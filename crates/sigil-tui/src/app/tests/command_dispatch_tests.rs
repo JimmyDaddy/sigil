@@ -43,7 +43,7 @@ fn alt_d_does_not_request_diagnostics_while_busy() -> Result<()> {
     config.workspace.root = temp.path().display().to_string();
     config.code_intelligence.enabled = true;
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
-    app.is_busy = true;
+    app.runtime.is_busy = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT))?;
 
@@ -112,7 +112,7 @@ fn focused_terminal_task_cancel_rejects_missing_busy_and_inactive_tasks() -> Res
         dispatch_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Running)?,
     ))]);
     app.selected_tool_activity_key = Some("terminal_task:terminal-1".to_owned());
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     let busy = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
     assert!(busy.is_none());
     assert_eq!(
@@ -120,7 +120,7 @@ fn focused_terminal_task_cancel_rejects_missing_busy_and_inactive_tasks() -> Res
         Some("wait for the active run before cancelling terminal task")
     );
 
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
         dispatch_terminal_entry(
             "terminal-1",

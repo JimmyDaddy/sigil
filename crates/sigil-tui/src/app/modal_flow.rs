@@ -367,7 +367,7 @@ impl AppState {
         };
         let base_url = provider_config.base_url.clone();
         let request_id = self.next_background_request_id();
-        self.active_model_picker_refresh = Some(PendingModelPickerRefresh {
+        self.runtime.active_model_picker_refresh = Some(PendingModelPickerRefresh {
             request_id,
             target,
             current: current.to_owned(),

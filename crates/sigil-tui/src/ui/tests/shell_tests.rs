@@ -290,7 +290,7 @@ fn render_main_screen_shows_esc_interrupt_for_running_turn() -> anyhow::Result<(
 #[test]
 fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -323,7 +323,7 @@ fn render_config_storage_paths_use_wider_main_panel_on_wide_terminals() -> anyho
     config.storage.cache_root =
         sigil_kernel::StorageRoot::Path("/Users/example/Library/Caches/sigil".to_owned());
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let backend = TestBackend::new(220, 36);
@@ -387,7 +387,7 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
     config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.set_terminal_size(160, 36);
-    app.input = "composer-visible".to_owned();
+    app.composer.input = "composer-visible".to_owned();
     app.handle(RunEvent::TextDelta("assistant `inline-code`".to_owned()))?;
     let call = ToolCall {
         id: "call-themed-read".to_owned(),
@@ -444,7 +444,7 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
 #[test]
 fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     for _ in 0..7 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -493,7 +493,7 @@ fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
     let mut config = test_config();
     config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(120, 28);
     let mut terminal = Terminal::new(backend)?;
@@ -529,7 +529,7 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
     colors.insert("text_primary".to_owned(), "#F0F1F2".to_owned());
     config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     for _ in 0..7 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -568,7 +568,7 @@ fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
             (4, "Compaction 5/12", "▸ Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-            app.input = "/config".to_owned();
+            app.composer.input = "/config".to_owned();
             let _ = app.submit_input()?;
             for _ in 0..right_presses {
                 let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -603,7 +603,7 @@ fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
 #[test]
 fn render_config_step_tabs_keep_selected_section_visible_on_narrow_width() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     for _ in 0..10 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -626,7 +626,7 @@ fn render_config_step_tabs_keep_selected_section_visible_on_narrow_width() -> an
 #[test]
 fn render_config_centers_content_on_very_wide_terminals() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(220, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -667,7 +667,7 @@ fn render_config_centers_content_on_very_wide_terminals() -> anyhow::Result<()> 
 #[test]
 fn render_config_header_uses_segmented_summary() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(96, 28);
     let mut terminal = Terminal::new(backend)?;
@@ -695,7 +695,7 @@ fn render_config_header_uses_segmented_summary() -> anyhow::Result<()> {
 #[test]
 fn render_config_footer_follows_short_content() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(160, 40);
     let mut terminal = Terminal::new(backend)?;
@@ -734,7 +734,7 @@ fn render_config_footer_follows_short_content() -> anyhow::Result<()> {
 #[test]
 fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -770,7 +770,7 @@ fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Resul
 #[test]
 fn render_config_screen_uses_muted_palette_instead_of_terminal_green() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -791,7 +791,7 @@ fn render_config_screen_uses_muted_palette_instead_of_terminal_green() -> anyhow
 #[test]
 fn render_config_screen_uses_subtle_sections_and_full_selected_row() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -842,7 +842,7 @@ fn render_config_screen_uses_subtle_sections_and_full_selected_row() -> anyhow::
 #[test]
 fn render_config_form_rows_align_value_column() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(132, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -875,7 +875,7 @@ fn render_config_form_rows_align_value_column() -> anyhow::Result<()> {
 #[test]
 fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(132, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -916,7 +916,7 @@ fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()
 #[test]
 fn render_config_readonly_rows_align_value_column() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -977,15 +977,15 @@ fn shell_footer_helpers_cover_context_thresholds() {
 #[test]
 fn shell_path_and_memory_badges_cover_fallback_states() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.memory_enabled = false;
+    app.runtime.memory_enabled = false;
     assert_eq!(memory_badge(&app), "off");
 
-    app.memory_enabled = true;
-    app.memory_document_count = 3;
-    app.memory_last_status = "ok".to_owned();
+    app.runtime.memory_enabled = true;
+    app.runtime.memory_document_count = 3;
+    app.runtime.memory_last_status = "ok".to_owned();
     assert_eq!(memory_badge(&app), "3/ok");
 
-    app.memory_last_status = "failed".to_owned();
+    app.runtime.memory_last_status = "failed".to_owned();
     assert_eq!(memory_badge(&app), "3/err");
 
     assert_eq!(short_path_label(Path::new("/tmp/demo")), "demo");
@@ -1029,7 +1029,7 @@ fn render_status_workspace_trust_mode_uses_trust_copy() -> anyhow::Result<()> {
 #[test]
 fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -1087,7 +1087,7 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
 #[test]
 fn render_config_screen_panel_height_tracks_content() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(160, 36);
     let mut terminal = Terminal::new(backend)?;
@@ -1107,7 +1107,7 @@ fn render_config_screen_panel_height_tracks_content() -> anyhow::Result<()> {
 #[test]
 fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -1128,7 +1128,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
 #[test]
 fn render_config_text_modal_uses_focus_input_row_and_command_tokens() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -1175,7 +1175,7 @@ fn render_config_text_modal_uses_focus_input_row_and_command_tokens() -> anyhow:
 #[test]
 fn render_config_model_picker_uses_config_palette() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
@@ -1197,7 +1197,7 @@ fn render_config_model_picker_uses_config_palette() -> anyhow::Result<()> {
 #[test]
 fn render_config_model_picker_uses_focus_row_and_command_tokens() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
@@ -1242,7 +1242,7 @@ fn render_config_model_picker_uses_focus_row_and_command_tokens() -> anyhow::Res
 #[test]
 fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(96, 28);
     let mut terminal = Terminal::new(backend)?;
@@ -1261,7 +1261,7 @@ fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Resu
 fn render_config_header_truncates_long_status_summary() -> anyhow::Result<()> {
     let long_config_name = "sigil-config-file-name-with-a-very-very-long-project-suffix.toml";
     let mut app = AppState::from_root_config(Path::new(long_config_name), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(80, 28);
     let mut terminal = Terminal::new(backend)?;
@@ -1279,7 +1279,7 @@ fn render_config_header_truncates_long_status_summary() -> anyhow::Result<()> {
 #[test]
 fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(48, 32);
     let mut terminal = Terminal::new(backend)?;
@@ -1328,7 +1328,7 @@ fn render_config_narrow_screen_truncates_long_values() -> anyhow::Result<()> {
         "deepseek-v4-pro-with-a-very-very-long-model-name-that-should-truncate".to_owned();
     config.agent.model = long_model.clone();
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let backend = TestBackend::new(96, 28);
     let mut terminal = Terminal::new(backend)?;
@@ -1351,7 +1351,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     let mut config = test_config();
     config.workspace.root = workspace.display().to_string();
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     for _ in 0..10 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -1377,7 +1377,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
 #[test]
 fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     for _ in 0..4 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -1417,7 +1417,7 @@ fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()
 #[test]
 fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -1444,7 +1444,7 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
 #[test]
 fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -1466,7 +1466,7 @@ fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
 #[test]
 fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -1614,23 +1614,23 @@ fn short_label_helpers_cover_path_session_pane_and_memory_states() {
     app.active_pane = PaneFocus::Activity;
     assert_eq!(short_pane_label(&app), "activity");
 
-    app.memory_enabled = false;
+    app.runtime.memory_enabled = false;
     assert_eq!(memory_badge(&app), "off");
-    app.memory_enabled = true;
-    app.memory_document_count = 7;
-    app.memory_last_status = "ok".to_owned();
+    app.runtime.memory_enabled = true;
+    app.runtime.memory_document_count = 7;
+    app.runtime.memory_last_status = "ok".to_owned();
     assert_eq!(memory_badge(&app), "7/ok");
-    app.memory_last_status = "failed".to_owned();
+    app.runtime.memory_last_status = "failed".to_owned();
     assert_eq!(memory_badge(&app), "7/err");
 }
 
 #[test]
 fn render_status_runtime_mode_shows_provider_session_and_runtime_state() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     app.active_pane = PaneFocus::Activity;
-    app.memory_enabled = false;
-    app.compaction_status = "pending".to_owned();
+    app.runtime.memory_enabled = false;
+    app.runtime.compaction_status = "pending".to_owned();
     app.session_id = "1234567890abcdef".to_owned();
     let backend = TestBackend::new(100, 4);
     let mut terminal = Terminal::new(backend)?;
@@ -1734,7 +1734,7 @@ fn render_docs_screenshot_assets() -> anyhow::Result<()> {
 
     let mut config_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     config_app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
-    config_app.input = "/config".to_owned();
+    config_app.composer.input = "/config".to_owned();
     let _ = config_app.submit_input()?;
     write_terminal_svg(
         &screenshot_dir.join("config-panel.svg"),
@@ -1805,7 +1805,7 @@ const DOC_TITLE_BAR_HEIGHT: u32 = 42;
 fn docs_session_app() -> anyhow::Result<AppState> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
-    app.input = "Explain the repo layout and identify the main entrypoints.".to_owned();
+    app.composer.input = "Explain the repo layout and identify the main entrypoints.".to_owned();
     let _ = app.submit_input()?;
     app.handle(RunEvent::ReasoningDelta(
         "I will inspect the workspace metadata, crates, and user docs first.".to_owned(),
@@ -1854,7 +1854,7 @@ fn docs_session_app() -> anyhow::Result<AppState> {
         "Sigil is TUI-first. Runtime wires providers and tools; kernel owns the agent contracts."
             .to_owned(),
     ))?;
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     Ok(app)
 }
 

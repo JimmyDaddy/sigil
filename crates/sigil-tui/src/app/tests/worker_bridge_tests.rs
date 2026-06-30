@@ -4,7 +4,7 @@ use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 #[test]
 fn normal_input_creates_user_and_running_state() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "hello".to_owned();
+    app.composer.input = "hello".to_owned();
     let action = app.submit_input()?;
     assert!(
         app.timeline
@@ -12,7 +12,7 @@ fn normal_input_creates_user_and_running_state() -> Result<()> {
             .any(|entry| { entry.role == TimelineRole::User && entry.text == "hello" })
     );
     assert!(matches!(action, Some(AppAction::SubmitPrompt(prompt)) if prompt == "hello"));
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.composer_height(), 5);
     assert!(
@@ -295,7 +295,7 @@ fn plan_approved_message_syncs_session_and_clears_pending_surface() -> Result<()
     assert!(app.pending_plan_approval().is_none());
     assert_eq!(app.last_notice(), Some("plan approved: ask"));
     assert_eq!(
-        sigil_kernel::PlanApprovalProjection::from_entries(&app.current_session_entries)
+        sigil_kernel::PlanApprovalProjection::from_entries(&app.session_browser.current_entries)
             .latest_approval,
         Some(entry)
     );
@@ -347,12 +347,12 @@ fn automatic_compaction_message_resets_status_and_emits_notice() -> Result<()> {
         cache_savings: 0.0,
         system_fingerprint: None,
     }))?;
-    assert_eq!(app.compaction_status, "hard");
+    assert_eq!(app.runtime.compaction_status, "hard");
 
     app.handle_worker_message(WorkerMessage::SessionCompacted {
         session_log_path,
-        provider_name: app.provider_name.clone(),
-        model_name: app.model_name.clone(),
+        provider_name: app.runtime.provider_name.clone(),
+        model_name: app.runtime.model_name.clone(),
         record: Box::new(CompactionRecord {
             summary: "summary".to_owned(),
             compacted_message_count: 3,
@@ -363,8 +363,8 @@ fn automatic_compaction_message_resets_status_and_emits_notice() -> Result<()> {
         entries: Vec::new(),
     })?;
 
-    assert_eq!(app.compaction_status, "ready");
-    assert_eq!(app.stats.last_prompt_tokens, 0);
+    assert_eq!(app.runtime.compaction_status, "ready");
+    assert_eq!(app.runtime.stats.last_prompt_tokens, 0);
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice && entry.text.contains("Auto-compacted")
     }));
@@ -387,12 +387,12 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
     write_session_log(&restored_path, &restored)?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.input = "volatile prompt".to_owned();
+    app.composer.input = "volatile prompt".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "volatile prompt"
     ));
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
 
     let cancel_action =
         app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
@@ -411,10 +411,10 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
         entries,
     })?;
 
-    assert!(!app.is_busy);
-    assert!(app.pending_approval.is_none());
-    assert_eq!(app.provider_name, "cancel-provider");
-    assert_eq!(app.model_name, "cancel-model");
+    assert!(!app.runtime.is_busy);
+    assert!(app.approval.pending.is_none());
+    assert_eq!(app.runtime.provider_name, "cancel-provider");
+    assert_eq!(app.runtime.model_name, "cancel-model");
     assert_eq!(app.session_id, "cancelled");
     assert_eq!(app.session_log_path, restored_path);
     assert!(
@@ -448,12 +448,12 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
 #[test]
 fn esc_interrupts_active_run() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "long task".to_owned();
+    app.composer.input = "long task".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "long task"
     ));
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
 
     let cancel_action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
@@ -472,13 +472,14 @@ fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
     let model_request_id = app
+        .runtime
         .active_model_picker_refresh
         .as_ref()
         .expect("model picker refresh should be active")
         .request_id;
 
     let balance_request_id = app.next_background_request_id();
-    app.active_balance_refresh_id = Some(balance_request_id);
+    app.runtime.active_balance_refresh_id = Some(balance_request_id);
     app.handle_worker_message(WorkerMessage::ProviderBalanceRefreshed {
         request_id: balance_request_id,
         snapshot: sigil_runtime::BalanceSnapshot {
@@ -494,9 +495,9 @@ fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
         result: Ok(vec!["remote-model".to_owned()]),
     })?;
 
-    assert_eq!(app.balance_snapshot.status, "USD 2.00");
-    assert!(app.active_balance_refresh_id.is_none());
-    assert!(app.active_model_picker_refresh.is_none());
+    assert_eq!(app.runtime.balance_snapshot.status, "USD 2.00");
+    assert!(app.runtime.active_balance_refresh_id.is_none());
+    assert!(app.runtime.active_model_picker_refresh.is_none());
     assert_eq!(
         app.last_notice(),
         Some("loaded provider model list (https://example.com)")
@@ -518,6 +519,7 @@ fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()
 
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
     let model_request_id = app
+        .runtime
         .active_model_picker_refresh
         .as_ref()
         .expect("model picker refresh should be active")
@@ -537,17 +539,17 @@ fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()
         base_url: "https://stale.example".to_owned(),
         result: Ok(vec!["stale".to_owned()]),
     })?;
-    assert!(app.active_model_picker_refresh.is_some());
+    assert!(app.runtime.active_model_picker_refresh.is_some());
 
-    app.active_model_picker_refresh = None;
+    app.runtime.active_model_picker_refresh = None;
     app.handle_worker_message(WorkerMessage::ProviderModelsRefreshed {
         request_id: model_request_id,
         base_url: "https://none.example".to_owned(),
         result: Ok(vec!["ignored".to_owned()]),
     })?;
 
-    app.active_balance_refresh_id = Some(7);
-    let previous_status = app.balance_snapshot.status.clone();
+    app.runtime.active_balance_refresh_id = Some(7);
+    let previous_status = app.runtime.balance_snapshot.status.clone();
     app.handle_worker_message(WorkerMessage::ProviderBalanceRefreshed {
         request_id: 8,
         snapshot: sigil_runtime::BalanceSnapshot {
@@ -557,8 +559,8 @@ fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()
             status: "USD 1.00".to_owned(),
         },
     })?;
-    assert_eq!(app.active_balance_refresh_id, Some(7));
-    assert_eq!(app.balance_snapshot.status, previous_status);
+    assert_eq!(app.runtime.active_balance_refresh_id, Some(7));
+    assert_eq!(app.runtime.balance_snapshot.status, previous_status);
     Ok(())
 }
 
@@ -568,13 +570,13 @@ fn schedule_balance_refresh_handles_missing_config_and_auth() {
 
     app.config_snapshot = None;
     app.schedule_balance_refresh();
-    assert_eq!(app.balance_snapshot.status, "n/a");
-    assert!(app.active_balance_refresh_id.is_none());
+    assert_eq!(app.runtime.balance_snapshot.status, "n/a");
+    assert!(app.runtime.active_balance_refresh_id.is_none());
 
     app.apply_runtime_config_snapshot(&test_config());
     app.schedule_balance_refresh();
-    assert_eq!(app.balance_snapshot.status, "missing auth");
-    assert!(app.active_balance_refresh_id.is_none());
+    assert_eq!(app.runtime.balance_snapshot.status, "missing auth");
+    assert!(app.runtime.active_balance_refresh_id.is_none());
 
     let temp = tempdir().expect("tempdir should be created");
     let mut setup_app = AppState::from_setup(
@@ -583,7 +585,7 @@ fn schedule_balance_refresh_handles_missing_config_and_auth() {
         None,
     );
     setup_app.schedule_balance_refresh();
-    assert!(setup_app.active_balance_refresh_id.is_none());
+    assert!(setup_app.runtime.active_balance_refresh_id.is_none());
 }
 
 #[test]
@@ -603,8 +605,8 @@ fn schedule_balance_refresh_skips_non_deepseek_provider() {
 
     app.schedule_balance_refresh();
 
-    assert_eq!(app.balance_snapshot.status, "n/a");
-    assert!(app.active_balance_refresh_id.is_none());
+    assert_eq!(app.runtime.balance_snapshot.status, "n/a");
+    assert!(app.runtime.active_balance_refresh_id.is_none());
     assert!(
         !app.drain_pending_worker_commands()
             .iter()
@@ -633,13 +635,15 @@ fn code_intelligence_results_update_status_lines_and_diagnostics() -> Result<()>
         },
     )))?;
 
-    assert_eq!(app.code_intelligence_status, "ready");
+    assert_eq!(app.runtime.code_intelligence_status, "ready");
     assert_eq!(
-        app.code_intelligence_server_lines.get("rust-analyzer"),
+        app.runtime
+            .code_intelligence_server_lines
+            .get("rust-analyzer"),
         Some(&"rust: ready rust-analyzer".to_owned())
     );
     assert_eq!(
-        app.code_intelligence_server_lines.get("pyright"),
+        app.runtime.code_intelligence_server_lines.get("pyright"),
         Some(&"python: fallback pyright".to_owned())
     );
 
@@ -658,22 +662,26 @@ fn code_intelligence_results_update_status_lines_and_diagnostics() -> Result<()>
     )))?;
 
     assert_eq!(
-        app.code_intelligence_status,
+        app.runtime.code_intelligence_status,
         "diagnostics 1 errors 1 warnings"
     );
     assert_eq!(
-        app.code_intelligence_diagnostics_line.as_deref(),
+        app.runtime.code_intelligence_diagnostics_line.as_deref(),
         Some("diagnostics: 1 errors 1 warnings")
     );
     assert_eq!(
-        app.code_intelligence_diagnostics_by_path.get("src/main.rs"),
+        app.runtime
+            .code_intelligence_diagnostics_by_path
+            .get("src/main.rs"),
         Some(&ApprovalDiagnosticSummary {
             errors: 1,
             warnings: 1,
         })
     );
     assert_eq!(
-        app.code_intelligence_diagnostics_by_path.get("src/lib.rs"),
+        app.runtime
+            .code_intelligence_diagnostics_by_path
+            .get("src/lib.rs"),
         Some(&ApprovalDiagnosticSummary::default())
     );
 
@@ -683,9 +691,9 @@ fn code_intelligence_results_update_status_lines_and_diagnostics() -> Result<()>
         ToolErrorKind::Protocol,
         "bad response",
     )))?;
-    assert_eq!(app.code_intelligence_status, "degraded tool error");
+    assert_eq!(app.runtime.code_intelligence_status, "degraded tool error");
     assert_eq!(
-        app.code_intelligence_server_lines.get("status"),
+        app.runtime.code_intelligence_server_lines.get("status"),
         Some(&"status: degraded tool error".to_owned())
     );
     Ok(())
@@ -739,7 +747,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
     app.handle_worker_message(WorkerMessage::AgentResultContinuationStarted {
         thread_ids: vec![sigil_kernel::AgentThreadId::new("agent_chat_done")?],
     })?;
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
     assert_eq!(app.run_phase(), RunPhase::Thinking);
     assert_eq!(app.last_notice(), Some("agent result ready; resuming main"));
     assert!(!app.timeline.iter().any(|entry| {
@@ -763,7 +771,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
         },
         entries: restored_entries("restored-provider", "restored-model"),
     })?;
-    assert!(!app.is_busy);
+    assert!(!app.runtime.is_busy);
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("agent @review finished"));
     assert!(!app.timeline.iter().any(|entry| {
@@ -842,14 +850,14 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
         (sigil_kernel::TaskRunStatus::Cancelled, "cancelled"),
         (sigil_kernel::TaskRunStatus::Interrupted, "interrupted"),
     ] {
-        app.is_busy = true;
+        app.runtime.is_busy = true;
         app.handle_worker_message(WorkerMessage::TaskRunFinished {
             task_id: "task_1".to_owned(),
             status,
             entries: Vec::new(),
         })?;
 
-        assert!(!app.is_busy);
+        assert!(!app.runtime.is_busy);
         assert_eq!(app.run_phase(), RunPhase::Idle);
         let expected_notice = format!("task task_1 {label}");
         assert_eq!(app.last_notice(), Some(expected_notice.as_str()));
@@ -858,7 +866,7 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
         }));
     }
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     app.handle_worker_message(WorkerMessage::TaskRunFinished {
         task_id: "task_1".to_owned(),
         status: sigil_kernel::TaskRunStatus::Failed,
@@ -872,7 +880,7 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
             }),
         )],
     })?;
-    assert!(!app.is_busy);
+    assert!(!app.runtime.is_busy);
     assert_eq!(
         app.last_notice(),
         Some("task task_1 failed: step gate_check failed")
@@ -947,8 +955,8 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     let entries = restored_entries("restored-provider", "restored-model");
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.is_busy = true;
-    app.pending_approval = Some(PendingApproval {
+    app.runtime.is_busy = true;
+    app.approval.pending = Some(PendingApproval {
         call: ToolCall {
             id: "call-1".to_owned(),
             name: "write_file".to_owned(),
@@ -982,8 +990,8 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         entries: entries.clone(),
     })?;
 
-    assert!(!app.is_busy);
-    assert!(app.pending_approval.is_none());
+    assert!(!app.runtime.is_busy);
+    assert!(app.approval.pending.is_none());
     assert!(app.modal_state.is_none());
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("agent idle"));
@@ -1003,7 +1011,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             .iter()
             .any(|event| event.label == "worker" && event.detail == "worker note")
     );
-    app.mutation_artifact_retention_preview = MutationArtifactRetentionPreview::Pending;
+    app.runtime.mutation_artifact_retention_preview = MutationArtifactRetentionPreview::Pending;
     app.handle_worker_message(WorkerMessage::Notice(
         "mutation artifact cleanup: scanned 0 artifacts (0 bytes), expired 0, deleted 0, unavailable 0, recorded 0 lifecycle events".to_owned(),
     ))?;
@@ -1014,7 +1022,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         )
     );
     assert!(matches!(
-        app.mutation_artifact_retention_preview,
+        app.runtime.mutation_artifact_retention_preview,
         MutationArtifactRetentionPreview::Ready { .. }
             | MutationArtifactRetentionPreview::Unavailable(_)
     ));
@@ -1032,16 +1040,16 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         entries: entries.clone(),
     })?;
     assert_eq!(app.session_log_path, restored_path);
-    assert_eq!(app.provider_name, "restored-provider");
-    assert_eq!(app.model_name, "restored-model");
+    assert_eq!(app.runtime.provider_name, "restored-provider");
+    assert_eq!(app.runtime.model_name, "restored-model");
     assert_eq!(app.last_notice(), Some("restored from disk"));
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     app.modal_state = Some(ModalState::KeyboardHelp);
     app.handle_worker_message(WorkerMessage::RunFailed(
         "request failed\n\nCaused by:\n  0: timeout".to_owned(),
     ))?;
-    assert!(!app.is_busy);
+    assert!(!app.runtime.is_busy);
     assert!(app.modal_state.is_none());
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("timeout"));
@@ -1130,7 +1138,7 @@ fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages(
 #[test]
 fn assistant_message_with_tool_call_preserves_tool_phase_and_dedupes_text() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.is_busy = true;
+    app.runtime.is_busy = true;
 
     let progress_text = "check 通过。跑相关 crate 的测试。";
     app.handle(RunEvent::TextDelta(progress_text.to_owned()))?;
@@ -1610,7 +1618,7 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
             updated_at_ms: Some(44),
         },
     })?;
-    assert!(app.current_session_entries.iter().any(|entry| {
+    assert!(app.session_browser.current_entries.iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(status))
@@ -1803,7 +1811,7 @@ fn worker_queue_messages_update_live_rows_and_dispatch_user_prompt() -> Result<(
         queue_id: queue_id.clone(),
         prompt: "follow up after current run".to_owned(),
     })?;
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
     assert_eq!(app.run_phase(), RunPhase::Thinking);
     assert_eq!(app.last_notice(), Some("running queued input"));
     assert!(app.timeline.iter().any(|entry| {
@@ -2096,7 +2104,7 @@ fn new_session_started_restores_empty_session_view() -> Result<()> {
     })?;
 
     assert_eq!(app.session_log_path, new_session_log_path);
-    assert_eq!(app.model_name, "deepseek-v4-pro");
+    assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
     assert_eq!(app.last_notice(), Some("started new session"));
     assert!(
         app.timeline
@@ -2114,12 +2122,12 @@ fn new_session_started_restores_empty_session_view() -> Result<()> {
 #[test]
 fn manual_compaction_restores_session_view_and_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "compact this".to_owned();
+    app.composer.input = "compact this".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "compact this"
     ));
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
 
     let session_log_path = app.session_log_path.clone();
     let entries = restored_entries("compacted-provider", "compacted-model");
@@ -2137,9 +2145,9 @@ fn manual_compaction_restores_session_view_and_notice() -> Result<()> {
         entries: entries.clone(),
     })?;
 
-    assert!(!app.is_busy);
-    assert_eq!(app.provider_name, "compacted-provider");
-    assert_eq!(app.model_name, "compacted-model");
+    assert!(!app.runtime.is_busy);
+    assert_eq!(app.runtime.provider_name, "compacted-provider");
+    assert_eq!(app.runtime.model_name, "compacted-model");
     assert_eq!(app.session_log_path, session_log_path);
     assert_eq!(app.last_notice(), Some("Session compacted."));
     assert!(
@@ -2157,7 +2165,7 @@ fn manual_compaction_restores_session_view_and_notice() -> Result<()> {
 #[test]
 fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let before = app.mcp_server_statuses.clone();
+    let before = app.runtime.mcp_server_statuses.clone();
 
     app.handle_worker_message(WorkerMessage::McpActivationStatus {
         server_name: None,
@@ -2166,7 +2174,7 @@ fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
         },
     })?;
 
-    assert_eq!(app.mcp_server_statuses, before);
+    assert_eq!(app.runtime.mcp_server_statuses, before);
     assert!(app.mcp_server_runtime_status_label("filesystem").is_none());
     assert!(app.events.iter().any(|event| {
         event.label == "mcp"
@@ -2212,8 +2220,8 @@ fn mcp_activate_server_tool_result_marks_lazy_server_ready() -> Result<()> {
 #[test]
 fn mcp_runtime_progress_updates_live_activity_without_timeline_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.is_busy = true;
-    app.run_phase = RunPhase::Tool("mcp__filesystem__scan".to_owned());
+    app.runtime.is_busy = true;
+    app.runtime.run_phase = RunPhase::Tool("mcp__filesystem__scan".to_owned());
     let before_timeline_len = app.timeline.len();
 
     app.handle_worker_message(WorkerMessage::McpProgress {
@@ -2300,7 +2308,7 @@ fn mcp_list_changed_marks_server_stale_until_refresh_status_arrives() -> Result<
 #[test]
 fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "work".to_owned();
+    app.composer.input = "work".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "work"
@@ -2308,7 +2316,7 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
     assert!(app.has_modal());
-    assert!(app.pending_approval.is_some());
+    assert!(app.approval.pending.is_some());
 
     app.handle_worker_message(WorkerMessage::RunFinished {
         result: sigil_kernel::AgentRunResult {
@@ -2319,10 +2327,10 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
         entries: restored_entries("deepseek", "deepseek-v4-flash"),
     })?;
 
-    assert!(!app.is_busy);
+    assert!(!app.runtime.is_busy);
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert!(!app.has_modal());
-    assert!(app.pending_approval.is_none());
+    assert!(app.approval.pending.is_none());
     assert_eq!(app.last_notice(), Some("agent idle"));
     assert!(
         app.events

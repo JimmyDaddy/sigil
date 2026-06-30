@@ -92,7 +92,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     );
 
     let mut config_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    config_app.input = "/config".to_owned();
+    config_app.composer.input = "/config".to_owned();
     let _ = config_app.submit_input()?;
     let config = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &config_app);
     assert_eq!(config.mode, LayoutMode::Config);
@@ -137,7 +137,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     );
 
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    approval_app.pending_approval = Some(PendingApproval {
+    approval_app.approval.pending = Some(PendingApproval {
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),
@@ -246,7 +246,7 @@ fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
 #[test]
 fn layout_snapshot_hits_approval_file_rows_and_actions() {
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    approval_app.pending_approval = Some(PendingApproval {
+    approval_app.approval.pending = Some(PendingApproval {
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),
@@ -372,7 +372,7 @@ fn slash_overlay_helpers_cover_zero_width_resume_title_and_candidates() -> anyho
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/resume".to_owned();
+    app.composer.input = "/resume".to_owned();
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let slash = layout.slash_overlay.expect("slash overlay should exist");
@@ -411,7 +411,7 @@ fn tool_card_hit_areas_cover_zero_area_and_busy_progress_rows() -> anyhow::Resul
             .all(|hit| hit.area.width > 0 && hit.area.height > 0)
     );
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     assert!(app.live_activity_summary().is_some());
     let busy = tool_card_hit_areas(live_area, &app);
     assert_eq!(busy.len(), idle.len());
@@ -442,7 +442,7 @@ fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<(
     assert!(setup_hit_areas(Rect::new(0, 0, 0, 0), &setup_app).is_none());
 
     let mut config_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    config_app.input = "/config".to_owned();
+    config_app.composer.input = "/config".to_owned();
     let _ = config_app.submit_input()?;
     assert!(config_hit_areas(Rect::new(0, 0, 0, 0), &config_app).is_none());
 
@@ -459,7 +459,7 @@ fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<(
 #[test]
 fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
 
     assert!(config_section_hit_areas(&[], Rect::new(0, 0, 12, 2), 0).is_empty());
@@ -516,7 +516,7 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
     app.handle_worker_message(WorkerMessage::Event(Box::new(RunEvent::AssistantMessage(
         sigil_kernel::ModelMessage::assistant(Some("visible".to_owned()), Vec::new()),
     ))))?;
-    app.pending_approval = Some(PendingApproval {
+    app.approval.pending = Some(PendingApproval {
         call: ToolCall {
             id: "call-approval".to_owned(),
             name: "write_file".to_owned(),

@@ -82,26 +82,26 @@ impl AppState {
             return 0;
         }
         1 + rows.len().min(COMPOSER_AGENT_VISIBLE_ROWS) as u16
-            + u16::from(self.composer_agent_panel_focused)
+            + u16::from(self.composer.agent_panel_focused)
     }
 
     pub(crate) fn is_composer_agent_panel_focused(&self) -> bool {
-        self.composer_agent_panel_focused
+        self.composer.agent_panel_focused
     }
 
     pub(super) fn focus_composer_agent_panel(&mut self) -> bool {
         if !self.composer_agent_panel_available() {
-            self.composer_agent_panel_focused = false;
+            self.composer.agent_panel_focused = false;
             return false;
         }
         self.select_active_agent_sidebar_item();
-        self.composer_agent_panel_focused = true;
+        self.composer.agent_panel_focused = true;
         self.last_notice = Some("agent list focused".to_owned());
         true
     }
 
     pub(super) fn blur_composer_agent_panel(&mut self) {
-        self.composer_agent_panel_focused = false;
+        self.composer.agent_panel_focused = false;
     }
 
     pub(super) fn selected_composer_agent_is_first(&self) -> bool {
@@ -115,7 +115,7 @@ impl AppState {
         let items = self.agent_sidebar_items();
         let selectable = selectable_agent_indexes(&items);
         if selectable.is_empty() {
-            self.composer_agent_panel_focused = false;
+            self.composer.agent_panel_focused = false;
             return false;
         }
         let current = selectable
@@ -436,7 +436,7 @@ impl AppState {
             self.sidebar_agent_selected = items.len().saturating_sub(1);
         }
         if !self.composer_agent_panel_available() {
-            self.composer_agent_panel_focused = false;
+            self.composer.agent_panel_focused = false;
         }
         if self.active_agent_view == AgentView::Main {
             self.active_agent_child_transcript = None;
@@ -521,7 +521,7 @@ impl AppState {
         self.sidebar_agent_selected = index;
         self.active_agent_view = target;
         if self.active_pane == super::PaneFocus::Composer && self.composer_agent_panel_available() {
-            self.composer_agent_panel_focused = true;
+            self.composer.agent_panel_focused = true;
         }
         self.reload_active_agent_child_transcript();
         self.timeline_scroll_back = 0;
@@ -533,7 +533,7 @@ impl AppState {
     fn agent_sidebar_items(&self) -> Vec<AgentSidebarItem> {
         let mut items = vec![AgentSidebarItem {
             label: "main".to_owned(),
-            detail: if self.is_busy {
+            detail: if self.runtime.is_busy {
                 "running in current session".to_owned()
             } else {
                 "idle in current session".to_owned()

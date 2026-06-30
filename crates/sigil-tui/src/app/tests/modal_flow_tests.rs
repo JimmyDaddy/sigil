@@ -4,7 +4,7 @@ use super::*;
 #[test]
 fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "draft".to_owned();
+    app.composer.input = "draft".to_owned();
     app.push_timeline(
         TimelineRole::Tool,
         r##"{
@@ -20,7 +20,7 @@ fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
 
-    assert_eq!(app.input, "draft");
+    assert_eq!(app.composer.input, "draft");
     assert_eq!(app.modal_title(), Some("Keyboard Help"));
     let lines = app.modal_lines();
     assert!(lines.iter().any(|line| line.contains("F1:")));
@@ -38,12 +38,12 @@ fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
 #[test]
 fn esc_closes_keyboard_help_before_interrupting_busy_run() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "long task".to_owned();
+    app.composer.input = "long task".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "long task"
     ));
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
     assert!(app.has_modal());
@@ -52,7 +52,7 @@ fn esc_closes_keyboard_help_before_interrupting_busy_run() -> Result<()> {
 
     assert!(action.is_none());
     assert!(!app.has_modal());
-    assert!(app.is_busy);
+    assert!(app.runtime.is_busy);
     assert_eq!(app.last_notice(), Some("closed keyboard help"));
     assert!(
         !app.timeline
@@ -82,9 +82,9 @@ fn model_picker_opens_with_local_options_before_remote_refresh() -> Result<()> {
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
 
     assert!(matches!(app.modal_state, Some(ModalState::ModelPicker(_))));
-    assert!(app.active_model_picker_refresh.is_some());
+    assert!(app.runtime.active_model_picker_refresh.is_some());
     assert!(matches!(
-        app.pending_worker_commands.last(),
+        app.runtime.pending_worker_commands.last(),
         Some(WorkerCommand::RefreshProviderModels { .. })
     ));
     assert_eq!(

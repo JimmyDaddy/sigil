@@ -68,7 +68,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         render_info_rail_with_theme(frame, shell.info_rail, &view_model.info_rail, &theme);
     }
 
-    if app.pending_approval.is_some() {
+    if app.approval.pending.is_some() {
         render_approval_modal(frame, app);
     }
 
@@ -190,10 +190,14 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
         ),
         Span::raw(format!(
             " {}/{}  write={}  {} ",
-            app.provider_name,
-            app.model_name,
-            app.permission_default_mode,
-            if app.is_busy { "running" } else { "idle" }
+            app.runtime.provider_name,
+            app.runtime.model_name,
+            app.runtime.permission_default_mode,
+            if app.runtime.is_busy {
+                "running"
+            } else {
+                "idle"
+            }
         )),
     ]);
 
@@ -204,7 +208,7 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
         short_pane_label(app),
         app.cache_hit_ratio() * 100.0,
         memory_badge(app),
-        app.compaction_status,
+        app.runtime.compaction_status,
     ))]);
 
     let tertiary = Line::from(vec![Span::styled(
@@ -238,13 +242,13 @@ fn short_pane_label(app: &AppState) -> &'static str {
 }
 
 fn memory_badge(app: &AppState) -> String {
-    if !app.memory_enabled {
+    if !app.runtime.memory_enabled {
         return "off".to_owned();
     }
-    if app.memory_last_status == "ok" {
-        format!("{}/ok", app.memory_document_count)
+    if app.runtime.memory_last_status == "ok" {
+        format!("{}/ok", app.runtime.memory_document_count)
     } else {
-        format!("{}/err", app.memory_document_count)
+        format!("{}/err", app.runtime.memory_document_count)
     }
 }
 

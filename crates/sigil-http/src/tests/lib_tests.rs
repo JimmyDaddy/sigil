@@ -15,15 +15,46 @@ use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
     HTTP_RUN_EVENT_SSE_NAME, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpCommandEnvelope, HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer,
-    HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
-    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpRegistryError,
-    HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
-    HttpRunStatus, HttpServerConfig, HttpServerConfigError, HttpSessionCreateRequest,
-    HttpSessionRunRegistry, HttpSseError, HttpSseEvent, http_openapi_document,
-    public_run_event_to_sse,
+    HttpAuthValidator, HttpCommandEnvelope, HttpLiveEventBus, HttpLiveEventRecvError,
+    HttpLocalServer, HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer,
+    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
+    HttpProtocolVersionError, HttpRegistryError, HttpRunApprovalMode, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpServerConfig,
+    HttpServerConfigError, HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError,
+    HttpSseEvent, http_openapi_document, public_run_event_to_sse,
 };
+
+#[test]
+fn module_split_facade_exports_protocol_auth_sse_and_dto_contracts() {
+    let envelope = HttpCommandEnvelope::new(
+        "command-1",
+        "client-1",
+        "session-1",
+        HttpSessionCreateRequest::default(),
+    )
+    .with_expected_stream_sequence(7)
+    .with_correlation_id("event-1");
+
+    envelope
+        .ensure_supported()
+        .expect("facade protocol envelope should use the supported version");
+    assert_eq!(envelope.protocol_version, HTTP_PROTOCOL_VERSION);
+    assert_eq!(envelope.expected_stream_sequence, Some(7));
+    assert_eq!(envelope.correlation_id.as_deref(), Some("event-1"));
+
+    let auth = HttpAuthValidator::disabled();
+    assert!(!auth.token_required());
+    auth.validate_authorization_header(None)
+        .expect("disabled auth should accept missing headers");
+
+    assert_eq!(HTTP_RUN_EVENT_SSE_NAME, "run_event");
+    assert_eq!(HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, 1);
+    assert_eq!(
+        HttpRunApprovalMode::AllowReadonly.to_string(),
+        "allow_readonly"
+    );
+}
 
 #[test]
 fn default_config_is_localhost_and_token_required() {

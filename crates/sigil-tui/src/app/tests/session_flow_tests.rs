@@ -32,8 +32,8 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
     let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
     assert!(app.restore_latest_session_from_disk(&config));
     assert_eq!(app.session_log_path, restored_path);
-    assert_eq!(app.provider_name, "restored-provider");
-    assert_eq!(app.model_name, "restored-model");
+    assert_eq!(app.runtime.provider_name, "restored-provider");
+    assert_eq!(app.runtime.model_name, "restored-model");
     assert!(
         app.timeline
             .iter()
@@ -543,7 +543,7 @@ fn restored_delete_file_tool_result_uses_preview_snapshot_for_diff_card() -> Res
 #[test]
 fn session_sidebar_lines_include_model_and_phase() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.run_phase = RunPhase::Thinking;
+    app.runtime.run_phase = RunPhase::Thinking;
 
     let lines = app.session_sidebar_lines();
 
@@ -556,7 +556,7 @@ fn session_sidebar_lines_include_model_and_phase() {
 #[test]
 fn session_display_title_uses_first_user_prompt() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "Summarize the codebase architecture".to_owned();
+    app.composer.input = "Summarize the codebase architecture".to_owned();
 
     let action = app.submit_input()?;
 
@@ -571,7 +571,7 @@ fn session_display_title_uses_first_user_prompt() -> Result<()> {
 #[test]
 fn latest_user_prompt_preview_reflects_recent_submission() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "hello from user".to_owned();
+    app.composer.input = "hello from user".to_owned();
 
     let action = app.submit_input()?;
 
@@ -623,7 +623,7 @@ fn restored_session_view_shows_compaction_block_and_restored_prompt_pressure() -
     })?;
 
     let lines = app.approval_preview_lines();
-    assert_eq!(app.compaction_status, "ready");
+    assert_eq!(app.runtime.compaction_status, "ready");
     assert!(lines.iter().any(|line| line.contains("prompt=0")));
     assert!(
         lines
@@ -713,8 +713,8 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::SessionSwitched {
         session_log_path: app.session_log_path.clone(),
-        provider_name: app.provider_name.clone(),
-        model_name: app.model_name.clone(),
+        provider_name: app.runtime.provider_name.clone(),
+        model_name: app.runtime.model_name.clone(),
         entries: vec![
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: "deepseek".to_owned(),
@@ -734,7 +734,7 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
     assert!(provider_lines.contains("provider view"));
     assert!(provider_lines.contains("Provider:"));
 
-    app.session_view_mode = super::SessionViewMode::Audit;
+    app.session_browser.view_mode = super::SessionViewMode::Audit;
     let audit_lines = app.approval_preview_lines().join("\n");
     assert!(audit_lines.contains("audit view"));
     assert!(audit_lines.contains("Audit:"));
@@ -776,7 +776,7 @@ fn session_audit_view_shows_tool_egress_summary() -> Result<()> {
         ],
     })?;
 
-    app.session_view_mode = super::SessionViewMode::Audit;
+    app.session_browser.view_mode = super::SessionViewMode::Audit;
     let audit_lines = app.approval_preview_lines().join("\n");
 
     assert!(audit_lines.contains(
@@ -802,7 +802,7 @@ fn sessions_filter_narrows_sidebar_results() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.refresh_session_history();
-    app.session_history_filter = "b".to_owned();
+    app.session_browser.history_filter = "b".to_owned();
     let lines = app.recent_session_lines().join("\n");
     assert!(lines.contains("beta"));
     assert!(!lines.contains("alpha"));
@@ -871,14 +871,15 @@ fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
     app.refresh_session_history();
 
     assert_eq!(
-        app.session_history
+        app.session_browser
+            .history
             .iter()
             .find(|entry| entry.path == session_path)
             .and_then(|entry| entry.title.as_deref()),
         Some("Investigate selector title display")
     );
 
-    app.input = "/resume".to_owned();
+    app.composer.input = "/resume".to_owned();
     assert!(
         app.slash_selector_rows()
             .iter()
@@ -908,7 +909,8 @@ fn session_history_uses_projection_title_from_v2_stream() -> Result<()> {
     app.refresh_session_history();
 
     assert_eq!(
-        app.session_history
+        app.session_browser
+            .history
             .iter()
             .find(|entry| entry.path == session_path)
             .and_then(|entry| entry.title.as_deref()),
@@ -933,7 +935,7 @@ fn resume_command_shows_session_selector_and_enter_switches_selected_session() -
     write_session_log(&restored_path, &restored)?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.input = "/resume".to_owned();
+    app.composer.input = "/resume".to_owned();
 
     let selector_rows = app.slash_selector_rows();
     assert_eq!(app.slash_selector_title(), Some("Resume session"));
@@ -968,7 +970,7 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
     write_session_log(&restored_path, &restored)?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.input = "/resume 1".to_owned();
+    app.composer.input = "/resume 1".to_owned();
     let action = app.submit_input()?;
     assert!(matches!(
         action,
@@ -983,8 +985,8 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
         entries,
     })?;
 
-    assert_eq!(app.provider_name, "restored-provider");
-    assert_eq!(app.model_name, "restored-model");
+    assert_eq!(app.runtime.provider_name, "restored-provider");
+    assert_eq!(app.runtime.model_name, "restored-model");
     assert_eq!(app.session_id, "restored");
     assert_eq!(app.session_log_path, restored_path);
     assert!(
@@ -1068,12 +1070,14 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
     app.refresh_session_history();
 
     assert!(
-        app.session_history
+        app.session_browser
+            .history
             .iter()
             .any(|entry| entry.path == alpha_path && entry.title.as_deref() == Some("alpha title"))
     );
     assert!(
-        app.session_history
+        app.session_browser
+            .history
             .iter()
             .any(|entry| entry.path == beta_path && entry.title.as_deref() == Some("beta plan"))
     );
@@ -1090,7 +1094,7 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
         Some(alpha_path.clone())
     );
 
-    app.session_history_filter = "beta".to_owned();
+    app.session_browser.history_filter = "beta".to_owned();
     let rows = app.recent_session_rows();
     assert!(matches!(
         rows.first(),
@@ -1109,7 +1113,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
         sigil_kernel::ToolDiffBudget::default(),
         None,
     );
-    app.current_session_entries = vec![
+    app.session_browser.current_entries = vec![
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
@@ -1257,7 +1261,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
             data: serde_json::Value::Null,
         }),
     ];
-    app.session_view_mode = SessionViewMode::Audit;
+    app.session_browser.view_mode = SessionViewMode::Audit;
 
     let rendered = app.session_view_lines().join("\n");
     assert!(rendered.contains("[ctl] session deepseek/deepseek-v4-flash"));
@@ -1360,7 +1364,7 @@ fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
 fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_log_path = Path::new("session-current.jsonl").to_path_buf();
-    app.session_history = vec![
+    app.session_browser.history = vec![
         crate::sessions::SessionHistoryEntry {
             path: Path::new("session-alpha.jsonl").to_path_buf(),
             label: "session-alpha.jsonl".to_owned(),

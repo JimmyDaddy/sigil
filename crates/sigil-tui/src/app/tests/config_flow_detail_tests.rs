@@ -270,24 +270,34 @@ trust = "trusted"
             .is_none()
     );
     assert_eq!(app.last_notice(), Some("agent review reviewed"));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
-            if trust.profile_id.as_str() == "review"
-                && trust.decision == sigil_kernel::AgentTrustState::NeedsReview
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+                    if trust.profile_id.as_str() == "review"
+                        && trust.decision == sigil_kernel::AgentTrustState::NeedsReview
+            ))
+    );
 
     assert!(
         app.review_selected_agent(sigil_kernel::AgentTrustState::Unknown)?
             .is_none()
     );
     assert_eq!(app.last_notice(), Some("agent review reviewed"));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
-            if trust.profile_id.as_str() == "review"
-                && trust.decision == sigil_kernel::AgentTrustState::Unknown
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+                    if trust.profile_id.as_str() == "review"
+                        && trust.decision == sigil_kernel::AgentTrustState::Unknown
+            ))
+    );
 
     if let Some(state) = app.config_state.as_mut()
         && let Some(agent) = state.agent_profiles.get_mut(state.selected_agent_index)
@@ -632,22 +642,22 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     config_state.set_skill_discovery(vec![skill], Vec::new());
     app.config_state = Some(config_state);
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("busy; use skill later"));
 
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("skill review is not trusted"));
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("busy; use skill later"));
 
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("skill review is not trusted"));
@@ -882,11 +892,11 @@ fn activate_selected_mcp_server_guard_paths_cover_busy_section_snapshot_and_sele
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
     app.config_state = Some(ConfigState::from_root_config(&root_config));
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     assert!(app.activate_selected_mcp_server()?.is_none());
     assert_eq!(app.last_notice.as_deref(), Some("busy; activate MCP later"));
 
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     app.config_state
         .as_mut()
         .expect("config state should exist")

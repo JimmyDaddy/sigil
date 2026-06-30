@@ -318,7 +318,7 @@ impl AppState {
                 lines.push("[artifact retention]".to_owned());
                 lines.extend(render_mutation_artifact_retention_summary(
                     config_state,
-                    &self.mutation_artifact_retention_preview,
+                    &self.runtime.mutation_artifact_retention_preview,
                 ));
                 lines.push(String::new());
                 lines.push("[details]".to_owned());
@@ -358,11 +358,11 @@ impl AppState {
                 lines.push("[loaded context]".to_owned());
                 lines.push(render_config_readonly_row(
                     "Documents",
-                    &format!("{} loaded", self.memory_document_count),
+                    &format!("{} loaded", self.runtime.memory_document_count),
                 ));
                 lines.push(render_config_readonly_row(
                     "Last scan",
-                    &self.memory_last_status,
+                    &self.runtime.memory_last_status,
                 ));
                 lines.push(render_config_readonly_row(
                     "Root files",
@@ -398,7 +398,7 @@ impl AppState {
                     config_state,
                     ConfigField::CompactionTailMessages,
                 ));
-                lines.push(format!("status: {}", self.compaction_status));
+                lines.push(format!("status: {}", self.runtime.compaction_status));
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::CodeIntelligence => {
@@ -1478,14 +1478,14 @@ impl AppState {
 
     pub(super) fn refresh_mutation_artifact_retention_preview(&mut self) {
         let Some(root_config) = self.config_snapshot.as_ref() else {
-            self.mutation_artifact_retention_preview =
+            self.runtime.mutation_artifact_retention_preview =
                 MutationArtifactRetentionPreview::Unavailable("config is unavailable".to_owned());
             return;
         };
         let store = match JsonlSessionStore::new(&self.session_log_path) {
             Ok(store) => store,
             Err(error) => {
-                self.mutation_artifact_retention_preview =
+                self.runtime.mutation_artifact_retention_preview =
                     MutationArtifactRetentionPreview::Unavailable(format!(
                         "failed to open mutation artifact recorder: {error:#}"
                     ));
@@ -1493,7 +1493,7 @@ impl AppState {
             }
         };
         let recorder = MutationEventRecorder::new(store);
-        self.mutation_artifact_retention_preview = match recorder.preview_artifact_cleanup(
+        self.runtime.mutation_artifact_retention_preview = match recorder.preview_artifact_cleanup(
             &sigil_kernel::MutationArtifactCleanupTarget::Recommended,
             &root_config.storage.mutation_artifact_retention.to_policy(),
         ) {
@@ -1517,7 +1517,7 @@ impl AppState {
     }
 
     fn mutation_artifact_inventory_count(&self) -> usize {
-        match &self.mutation_artifact_retention_preview {
+        match &self.runtime.mutation_artifact_retention_preview {
             MutationArtifactRetentionPreview::Ready { artifacts, .. } => artifacts.len(),
             MutationArtifactRetentionPreview::Pending
             | MutationArtifactRetentionPreview::Unavailable(_) => 0,
@@ -1549,7 +1549,8 @@ impl AppState {
     }
 
     fn verification_trust_context(&self) -> Result<(String, WorkspaceTrust, String)> {
-        let projection = VerificationStateProjection::from_entries(&self.current_session_entries);
+        let projection =
+            VerificationStateProjection::from_entries(&self.session_browser.current_entries);
         let workspace_id = stable_workspace_id(&self.workspace_root)?;
         let trust_entry = projection.workspace_trust.get(&workspace_id);
         let trust = trust_entry
@@ -1604,7 +1605,7 @@ impl AppState {
         match AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             root_config,
             &self.workspace_root,
-            &self.current_session_entries,
+            &self.session_browser.current_entries,
         ) {
             Ok(registry) => (registry.profiles().to_vec(), registry.warnings().to_vec()),
             Err(error) => (Vec::new(), vec![format!("agent discovery failed: {error}")]),
@@ -1612,7 +1613,7 @@ impl AppState {
     }
 
     fn discover_config_plugins(&self) -> (Vec<PluginManifestSnapshot>, Vec<String>) {
-        let projection = PluginStateProjection::from_entries(&self.current_session_entries);
+        let projection = PluginStateProjection::from_entries(&self.session_browser.current_entries);
         let trust_entries = projection
             .trust_entries
             .into_values()
@@ -1638,7 +1639,7 @@ impl AppState {
     }
 
     fn open_selected_skill_arguments(&mut self) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; use skill later".to_owned());
             return Ok(None);
         }
@@ -1658,7 +1659,7 @@ impl AppState {
     }
 
     fn submit_selected_skill_invocation(&mut self, arguments: String) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; use skill later".to_owned());
             return Ok(None);
         }
@@ -1680,7 +1681,7 @@ impl AppState {
     }
 
     fn review_selected_agent(&mut self, decision: AgentTrustState) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; review agent later".to_owned());
             return Ok(None);
         }
@@ -1743,7 +1744,7 @@ impl AppState {
         &mut self,
         toggle: AgentPolicyToggle,
     ) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; update agent policy later".to_owned());
             return Ok(None);
         }
@@ -1838,7 +1839,7 @@ impl AppState {
         let registry = match AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             &root_config,
             &self.workspace_root,
-            &self.current_session_entries,
+            &self.session_browser.current_entries,
         ) {
             Ok(registry) => registry,
             Err(error) => {
@@ -1884,7 +1885,7 @@ impl AppState {
         let Ok(registry) = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             &root_config,
             &self.workspace_root,
-            &self.current_session_entries,
+            &self.session_browser.current_entries,
         ) else {
             return;
         };
@@ -1936,7 +1937,7 @@ impl AppState {
         &mut self,
         decision: PluginTrustDecision,
     ) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; review plugin later".to_owned());
             return Ok(None);
         }
@@ -2019,7 +2020,7 @@ impl AppState {
     }
 
     fn ensure_current_session_identity(&mut self) -> Result<()> {
-        if self.current_session_entries.iter().any(|entry| {
+        if self.session_browser.current_entries.iter().any(|entry| {
             matches!(
                 entry,
                 SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
@@ -2028,8 +2029,8 @@ impl AppState {
             return Ok(());
         }
         self.append_control_to_current_session(ControlEntry::SessionIdentity {
-            provider_name: self.provider_name.clone(),
-            model_name: self.model_name.clone(),
+            provider_name: self.runtime.provider_name.clone(),
+            model_name: self.runtime.model_name.clone(),
         })
     }
 
@@ -2075,7 +2076,7 @@ impl AppState {
     }
 
     fn save_config_draft(&mut self) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; save later".to_owned());
             return Ok(None);
         }
@@ -2121,7 +2122,7 @@ impl AppState {
     }
 
     fn activate_selected_mcp_server(&mut self) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; activate MCP later".to_owned());
             return Ok(None);
         }
@@ -2149,6 +2150,7 @@ impl AppState {
         };
         let server_name = server.name.clone();
         let current_status = self
+            .runtime
             .mcp_server_statuses
             .get(&server_name)
             .cloned()
@@ -2156,7 +2158,8 @@ impl AppState {
         if server.startup == McpServerStartup::Lazy
             && matches!(current_status, McpServerRuntimeStatus::Deferred)
         {
-            self.mcp_server_statuses
+            self.runtime
+                .mcp_server_statuses
                 .insert(server_name.clone(), McpServerRuntimeStatus::Activating);
             self.last_notice = Some(format!("activating MCP {server_name}"));
             self.push_event("mcp", format!("activate {server_name}"));
@@ -2165,7 +2168,8 @@ impl AppState {
             }));
         }
 
-        self.mcp_server_statuses
+        self.runtime
+            .mcp_server_statuses
             .insert(server_name.clone(), McpServerRuntimeStatus::Refreshing);
         self.last_notice = Some(format!("refreshing MCP {server_name}"));
         self.push_event("mcp", format!("refresh {server_name}"));
@@ -2186,19 +2190,20 @@ impl AppState {
         self.session_log_dir = self.sigil_paths.session_log_dir.clone();
         self.config_snapshot = Some(root_config.clone());
         self.secret_redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
-        self.permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
+        self.runtime.permission_default_mode =
+            root_config.permission.default_mode.as_str().to_owned();
         self.memory_config = root_config.memory.clone();
         self.compaction_config = root_config.compaction.clone();
         self.refresh_session_view_cache();
-        self.code_intelligence_status =
+        self.runtime.code_intelligence_status =
             code_intelligence_config_status(&root_config.code_intelligence);
-        self.code_intelligence_server_lines.clear();
-        self.code_intelligence_diagnostics_line = None;
-        self.code_intelligence_diagnostics_by_path.clear();
-        self.mcp_server_statuses = initial_mcp_server_statuses(root_config);
-        if self.current_session_entries.is_empty() {
-            self.provider_name = root_config.agent.provider.clone();
-            self.model_name = root_config.agent.model.clone();
+        self.runtime.code_intelligence_server_lines.clear();
+        self.runtime.code_intelligence_diagnostics_line = None;
+        self.runtime.code_intelligence_diagnostics_by_path.clear();
+        self.runtime.mcp_server_statuses = initial_mcp_server_statuses(root_config);
+        if self.session_browser.current_entries.is_empty() {
+            self.runtime.provider_name = root_config.agent.provider.clone();
+            self.runtime.model_name = root_config.agent.model.clone();
         }
         self.refresh_memory_summary();
         self.load_input_history();
@@ -2221,7 +2226,8 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn mcp_server_runtime_status_label(&self, server_name: &str) -> Option<String> {
-        self.mcp_server_statuses
+        self.runtime
+            .mcp_server_statuses
             .get(server_name)
             .map(|status| status.label_for_server(Some(server_name)))
     }
@@ -2236,6 +2242,7 @@ impl AppState {
             .iter()
             .map(|server| {
                 let status = self
+                    .runtime
                     .mcp_server_statuses
                     .get(&server.name)
                     .cloned()
@@ -2258,7 +2265,8 @@ impl AppState {
         else {
             return "unsaved".to_owned();
         };
-        self.mcp_server_statuses
+        self.runtime
+            .mcp_server_statuses
             .get(&config.name)
             .cloned()
             .unwrap_or_else(|| initial_mcp_server_status(config))
@@ -2272,7 +2280,7 @@ impl AppState {
         let root_config = config_state.draft.code_intelligence_preview_root_config();
         let checks = build_code_intelligence_checks(&root_config, &self.workspace_root);
         let mut lines = vec![
-            render_config_readonly_row("Saved runtime", &self.code_intelligence_status),
+            render_config_readonly_row("Saved runtime", &self.runtime.code_intelligence_status),
             render_config_readonly_row(
                 "Draft status",
                 &code_intelligence_config_status(&root_config.code_intelligence),

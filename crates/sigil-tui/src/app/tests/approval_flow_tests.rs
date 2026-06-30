@@ -5,7 +5,7 @@ fn approval_request_stores_preview() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
 
-    let pending = app.pending_approval.expect("expected pending approval");
+    let pending = app.approval.pending.expect("expected pending approval");
     let preview = pending.preview.expect("expected preview");
     assert_eq!(preview.changed_files, vec!["note.txt".to_owned()]);
     assert!(preview.body.contains("+++ proposed/note.txt"));
@@ -558,7 +558,7 @@ fn approval_enter_chooses_selected_action() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
 
-    assert_eq!(app.approval_selected_action, ApprovalAction::Deny);
+    assert_eq!(app.approval.selected_action, ApprovalAction::Deny);
     assert_eq!(
         app.approval_modal_view()
             .expect("approval modal should exist")
@@ -573,7 +573,7 @@ fn approval_enter_chooses_selected_action() -> Result<()> {
     ));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.approval_selected_action, ApprovalAction::Allow);
+    assert_eq!(app.approval.selected_action, ApprovalAction::Allow);
     let allow = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         allow,
@@ -629,15 +629,15 @@ fn approval_hunk_and_file_navigation_updates_selection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, multi_file_approval_preview())?;
 
-    assert_eq!(app.approval_selected_file_index, 0);
-    assert_eq!(app.approval_selected_hunk_index, 0);
+    assert_eq!(app.approval.selected_file_index, 0);
+    assert_eq!(app.approval.selected_hunk_index, 0);
 
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))?
             .is_none()
     );
-    assert_eq!(app.approval_selected_hunk_index, 1);
-    assert!(app.approval_scroll_back > 0);
+    assert_eq!(app.approval.selected_hunk_index, 1);
+    assert!(app.approval.scroll_back > 0);
     let jumped = app.approval_preview_lines().join("\n");
     assert!(jumped.contains("hunk 2/2"));
 
@@ -645,9 +645,9 @@ fn approval_hunk_and_file_navigation_updates_selection() -> Result<()> {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))?
             .is_none()
     );
-    assert_eq!(app.approval_selected_file_index, 1);
-    assert_eq!(app.approval_selected_hunk_index, 0);
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.selected_file_index, 1);
+    assert_eq!(app.approval.selected_hunk_index, 0);
+    assert_eq!(app.approval.scroll_back, 0);
     let second_file = app.approval_preview_lines().join("\n");
     assert!(second_file.contains("file 2/2"));
     assert!(second_file.contains("> note-b.txt"));
@@ -656,7 +656,7 @@ fn approval_hunk_and_file_navigation_updates_selection() -> Result<()> {
         app.handle_key_event(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE))?
             .is_none()
     );
-    assert_eq!(app.approval_selected_file_index, 0);
+    assert_eq!(app.approval.selected_file_index, 0);
     let first_file = app.approval_preview_lines().join("\n");
     assert!(first_file.contains("file 1/2"));
     assert!(first_file.contains("> note-a.txt"));
@@ -702,7 +702,7 @@ fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
         approved: false,
         reason: Some("policy denied".to_owned()),
     })?;
-    assert!(app.pending_approval.is_none());
+    assert!(app.approval.pending.is_none());
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert!(
         app.timeline
@@ -748,7 +748,7 @@ fn approval_preview_handles_empty_preview_body_and_slash_shortcut() -> Result<()
             .is_none()
     );
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert_eq!(app.input, "/");
+    assert_eq!(app.composer.input, "/");
     Ok(())
 }
 
@@ -826,7 +826,7 @@ fn escape_in_pending_approval_only_changes_focus() -> Result<()> {
 
     assert!(action.is_none());
     assert_eq!(app.active_pane, PaneFocus::Activity);
-    assert!(app.pending_approval.is_some());
+    assert!(app.approval.pending.is_some());
     assert!(app.approval_modal_view().is_some());
     Ok(())
 }
@@ -841,7 +841,7 @@ fn slash_prefix_during_pending_approval_returns_to_composer() -> Result<()> {
 
     assert!(action.is_none());
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert_eq!(app.input, "/");
-    assert!(app.pending_approval.is_some());
+    assert_eq!(app.composer.input, "/");
+    assert!(app.approval.pending.is_some());
     Ok(())
 }

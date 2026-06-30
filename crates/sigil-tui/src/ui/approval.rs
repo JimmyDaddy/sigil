@@ -179,7 +179,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
             .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(Text::from(diff_lines))
-                .scroll((app.approval_scroll_back as u16, 0))
+                .scroll((app.approval.scroll_back as u16, 0))
                 .wrap(Wrap { trim: false }),
             diff_sections[1],
         );

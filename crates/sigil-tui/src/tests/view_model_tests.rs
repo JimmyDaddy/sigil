@@ -643,7 +643,7 @@ fn code_tool_result_updates_code_intelligence_status() -> anyhow::Result<()> {
         },
     )))?;
 
-    assert_eq!(app.code_intelligence_status, "ready rust-analyzer");
+    assert_eq!(app.runtime.code_intelligence_status, "ready rust-analyzer");
     Ok(())
 }
 
@@ -749,7 +749,7 @@ fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<(
     )))?;
 
     assert_eq!(
-        app.code_intelligence_status,
+        app.runtime.code_intelligence_status,
         "diagnostics 1 errors 2 warnings"
     );
     let view_model = UiViewModel::from_app(&app);
@@ -1167,7 +1167,7 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
 #[test]
 fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     app.handle(RunEvent::ToolApprovalRequested {
         call: ToolCall {
             id: "call-approval".to_owned(),

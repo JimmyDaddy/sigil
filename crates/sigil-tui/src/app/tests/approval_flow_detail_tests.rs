@@ -104,7 +104,7 @@ fn approval_diff_transformers_cover_hunks_and_changed_only() -> anyhow::Result<(
         .to_owned();
     assert_eq!(app.approval_hunk_positions().len(), 2);
 
-    app.approval_selected_hunk_index = 1;
+    app.approval.selected_hunk_index = 1;
     let current = app.extract_current_hunk(&diff);
     assert!(current.contains("..."));
     assert!(current.contains("@@ -5,2 +5,2 @@"));
@@ -114,13 +114,13 @@ fn approval_diff_transformers_cover_hunks_and_changed_only() -> anyhow::Result<(
     assert!(changed.contains("-beta"));
     assert!(changed.contains("+gamma"));
 
-    app.approval_diff_mode = ApprovalDiffMode::CurrentHunk;
+    app.approval.diff_mode = ApprovalDiffMode::CurrentHunk;
     assert!(
         app.transform_approval_diff(&diff)
             .contains("@@ -5,2 +5,2 @@")
     );
 
-    app.approval_diff_mode = ApprovalDiffMode::ChangedOnly;
+    app.approval.diff_mode = ApprovalDiffMode::ChangedOnly;
     assert_eq!(app.selected_approval_diff(), Some(diff.as_str()));
     Ok(())
 }
@@ -143,15 +143,15 @@ fn approval_hunkless_and_file_switch_guards_cover_private_paths() -> anyhow::Res
     app.jump_approval_hunk(false);
     app.switch_approval_file(true);
 
-    app.pending_approval = None;
+    app.approval.pending = None;
     app.switch_approval_file(true);
 
     inject_write_file_approval(&mut app, multi_file_approval_preview())?;
-    app.approval_selected_hunk_index = 1;
+    app.approval.selected_hunk_index = 1;
     app.jump_approval_hunk(false);
-    assert_eq!(app.approval_selected_hunk_index, 0);
+    assert_eq!(app.approval.selected_hunk_index, 0);
 
-    app.approval_diff_mode = ApprovalDiffMode::CurrentHunk;
+    app.approval.diff_mode = ApprovalDiffMode::CurrentHunk;
     let view = app
         .approval_modal_view()
         .expect("approval modal view should exist");

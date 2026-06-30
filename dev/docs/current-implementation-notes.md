@@ -41,14 +41,14 @@ sigil/
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、多文件 change set apply、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用、诊断、code action 查询，以及需要审批 diff 的 code action / rename edit 工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
-- `sigil-http` 当前承载 HTTP/SSE adapter server config DTO、bearer auth validator、`PublicRunEvent` SSE serialization、per-run event sequence helper、in-memory session/run registry、run start/cancel 与 approval decision routing；后续负责 HTTP routing 和 server wiring，不依赖 `sigil-tui`，不复制 agent loop。
+- `sigil-http` 当前通过 `lib.rs` façade 暴露 HTTP/SSE adapter API，内部按 protocol、config/auth、listener、SSE、DTO、driver、registry 和 OpenAPI schema 拆分；listener 只负责 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。
 - `sigil` 提供 `sigil` binary：无子命令时直接启动 TUI；`run` 自动化入口、`doctor` 本地诊断入口和 `serve` HTTP/SSE adapter preflight 入口保留为显式子命令；`serve` 当前只验证 localhost/token defaults 并输出 routing pending 状态，不启动 HTTP listener；`prefix` / `fim` 保留为隐藏调试或 provider 专项入口，不作为普通用户主心智。
 - `sigil --version` 输出 package version、git commit、target 和 profile，用于安装后 smoke、release archive 验证和问题定位。
 - `sigil-tui` 承载第一用户入口的 TUI 实现，包括 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/new`、`/resume`、`/plan`、审批 modal、tool activity、diff preview、session 恢复、task 状态展示、context compaction、markdown code block 高亮和 code intelligence 状态展示；provider 配置、状态请求、状态刷新任务生命周期和 context-window 解析通过 `sigil-runtime` 的 provider-neutral API 进入，agent message route 和通用 control append 也复用 runtime helper，不直接依赖 provider crate。
 
 ## TUI 模块边界
 
-`crates/sigil-tui/src/app.rs` 保持 `AppState` façade：字段定义、bootstrap、顶层 key routing 和跨状态编排留在这里。具体状态流维护在 `src/app/*`：
+`crates/sigil-tui/src/app.rs` 保持 `AppState` façade：bootstrap、顶层 key routing 和跨状态编排留在这里。运行状态、composer、approval 和 session browser 字段归入 `src/app/state.rs` 的领域 bundle。具体状态流维护在 `src/app/*`：
 
 - `input_flow.rs`
 - `slash_flow.rs`
@@ -65,7 +65,7 @@ sigil/
 
 状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`。新增 TUI 行为时优先落到对应 flow 和同域测试，不要把状态机重新堆回 `app.rs`。
 
-`runner.rs` 是 worker façade。worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 维护在 `runner/*`，测试维护在 `runner/tests/*`。
+`runner.rs` 是 worker façade。worker protocol、spawn 装配、event/approval bridge、session/compaction flow 维护在 `runner/*`；worker loop 的 scheduler、active run、queue、MCP/provider refresh、agent/task runtime 和 terminal refresh 维护在 `runner/worker_loop/*`，测试维护在 `runner/tests/*`。
 
 `ui.rs` 是 renderer 模块入口。shell layout、theme、geometry、text、timeline、tool card、markdown、approval、setup/config、modal 等渲染块维护在 `ui/*`。
 

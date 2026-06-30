@@ -301,7 +301,7 @@ fn run_app(
         dirty |= scrollback.has_pending_seed() && should_sync_terminal_scrollback(app);
 
         let spinner_tick = live_spinner_tick();
-        if app.is_busy && spinner_tick != last_spinner_tick {
+        if app.runtime.is_busy && spinner_tick != last_spinner_tick {
             dirty = true;
         }
 
@@ -746,11 +746,11 @@ fn sync_terminal_scrollback(
 }
 
 fn should_sync_terminal_scrollback(app: &AppState) -> bool {
-    !app.is_busy && !app.is_setup_mode() && !app.is_config_mode()
+    !app.runtime.is_busy && !app.is_setup_mode() && !app.is_config_mode()
 }
 
 fn poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Duration {
-    if app.is_busy {
+    if app.runtime.is_busy {
         BUSY_POLL_INTERVAL
     } else if scrollback.has_pending_seed() && should_sync_terminal_scrollback(app) {
         SCROLLBACK_SEED_POLL_INTERVAL
@@ -1003,7 +1003,10 @@ fn scrollback_separator(app: &AppState) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" {} / {} ----", app.provider_name, app.model_name),
+            format!(
+                " {} / {} ----",
+                app.runtime.provider_name, app.runtime.model_name
+            ),
             Style::default().fg(palette.text_muted),
         ),
     ])

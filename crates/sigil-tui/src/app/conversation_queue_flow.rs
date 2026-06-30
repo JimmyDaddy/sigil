@@ -16,7 +16,7 @@ const COMPOSER_QUEUE_VISIBLE_ROWS: usize = 4;
 
 impl AppState {
     pub(crate) fn conversation_queue_projection(&self) -> ConversationQueueProjection {
-        ConversationQueueProjection::from_entries(&self.current_session_entries)
+        ConversationQueueProjection::from_entries(&self.session_browser.current_entries)
     }
 
     pub(crate) fn composer_queue_rows(&self) -> Vec<ComposerQueueRow> {
@@ -30,7 +30,7 @@ impl AppState {
                 label: queue_prompt_label(&item),
                 detail: queue_item_detail(&item, projection.paused),
                 status: queue_status_kind(item.status, projection.paused),
-                selected: index == self.composer_queue_selected,
+                selected: index == self.composer.queue_selected,
             })
             .collect()
     }
@@ -44,7 +44,7 @@ impl AppState {
     }
 
     pub(crate) fn is_composer_queue_panel_focused(&self) -> bool {
-        self.composer_queue_panel_focused
+        self.composer.queue_panel_focused
     }
 
     pub(crate) fn composer_queue_paused(&self) -> bool {
@@ -52,24 +52,24 @@ impl AppState {
     }
 
     pub(crate) fn selected_composer_queue_action(&self) -> ComposerQueueAction {
-        self.composer_queue_action_selected
+        self.composer.queue_action_selected
     }
 
     pub(super) fn focus_composer_queue_panel(&mut self) -> bool {
         if !self.composer_queue_panel_available() {
-            self.composer_queue_panel_focused = false;
+            self.composer.queue_panel_focused = false;
             return false;
         }
         self.refresh_conversation_queue_selection();
         self.reset_composer_queue_action();
-        self.composer_queue_panel_focused = true;
+        self.composer.queue_panel_focused = true;
         self.blur_composer_agent_panel();
         self.last_notice = Some("queue focused".to_owned());
         true
     }
 
     pub(super) fn blur_composer_queue_panel(&mut self) {
-        self.composer_queue_panel_focused = false;
+        self.composer.queue_panel_focused = false;
     }
 
     pub(super) fn blur_composer_aux_panels(&mut self) {
@@ -78,38 +78,39 @@ impl AppState {
     }
 
     pub(super) fn selected_composer_queue_is_first(&self) -> bool {
-        self.composer_queue_selected == 0
+        self.composer.queue_selected == 0
     }
 
     pub(super) fn selected_composer_queue_is_last(&self) -> bool {
         let count = self.conversation_queue_projection().items.len();
-        count == 0 || self.composer_queue_selected + 1 >= count.min(COMPOSER_QUEUE_VISIBLE_ROWS)
+        count == 0 || self.composer.queue_selected + 1 >= count.min(COMPOSER_QUEUE_VISIBLE_ROWS)
     }
 
     pub(super) fn move_composer_queue_selection(&mut self, next: bool) -> bool {
         let count = self.conversation_queue_projection().items.len();
         if count == 0 {
-            self.composer_queue_panel_focused = false;
+            self.composer.queue_panel_focused = false;
             return false;
         }
         let max_index = count.min(COMPOSER_QUEUE_VISIBLE_ROWS).saturating_sub(1);
-        self.composer_queue_selected = if next {
-            self.composer_queue_selected
+        self.composer.queue_selected = if next {
+            self.composer
+                .queue_selected
                 .saturating_add(1)
                 .min(max_index)
         } else {
-            self.composer_queue_selected.saturating_sub(1)
+            self.composer.queue_selected.saturating_sub(1)
         };
         self.reset_composer_queue_action();
         true
     }
 
     pub(super) fn cycle_composer_queue_action(&mut self, forward: bool) {
-        self.composer_queue_action_selected = self.composer_queue_action_selected.next(forward);
+        self.composer.queue_action_selected = self.composer.queue_action_selected.next(forward);
     }
 
     pub(super) fn execute_selected_queue_action(&mut self) -> Option<AppAction> {
-        match self.composer_queue_action_selected {
+        match self.composer.queue_action_selected {
             ComposerQueueAction::SendNow => self.send_selected_queue_item_now(),
             ComposerQueueAction::KeepNext => self.promote_selected_queue_item(),
             ComposerQueueAction::Edit => {
@@ -153,7 +154,7 @@ impl AppState {
         let Some(item) = self.selected_queue_item() else {
             return false;
         };
-        self.queue_edit_target = Some(item.queued.queue_id.clone());
+        self.composer.queue_edit_target = Some(item.queued.queue_id.clone());
         self.set_input_and_cursor(item.queued.prompt.clone());
         self.active_pane = PaneFocus::Composer;
         self.blur_composer_queue_panel();
@@ -169,28 +170,28 @@ impl AppState {
         let projection = self.conversation_queue_projection();
         let visible_count = projection.items.len().min(COMPOSER_QUEUE_VISIBLE_ROWS);
         if visible_count == 0 {
-            self.composer_queue_selected = 0;
-            self.composer_queue_panel_focused = false;
+            self.composer.queue_selected = 0;
+            self.composer.queue_panel_focused = false;
             self.reset_composer_queue_action();
-            self.queue_edit_target = None;
+            self.composer.queue_edit_target = None;
             return;
         }
-        self.composer_queue_selected = self.composer_queue_selected.min(visible_count - 1);
-        if let Some(target) = &self.queue_edit_target
+        self.composer.queue_selected = self.composer.queue_selected.min(visible_count - 1);
+        if let Some(target) = &self.composer.queue_edit_target
             && !projection
                 .items
                 .iter()
                 .any(|item| item.queued.queue_id == *target)
         {
-            self.queue_edit_target = None;
+            self.composer.queue_edit_target = None;
         }
     }
 
     pub(super) fn finish_queue_edit_submission(&mut self, prompt: String) -> Option<AppAction> {
-        let queue_id = self.queue_edit_target.take()?;
-        self.input.clear();
-        self.input_cursor = 0;
-        self.input_paste_spans.clear();
+        let queue_id = self.composer.queue_edit_target.take()?;
+        self.composer.input.clear();
+        self.composer.input_cursor = 0;
+        self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.reset_input_history_navigation();
         self.push_timeline(TimelineRole::Notice, "queued input edited");
@@ -250,7 +251,7 @@ impl AppState {
                 if !target.is_empty()
                     && let Some(index) = self.queue_index_for_target(target)
                 {
-                    self.composer_queue_selected = index;
+                    self.composer.queue_selected = index;
                 }
                 if self.begin_edit_selected_queue_item() {
                     Ok(None)
@@ -279,10 +280,10 @@ impl AppState {
     }
 
     pub(super) fn cancel_queue_edit(&mut self) -> bool {
-        if self.queue_edit_target.is_none() {
+        if self.composer.queue_edit_target.is_none() {
             return false;
         }
-        self.queue_edit_target = None;
+        self.composer.queue_edit_target = None;
         self.last_notice = Some("queue edit cancelled".to_owned());
         true
     }
@@ -292,7 +293,7 @@ impl AppState {
     }
 
     fn reset_composer_queue_action(&mut self) {
-        self.composer_queue_action_selected = ComposerQueueAction::SendNow;
+        self.composer.queue_action_selected = ComposerQueueAction::SendNow;
     }
 
     fn selected_queue_id(&self) -> Option<ConversationInputQueueId> {
@@ -305,7 +306,7 @@ impl AppState {
             .items
             .into_iter()
             .take(COMPOSER_QUEUE_VISIBLE_ROWS)
-            .nth(self.composer_queue_selected)
+            .nth(self.composer.queue_selected)
     }
 
     fn toggle_queue_pause_to(&mut self, paused: bool) -> Option<AppAction> {
@@ -345,7 +346,7 @@ impl AppState {
     fn queue_index_for_target(&self, target: &str) -> Option<usize> {
         let normalized = target.trim().to_ascii_lowercase();
         if normalized.is_empty() {
-            return Some(self.composer_queue_selected);
+            return Some(self.composer.queue_selected);
         }
         let projection = self.conversation_queue_projection();
         if let Ok(ordinal) = normalized.parse::<usize>()

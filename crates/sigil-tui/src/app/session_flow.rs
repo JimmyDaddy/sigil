@@ -28,7 +28,11 @@ const SESSION_HISTORY_TITLE_LINE_MAX_BYTES: usize = 256 * 1024;
 impl AppState {
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
         self.refresh_session_history();
-        let Some(session_log_path) = self.session_history.first().map(|entry| entry.path.clone())
+        let Some(session_log_path) = self
+            .session_browser
+            .history
+            .first()
+            .map(|entry| entry.path.clone())
         else {
             return false;
         };
@@ -70,20 +74,20 @@ impl AppState {
 
     pub(super) fn session_view_lines(&self) -> Vec<String> {
         let mut lines = vec![
-            format!("{} view", self.session_view_mode.label()),
+            format!("{} view", self.session_browser.view_mode.label()),
             format!(
                 "compact={}  prompt={}  cache={:.0}%",
-                self.compaction_status,
-                self.stats.last_prompt_tokens,
+                self.runtime.compaction_status,
+                self.runtime.stats.last_prompt_tokens,
                 self.cache_hit_ratio() * 100.0
             ),
         ];
-        if self.is_busy {
+        if self.runtime.is_busy {
             lines.push("running; durable view".to_owned());
         }
 
         lines.push(String::new());
-        lines.extend(match self.session_view_mode {
+        lines.extend(match self.session_browser.view_mode {
             SessionViewMode::Provider => self.provider_projection_lines(),
             SessionViewMode::Audit => self.audit_log_lines(),
         });
@@ -96,20 +100,21 @@ impl AppState {
     }
 
     fn provider_projection_lines(&self) -> Vec<String> {
-        if self.current_session_entries.is_empty() {
+        if self.session_browser.current_entries.is_empty() {
             return vec!["no provider messages".to_owned()];
         }
 
         let session = Session::from_entries(
-            self.provider_name.clone(),
-            self.model_name.clone(),
-            self.current_session_entries.clone(),
+            self.runtime.provider_name.clone(),
+            self.runtime.model_name.clone(),
+            self.session_browser.current_entries.clone(),
         );
         let messages = session.messages();
         let mut lines = vec!["Provider:".to_owned()];
-        if let Some(panel) =
-            RecoveryPanelViewModel::from_entries(&self.current_session_entries, unix_time_ms())
-        {
+        if let Some(panel) = RecoveryPanelViewModel::from_entries(
+            &self.session_browser.current_entries,
+            unix_time_ms(),
+        ) {
             lines.extend(panel.lines().into_iter().map(|line| format!("  {line}")));
         }
         if let Some(record) = &self.latest_compaction_record {
@@ -129,7 +134,7 @@ impl AppState {
         for message in messages {
             lines.push(render_model_message_line(&message));
         }
-        if !self.is_busy {
+        if !self.runtime.is_busy {
             match session.compaction_preview(&self.compaction_config) {
                 Ok(Some(preview)) => {
                     lines.push(String::new());
@@ -149,12 +154,12 @@ impl AppState {
     }
 
     fn audit_log_lines(&self) -> Vec<String> {
-        if self.current_session_entries.is_empty() {
+        if self.session_browser.current_entries.is_empty() {
             return vec!["no audit entries".to_owned()];
         }
 
         let mut lines = vec!["Audit:".to_owned()];
-        for entry in &self.current_session_entries {
+        for entry in &self.session_browser.current_entries {
             lines.push(render_session_log_entry(entry));
         }
         lines
@@ -189,10 +194,10 @@ impl AppState {
     pub(super) fn recent_session_rows(&self) -> Vec<SessionHistoryRow> {
         let filtered_indices = self.filtered_session_indices();
         let mut rows = vec![SessionHistoryRow::SessionHeader {
-            filter: if self.session_history_filter.is_empty() {
+            filter: if self.session_browser.history_filter.is_empty() {
                 "-".to_owned()
             } else {
-                self.session_history_filter.clone()
+                self.session_browser.history_filter.clone()
             },
             total: filtered_indices.len(),
         }];
@@ -204,22 +209,23 @@ impl AppState {
         }
 
         let start = self
-            .session_history_selected
-            .saturating_sub(self.session_history_visible_limit / 2)
+            .session_browser
+            .history_selected
+            .saturating_sub(self.session_browser.history_visible_limit / 2)
             .min(filtered_indices.len().saturating_sub(1));
-        let end = (start + self.session_history_visible_limit).min(filtered_indices.len());
+        let end = (start + self.session_browser.history_visible_limit).min(filtered_indices.len());
         for (filtered_index, entry_index) in filtered_indices
             .iter()
             .enumerate()
             .skip(start)
             .take(end.saturating_sub(start))
         {
-            let entry = &self.session_history[*entry_index];
+            let entry = &self.session_browser.history[*entry_index];
             rows.push(SessionHistoryRow::SessionItem {
                 index: filtered_index + 1,
                 label: session_history_display_label(entry),
                 current: entry.path == self.session_log_path,
-                selected: filtered_index == self.session_history_selected,
+                selected: filtered_index == self.session_browser.history_selected,
                 meta: format!(
                     "{} · {}",
                     human_file_size(entry.bytes),
@@ -231,11 +237,12 @@ impl AppState {
     }
 
     pub(super) fn sync_current_session_state(&mut self, entries: Vec<SessionLogEntry>) {
-        let entries = preserve_local_ui_control_entries(&self.current_session_entries, entries);
-        self.stats = session_stats_from_entries(&entries);
+        let entries =
+            preserve_local_ui_control_entries(&self.session_browser.current_entries, entries);
+        self.runtime.stats = session_stats_from_entries(&entries);
         self.latest_compaction_record = latest_compaction_record(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
-        self.current_session_entries = entries;
+        self.session_browser.current_entries = entries;
         self.mark_current_session_entries_changed();
         self.refresh_conversation_queue_selection();
         self.refresh_active_agent_view_after_parent_sync();
@@ -243,12 +250,14 @@ impl AppState {
     }
 
     pub(super) fn append_current_session_control(&mut self, control: ControlEntry) {
-        self.current_session_entries
+        self.session_browser
+            .current_entries
             .push(SessionLogEntry::Control(control));
-        self.stats = session_stats_from_entries(&self.current_session_entries);
-        self.latest_compaction_record = latest_compaction_record(&self.current_session_entries);
+        self.runtime.stats = session_stats_from_entries(&self.session_browser.current_entries);
+        self.latest_compaction_record =
+            latest_compaction_record(&self.session_browser.current_entries);
         self.tool_preview_snapshots =
-            restored_tool_preview_snapshot_index(&self.current_session_entries);
+            restored_tool_preview_snapshot_index(&self.session_browser.current_entries);
         self.mark_current_session_entries_changed();
         self.refresh_conversation_queue_selection();
         self.refresh_active_agent_view_after_parent_sync();
@@ -296,13 +305,14 @@ impl AppState {
             }
         }
         sessions.sort_by(|left, right| right.0.cmp(&left.0));
-        self.session_history = sessions.into_iter().map(|(_, entry)| entry).collect();
+        self.session_browser.history = sessions.into_iter().map(|(_, entry)| entry).collect();
         let current_index = self
-            .session_history
+            .session_browser
+            .history
             .iter()
             .position(|entry| entry.path == self.session_log_path)
             .unwrap_or(0);
-        self.session_history_selected = self
+        self.session_browser.history_selected = self
             .filtered_session_indices()
             .iter()
             .position(|index| *index == current_index)
@@ -313,20 +323,20 @@ impl AppState {
     pub(super) fn refresh_memory_summary(&mut self) {
         match inspect_memory_documents(&self.workspace_root, &self.memory_config) {
             Ok(report) => {
-                self.memory_enabled = report.enabled;
-                self.memory_document_count = report.document_count;
-                self.memory_last_status = "ok".to_owned();
+                self.runtime.memory_enabled = report.enabled;
+                self.runtime.memory_document_count = report.document_count;
+                self.runtime.memory_last_status = "ok".to_owned();
             }
             Err(error) => {
-                self.memory_enabled = self.memory_config.enabled;
-                self.memory_document_count = 0;
-                self.memory_last_status = error.to_string();
+                self.runtime.memory_enabled = self.memory_config.enabled;
+                self.runtime.memory_document_count = 0;
+                self.runtime.memory_last_status = error.to_string();
             }
         }
     }
 
     pub(super) fn resolve_resume_target(&self, selector: &str) -> Option<PathBuf> {
-        if self.session_history.is_empty() {
+        if self.session_browser.history.is_empty() {
             return None;
         }
 
@@ -339,7 +349,7 @@ impl AppState {
         if normalized.eq_ignore_ascii_case("latest") {
             return candidate_indices
                 .first()
-                .and_then(|index| self.session_history.get(*index))
+                .and_then(|index| self.session_browser.history.get(*index))
                 .map(|entry| entry.path.clone());
         }
 
@@ -348,21 +358,26 @@ impl AppState {
             .ok()
             .and_then(|index| index.checked_sub(1))
             .and_then(|index| candidate_indices.get(index).copied())
-            .and_then(|index| self.session_history.get(index))
+            .and_then(|index| self.session_browser.history.get(index))
             .map(|entry| entry.path.clone())
         {
             return Some(path);
         }
 
         let path = PathBuf::from(normalized);
-        if self.session_history.iter().any(|entry| entry.path == path) {
+        if self
+            .session_browser
+            .history
+            .iter()
+            .any(|entry| entry.path == path)
+        {
             return Some(path);
         }
 
         let query = normalized.to_ascii_lowercase();
         let mut matches = candidate_indices
             .into_iter()
-            .filter_map(|index| self.session_history.get(index))
+            .filter_map(|index| self.session_browser.history.get(index))
             .filter(|entry| {
                 entry.label.to_ascii_lowercase().contains(&query)
                     || entry
@@ -387,13 +402,14 @@ impl AppState {
 
     pub(super) fn resume_candidate_indices(&self) -> Vec<usize> {
         let non_current = self
-            .session_history
+            .session_browser
+            .history
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| (entry.path != self.session_log_path).then_some(index))
             .collect::<Vec<_>>();
         if non_current.is_empty() {
-            return (0..self.session_history.len()).collect();
+            return (0..self.session_browser.history.len()).collect();
         }
         non_current
     }
@@ -407,15 +423,15 @@ impl AppState {
         notice: &str,
     ) {
         self.session_log_path = session_log_path;
-        self.provider_name = provider_name;
-        self.model_name = model_name;
+        self.runtime.provider_name = provider_name;
+        self.runtime.model_name = model_name;
         self.session_id = session_id_from_path(&self.session_log_path)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         self.active_agent_view = super::AgentView::Main;
         self.active_agent_child_transcript = None;
         self.sync_current_session_state(entries.clone());
-        self.pending_approval = None;
-        self.run_phase = RunPhase::Idle;
+        self.approval.pending = None;
+        self.runtime.run_phase = RunPhase::Idle;
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);
         self.timeline.clear();
@@ -434,18 +450,23 @@ impl AppState {
         self.push_event("workspace", self.workspace_root.display().to_string());
         self.push_event(
             "model",
-            format!("{}/{}", self.provider_name, self.model_name),
+            format!("{}/{}", self.runtime.provider_name, self.runtime.model_name),
         );
-        self.push_event("effort", self.reasoning_effort.as_str());
-        self.push_event("approval_default", self.permission_default_mode.clone());
+        self.push_event("effort", self.runtime.reasoning_effort.as_str());
+        self.push_event(
+            "approval_default",
+            self.runtime.permission_default_mode.clone(),
+        );
         self.push_event(
             "memory",
             format!(
                 "enabled={} docs={} status={}",
-                self.memory_enabled, self.memory_document_count, self.memory_last_status
+                self.runtime.memory_enabled,
+                self.runtime.memory_document_count,
+                self.runtime.memory_last_status
             ),
         );
-        self.push_event("compaction", self.compaction_status.clone());
+        self.push_event("compaction", self.runtime.compaction_status.clone());
         self.push_event("session_log", self.session_log_path.display().to_string());
         self.push_event("focus", self.active_pane.label());
         self.push_event("restore", format!("entries={}", entries.len()));
@@ -588,7 +609,7 @@ impl AppState {
         if delta.trim().is_empty() {
             return;
         }
-        self.push_phase_marker(format!("thinking|{}", self.model_name));
+        self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
         self.push_timeline(TimelineRole::Thinking, delta.to_owned());
     }
 
@@ -600,8 +621,9 @@ impl AppState {
     }
 
     pub(super) fn filtered_session_indices(&self) -> Vec<usize> {
-        let filter = self.session_history_filter.to_ascii_lowercase();
-        self.session_history
+        let filter = self.session_browser.history_filter.to_ascii_lowercase();
+        self.session_browser
+            .history
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {

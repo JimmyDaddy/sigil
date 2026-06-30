@@ -9,7 +9,7 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     assert_eq!(ComposerMode::Plan.phase_marker(), "plan");
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer_mode = ComposerMode::Plan;
+    app.composer.mode = ComposerMode::Plan;
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(action.is_none());
     assert_eq!(app.composer_mode_label(), "Build");
@@ -34,8 +34,8 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
         })
     ));
 
-    app.is_busy = true;
-    app.input = "@review inspect".to_owned();
+    app.runtime.is_busy = true;
+    app.composer.input = "@review inspect".to_owned();
     let action = app.submit_input()?;
     assert!(matches!(
         action,
@@ -50,7 +50,7 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
         Some("queued for next turn")
     );
 
-    app.input = "/task implement".to_owned();
+    app.composer.input = "/task implement".to_owned();
     let action = app.submit_input()?;
     assert!(action.is_none());
     assert_eq!(
@@ -58,8 +58,8 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
         Some("busy; task later")
     );
 
-    app.is_busy = false;
-    app.input = "/task".to_owned();
+    app.runtime.is_busy = false;
+    app.composer.input = "/task".to_owned();
     let action = app.submit_input()?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("usage: /task <task|continue>"));
@@ -331,13 +331,19 @@ fn agent_rename_filters_and_persists_display_name() -> Result<()> {
         Some("agent renamed: child_1 -> Repo Audit")
     );
     assert_eq!(app.active_agent_label(), "Repo Audit");
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
-            if rename.display_name == "Repo Audit"
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
+                    if rename.display_name == "Repo Audit"
+            ))
+    );
     let stale_entries = app
-        .current_session_entries
+        .session_browser
+        .current_entries
         .iter()
         .filter(|entry| {
             !matches!(
@@ -349,11 +355,16 @@ fn agent_rename_filters_and_persists_display_name() -> Result<()> {
         .collect::<Vec<_>>();
     app.sync_current_session_state(stale_entries);
     assert_eq!(app.active_agent_label(), "Repo Audit");
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
-            if rename.display_name == "Repo Audit"
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
+                    if rename.display_name == "Repo Audit"
+            ))
+    );
     Ok(())
 }
 
@@ -663,8 +674,8 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     assert!(rows.iter().any(|row| {
         row.label == "agent kernel map" && row.detail == "running · explore · chat" && !row.muted
     }));
-    let base_entries = app.current_session_entries.clone();
-    let mut recovering_entries = app.current_session_entries.clone();
+    let base_entries = app.session_browser.current_entries.clone();
+    let mut recovering_entries = app.session_browser.current_entries.clone();
     recovering_entries.push(SessionLogEntry::Control(
         ControlEntry::AgentThreadStatusChanged(sigil_kernel::AgentThreadStatusChangedEntry {
             thread_id: thread_id.clone(),
@@ -693,7 +704,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
 
     app.sync_current_session_state(base_entries);
 
-    app.input = "/agent thread_1".to_owned();
+    app.composer.input = "/agent thread_1".to_owned();
     assert!(app.submit_input()?.is_none());
     assert_eq!(app.active_agent_label(), "kernel map");
     let focus_lines = app
@@ -717,7 +728,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
             .any(|line| line.contains("KERNEL_THREAD_DONE"))
     );
 
-    app.input = "/agent rename current Kernel Mapper".to_owned();
+    app.composer.input = "/agent rename current Kernel Mapper".to_owned();
     assert!(app.submit_input()?.is_none());
     assert_eq!(app.active_agent_label(), "Kernel Mapper");
     let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
@@ -729,7 +740,8 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         )
     }));
     let stale_entries = app
-        .current_session_entries
+        .session_browser
+        .current_entries
         .iter()
         .filter(|entry| {
             !matches!(
@@ -741,7 +753,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         .collect::<Vec<_>>();
     app.sync_current_session_state(stale_entries);
     assert_eq!(app.active_agent_label(), "Kernel Mapper");
-    assert!(app.current_session_entries.iter().any(|entry| {
+    assert!(app.session_browser.current_entries.iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(rename))
@@ -749,7 +761,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         )
     }));
 
-    app.input = "/agent message current continue".to_owned();
+    app.composer.input = "/agent message current continue".to_owned();
     let action = app.submit_input()?;
     assert!(matches!(
         action,
@@ -763,7 +775,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         Some("agent message requested: thread_1")
     );
 
-    app.input = "/agent cancel current".to_owned();
+    app.composer.input = "/agent cancel current".to_owned();
     assert!(app.submit_input()?.is_none());
     assert_eq!(
         app.last_notice.as_deref(),
@@ -779,14 +791,14 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         )
     }));
 
-    app.input = "/agent close current".to_owned();
-    app.composer_agent_panel_focused = true;
+    app.composer.input = "/agent close current".to_owned();
+    app.composer.agent_panel_focused = true;
     assert!(app.submit_input()?.is_none());
     assert_eq!(
         app.last_notice.as_deref(),
         Some("agent close unavailable until terminal: thread_1")
     );
-    assert!(app.composer_agent_panel_focused);
+    assert!(app.composer.agent_panel_focused);
     assert_eq!(app.active_agent_label(), "Kernel Mapper");
     assert!(
         app.agent_sidebar_rows()
@@ -794,7 +806,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
             .any(|row| row.label == "agent Kernel Mapper")
     );
 
-    let mut terminal_entries = app.current_session_entries.clone();
+    let mut terminal_entries = app.session_browser.current_entries.clone();
     terminal_entries.push(SessionLogEntry::Control(
         ControlEntry::AgentThreadStatusChanged(sigil_kernel::AgentThreadStatusChangedEntry {
             thread_id: thread_id.clone(),
@@ -805,8 +817,8 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     ));
     app.sync_current_session_state(terminal_entries.clone());
 
-    app.input = "/agent close current".to_owned();
-    app.composer_agent_panel_focused = true;
+    app.composer.input = "/agent close current".to_owned();
+    app.composer.agent_panel_focused = true;
     let action = app.submit_input()?;
     assert!(matches!(
         action,
@@ -819,7 +831,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         app.last_notice.as_deref(),
         Some("agent close requested: thread_1")
     );
-    assert!(app.composer_agent_panel_focused);
+    assert!(app.composer.agent_panel_focused);
     assert_eq!(app.active_agent_label(), "Kernel Mapper");
     let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
     assert!(!persisted.iter().any(|entry| {
@@ -919,7 +931,7 @@ fn agent_graph_summary_uses_synced_entries_without_render_time_file_replay() -> 
         )),
     ];
     write_session_log(&app.session_log_path, &entries)?;
-    app.current_session_entries.clear();
+    app.session_browser.current_entries.clear();
 
     assert_eq!(app.agent_graph_summary_line(), None);
     app.sync_current_session_state(entries);
@@ -1881,12 +1893,12 @@ fn mcp_sidebar_lines_are_empty_before_runtime_config_loads() -> Result<()> {
 #[test]
 fn code_intelligence_sidebar_sorts_diagnostics_and_collapses_overflow() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.code_intelligence_server_lines.insert(
+    app.runtime.code_intelligence_server_lines.insert(
         "rust-analyzer".to_owned(),
         "rust-analyzer: ready".to_owned(),
     );
-    app.code_intelligence_diagnostics_line = Some("diagnostics: 8".to_owned());
-    app.code_intelligence_diagnostics_by_path = std::collections::BTreeMap::from([
+    app.runtime.code_intelligence_diagnostics_line = Some("diagnostics: 8".to_owned());
+    app.runtime.code_intelligence_diagnostics_by_path = std::collections::BTreeMap::from([
         (
             "src/a.rs".to_owned(),
             ApprovalDiagnosticSummary {
@@ -1969,7 +1981,7 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
         action,
         Some(AppAction::RuntimeConfigUpdated { .. })
     ));
-    assert_eq!(app.permission_default_mode, "deny");
+    assert_eq!(app.runtime.permission_default_mode, "deny");
 
     app.active_pane = PaneFocus::Activity;
     app.sidebar_selected_card = SidebarCard::Permission;
@@ -2002,7 +2014,7 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
             .any(|entry| entry.role == TimelineRole::Notice && entry.text == "no agent selected")
     );
 
-    let before_input = app.input.clone();
+    let before_input = app.composer.input.clone();
     for key in [
         KeyCode::Char('x'),
         KeyCode::Backspace,
@@ -2010,11 +2022,11 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
         KeyCode::Right,
     ] {
         let _ = app.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE))?;
-        assert_eq!(app.input, before_input);
+        assert_eq!(app.composer.input, before_input);
         assert_eq!(app.active_pane, PaneFocus::Activity);
     }
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     app.sidebar_selected_card = SidebarCard::Permission;
     let action = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))?;
     assert!(action.is_none());
@@ -2031,7 +2043,7 @@ fn composer_top_level_keys_cover_empty_submit_cursor_scroll_and_escape_paths() -
 
     assert!(app.submit_input()?.is_none());
 
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let row_count = app.slash_selector_rows().len();
     assert!(row_count > 1);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -2046,16 +2058,19 @@ fn composer_top_level_keys_cover_empty_submit_cursor_scroll_and_escape_paths() -
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert!(app.slash_selector_selected_index().is_some());
 
-    app.input = "line one\nline two".to_owned();
+    app.composer.input = "line one\nline two".to_owned();
     let first_line_cursor = "line".chars().count();
-    app.input_cursor = first_line_cursor;
+    app.composer.input_cursor = first_line_cursor;
     app.active_pane = PaneFocus::Composer;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert!(app.input_cursor > first_line_cursor);
+    assert!(app.composer.input_cursor > first_line_cursor);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
-    assert_eq!(app.input_cursor, 0);
+    assert_eq!(app.composer.input_cursor, 0);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
-    assert_eq!(app.input_cursor, app.input.chars().count());
+    assert_eq!(
+        app.composer.input_cursor,
+        app.composer.input.chars().count()
+    );
 
     for index in 0..12 {
         app.push_timeline(TimelineRole::Assistant, format!("message {index}"));
@@ -2069,31 +2084,31 @@ fn composer_top_level_keys_cover_empty_submit_cursor_scroll_and_escape_paths() -
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
     assert_eq!(app.timeline_scroll_back, 0);
 
-    app.input = "abc".to_owned();
-    app.input_cursor = 2;
+    app.composer.input = "abc".to_owned();
+    app.composer.input_cursor = 2;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.input_cursor, 1);
+    assert_eq!(app.composer.input_cursor, 1);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.input_cursor, 2);
+    assert_eq!(app.composer.input_cursor, 2);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "ac");
+    assert_eq!(app.composer.input, "ac");
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-    assert!(app.input.is_empty());
-    assert_eq!(app.input_cursor, 0);
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer.input_cursor, 0);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::SHIFT))?;
-    assert_eq!(app.input, "\n");
+    assert_eq!(app.composer.input, "\n");
     Ok(())
 }
 
 #[test]
 fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.run_phase = RunPhase::Streaming;
+    app.runtime.run_phase = RunPhase::Streaming;
     assert_eq!(app.run_phase_label(), "streaming");
 
-    app.provider_name = "custom".to_owned();
-    app.model_name = "unknown".to_owned();
+    app.runtime.provider_name = "custom".to_owned();
+    app.runtime.model_name = "unknown".to_owned();
     app.compaction_config.context_window_tokens = None;
     assert_eq!(
         app.context_usage_line(),
@@ -2107,7 +2122,7 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
     assert!(app.compaction_policy_line().starts_with("policy: soft"));
     assert!(app.footer_status_line().contains("ctx n/a"));
 
-    app.input = "/resume definitely-missing".to_owned();
+    app.composer.input = "/resume definitely-missing".to_owned();
     assert!(app.submit_input()?.is_none());
     assert!(
         app.timeline

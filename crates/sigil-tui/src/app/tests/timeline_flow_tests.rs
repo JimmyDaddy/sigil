@@ -811,7 +811,7 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
     app.timeline_render_ranges.clear();
     app.push_timeline(TimelineRole::Assistant, "streaming answer");
     app.streaming_assistant_index = Some(0);
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     assert_eq!(app.scrollback_cutoff_line(), 0);
     Ok(())
 }
@@ -1089,36 +1089,36 @@ fn timeline_scroll_and_live_summary_edges_cover_pending_and_busy_states() -> Res
 
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle_mouse_scroll(false);
-    assert_eq!(app.approval_scroll_back, 3);
+    assert_eq!(app.approval.scroll_back, 3);
     app.handle_mouse_scroll(true);
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.scroll_back, 0);
 
     app.active_pane = PaneFocus::Activity;
     app.scroll_active_pane(2);
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.scroll_back, 0);
     app.unscroll_active_pane(4);
-    assert_eq!(app.approval_scroll_back, 4);
-    app.pending_approval = None;
+    assert_eq!(app.approval.scroll_back, 4);
+    app.approval.pending = None;
     app.scroll_active_pane(5);
     assert_eq!(app.activity_scroll_back, 5);
     app.unscroll_active_pane(3);
     assert_eq!(app.activity_scroll_back, 2);
 
     assert!(app.live_activity_summary().is_none());
-    app.is_busy = true;
-    app.run_phase = RunPhase::Idle;
+    app.runtime.is_busy = true;
+    app.runtime.run_phase = RunPhase::Idle;
     assert_eq!(
         app.live_activity_summary()
             .map(|summary| (summary.label, summary.detail)),
         Some(("working".to_owned(), "waiting for next event".to_owned()))
     );
-    app.run_phase = RunPhase::Tool("bash".to_owned());
+    app.runtime.run_phase = RunPhase::Tool("bash".to_owned());
     assert_eq!(
         app.live_activity_summary()
             .map(|summary| (summary.label, summary.detail)),
         Some(("tool".to_owned(), "running bash".to_owned()))
     );
-    app.run_phase = RunPhase::Streaming;
+    app.runtime.run_phase = RunPhase::Streaming;
     assert_eq!(
         app.live_activity_summary()
             .map(|summary| (summary.label, summary.detail)),
@@ -1645,7 +1645,7 @@ fn compaction_status_tracks_latest_prompt_tokens_instead_of_cumulative_totals() 
         cache_savings: 0.0,
         system_fingerprint: None,
     }))?;
-    assert_eq!(app.compaction_status, "soft");
+    assert_eq!(app.runtime.compaction_status, "soft");
 
     app.handle(RunEvent::Usage(UsageStats {
         prompt_tokens: 20,
@@ -1658,7 +1658,7 @@ fn compaction_status_tracks_latest_prompt_tokens_instead_of_cumulative_totals() 
         system_fingerprint: None,
     }))?;
 
-    assert_eq!(app.compaction_status, "ready");
+    assert_eq!(app.runtime.compaction_status, "ready");
     Ok(())
 }
 
@@ -1686,7 +1686,7 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
         app.context_usage_line(),
         "ctx: 9% · prompt 90.4K / 1.0M provider · soft at 500.0K"
     );
-    assert_eq!(app.compaction_status, "ready");
+    assert_eq!(app.runtime.compaction_status, "ready");
     assert!(app.footer_status_line().contains("tok 90.4K"));
     assert!(app.footer_status_line().contains("ctx 9%"));
     assert!(
@@ -1765,7 +1765,7 @@ fn usage_display_shows_session_and_delta_costs() -> Result<()> {
 #[test]
 fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.balance_snapshot = sigil_runtime::BalanceSnapshot {
+    app.runtime.balance_snapshot = sigil_runtime::BalanceSnapshot {
         total: Some(12.34),
         currency: Some("CNY".to_owned()),
         available: true,
@@ -1785,7 +1785,7 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         cache_savings: 0.10,
         system_fingerprint: None,
     }))?;
-    assert_eq!(app.session_delta_stats.input_cost, 0.20);
+    assert_eq!(app.runtime.session_delta_stats.input_cost, 0.20);
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
         session_log_path: restored_path,
@@ -1805,9 +1805,12 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
         ))],
     })?;
 
-    assert_eq!(app.stats.input_cost + app.stats.output_cost, 1.50);
     assert_eq!(
-        app.session_delta_stats.input_cost + app.session_delta_stats.output_cost,
+        app.runtime.stats.input_cost + app.runtime.stats.output_cost,
+        1.50
+    );
+    assert_eq!(
+        app.runtime.session_delta_stats.input_cost + app.runtime.session_delta_stats.output_cost,
         0.0
     );
     assert!(
@@ -1854,7 +1857,7 @@ fn usage_display_prefers_configured_cost_currency_over_balance_currency() -> Res
     let mut config = test_config();
     config.appearance.usage_cost_currency = sigil_kernel::UsageCostCurrency::Cny;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.balance_snapshot = sigil_runtime::BalanceSnapshot {
+    app.runtime.balance_snapshot = sigil_runtime::BalanceSnapshot {
         total: Some(3.25),
         currency: Some("USD".to_owned()),
         available: true,
@@ -1902,7 +1905,7 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert_eq!(app.input, "/");
+    assert_eq!(app.composer.input, "/");
 
     app.active_pane = PaneFocus::Activity;
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
@@ -1913,14 +1916,14 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
 #[test]
 fn busy_escape_requests_cancel_without_discarding_composer_text() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.is_busy = true;
-    app.input = "keep draft".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.runtime.is_busy = true;
+    app.composer.input = "keep draft".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
     assert!(matches!(action, Some(AppAction::CancelRun)));
-    assert_eq!(app.input, "keep draft");
+    assert_eq!(app.composer.input, "keep draft");
     assert_eq!(app.last_notice(), Some("cancellation requested"));
     assert!(
         app.timeline
@@ -1934,12 +1937,12 @@ fn busy_escape_requests_cancel_without_discarding_composer_text() -> Result<()> 
 fn slash_command_busy_and_unknown_paths_leave_tui_responsive() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
-    app.input = "/unknown".to_owned();
+    app.composer.input = "/unknown".to_owned();
     assert!(app.submit_input()?.is_none());
     assert_eq!(app.last_notice(), Some("unknown slash command"));
 
-    app.is_busy = true;
-    app.input = "/compact".to_owned();
+    app.runtime.is_busy = true;
+    app.composer.input = "/compact".to_owned();
     assert!(app.submit_input()?.is_none());
     assert!(
         app.timeline
@@ -1947,7 +1950,7 @@ fn slash_command_busy_and_unknown_paths_leave_tui_responsive() -> Result<()> {
             .any(|entry| entry.role == TimelineRole::Notice && entry.text == "busy; compact later")
     );
 
-    app.input = "/resume missing".to_owned();
+    app.composer.input = "/resume missing".to_owned();
     assert!(app.submit_input()?.is_none());
     assert!(
         app.timeline
@@ -1960,11 +1963,11 @@ fn slash_command_busy_and_unknown_paths_leave_tui_responsive() -> Result<()> {
 #[test]
 fn app_status_helpers_cover_empty_balance_context_and_session_title() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.balance_snapshot.available = true;
-    app.balance_snapshot.total = None;
-    app.balance_snapshot.currency = None;
-    app.balance_snapshot.status = "checking".to_owned();
-    app.stats.last_prompt_tokens = 1234;
+    app.runtime.balance_snapshot.available = true;
+    app.runtime.balance_snapshot.total = None;
+    app.runtime.balance_snapshot.currency = None;
+    app.runtime.balance_snapshot.status = "checking".to_owned();
+    app.runtime.stats.last_prompt_tokens = 1234;
 
     assert_eq!(app.balance_sidebar_line(), "balance: checking");
     assert_eq!(
@@ -1986,7 +1989,7 @@ fn app_status_helpers_cover_empty_balance_context_and_session_title() {
     );
     assert_eq!(app.session_display_title(), "first line");
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     assert_eq!(app.permission_card_lines()[2], "busy: locked during run");
     assert!(app.footer_status_line().contains("Ctrl-C cancel"));
 }
@@ -1996,8 +1999,8 @@ fn live_activity_summary_tracks_busy_phase() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     assert!(app.live_activity_summary().is_none());
 
-    app.is_busy = true;
-    app.run_phase = RunPhase::Tool("read_file".to_owned());
+    app.runtime.is_busy = true;
+    app.runtime.run_phase = RunPhase::Tool("read_file".to_owned());
 
     let summary = app.live_activity_summary().expect("expected live summary");
     assert_eq!(summary.label, "tool");
@@ -2008,8 +2011,8 @@ fn live_activity_summary_tracks_busy_phase() {
 fn child_agent_view_live_activity_overrides_parent_busy_phase() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;
-    app.is_busy = true;
-    app.run_phase = RunPhase::Tool("wait_agent".to_owned());
+    app.runtime.is_busy = true;
+    app.runtime.run_phase = RunPhase::Tool("wait_agent".to_owned());
 
     let summary = app.live_activity_summary().expect("child live summary");
 
@@ -2103,12 +2106,12 @@ fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
             "children/agent_chat_terminal.jsonl",
         )?,
     };
-    app.is_busy = false;
+    app.runtime.is_busy = false;
 
     assert!(app.live_activity_summary().is_none());
 
-    app.is_busy = true;
-    app.run_phase = RunPhase::Streaming;
+    app.runtime.is_busy = true;
+    app.runtime.run_phase = RunPhase::Streaming;
     let summary = app
         .live_activity_summary()
         .expect("parent activity should still be visible");
@@ -2121,7 +2124,7 @@ fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
 fn terminal_legacy_child_view_does_not_render_working_progress() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;
-    let mut entries = app.current_session_entries.clone();
+    let mut entries = app.session_browser.current_entries.clone();
     entries.push(SessionLogEntry::Control(ControlEntry::TaskChildSession(
         sigil_kernel::TaskChildSessionEntry {
             task_id: sigil_kernel::TaskId::new("task_1")?,
@@ -2158,7 +2161,7 @@ fn terminal_legacy_child_view_does_not_render_working_progress() -> Result<()> {
 fn child_agent_view_live_activity_falls_back_to_legacy_child_entry() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;
-    let mut entries = app.current_session_entries.clone();
+    let mut entries = app.session_browser.current_entries.clone();
     entries.push(SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
         sigil_kernel::AgentThreadClosedEntry {
             thread_id: sigil_kernel::AgentThreadId::new("legacy_task_1_v1_step_1_child_1")?,
@@ -2172,8 +2175,8 @@ fn child_agent_view_live_activity_falls_back_to_legacy_child_entry() -> Result<(
             "children/task_1/step_1-child_1.jsonl",
         )?,
     };
-    app.is_busy = true;
-    app.run_phase = RunPhase::Tool("wait_agent".to_owned());
+    app.runtime.is_busy = true;
+    app.runtime.run_phase = RunPhase::Tool("wait_agent".to_owned());
 
     let summary = app
         .live_activity_summary()

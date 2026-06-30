@@ -49,7 +49,7 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
             .expect("empty target uses selection"),
         0
     );
-    app.composer_queue_selected = 1;
+    app.composer.queue_selected = 1;
     let selected = app
         .queue_action_for_target("", |queue_id| AppAction::PromoteQueuedConversationInput {
             queue_id,

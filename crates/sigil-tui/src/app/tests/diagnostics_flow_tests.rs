@@ -24,7 +24,7 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
     );
     config.save(&config_path)?;
     let mut app = AppState::from_root_config(&config_path, &config);
-    app.input = "/doctor".to_owned();
+    app.composer.input = "/doctor".to_owned();
 
     let action = app.submit_input()?;
 
@@ -61,7 +61,7 @@ fn doctor_slash_command_renders_appearance_warnings() -> anyhow::Result<()> {
     config.appearance.colors = ThemeColorOverrides::new(colors);
     config.save(&config_path)?;
     let mut app = AppState::from_root_config(&config_path, &config);
-    app.input = "/doctor".to_owned();
+    app.composer.input = "/doctor".to_owned();
 
     let action = app.submit_input()?;
 

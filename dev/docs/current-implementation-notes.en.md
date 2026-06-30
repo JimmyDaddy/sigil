@@ -41,14 +41,14 @@ sigil/
 - `sigil-tools-builtin` provides file read/write/edit/delete, multi-file change set apply, search, directory listing, and shell execution.
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, diagnostic, and code action query tools, plus code action / rename edit tools with approval diff previews.
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
-- `sigil-http` currently owns the HTTP/SSE adapter server config DTO, bearer auth validator, `PublicRunEvent` SSE serialization, per-run event sequence helper, in-memory session/run registry, run start/cancel handling, and approval decision routing; later work will add HTTP routing and server wiring without depending on `sigil-tui` or duplicating the agent loop.
+- `sigil-http` now exposes the HTTP/SSE adapter API through a `lib.rs` facade, with protocol, config/auth, listener, SSE, DTO, driver, registry, and OpenAPI schema internals split into focused modules; the listener owns only HTTP framing/auth/registry routing and does not depend on `sigil-tui` or duplicate the agent loop.
 - `sigil` provides the `sigil` binary: no subcommand starts the TUI directly; `run`, `doctor`, and the `serve` HTTP/SSE adapter preflight remain explicit automation and diagnostics subcommands; `serve` currently validates localhost/token defaults and prints a routing-pending status without starting an HTTP listener; `prefix` and `fim` remain hidden debugging or provider-specific entrypoints rather than normal user concepts.
 - `sigil --version` prints the package version, git commit, target, and profile for install smoke checks, release archive validation, and issue triage.
 - `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/new`, `/resume`, `/plan`, approval modal, tool activity, diff preview, session recovery, task status display, context compaction, markdown code block highlighting, and code intelligence status display. Provider config, status requests, provider-status task lifecycle, and context-window resolution enter through `sigil-runtime` provider-neutral APIs; agent message routing and generic control appends also reuse runtime helpers, and the TUI no longer depends directly on provider crates.
 
 ## TUI Module Boundaries
 
-`crates/sigil-tui/src/app.rs` remains the `AppState` facade. It owns fields, bootstrap, top-level key routing, and cross-state orchestration. Specific flows live under `src/app/*`:
+`crates/sigil-tui/src/app.rs` remains the `AppState` facade. It owns bootstrap, top-level key routing, and cross-state orchestration. Runtime, composer, approval, and session-browser fields live in domain bundles under `src/app/state.rs`. Specific flows live under `src/app/*`:
 
 - `input_flow.rs`
 - `slash_flow.rs`
@@ -65,7 +65,7 @@ sigil/
 
 Flow tests live in `crates/sigil-tui/src/app/tests/*_tests.rs`. New TUI behavior should land in the corresponding flow and same-domain tests instead of rebuilding the state machine inside `app.rs`.
 
-`runner.rs` is the worker facade. Worker protocol, spawn assembly, run loop, event/approval bridge, and session/compaction flow live under `runner/*`; tests live under `runner/tests/*`.
+`runner.rs` is the worker facade. Worker protocol, spawn assembly, event/approval bridge, and session/compaction flow live under `runner/*`; worker-loop scheduler, active run, queue, MCP/provider refresh, agent/task runtime, and terminal refresh live under `runner/worker_loop/*`; tests live under `runner/tests/*`.
 
 `ui.rs` is the renderer module entrypoint. Shell layout, theme, geometry, text, timeline, tool card, markdown, approval, setup/config, and modal renderers live under `ui/*`.
 

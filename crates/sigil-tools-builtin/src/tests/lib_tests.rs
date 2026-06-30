@@ -40,6 +40,40 @@ fn bash_tool(test_root: &Path) -> BashTool {
 }
 
 #[test]
+fn module_split_facade_registers_tools_paths_and_backend_contracts() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+    let names = registry
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "apply_changeset",
+        "bash",
+        "terminal_start",
+    ] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "missing builtin tool from split facade: {expected}"
+        );
+    }
+
+    let paths = BuiltinToolPaths::workspace_defaults(Path::new("/workspace"));
+    assert_eq!(paths.scratch_label, "cache/tmp");
+    assert!(paths.scratch_root.ends_with("cache/tmp"));
+
+    let backend = super::build_execution_backend(&ExecutionConfig::default())?;
+    assert_eq!(backend.kind(), ExecutionBackendKind::Local);
+    Ok(())
+}
+
+#[test]
 fn local_execution_backend_policy_fails_closed_when_sandbox_required() -> Result<()> {
     let backend = super::build_execution_backend(&ExecutionConfig::default())?;
     assert_eq!(backend.kind(), ExecutionBackendKind::Local);

@@ -126,7 +126,7 @@ impl AppState {
 
     fn effort_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
         let query = arg.trim().to_ascii_lowercase();
-        let current = self.reasoning_effort.as_str();
+        let current = self.runtime.reasoning_effort.as_str();
         let mut options = EFFORT_SELECTOR_OPTIONS
             .iter()
             .copied()
@@ -151,7 +151,7 @@ impl AppState {
     fn model_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
         let trimmed = arg.trim();
         let query = trimmed.to_ascii_lowercase();
-        let current = self.model_name.as_str();
+        let current = self.runtime.model_name.as_str();
         let current_is_known = MODEL_SELECTOR_OPTIONS
             .iter()
             .any(|option| option.value == current);
@@ -210,7 +210,7 @@ impl AppState {
             .into_iter()
             .enumerate()
             .filter_map(|(candidate_index, entry_index)| {
-                let entry = self.session_history.get(entry_index)?;
+                let entry = self.session_browser.history.get(entry_index)?;
                 let ordinal = candidate_index + 1;
                 let label = session_history_display_label(entry);
                 let current = entry.path == self.session_log_path;
@@ -264,7 +264,7 @@ impl AppState {
         AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             root_config,
             &self.workspace_root,
-            &self.current_session_entries,
+            &self.session_browser.current_entries,
         )
         .map(|registry| {
             registry
@@ -426,10 +426,10 @@ impl AppState {
         if !self.slash_selector_context_allows_popup() {
             return Vec::new();
         }
-        if let Some(query) = Self::agent_mention_query(&self.input) {
+        if let Some(query) = Self::agent_mention_query(&self.composer.input) {
             return self.agent_mention_entries(query);
         }
-        let Some((token, arg)) = Self::slash_query(&self.input) else {
+        let Some((token, arg)) = Self::slash_query(&self.composer.input) else {
             return Vec::new();
         };
 
@@ -451,13 +451,13 @@ impl AppState {
     }
 
     fn slash_selector_context_allows_popup(&self) -> bool {
-        if Self::agent_mention_query(&self.input).is_some() {
+        if Self::agent_mention_query(&self.composer.input).is_some() {
             return true;
         }
-        let Some((token, arg)) = Self::slash_query(&self.input) else {
+        let Some((token, arg)) = Self::slash_query(&self.composer.input) else {
             return false;
         };
-        if !Self::slash_has_argument_boundary(&self.input) {
+        if !Self::slash_has_argument_boundary(&self.composer.input) {
             return true;
         }
 
@@ -545,7 +545,7 @@ impl AppState {
     }
 
     fn refresh_slash_selector_context(&mut self) {
-        let Some((token, _)) = Self::slash_query(&self.input) else {
+        let Some((token, _)) = Self::slash_query(&self.composer.input) else {
             return;
         };
         if token == "/resume" {
@@ -626,9 +626,9 @@ impl AppState {
     }
 
     fn complete_slash_entry(&mut self, entry: &SlashSelectorEntry) {
-        let trimmed = self.input.trim_start();
-        let leading_len = self.input.len().saturating_sub(trimmed.len());
-        let leading = self.input[..leading_len].to_owned();
+        let trimmed = self.composer.input.trim_start();
+        let leading_len = self.composer.input.len().saturating_sub(trimmed.len());
+        let leading = self.composer.input[..leading_len].to_owned();
         let completed = format!("{leading}{}", entry.fill);
         self.set_input_and_cursor(completed);
         self.last_notice = Some(format!("slash completed to {}", entry.fill.trim_end()));
@@ -648,8 +648,9 @@ impl AppState {
             return false;
         };
 
-        entry.label.starts_with('/') && self.input.trim_start() != entry.fill.trim_end()
-            || entry.label.starts_with('@') && self.input.trim_start() != entry.fill.trim_end()
+        entry.label.starts_with('/') && self.composer.input.trim_start() != entry.fill.trim_end()
+            || entry.label.starts_with('@')
+                && self.composer.input.trim_start() != entry.fill.trim_end()
     }
 
     pub fn has_slash_selector(&self) -> bool {
@@ -657,7 +658,7 @@ impl AppState {
     }
 
     pub fn has_agent_mention_selector(&self) -> bool {
-        Self::agent_mention_query(&self.input).is_some()
+        Self::agent_mention_query(&self.composer.input).is_some()
     }
 
     pub fn slash_selector_selected_index(&self) -> Option<usize> {
@@ -680,13 +681,13 @@ impl AppState {
         if !self.slash_selector_context_allows_popup() {
             return None;
         }
-        if Self::agent_mention_query(&self.input).is_some() {
+        if Self::agent_mention_query(&self.composer.input).is_some() {
             return self
                 .slash_selector_entries()
                 .is_empty()
                 .then_some("no matching agent");
         }
-        let (token, _) = Self::slash_query(&self.input)?;
+        let (token, _) = Self::slash_query(&self.composer.input)?;
         if !self.slash_selector_entries().is_empty() {
             return None;
         }
@@ -694,7 +695,7 @@ impl AppState {
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
             Some("/agent") => Some("no matching agent"),
             Some("/effort") => Some("pick effort: low | medium | high | max"),
-            Some("/resume") if self.session_history.is_empty() => Some("no saved sessions"),
+            Some("/resume") if self.session_browser.history.is_empty() => Some("no saved sessions"),
             Some("/resume") => Some("no matching session"),
             _ => Some("no slash match"),
         }
@@ -724,10 +725,10 @@ impl AppState {
     }
 
     pub(crate) fn slash_selector_title(&self) -> Option<&'static str> {
-        if Self::agent_mention_query(&self.input).is_some() {
+        if Self::agent_mention_query(&self.composer.input).is_some() {
             return Some("Agent");
         }
-        let (token, _) = Self::slash_query(&self.input)?;
+        let (token, _) = Self::slash_query(&self.composer.input)?;
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
             Some("/agent") => Some("Agent"),
             Some("/resume") => Some("Resume session"),

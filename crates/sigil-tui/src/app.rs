@@ -1,5 +1,5 @@
 use std::{
-    cell::{Ref, RefCell},
+    cell::Ref,
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
     path::{Path, PathBuf},
@@ -21,6 +21,7 @@ mod runtime_status;
 mod session_flow;
 mod setup_flow;
 mod slash_flow;
+mod state;
 pub(crate) mod task_sidebar;
 mod timeline_flow;
 mod tool_card_interaction;
@@ -53,7 +54,7 @@ pub use crate::approval::{ApprovalDiffMode, PendingApproval};
 use crate::commands::{UiCommand, command_for_key_event};
 pub(crate) use crate::config_panel::ConfigState;
 pub use crate::input::PaneFocus;
-use crate::runner::{QueueMoveDirection, WorkerCommand};
+use crate::runner::QueueMoveDirection;
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
 use crate::slash::ResolvedSlashCommand;
@@ -66,13 +67,14 @@ pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
 use self::config_flow::cycle_approval_mode;
 use self::formatting::*;
-use self::modal_flow::{ModalState, ModelPickerRefresh, PendingModelPickerRefresh};
+use self::modal_flow::{ModalState, ModelPickerRefresh};
 use self::runtime_status::{McpProgressState, ResolvedUsageCostCurrency};
 pub(crate) use self::runtime_status::{
     McpServerRuntimeStatus, TimelineTextSelection, code_intelligence_config_status,
     diagnostic_summary_label, initial_mcp_server_status, initial_mcp_server_statuses,
 };
 use self::session_flow::{current_focus_label, short_session_token};
+use self::state::{ApprovalState, ComposerState, RuntimeStatusState, SessionBrowserState};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 pub(crate) const SCRATCH_DIR_LABEL: &str = "cache/tmp";
@@ -243,50 +245,24 @@ pub struct AppState {
     pub sigil_paths: SigilPaths,
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
-    pub provider_name: String,
-    pub model_name: String,
-    pub permission_default_mode: String,
-    pub memory_enabled: bool,
-    pub memory_document_count: usize,
-    pub memory_last_status: String,
-    mutation_artifact_retention_preview: MutationArtifactRetentionPreview,
-    pub compaction_status: String,
-    pub code_intelligence_status: String,
-    pub code_intelligence_server_lines: BTreeMap<String, String>,
-    pub code_intelligence_diagnostics_line: Option<String>,
-    pub(crate) code_intelligence_diagnostics_by_path: BTreeMap<String, ApprovalDiagnosticSummary>,
-    pub(crate) mcp_server_statuses: BTreeMap<String, McpServerRuntimeStatus>,
     pub session_id: String,
-    pub input: String,
-    composer_mode: ComposerMode,
-    pending_plan_approval: Option<PendingPlanApproval>,
-    pub input_history: Vec<String>,
+    pub(crate) runtime: RuntimeStatusState,
+    pub(crate) composer: ComposerState,
+    pub(crate) approval: ApprovalState,
+    pub(crate) session_browser: SessionBrowserState,
     pub timeline: Vec<TimelineEntry>,
     pub events: Vec<EventEntry>,
-    pub stats: SessionStats,
-    pub session_delta_stats: SessionStats,
     pub should_quit: bool,
-    pub is_busy: bool,
-    pub pending_approval: Option<PendingApproval>,
     pub active_pane: PaneFocus,
     pub timeline_scroll_back: usize,
-    pub approval_scroll_back: usize,
     pub activity_scroll_back: usize,
     info_rail_detail: bool,
-    pub session_history: Vec<SessionHistoryEntry>,
-    pub session_history_visible_limit: usize,
-    pub session_history_selected: usize,
-    pub session_history_filter: String,
     config_snapshot: Option<RootConfig>,
     secret_redactor: SecretRedactor,
     setup_state: Option<SetupState>,
     workspace_trust_gate_state: Option<WorkspaceTrustGateState>,
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
-    session_view_mode: SessionViewMode,
-    current_session_entries: Vec<SessionLogEntry>,
-    current_session_entries_revision: u64,
-    session_view_cache: RefCell<SessionViewCache>,
     tool_preview_snapshots: HashMap<String, ToolPreviewSnapshot>,
     latest_compaction_record: Option<CompactionRecord>,
     compaction_config: CompactionConfig,
@@ -303,10 +279,6 @@ pub struct AppState {
     pending_mouse_left_down: bool,
     pending_tool_card_body_click_entry: Option<usize>,
     last_notice: Option<String>,
-    mcp_progress: Option<McpProgressState>,
-    reasoning_effort: ReasoningEffort,
-    run_phase: RunPhase,
-    last_phase_marker: Option<String>,
     streaming_assistant_index: Option<usize>,
     streaming_reasoning_index: Option<usize>,
     timeline_render_cache: Vec<Line<'static>>,
@@ -323,31 +295,10 @@ pub struct AppState {
     usage_sidebar_cache: Vec<String>,
     sidebar_selected_card: SidebarCard,
     sidebar_agent_selected: usize,
-    composer_agent_panel_focused: bool,
-    composer_queue_panel_focused: bool,
-    composer_queue_selected: usize,
-    composer_queue_action_selected: ComposerQueueAction,
-    queue_edit_target: Option<ConversationInputQueueId>,
     active_agent_view: AgentView,
     active_agent_child_transcript: Option<ActiveAgentChildTranscript>,
-    balance_snapshot: BalanceSnapshot,
-    next_background_request_id: u64,
-    pending_worker_commands: Vec<WorkerCommand>,
-    active_balance_refresh_id: Option<u64>,
-    active_model_picker_refresh: Option<PendingModelPickerRefresh>,
     terminal_width: u16,
     terminal_height: u16,
-    input_cursor: usize,
-    input_paste_spans: Vec<ComposerPasteSpan>,
-    input_history_index: Option<usize>,
-    input_history_draft: Option<String>,
-    cleared_input_draft: Option<String>,
-    input_kill_buffer: Option<String>,
-    approval_metadata_collapsed: bool,
-    approval_selected_file_index: usize,
-    approval_selected_hunk_index: usize,
-    approval_diff_mode: ApprovalDiffMode,
-    approval_selected_action: ApprovalAction,
     slash_selector_index: usize,
 }
 
@@ -494,50 +445,53 @@ impl AppState {
             sigil_paths,
             session_log_dir,
             session_log_path: PathBuf::new(),
-            provider_name: root_config.agent.provider.clone(),
-            model_name: root_config.agent.model.clone(),
-            permission_default_mode,
-            memory_enabled: root_config.memory.enabled,
-            memory_document_count: 0,
-            memory_last_status: "pending".to_owned(),
-            mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
-            compaction_status: initial_compaction_status,
-            code_intelligence_status: initial_code_intelligence_status,
-            code_intelligence_server_lines: BTreeMap::new(),
-            code_intelligence_diagnostics_line: None,
-            code_intelligence_diagnostics_by_path: BTreeMap::new(),
-            mcp_server_statuses: initial_mcp_server_statuses(root_config),
             session_id,
-            input: String::new(),
-            composer_mode: ComposerMode::Build,
-            pending_plan_approval: None,
-            input_history: Vec::new(),
+            runtime: RuntimeStatusState {
+                provider_name: root_config.agent.provider.clone(),
+                model_name: root_config.agent.model.clone(),
+                permission_default_mode,
+                memory_enabled: root_config.memory.enabled,
+                memory_document_count: 0,
+                memory_last_status: "pending".to_owned(),
+                mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
+                compaction_status: initial_compaction_status,
+                code_intelligence_status: initial_code_intelligence_status,
+                code_intelligence_server_lines: BTreeMap::new(),
+                code_intelligence_diagnostics_line: None,
+                code_intelligence_diagnostics_by_path: BTreeMap::new(),
+                mcp_server_statuses: initial_mcp_server_statuses(root_config),
+                stats: SessionStats::default(),
+                session_delta_stats: SessionStats::default(),
+                is_busy: false,
+                mcp_progress: None,
+                reasoning_effort: ReasoningEffort::Max,
+                run_phase: RunPhase::Idle,
+                last_phase_marker: None,
+                balance_snapshot: BalanceSnapshot {
+                    status: "pending".to_owned(),
+                    ..BalanceSnapshot::default()
+                },
+                next_background_request_id: 1,
+                pending_worker_commands: Vec::new(),
+                active_balance_refresh_id: None,
+                active_model_picker_refresh: None,
+            },
+            composer: ComposerState::default(),
+            approval: ApprovalState::default(),
+            session_browser: SessionBrowserState::default(),
             timeline: Vec::new(),
             events: Vec::new(),
-            stats: SessionStats::default(),
-            session_delta_stats: SessionStats::default(),
             should_quit: false,
-            is_busy: false,
-            pending_approval: None,
             active_pane: PaneFocus::Composer,
             timeline_scroll_back: 0,
-            approval_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_detail: false,
-            session_history: Vec::new(),
-            session_history_visible_limit: 9,
-            session_history_selected: 0,
-            session_history_filter: String::new(),
             config_snapshot: Some(root_config.clone()),
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
             setup_state: None,
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
-            session_view_mode: SessionViewMode::Provider,
-            current_session_entries: Vec::new(),
-            current_session_entries_revision: 0,
-            session_view_cache: RefCell::new(SessionViewCache::default()),
             tool_preview_snapshots: HashMap::new(),
             latest_compaction_record: None,
             compaction_config: root_config.compaction.clone(),
@@ -554,10 +508,6 @@ impl AppState {
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: None,
-            mcp_progress: None,
-            reasoning_effort: ReasoningEffort::Max,
-            run_phase: RunPhase::Idle,
-            last_phase_marker: None,
             streaming_assistant_index: None,
             streaming_reasoning_index: None,
             timeline_render_cache: Vec::new(),
@@ -574,34 +524,10 @@ impl AppState {
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
-            composer_agent_panel_focused: false,
-            composer_queue_panel_focused: false,
-            composer_queue_selected: 0,
-            composer_queue_action_selected: ComposerQueueAction::SendNow,
-            queue_edit_target: None,
             active_agent_view: AgentView::Main,
             active_agent_child_transcript: None,
-            balance_snapshot: BalanceSnapshot {
-                status: "pending".to_owned(),
-                ..BalanceSnapshot::default()
-            },
-            next_background_request_id: 1,
-            pending_worker_commands: Vec::new(),
-            active_balance_refresh_id: None,
-            active_model_picker_refresh: None,
             terminal_width: 120,
             terminal_height: 32,
-            input_cursor: 0,
-            input_paste_spans: Vec::new(),
-            input_history_index: None,
-            input_history_draft: None,
-            cleared_input_draft: None,
-            input_kill_buffer: None,
-            approval_metadata_collapsed: false,
-            approval_selected_file_index: 0,
-            approval_selected_hunk_index: 0,
-            approval_diff_mode: ApprovalDiffMode::Full,
-            approval_selected_action: ApprovalAction::Deny,
             slash_selector_index: 0,
         };
         app.session_log_path = app
@@ -635,50 +561,53 @@ impl AppState {
             sigil_paths,
             session_log_dir,
             session_log_path: PathBuf::new(),
-            provider_name: "deepseek".to_owned(),
-            model_name: "deepseek-v4-flash".to_owned(),
-            permission_default_mode: ApprovalMode::Ask.as_str().to_owned(),
-            memory_enabled: true,
-            memory_document_count: 0,
-            memory_last_status: "pending".to_owned(),
-            mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
-            compaction_status: CompactionThresholdStatus::NotAvailable.as_str().to_owned(),
-            code_intelligence_status: "off".to_owned(),
-            code_intelligence_server_lines: BTreeMap::new(),
-            code_intelligence_diagnostics_line: None,
-            code_intelligence_diagnostics_by_path: BTreeMap::new(),
-            mcp_server_statuses: BTreeMap::new(),
             session_id,
-            input: String::new(),
-            composer_mode: ComposerMode::Build,
-            pending_plan_approval: None,
-            input_history: Vec::new(),
+            runtime: RuntimeStatusState {
+                provider_name: "deepseek".to_owned(),
+                model_name: "deepseek-v4-flash".to_owned(),
+                permission_default_mode: ApprovalMode::Ask.as_str().to_owned(),
+                memory_enabled: true,
+                memory_document_count: 0,
+                memory_last_status: "pending".to_owned(),
+                mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
+                compaction_status: CompactionThresholdStatus::NotAvailable.as_str().to_owned(),
+                code_intelligence_status: "off".to_owned(),
+                code_intelligence_server_lines: BTreeMap::new(),
+                code_intelligence_diagnostics_line: None,
+                code_intelligence_diagnostics_by_path: BTreeMap::new(),
+                mcp_server_statuses: BTreeMap::new(),
+                stats: SessionStats::default(),
+                session_delta_stats: SessionStats::default(),
+                is_busy: false,
+                mcp_progress: None,
+                reasoning_effort: ReasoningEffort::Max,
+                run_phase: RunPhase::Idle,
+                last_phase_marker: None,
+                balance_snapshot: BalanceSnapshot {
+                    status: "missing auth".to_owned(),
+                    ..BalanceSnapshot::default()
+                },
+                next_background_request_id: 1,
+                pending_worker_commands: Vec::new(),
+                active_balance_refresh_id: None,
+                active_model_picker_refresh: None,
+            },
+            composer: ComposerState::default(),
+            approval: ApprovalState::default(),
+            session_browser: SessionBrowserState::default(),
             timeline: Vec::new(),
             events: Vec::new(),
-            stats: SessionStats::default(),
-            session_delta_stats: SessionStats::default(),
             should_quit: false,
-            is_busy: false,
-            pending_approval: None,
             active_pane: PaneFocus::Composer,
             timeline_scroll_back: 0,
-            approval_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_detail: false,
-            session_history: Vec::new(),
-            session_history_visible_limit: 9,
-            session_history_selected: 0,
-            session_history_filter: String::new(),
             config_snapshot: None,
             secret_redactor: SecretRedactor::default(),
             setup_state: Some(SetupState::new(config_path, startup_error.clone())),
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
-            session_view_mode: SessionViewMode::Provider,
-            current_session_entries: Vec::new(),
-            current_session_entries_revision: 0,
-            session_view_cache: RefCell::new(SessionViewCache::default()),
             tool_preview_snapshots: HashMap::new(),
             latest_compaction_record: None,
             compaction_config: CompactionConfig::default(),
@@ -695,10 +624,6 @@ impl AppState {
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: startup_error,
-            mcp_progress: None,
-            reasoning_effort: ReasoningEffort::Max,
-            run_phase: RunPhase::Idle,
-            last_phase_marker: None,
             streaming_assistant_index: None,
             streaming_reasoning_index: None,
             timeline_render_cache: Vec::new(),
@@ -715,34 +640,10 @@ impl AppState {
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
-            composer_agent_panel_focused: false,
-            composer_queue_panel_focused: false,
-            composer_queue_selected: 0,
-            composer_queue_action_selected: ComposerQueueAction::SendNow,
-            queue_edit_target: None,
             active_agent_view: AgentView::Main,
             active_agent_child_transcript: None,
-            balance_snapshot: BalanceSnapshot {
-                status: "missing auth".to_owned(),
-                ..BalanceSnapshot::default()
-            },
-            next_background_request_id: 1,
-            pending_worker_commands: Vec::new(),
-            active_balance_refresh_id: None,
-            active_model_picker_refresh: None,
             terminal_width: 120,
             terminal_height: 32,
-            input_cursor: 0,
-            input_paste_spans: Vec::new(),
-            input_history_index: None,
-            input_history_draft: None,
-            cleared_input_draft: None,
-            input_kill_buffer: None,
-            approval_metadata_collapsed: false,
-            approval_selected_file_index: 0,
-            approval_selected_hunk_index: 0,
-            approval_diff_mode: ApprovalDiffMode::Full,
-            approval_selected_action: ApprovalAction::Deny,
             slash_selector_index: 0,
         };
         app.session_log_path = app
@@ -755,18 +656,22 @@ impl AppState {
     }
 
     pub(crate) fn code_intelligence_sidebar_lines(&self) -> Vec<String> {
-        if self.code_intelligence_server_lines.is_empty()
-            && self.code_intelligence_diagnostics_line.is_none()
-            && self.code_intelligence_diagnostics_by_path.is_empty()
+        if self.runtime.code_intelligence_server_lines.is_empty()
+            && self.runtime.code_intelligence_diagnostics_line.is_none()
+            && self
+                .runtime
+                .code_intelligence_diagnostics_by_path
+                .is_empty()
         {
-            return vec![format!("status: {}", self.code_intelligence_status)];
+            return vec![format!("status: {}", self.runtime.code_intelligence_status)];
         }
         let mut lines = self
+            .runtime
             .code_intelligence_server_lines
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(line) = &self.code_intelligence_diagnostics_line {
+        if let Some(line) = &self.runtime.code_intelligence_diagnostics_line {
             lines.push(line.clone());
         }
         lines.extend(self.code_intelligence_diagnostic_file_lines());
@@ -774,11 +679,16 @@ impl AppState {
     }
 
     fn code_intelligence_diagnostic_file_lines(&self) -> Vec<String> {
-        if self.code_intelligence_diagnostics_by_path.is_empty() {
+        if self
+            .runtime
+            .code_intelligence_diagnostics_by_path
+            .is_empty()
+        {
             return Vec::new();
         }
         const MAX_DIAGNOSTIC_FILES: usize = 4;
         let mut summaries = self
+            .runtime
             .code_intelligence_diagnostics_by_path
             .iter()
             .map(|(path, summary)| (path.as_str(), *summary))
@@ -815,19 +725,27 @@ impl AppState {
         self.push_event("workspace", self.workspace_root.display().to_string());
         self.push_event(
             "model",
-            format!("{}/{}", self.provider_name, self.model_name),
+            format!("{}/{}", self.runtime.provider_name, self.runtime.model_name),
         );
-        self.push_event("effort", self.reasoning_effort.as_str());
-        self.push_event("approval_default", self.permission_default_mode.clone());
+        self.push_event("effort", self.runtime.reasoning_effort.as_str());
+        self.push_event(
+            "approval_default",
+            self.runtime.permission_default_mode.clone(),
+        );
         self.push_event(
             "memory",
             format!(
                 "enabled={} docs={} status={}",
-                self.memory_enabled, self.memory_document_count, self.memory_last_status
+                self.runtime.memory_enabled,
+                self.runtime.memory_document_count,
+                self.runtime.memory_last_status
             ),
         );
-        self.push_event("compaction", self.compaction_status.clone());
-        self.push_event("code_intelligence", self.code_intelligence_status.clone());
+        self.push_event("compaction", self.runtime.compaction_status.clone());
+        self.push_event(
+            "code_intelligence",
+            self.runtime.code_intelligence_status.clone(),
+        );
         self.push_event("session_log", self.session_log_path.display().to_string());
         self.push_event("focus", self.active_pane.label());
         self.reset_scroll();
@@ -867,33 +785,33 @@ impl AppState {
     }
 
     fn reset_for_new_session(&mut self, provider_name: String, model_name: String, notice: String) {
-        self.provider_name = provider_name;
-        self.model_name = model_name;
+        self.runtime.provider_name = provider_name;
+        self.runtime.model_name = model_name;
         self.session_id = Uuid::new_v4().to_string();
         self.session_log_path = self
             .session_log_dir
             .join(format!("session-{}.jsonl", self.session_id));
-        self.stats = SessionStats::default();
-        self.session_delta_stats = SessionStats::default();
-        self.is_busy = false;
-        self.pending_approval = None;
+        self.runtime.stats = SessionStats::default();
+        self.runtime.session_delta_stats = SessionStats::default();
+        self.runtime.is_busy = false;
+        self.approval.pending = None;
         self.active_pane = PaneFocus::Composer;
         self.timeline_scroll_back = 0;
-        self.approval_scroll_back = 0;
+        self.approval.scroll_back = 0;
         self.activity_scroll_back = 0;
-        self.current_session_entries.clear();
+        self.session_browser.current_entries.clear();
         self.mark_current_session_entries_changed();
         self.tool_preview_snapshots.clear();
         self.latest_compaction_record = None;
-        self.run_phase = RunPhase::Idle;
-        self.last_phase_marker = None;
+        self.runtime.run_phase = RunPhase::Idle;
+        self.runtime.last_phase_marker = None;
         self.streaming_assistant_index = None;
         self.streaming_reasoning_index = None;
-        self.approval_metadata_collapsed = false;
-        self.approval_selected_file_index = 0;
-        self.approval_selected_hunk_index = 0;
-        self.approval_diff_mode = ApprovalDiffMode::Full;
-        self.approval_selected_action = ApprovalAction::Deny;
+        self.approval.metadata_collapsed = false;
+        self.approval.selected_file_index = 0;
+        self.approval.selected_hunk_index = 0;
+        self.approval.diff_mode = ApprovalDiffMode::Full;
+        self.approval.selected_action = ApprovalAction::Deny;
         self.selected_tool_activity_key = None;
         self.expanded_thinking_entry_indices.clear();
         self.collapsed_thinking_entry_indices.clear();
@@ -906,10 +824,10 @@ impl AppState {
         self.pending_tool_card_body_click_entry = None;
         self.active_agent_view = AgentView::Main;
         self.active_agent_child_transcript = None;
-        self.composer_agent_panel_focused = false;
-        self.cleared_input_draft = None;
-        self.input_kill_buffer = None;
-        self.input_paste_spans.clear();
+        self.composer.agent_panel_focused = false;
+        self.composer.cleared_input_draft = None;
+        self.composer.input_kill_buffer = None;
+        self.composer.input_paste_spans.clear();
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
@@ -946,7 +864,7 @@ impl AppState {
                 return Ok(Some(AppAction::CopyToClipboard { text }));
             }
             self.modal_state = None;
-            if self.is_busy {
+            if self.runtime.is_busy {
                 self.last_notice = Some("cancellation requested".to_owned());
                 self.push_timeline(TimelineRole::Notice, "cancel requested");
                 return Ok(Some(AppAction::CancelRun));
@@ -964,7 +882,7 @@ impl AppState {
             return Ok(None);
         }
 
-        if key.code == KeyCode::Esc && key.modifiers.is_empty() && self.is_busy {
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() && self.runtime.is_busy {
             self.modal_state = None;
             self.last_notice = Some("cancellation requested".to_owned());
             self.push_timeline(TimelineRole::Notice, "cancel requested");
@@ -979,9 +897,9 @@ impl AppState {
             return Ok(Some(outcome));
         }
 
-        if self.is_busy
-            && self.pending_approval.is_none()
-            && matches!(self.run_phase, RunPhase::Agent(_))
+        if self.runtime.is_busy
+            && self.approval.pending.is_none()
+            && matches!(self.runtime.run_phase, RunPhase::Agent(_))
             && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
             && has_control_without_alt(key)
         {
@@ -992,7 +910,7 @@ impl AppState {
         }
 
         if self.active_pane == PaneFocus::Activity
-            && self.pending_approval.is_none()
+            && self.approval.pending.is_none()
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
             match key.code {
@@ -1051,43 +969,43 @@ impl AppState {
         match key.code {
             KeyCode::Char('u')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.pending_approval.is_none() =>
+                    && self.approval.pending.is_none() =>
             {
                 self.scroll_timeline(self.transcript_page_step());
             }
             KeyCode::Char('d')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.pending_approval.is_none() =>
+                    && self.approval.pending.is_none() =>
             {
                 self.unscroll_timeline(self.transcript_page_step());
             }
             KeyCode::Char('p')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.pending_approval.is_none() =>
+                    && self.approval.pending.is_none() =>
             {
                 self.navigate_input_history(true);
             }
             KeyCode::Char('n')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.pending_approval.is_none() =>
+                    && self.approval.pending.is_none() =>
             {
                 self.navigate_input_history(false);
             }
             KeyCode::Home
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.pending_approval.is_none() =>
+                    && self.approval.pending.is_none() =>
             {
                 self.scroll_timeline_to_top();
             }
             KeyCode::End
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.pending_approval.is_none() =>
+                    && self.approval.pending.is_none() =>
             {
                 self.unscroll_timeline(usize::MAX / 2);
             }
             KeyCode::Char('t')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.pending_approval.is_none() =>
+                    && self.approval.pending.is_none() =>
             {
                 if self.active_pane != PaneFocus::Activity && self.has_collapsible_thinking_blocks()
                 {
@@ -1186,69 +1104,69 @@ impl AppState {
             {
                 self.move_slash_selector(false);
             }
-            KeyCode::Tab if self.composer_queue_panel_focused => {
+            KeyCode::Tab if self.composer.queue_panel_focused => {
                 self.cycle_composer_queue_action(true);
             }
-            KeyCode::BackTab if self.composer_queue_panel_focused => {
+            KeyCode::BackTab if self.composer.queue_panel_focused => {
                 self.cycle_composer_queue_action(false);
             }
-            KeyCode::Right if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Right if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 self.cycle_composer_queue_action(true);
             }
-            KeyCode::Left if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Left if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 self.cycle_composer_queue_action(false);
             }
             KeyCode::Tab => {}
-            KeyCode::BackTab if self.pending_approval.is_none() => {
+            KeyCode::BackTab if self.approval.pending.is_none() => {
                 return self.toggle_runtime_permission_mode();
             }
             KeyCode::Up
-                if self.composer_queue_panel_focused
+                if self.composer.queue_panel_focused
                     && has_alt_without_control(key)
                     && self.selected_composer_queue_is_first() =>
             {
                 return Ok(self.move_selected_queue_item(QueueMoveDirection::Up));
             }
             KeyCode::Down
-                if self.composer_queue_panel_focused
+                if self.composer.queue_panel_focused
                     && has_alt_without_control(key)
                     && self.selected_composer_queue_is_last() =>
             {
                 return Ok(self.move_selected_queue_item(QueueMoveDirection::Down));
             }
-            KeyCode::Up if self.composer_queue_panel_focused && has_alt_without_control(key) => {
+            KeyCode::Up if self.composer.queue_panel_focused && has_alt_without_control(key) => {
                 return Ok(self.move_selected_queue_item(QueueMoveDirection::Up));
             }
-            KeyCode::Down if self.composer_queue_panel_focused && has_alt_without_control(key) => {
+            KeyCode::Down if self.composer.queue_panel_focused && has_alt_without_control(key) => {
                 return Ok(self.move_selected_queue_item(QueueMoveDirection::Down));
             }
-            KeyCode::Up if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Up if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 if self.selected_composer_queue_is_first() {
                     self.blur_composer_queue_panel();
                 } else {
                     self.move_composer_queue_selection(false);
                 }
             }
-            KeyCode::Down if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Down if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 if self.selected_composer_queue_is_last() && self.focus_composer_agent_panel() {
                     self.blur_composer_queue_panel();
                 } else {
                     self.move_composer_queue_selection(true);
                 }
             }
-            KeyCode::Esc if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Esc if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 self.blur_composer_queue_panel();
             }
-            KeyCode::Enter if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Enter if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 return Ok(self.execute_selected_queue_action());
             }
             KeyCode::Backspace | KeyCode::Delete
-                if self.composer_queue_panel_focused && key.modifiers.is_empty() =>
+                if self.composer.queue_panel_focused && key.modifiers.is_empty() =>
             {
                 return Ok(self.cancel_selected_queue_item());
             }
-            KeyCode::Char(_) if self.composer_queue_panel_focused && key.modifiers.is_empty() => {}
-            KeyCode::Up if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Char(_) if self.composer.queue_panel_focused && key.modifiers.is_empty() => {}
+            KeyCode::Up if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
                 if self.selected_composer_agent_is_first() {
                     if !self.focus_composer_queue_panel() {
                         self.blur_composer_agent_panel();
@@ -1257,35 +1175,35 @@ impl AppState {
                     self.move_composer_agent_selection(false);
                 }
             }
-            KeyCode::Down if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Down if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
                 self.move_composer_agent_selection(true);
             }
-            KeyCode::Esc if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Esc if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
                 self.blur_composer_agent_panel();
             }
             KeyCode::Char('c') | KeyCode::Char('C')
-                if self.composer_agent_panel_focused && key.modifiers.is_empty() =>
+                if self.composer.agent_panel_focused && key.modifiers.is_empty() =>
             {
                 return self.close_selected_agent_from_panel();
             }
             KeyCode::Char('m') | KeyCode::Char('M')
-                if self.composer_agent_panel_focused && key.modifiers.is_empty() =>
+                if self.composer.agent_panel_focused && key.modifiers.is_empty() =>
             {
                 self.begin_message_selected_agent_from_panel();
             }
-            KeyCode::Enter if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+            KeyCode::Enter if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
                 self.activate_selected_agent_view();
             }
             KeyCode::Up
                 if self.active_pane == PaneFocus::Composer
-                    && self.input_history_index.is_some()
+                    && self.composer.input_history_index.is_some()
                     && key.modifiers.is_empty() =>
             {
                 self.navigate_input_history(true);
             }
             KeyCode::Down
                 if self.active_pane == PaneFocus::Composer
-                    && self.input_history_index.is_some()
+                    && self.composer.input_history_index.is_some()
                     && key.modifiers.is_empty() =>
             {
                 self.navigate_input_history(false);
@@ -1307,7 +1225,7 @@ impl AppState {
             }
             KeyCode::Down if self.active_pane == PaneFocus::Composer => {
                 if self.input_cursor_visual_row() == self.input_last_visual_row() {
-                    if self.input_history_index.is_some()
+                    if self.composer.input_history_index.is_some()
                         || (!self.focus_composer_queue_panel()
                             && !self.focus_composer_agent_panel())
                     {
@@ -1338,7 +1256,9 @@ impl AppState {
             KeyCode::Home => self.scroll_timeline_to_top(),
             KeyCode::End => self.unscroll_timeline(usize::MAX / 2),
             KeyCode::Esc => {
-                if self.input.is_empty() && self.handle_ui_command(UiCommand::ClearToolCardFocus) {
+                if self.composer.input.is_empty()
+                    && self.handle_ui_command(UiCommand::ClearToolCardFocus)
+                {
                     return Ok(None);
                 }
                 if self.cancel_queue_edit() {
@@ -1348,8 +1268,8 @@ impl AppState {
                     self.active_pane = PaneFocus::Composer;
                     return Ok(None);
                 }
-                if self.input.is_empty() && self.composer_mode == ComposerMode::Plan {
-                    self.composer_mode = ComposerMode::Build;
+                if self.composer.input.is_empty() && self.composer.mode == ComposerMode::Plan {
+                    self.composer.mode = ComposerMode::Build;
                     self.last_notice = Some("build mode".to_owned());
                     self.push_event("mode", "build");
                     return Ok(None);
@@ -1414,7 +1334,7 @@ impl AppState {
                 self.active_pane = PaneFocus::Composer;
                 self.blur_composer_aux_panels();
                 let normalized = if normalize_command_prefix_character(character).is_some()
-                    && self.input.trim().is_empty()
+                    && self.composer.input.trim().is_empty()
                 {
                     '/'
                 } else {
@@ -1430,7 +1350,7 @@ impl AppState {
     }
 
     fn handle_pending_plan_approval_key_event(&mut self, key: KeyEvent) -> Option<AppAction> {
-        self.pending_plan_approval.as_ref()?;
+        self.composer.pending_plan_approval.as_ref()?;
         if !key.modifiers.is_empty() {
             return None;
         }
@@ -1443,7 +1363,7 @@ impl AppState {
             }
             KeyCode::Char('c') | KeyCode::Char('C') => {
                 self.clear_pending_plan_approval();
-                self.composer_mode = ComposerMode::Plan;
+                self.composer.mode = ComposerMode::Plan;
                 self.last_notice = Some("continue planning".to_owned());
                 self.push_event("plan", "continue");
                 None
@@ -1459,7 +1379,7 @@ impl AppState {
     }
 
     fn approve_pending_plan(&mut self, permission: PlanApprovalPermission) -> Option<AppAction> {
-        let pending = self.pending_plan_approval.take()?;
+        let pending = self.composer.pending_plan_approval.take()?;
         self.last_notice = Some(match permission {
             PlanApprovalPermission::Ask => "approving plan: ask".to_owned(),
             PlanApprovalPermission::WorkspaceEdits => "approving plan: workspace edits".to_owned(),
@@ -1474,11 +1394,11 @@ impl AppState {
     }
 
     pub fn cache_hit_ratio(&self) -> f64 {
-        let total = self.stats.cache_hit_tokens + self.stats.cache_miss_tokens;
+        let total = self.runtime.stats.cache_hit_tokens + self.runtime.stats.cache_miss_tokens;
         if total == 0 {
             0.0
         } else {
-            self.stats.cache_hit_tokens as f64 / total as f64
+            self.runtime.stats.cache_hit_tokens as f64 / total as f64
         }
     }
 
@@ -1542,7 +1462,7 @@ impl AppState {
     }
 
     pub fn submit_input(&mut self) -> Result<Option<AppAction>> {
-        let prompt = self.input.trim().to_owned();
+        let prompt = self.composer.input.trim().to_owned();
         if prompt.is_empty() {
             return Ok(None);
         }
@@ -1550,7 +1470,7 @@ impl AppState {
         self.record_input_history(prompt.clone());
         self.reset_input_history_navigation();
 
-        if self.queue_edit_target.is_some() {
+        if self.composer.queue_edit_target.is_some() {
             return Ok(self.finish_queue_edit_submission(prompt));
         }
 
@@ -1566,10 +1486,10 @@ impl AppState {
         }
 
         if prompt.trim_start().starts_with('@') {
-            if self.is_busy {
-                self.input.clear();
-                self.input_cursor = 0;
-                self.input_paste_spans.clear();
+            if self.runtime.is_busy {
+                self.composer.input.clear();
+                self.composer.input_cursor = 0;
+                self.composer.input_paste_spans.clear();
                 self.reset_slash_selector();
                 self.push_timeline(TimelineRole::Notice, "queued for next turn");
                 self.push_event("queue", format!("queued busy input {prompt}"));
@@ -1597,10 +1517,10 @@ impl AppState {
             )));
         }
 
-        if self.is_busy {
-            self.input.clear();
-            self.input_cursor = 0;
-            self.input_paste_spans.clear();
+        if self.runtime.is_busy {
+            self.composer.input.clear();
+            self.composer.input_cursor = 0;
+            self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
             self.push_timeline(TimelineRole::Notice, "queued for next turn");
             self.push_event("queue", format!("queued busy input {prompt}"));
@@ -1614,46 +1534,46 @@ impl AppState {
 
         self.clear_pending_plan_approval();
 
-        if self.composer_mode == ComposerMode::Plan {
-            self.input.clear();
-            self.input_cursor = 0;
-            self.input_paste_spans.clear();
+        if self.composer.mode == ComposerMode::Plan {
+            self.composer.input.clear();
+            self.composer.input_cursor = 0;
+            self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
             self.timeline_scroll_back = 0;
             self.push_timeline(TimelineRole::User, prompt.clone());
             self.push_event("input", format!("submitted plan prompt {prompt}"));
             self.active_pane = PaneFocus::Composer;
             self.push_event("focus", current_focus_label(self));
-            self.is_busy = true;
-            self.run_phase = RunPhase::Thinking;
+            self.runtime.is_busy = true;
+            self.runtime.run_phase = RunPhase::Thinking;
             self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
-            self.last_phase_marker = None;
+            self.runtime.last_phase_marker = None;
             self.push_phase_marker(format!(
                 "{}|{}",
                 ComposerMode::Plan.phase_marker(),
-                self.model_name
+                self.runtime.model_name
             ));
             self.streaming_assistant_index = None;
             self.streaming_reasoning_index = None;
-            self.composer_mode = ComposerMode::Build;
+            self.composer.mode = ComposerMode::Build;
             self.refresh_usage_sidebar_cache();
             return Ok(Some(AppAction::SubmitPlanPrompt(prompt)));
         }
 
-        self.input.clear();
-        self.input_cursor = 0;
-        self.input_paste_spans.clear();
+        self.composer.input.clear();
+        self.composer.input_cursor = 0;
+        self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
         self.push_timeline(TimelineRole::User, prompt.clone());
         self.push_event("input", format!("submitted {prompt}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
-        self.is_busy = true;
-        self.run_phase = RunPhase::Thinking;
+        self.runtime.is_busy = true;
+        self.runtime.run_phase = RunPhase::Thinking;
         self.last_notice = Some("thinking".to_owned());
-        self.last_phase_marker = None;
-        self.push_phase_marker(format!("thinking|{}", self.model_name));
+        self.runtime.last_phase_marker = None;
+        self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
         self.streaming_assistant_index = None;
         self.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
@@ -1665,15 +1585,15 @@ impl AppState {
         command: ResolvedSlashCommand,
         prompt: String,
     ) -> Result<Option<AppAction>> {
-        self.input.clear();
-        self.input_cursor = 0;
-        self.input_paste_spans.clear();
+        self.composer.input.clear();
+        self.composer.input_cursor = 0;
+        self.composer.input_paste_spans.clear();
         self.pending_mouse_slash_confirmation = None;
         self.reset_slash_selector();
         self.push_event("slash", prompt.clone());
         match command.canonical.as_str() {
             "/compact" => {
-                if self.is_busy {
+                if self.runtime.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; compact later");
                     Ok(None)
                 } else {
@@ -1695,7 +1615,7 @@ impl AppState {
             "/model" => self.set_runtime_model_from_command(&command.arg),
             "/queue" => self.execute_queue_slash_command(&command.arg),
             "/new" => {
-                if self.is_busy {
+                if self.runtime.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; start new session later");
                     return Ok(None);
                 }
@@ -1703,17 +1623,17 @@ impl AppState {
                 Ok(Some(AppAction::StartNewSession { session_log_path }))
             }
             "/plan" => {
-                if self.is_busy {
+                if self.runtime.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; plan later");
                     return Ok(None);
                 }
                 let arg = command.arg.trim();
                 if arg.is_empty() {
-                    self.input.clear();
-                    self.input_cursor = 0;
-                    self.input_paste_spans.clear();
+                    self.composer.input.clear();
+                    self.composer.input_cursor = 0;
+                    self.composer.input_paste_spans.clear();
                     self.reset_slash_selector();
-                    self.composer_mode = ComposerMode::Plan;
+                    self.composer.mode = ComposerMode::Plan;
                     self.last_notice = Some("plan mode".to_owned());
                     self.push_event("mode", "plan");
                     return Ok(None);
@@ -1729,23 +1649,23 @@ impl AppState {
 
                 let plan_prompt = arg.to_owned();
                 self.clear_pending_plan_approval();
-                self.input.clear();
-                self.input_cursor = 0;
-                self.input_paste_spans.clear();
+                self.composer.input.clear();
+                self.composer.input_cursor = 0;
+                self.composer.input_paste_spans.clear();
                 self.reset_slash_selector();
                 self.timeline_scroll_back = 0;
                 self.push_timeline(TimelineRole::User, format!("/plan {plan_prompt}"));
                 self.push_event("input", format!("submitted plan prompt {plan_prompt}"));
                 self.active_pane = PaneFocus::Composer;
                 self.push_event("focus", current_focus_label(self));
-                self.is_busy = true;
-                self.run_phase = RunPhase::Thinking;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
                 self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.push_phase_marker(format!(
                     "{}|{}",
                     ComposerMode::Plan.phase_marker(),
-                    self.model_name
+                    self.runtime.model_name
                 ));
                 self.streaming_assistant_index = None;
                 self.streaming_reasoning_index = None;
@@ -1753,7 +1673,7 @@ impl AppState {
                 Ok(Some(AppAction::SubmitPlanPrompt(plan_prompt)))
             }
             "/task" => {
-                if self.is_busy {
+                if self.runtime.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; task later");
                     return Ok(None);
                 }
@@ -1769,11 +1689,11 @@ impl AppState {
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                         .map(ToOwned::to_owned);
-                    self.is_busy = true;
-                    self.run_phase = RunPhase::Thinking;
+                    self.runtime.is_busy = true;
+                    self.runtime.run_phase = RunPhase::Thinking;
                     self.last_notice = Some("continuing task".to_owned());
-                    self.last_phase_marker = None;
-                    self.push_phase_marker(format!("task|{}", self.model_name));
+                    self.runtime.last_phase_marker = None;
+                    self.push_phase_marker(format!("task|{}", self.runtime.model_name));
                     self.streaming_assistant_index = None;
                     self.streaming_reasoning_index = None;
                     self.refresh_usage_sidebar_cache();
@@ -1790,11 +1710,11 @@ impl AppState {
                 self.push_event("input", format!("submitted task {objective}"));
                 self.active_pane = PaneFocus::Composer;
                 self.push_event("focus", current_focus_label(self));
-                self.is_busy = true;
-                self.run_phase = RunPhase::Thinking;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
                 self.last_notice = Some("planning task".to_owned());
-                self.last_phase_marker = None;
-                self.push_phase_marker(format!("task|{}", self.model_name));
+                self.runtime.last_phase_marker = None;
+                self.push_phase_marker(format!("task|{}", self.runtime.model_name));
                 self.streaming_assistant_index = None;
                 self.streaming_reasoning_index = None;
                 self.refresh_usage_sidebar_cache();
@@ -1806,7 +1726,7 @@ impl AppState {
                 Ok(None)
             }
             "/resume" => {
-                if self.is_busy {
+                if self.runtime.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; resume later");
                     return Ok(None);
                 }
@@ -1837,7 +1757,7 @@ impl AppState {
         command: &ResolvedSlashCommand,
         prompt: &str,
     ) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.push_timeline(TimelineRole::Notice, "busy; invoke agent later");
             self.last_notice = Some("busy; invoke agent later".to_owned());
             return Ok(None);
@@ -1869,23 +1789,23 @@ impl AppState {
         prompt: String,
     ) -> AppAction {
         self.clear_pending_plan_approval();
-        self.input.clear();
-        self.input_cursor = 0;
-        self.input_paste_spans.clear();
+        self.composer.input.clear();
+        self.composer.input_cursor = 0;
+        self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
         self.push_timeline(TimelineRole::User, prompt.clone());
         self.push_event("input", format!("invoked agent {profile_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
-        self.is_busy = true;
-        self.run_phase = RunPhase::Agent(profile_id.clone());
+        self.runtime.is_busy = true;
+        self.runtime.run_phase = RunPhase::Agent(profile_id.clone());
         self.last_notice = Some(format!("waiting for agent @{profile_id}"));
-        self.last_phase_marker = None;
+        self.runtime.last_phase_marker = None;
         self.push_phase_marker(format!("agent|{profile_id}"));
         self.streaming_assistant_index = None;
         self.streaming_reasoning_index = None;
-        self.composer_mode = ComposerMode::Build;
+        self.composer.mode = ComposerMode::Build;
         self.refresh_usage_sidebar_cache();
         AppAction::InvokeAgentProfile {
             profile_id,
@@ -1906,7 +1826,7 @@ impl AppState {
             return Ok(None);
         };
         let item_kind = slash_skill_display_kind(&skill);
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.push_timeline(TimelineRole::Notice, format!("busy; use {item_kind} later"));
             self.last_notice = Some(format!("busy; use {item_kind} later"));
             return Ok(None);
@@ -1941,9 +1861,9 @@ impl AppState {
         self.push_event("input", format!("invoked skill {skill_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
-        self.is_busy = true;
-        self.run_phase = RunPhase::Thinking;
-        self.last_phase_marker = None;
+        self.runtime.is_busy = true;
+        self.runtime.run_phase = RunPhase::Thinking;
+        self.runtime.last_phase_marker = None;
         self.streaming_assistant_index = None;
         self.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
@@ -1952,7 +1872,7 @@ impl AppState {
         match skill.run_as {
             sigil_kernel::SkillRunMode::Inline => {
                 self.last_notice = Some(format!("using skill {skill_id}"));
-                self.push_phase_marker(format!("thinking|{}", self.model_name));
+                self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
                 Ok(Some(AppAction::InvokeInlineSkill {
                     skill_id: skill_id.to_owned(),
                     arguments,
@@ -1960,7 +1880,7 @@ impl AppState {
             }
             sigil_kernel::SkillRunMode::ChildSession => {
                 self.last_notice = Some(format!("invoking agent {skill_id}"));
-                self.push_phase_marker(format!("task|{}", self.model_name));
+                self.push_phase_marker(format!("task|{}", self.runtime.model_name));
                 Ok(Some(AppAction::InvokeChildSessionSkill {
                     skill_id: skill_id.to_owned(),
                     arguments,
@@ -1970,11 +1890,11 @@ impl AppState {
     }
 
     pub(crate) fn run_phase(&self) -> RunPhase {
-        self.run_phase.clone()
+        self.runtime.run_phase.clone()
     }
 
     pub(crate) fn run_phase_label(&self) -> String {
-        match &self.run_phase {
+        match &self.runtime.run_phase {
             RunPhase::Idle => "ready".to_owned(),
             RunPhase::Thinking => "thinking".to_owned(),
             RunPhase::Agent(profile_id) => format!("agent @{profile_id}"),
@@ -2002,7 +1922,7 @@ impl AppState {
                         .file_name()
                         .and_then(|value| value.to_str())
                         .unwrap_or("session"),
-                    self.model_name
+                    self.runtime.model_name
                 )
             })
     }
@@ -2030,9 +1950,9 @@ impl AppState {
 
     pub(crate) fn session_sidebar_lines(&self) -> Vec<String> {
         vec![
-            format!("provider: {}", self.provider_name),
-            format!("model: {}", self.model_name),
-            format!("effort: {}", self.reasoning_effort.as_str()),
+            format!("provider: {}", self.runtime.provider_name),
+            format!("model: {}", self.runtime.model_name),
+            format!("effort: {}", self.runtime.reasoning_effort.as_str()),
             format!("phase: {}", self.run_phase_label()),
             format!("session: {}", short_session_token(&self.session_id)),
         ]
@@ -2073,34 +1993,36 @@ impl AppState {
 
     fn session_view_cache(&self) -> Ref<'_, SessionViewCache> {
         self.ensure_session_view_cache();
-        self.session_view_cache.borrow()
+        self.session_browser.view_cache.borrow()
     }
 
     fn ensure_session_view_cache(&self) {
         let needs_refresh = {
-            let cache = self.session_view_cache.borrow();
-            cache.entries_len != self.current_session_entries.len()
-                || cache.entries_revision != self.current_session_entries_revision
+            let cache = self.session_browser.view_cache.borrow();
+            cache.entries_len != self.session_browser.current_entries.len()
+                || cache.entries_revision != self.session_browser.current_entries_revision
         };
         if needs_refresh {
             let cache = self.build_session_view_cache();
-            *self.session_view_cache.borrow_mut() = cache;
+            *self.session_browser.view_cache.borrow_mut() = cache;
         }
     }
 
     fn mark_current_session_entries_changed(&mut self) {
-        self.current_session_entries_revision =
-            self.current_session_entries_revision.saturating_add(1);
+        self.session_browser.current_entries_revision = self
+            .session_browser
+            .current_entries_revision
+            .saturating_add(1);
         self.refresh_session_view_cache();
     }
 
     fn refresh_session_view_cache(&mut self) {
         let cache = self.build_session_view_cache();
-        *self.session_view_cache.borrow_mut() = cache;
+        *self.session_browser.view_cache.borrow_mut() = cache;
     }
 
     fn build_session_view_cache(&self) -> SessionViewCache {
-        let entries = &self.current_session_entries;
+        let entries = &self.session_browser.current_entries;
         let task_projection = TaskStateProjection::from_entries(entries);
         let agent_projection = AgentThreadStateProjection::from_entries(entries);
         let continuation_projection = AgentResultContinuationProjection::from_entries(entries);
@@ -2114,7 +2036,7 @@ impl AppState {
                 .map(|summary| summary.display_line());
         SessionViewCache {
             entries_len: entries.len(),
-            entries_revision: self.current_session_entries_revision,
+            entries_revision: self.session_browser.current_entries_revision,
             task_projection,
             agent_projection,
             task_sidebar_lines: task_sidebar::task_sidebar_lines(entries),
@@ -2130,8 +2052,8 @@ impl AppState {
             return None;
         }
         let session = Session::from_entries(
-            self.provider_name.clone(),
-            self.model_name.clone(),
+            self.runtime.provider_name.clone(),
+            self.runtime.model_name.clone(),
             entries.to_vec(),
         );
         match session.compaction_preview(&self.compaction_config) {
@@ -2148,16 +2070,16 @@ impl AppState {
     }
 
     pub(crate) fn pending_plan_approval(&self) -> Option<&PendingPlanApproval> {
-        self.pending_plan_approval.as_ref()
+        self.composer.pending_plan_approval.as_ref()
     }
 
     pub(crate) fn set_pending_plan_approval_from_text(&mut self, plan_text: &str) {
         let plan_text = plan_text.trim();
         if plan_text.is_empty() {
-            self.pending_plan_approval = None;
+            self.composer.pending_plan_approval = None;
             return;
         }
-        self.pending_plan_approval = Some(PendingPlanApproval {
+        self.composer.pending_plan_approval = Some(PendingPlanApproval {
             plan_text: plan_text.to_owned(),
             plan_hash: plan_text_hash(plan_text),
             scope_summary: first_nonempty_plan_line(plan_text)
@@ -2166,15 +2088,15 @@ impl AppState {
     }
 
     fn clear_pending_plan_approval(&mut self) {
-        self.pending_plan_approval = None;
+        self.composer.pending_plan_approval = None;
     }
 
     pub(crate) fn composer_mode_label(&self) -> &'static str {
-        self.composer_mode.label()
+        self.composer.mode.label()
     }
 
     pub(crate) fn reasoning_effort_label(&self) -> &'static str {
-        self.reasoning_effort.as_str()
+        self.runtime.reasoning_effort.as_str()
     }
 
     pub(crate) fn info_rail_detail_enabled(&self) -> bool {
@@ -2198,14 +2120,14 @@ impl AppState {
             Some(cap) if cap > 0 => format!(
                 "ctx: {}% · prompt {} / {} {} · {}",
                 self.context_usage_percent(cap),
-                format_token_compact(self.stats.last_prompt_tokens),
+                format_token_compact(self.runtime.stats.last_prompt_tokens),
                 format_token_compact(cap as u64),
                 context_window_source_label(resolved.source),
                 self.context_usage_hint(cap)
             ),
             _ => format!(
                 "ctx: n/a · prompt {} · set fallback_context_window_tokens",
-                format_token_compact(self.stats.last_prompt_tokens)
+                format_token_compact(self.runtime.stats.last_prompt_tokens)
             ),
         }
     }
@@ -2238,9 +2160,9 @@ impl AppState {
 
     pub(crate) fn permission_card_lines(&self) -> Vec<String> {
         vec![
-            format!("mode: {}", self.permission_default_mode),
+            format!("mode: {}", self.runtime.permission_default_mode),
             "Shift-Tab cycle + save".to_owned(),
-            if self.is_busy {
+            if self.runtime.is_busy {
                 "busy: locked during run".to_owned()
             } else {
                 "scope: saved default".to_owned()
@@ -2250,10 +2172,10 @@ impl AppState {
 
     fn refresh_usage_sidebar_cache(&mut self) {
         let currency = self.usage_cost_currency();
-        let session_spent = self.stats.input_cost + self.stats.output_cost;
-        let delta_spent =
-            self.session_delta_stats.input_cost + self.session_delta_stats.output_cost;
-        let saved = self.stats.cache_savings;
+        let session_spent = self.runtime.stats.input_cost + self.runtime.stats.output_cost;
+        let delta_spent = self.runtime.session_delta_stats.input_cost
+            + self.runtime.session_delta_stats.output_cost;
+        let saved = self.runtime.stats.cache_savings;
         let session_spent = currency.format_cost(session_spent);
         let delta_spent = currency.format_cost(delta_spent);
         let saved = currency.format_cost(saved);
@@ -2261,7 +2183,7 @@ impl AppState {
         let mut lines = vec![
             self.context_usage_line(),
             self.session_token_line(),
-            format!("compact: {}", self.compaction_status),
+            format!("compact: {}", self.runtime.compaction_status),
             self.compaction_policy_line(),
             self.tool_card_status_line(),
             format!(
@@ -2272,7 +2194,7 @@ impl AppState {
             format!("spent since opening: {delta_spent}"),
             balance_line,
         ];
-        let compaction_preview_line = if self.is_busy {
+        let compaction_preview_line = if self.runtime.is_busy {
             None
         } else {
             self.session_view_cache().compaction_preview_line.clone()
@@ -2288,24 +2210,24 @@ impl AppState {
     }
 
     pub(crate) fn balance_sidebar_line(&self) -> String {
-        if self.balance_snapshot.available {
+        if self.runtime.balance_snapshot.available {
             match (
-                self.balance_snapshot.total,
-                self.balance_snapshot.currency.as_deref(),
+                self.runtime.balance_snapshot.total,
+                self.runtime.balance_snapshot.currency.as_deref(),
             ) {
                 (Some(total), Some(currency)) => format!("balance: {currency} {total:.2}"),
-                _ => format!("balance: {}", self.balance_snapshot.status),
+                _ => format!("balance: {}", self.runtime.balance_snapshot.status),
             }
         } else {
-            format!("balance: {}", self.balance_snapshot.status)
+            format!("balance: {}", self.runtime.balance_snapshot.status)
         }
     }
 
     fn session_token_line(&self) -> String {
         format!(
             "session tok: input {} · output {}",
-            format_token_compact(self.stats.prompt_tokens),
-            format_token_compact(self.stats.completion_tokens)
+            format_token_compact(self.runtime.stats.prompt_tokens),
+            format_token_compact(self.runtime.stats.completion_tokens)
         )
     }
 
@@ -2317,21 +2239,21 @@ impl AppState {
             .unwrap_or_default();
         ResolvedUsageCostCurrency::from_config(
             configured,
-            self.balance_snapshot.currency.as_deref(),
+            self.runtime.balance_snapshot.currency.as_deref(),
         )
     }
 
     #[cfg(test)]
     pub(crate) fn footer_status_line(&self) -> String {
         let currency = self.usage_cost_currency();
-        let session_spent = self.stats.input_cost + self.stats.output_cost;
-        let delta_spent =
-            self.session_delta_stats.input_cost + self.session_delta_stats.output_cost;
+        let session_spent = self.runtime.stats.input_cost + self.runtime.stats.output_cost;
+        let delta_spent = self.runtime.session_delta_stats.input_cost
+            + self.runtime.session_delta_stats.output_cost;
         let session_spent = currency.format_cost(session_spent);
         let delta_spent = currency.format_cost(delta_spent);
         let token_line = format!(
             "tok {}",
-            format_token_compact(self.stats.last_prompt_tokens)
+            format_token_compact(self.runtime.stats.last_prompt_tokens)
         );
         let context = match self.resolved_context_window().tokens {
             Some(cap) if cap > 0 => format!("ctx {}%", self.context_usage_percent(cap)),
@@ -2342,29 +2264,33 @@ impl AppState {
             token_line,
             context,
             self.cache_hit_ratio() * 100.0,
-            self.permission_default_mode,
-            if self.is_busy { "cancel" } else { "quit" }
+            self.runtime.permission_default_mode,
+            if self.runtime.is_busy {
+                "cancel"
+            } else {
+                "quit"
+            }
         )
     }
 
     fn resolved_context_window(&self) -> sigil_runtime::ResolvedContextWindow {
         resolve_context_window_tokens(
-            &self.provider_name,
-            &self.model_name,
+            &self.runtime.provider_name,
+            &self.runtime.model_name,
             self.compaction_config.context_window_tokens,
         )
     }
 
     fn resolved_compaction_config(&self) -> CompactionConfig {
         effective_compaction_config(
-            &self.provider_name,
-            &self.model_name,
+            &self.runtime.provider_name,
+            &self.runtime.model_name,
             &self.compaction_config,
         )
     }
 
     fn context_usage_percent(&self, cap: u32) -> u64 {
-        ((self.stats.last_prompt_tokens as f64 / cap as f64) * 100.0)
+        ((self.runtime.stats.last_prompt_tokens as f64 / cap as f64) * 100.0)
             .round()
             .clamp(0.0, 999.0) as u64
     }
@@ -2372,7 +2298,7 @@ impl AppState {
     fn context_usage_hint(&self, cap: u32) -> String {
         match self
             .resolved_compaction_config()
-            .threshold_status(self.stats.last_prompt_tokens)
+            .threshold_status(self.runtime.stats.last_prompt_tokens)
         {
             CompactionThresholdStatus::Off => "compact off".to_owned(),
             CompactionThresholdStatus::NotAvailable => "threshold n/a".to_owned(),
@@ -2403,13 +2329,13 @@ impl AppState {
     fn recompute_compaction_status(&mut self, emit_feedback: bool) {
         let next = self
             .resolved_compaction_config()
-            .threshold_status(self.stats.last_prompt_tokens);
+            .threshold_status(self.runtime.stats.last_prompt_tokens);
         let next_label = next.as_str().to_owned();
-        if self.compaction_status == next_label {
+        if self.runtime.compaction_status == next_label {
             return;
         }
 
-        self.compaction_status = next_label.clone();
+        self.runtime.compaction_status = next_label.clone();
         self.push_event("compaction", next_label);
         if !emit_feedback {
             return;
@@ -2462,7 +2388,7 @@ impl AppState {
     }
 
     fn toggle_runtime_permission_mode(&mut self) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; permission locked".to_owned());
             self.push_timeline(
                 TimelineRole::Notice,
@@ -2482,10 +2408,16 @@ impl AppState {
             "default mode = {}",
             next_config.permission.default_mode.as_str()
         ));
-        self.push_event("approval_default", self.permission_default_mode.clone());
+        self.push_event(
+            "approval_default",
+            self.runtime.permission_default_mode.clone(),
+        );
         self.push_timeline(
             TimelineRole::Notice,
-            format!("default permission -> {}", self.permission_default_mode),
+            format!(
+                "default permission -> {}",
+                self.runtime.permission_default_mode
+            ),
         );
         self.schedule_balance_refresh();
         Ok(Some(AppAction::RuntimeConfigUpdated {
@@ -2503,7 +2435,7 @@ impl AppState {
             return Ok(None);
         };
 
-        self.reasoning_effort = effort.clone();
+        self.runtime.reasoning_effort = effort.clone();
         self.last_notice = Some(format!("reasoning effort = {}", effort.as_str()));
         self.push_event("effort", effort.as_str());
         self.push_timeline(
@@ -2514,7 +2446,7 @@ impl AppState {
     }
 
     fn set_runtime_model_from_command(&mut self, argument: &str) -> Result<Option<AppAction>> {
-        if self.is_busy {
+        if self.runtime.is_busy {
             self.last_notice = Some("busy; model locked".to_owned());
             self.push_timeline(TimelineRole::Notice, "busy; switch model after the run");
             return Ok(None);
@@ -2526,7 +2458,7 @@ impl AppState {
             return Ok(None);
         };
 
-        if model == self.model_name {
+        if model == self.runtime.model_name {
             self.last_notice = Some(format!("model already active = {model}"));
             self.push_timeline(
                 TimelineRole::Notice,

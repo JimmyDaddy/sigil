@@ -81,7 +81,7 @@ impl AppState {
 
     pub(super) fn scrollback_cutoff_line(&self) -> usize {
         let durable_cutoff_entry = match self.streaming_assistant_index {
-            Some(index) if index + 1 == self.timeline.len() && self.is_busy => index,
+            Some(index) if index + 1 == self.timeline.len() && self.runtime.is_busy => index,
             _ => self.timeline.len(),
         };
         let durable_cutoff_line = if durable_cutoff_entry == 0 {
@@ -208,10 +208,10 @@ impl AppState {
 
     pub(super) fn push_phase_marker(&mut self, text: impl Into<String>) {
         let text = text.into();
-        if self.last_phase_marker.as_deref() == Some(text.as_str()) {
+        if self.runtime.last_phase_marker.as_deref() == Some(text.as_str()) {
             return;
         }
-        self.last_phase_marker = Some(text.clone());
+        self.runtime.last_phase_marker = Some(text.clone());
         self.push_event("phase", text);
     }
 
@@ -482,7 +482,7 @@ impl AppState {
 
     pub(super) fn reset_scroll(&mut self) {
         self.timeline_scroll_back = 0;
-        self.approval_scroll_back = 0;
+        self.approval.scroll_back = 0;
         self.activity_scroll_back = 0;
     }
 
@@ -503,11 +503,11 @@ impl AppState {
 
     pub fn handle_mouse_scroll(&mut self, upward: bool) {
         let delta = self.terminal_scroll_sensitivity();
-        if self.pending_approval.is_some() {
+        if self.approval.pending.is_some() {
             if upward {
-                self.approval_scroll_back = self.approval_scroll_back.saturating_sub(delta);
+                self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
             } else {
-                self.approval_scroll_back = self.approval_scroll_back.saturating_add(delta);
+                self.approval.scroll_back = self.approval.scroll_back.saturating_add(delta);
             }
             return;
         }
@@ -523,8 +523,8 @@ impl AppState {
         match self.active_pane {
             PaneFocus::Composer => self.scroll_timeline(delta),
             PaneFocus::Activity => {
-                if self.pending_approval.is_some() {
-                    self.approval_scroll_back = self.approval_scroll_back.saturating_sub(delta);
+                if self.approval.pending.is_some() {
+                    self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
                 } else {
                     self.activity_scroll_back = self.activity_scroll_back.saturating_add(delta);
                 }
@@ -536,8 +536,8 @@ impl AppState {
         match self.active_pane {
             PaneFocus::Composer => self.unscroll_timeline(delta),
             PaneFocus::Activity => {
-                if self.pending_approval.is_some() {
-                    self.approval_scroll_back = self.approval_scroll_back.saturating_add(delta);
+                if self.approval.pending.is_some() {
+                    self.approval.scroll_back = self.approval.scroll_back.saturating_add(delta);
                 } else {
                     self.activity_scroll_back = self.activity_scroll_back.saturating_sub(delta);
                 }
@@ -1013,7 +1013,7 @@ impl AppState {
     }
 
     pub(crate) fn live_activity_summary(&self) -> Option<LiveActivitySummary> {
-        if let Some(pending) = &self.pending_approval {
+        if let Some(pending) = &self.approval.pending {
             return Some(LiveActivitySummary {
                 label: "approval".to_owned(),
                 detail: format!("waiting for decision on {}", pending.call.name),
@@ -1022,18 +1022,21 @@ impl AppState {
         if let Some(summary) = self.active_child_agent_activity_summary() {
             return Some(summary);
         }
-        if !self.is_busy {
+        if !self.runtime.is_busy {
             return None;
         }
-        if let Some(progress) = &self.mcp_progress {
+        if let Some(progress) = &self.runtime.mcp_progress {
             return Some(LiveActivitySummary {
                 label: "mcp".to_owned(),
                 detail: progress.detail.clone(),
             });
         }
-        let (label, detail) = match &self.run_phase {
+        let (label, detail) = match &self.runtime.run_phase {
             RunPhase::Idle => ("working", "waiting for next event".to_owned()),
-            RunPhase::Thinking => ("thinking", format!("reasoning with {}", self.model_name)),
+            RunPhase::Thinking => (
+                "thinking",
+                format!("reasoning with {}", self.runtime.model_name),
+            ),
             RunPhase::Agent(profile_id) => ("agent", format!("waiting for @{profile_id} result")),
             RunPhase::Tool(name) => ("tool", format!("running {name}")),
             RunPhase::Streaming => ("streaming", "writing the reply".to_owned()),

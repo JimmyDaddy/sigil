@@ -152,11 +152,11 @@ fn config_storage_section_shows_artifact_retention_overrides() {
     assert!(detail.contains("Max bytes: 1 MiB"));
     assert!(detail.contains("Expire older than: 1 hour"));
 
-    app.mutation_artifact_retention_preview = MutationArtifactRetentionPreview::Pending;
+    app.runtime.mutation_artifact_retention_preview = MutationArtifactRetentionPreview::Pending;
     let pending = app.config_detail_lines().join("\n");
     assert!(pending.contains("Preview: pending"));
 
-    app.mutation_artifact_retention_preview =
+    app.runtime.mutation_artifact_retention_preview =
         MutationArtifactRetentionPreview::Unavailable("preview failed".to_owned());
     let unavailable = app.config_detail_lines().join("\n");
     assert!(unavailable.contains("Preview: unavailable"));
@@ -415,7 +415,7 @@ fn write_invalid_workspace_plugin(workspace_root: &Path, id: &str) -> Result<()>
 #[test]
 fn config_command_opens_first_editable_step() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
 
     let action = app.submit_input()?;
 
@@ -916,15 +916,17 @@ fn config_permissions_step_shows_repo_verification_trust_promotion() {
     assert!(!untrusted_detail.contains("> cargo-test · cargo · cargo test"));
 
     let workspace_id = sigil_kernel::stable_workspace_id(temp.path()).expect("workspace id");
-    app.current_session_entries.push(SessionLogEntry::Control(
-        ControlEntry::WorkspaceTrustDecision(sigil_kernel::WorkspaceTrustDecisionEntry {
-            workspace_id,
-            workspace_trust_snapshot_id: "trust-1".to_owned(),
-            trust: sigil_kernel::WorkspaceTrust::Trusted,
-            decided_by_event_id: Some("event-trust".to_owned()),
-            reason: Some("test trusted workspace".to_owned()),
-        }),
-    ));
+    app.session_browser
+        .current_entries
+        .push(SessionLogEntry::Control(
+            ControlEntry::WorkspaceTrustDecision(sigil_kernel::WorkspaceTrustDecisionEntry {
+                workspace_id,
+                workspace_trust_snapshot_id: "trust-1".to_owned(),
+                trust: sigil_kernel::WorkspaceTrust::Trusted,
+                decided_by_event_id: Some("event-trust".to_owned()),
+                reason: Some("test trusted workspace".to_owned()),
+            }),
+        ));
 
     let trusted_detail = app.config_detail_lines().join("\n");
 
@@ -1045,7 +1047,7 @@ fn config_storage_preview_reports_unavailable_artifact_states() {
     app.config_snapshot = None;
     app.refresh_mutation_artifact_retention_preview();
     assert!(matches!(
-        app.mutation_artifact_retention_preview,
+        app.runtime.mutation_artifact_retention_preview,
         MutationArtifactRetentionPreview::Unavailable(ref reason)
             if reason == "config is unavailable"
     ));
@@ -1056,7 +1058,7 @@ fn config_storage_preview_reports_unavailable_artifact_states() {
     app.session_log_path = blocked_parent.join("session.jsonl");
     app.refresh_mutation_artifact_retention_preview();
     assert!(matches!(
-        app.mutation_artifact_retention_preview,
+        app.runtime.mutation_artifact_retention_preview,
         MutationArtifactRetentionPreview::Unavailable(ref reason)
             if reason.contains("failed to open mutation artifact recorder")
     ));
@@ -1071,7 +1073,7 @@ fn config_storage_preview_reports_unavailable_artifact_states() {
     app.session_log_path = artifact_file_root.join("sessions/session.jsonl");
     app.refresh_mutation_artifact_retention_preview();
     assert!(matches!(
-        app.mutation_artifact_retention_preview,
+        app.runtime.mutation_artifact_retention_preview,
         MutationArtifactRetentionPreview::Unavailable(ref reason)
             if reason.contains("failed to preview mutation artifacts")
     ));
@@ -1539,7 +1541,7 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
         .as_mut()
         .expect("config state should still exist")
         .set_section(ConfigSection::Appearance);
-    let initial_control_entries = app.current_session_entries.len();
+    let initial_control_entries = app.session_browser.current_entries.len();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
@@ -1584,7 +1586,10 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
         .find_map(|span| span.style.bg)
         .expect("timeline cache should rebuild with themed background");
     assert_ne!(initial_theme_bg, updated_theme_bg);
-    assert_eq!(app.current_session_entries.len(), initial_control_entries);
+    assert_eq!(
+        app.session_browser.current_entries.len(),
+        initial_control_entries
+    );
     let rendered = std::fs::read_to_string(&config_path)?;
     assert!(rendered.contains("theme = \"solarized_dark\""));
     Ok(())
@@ -1845,7 +1850,7 @@ fn config_agents_footer_refuses_system_managed_and_busy_updates() -> Result<()> 
             .is_some_and(|notice| notice.contains("system-managed"))
     );
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     app.config_state
         .as_mut()
         .expect("config state should still exist")
@@ -1900,16 +1905,26 @@ allowed_tools = ["grep"]
 
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("agent review trusted"));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(_))
-    )));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
-            if trust.profile_id.as_str() == "review"
-                && trust.decision == sigil_kernel::AgentTrustState::Trusted
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(_))
+            ))
+    );
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+                    if trust.profile_id.as_str() == "review"
+                        && trust.decision == sigil_kernel::AgentTrustState::Trusted
+            ))
+    );
     assert_eq!(
         app.config_state
             .as_ref()
@@ -1926,14 +1941,19 @@ allowed_tools = ["grep"]
 
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("agent review model=no"));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
-            if policy.profile_id.as_str() == "review"
-                && policy.model_invocable == Some(false)
-                && policy.enabled.is_none()
-                && policy.user_invocable.is_none()
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
+                    if policy.profile_id.as_str() == "review"
+                        && policy.model_invocable == Some(false)
+                        && policy.enabled.is_none()
+                        && policy.user_invocable.is_none()
+            ))
+    );
     assert_eq!(
         app.config_state
             .as_ref()
@@ -1949,12 +1969,17 @@ allowed_tools = ["grep"]
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("agent review disabled"));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
-            if trust.profile_id.as_str() == "review"
-                && trust.decision == sigil_kernel::AgentTrustState::Disabled
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+                    if trust.profile_id.as_str() == "review"
+                        && trust.decision == sigil_kernel::AgentTrustState::Disabled
+            ))
+    );
 
     app.config_state
         .as_mut()
@@ -1963,11 +1988,16 @@ allowed_tools = ["grep"]
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("agent review enabled=no"));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
-            if policy.profile_id.as_str() == "review" && policy.enabled == Some(false)
-    )));
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
+                    if policy.profile_id.as_str() == "review" && policy.enabled == Some(false)
+            ))
+    );
 
     app.config_state
         .as_mut()
@@ -1976,7 +2006,7 @@ allowed_tools = ["grep"]
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("agent review user=no"));
-    assert!(app.current_session_entries.iter().any(|entry| matches!(
+    assert!(app.session_browser.current_entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
             if policy.profile_id.as_str() == "review" && policy.user_invocable == Some(false)
@@ -2183,7 +2213,7 @@ trust: trusted
     let config = config_for_workspace(&workspace);
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.open_config_panel();
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     {
         let state = app
             .config_state
@@ -2196,7 +2226,7 @@ trust: trusted
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("busy; use skill later"));
 
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     {
         let state = app
             .config_state
@@ -2771,7 +2801,7 @@ fn config_plugins_footer_denies_and_guards_busy_wrong_section_and_empty_selectio
     let config = config_for_workspace(&workspace);
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.open_config_panel();
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     {
         let state = app
             .config_state
@@ -2784,7 +2814,7 @@ fn config_plugins_footer_denies_and_guards_busy_wrong_section_and_empty_selectio
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("busy; review plugin later"));
 
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     {
         let state = app
             .config_state
@@ -2921,10 +2951,15 @@ fn config_plugins_footer_reloads_manifest_before_reviewing_missing_plugin() -> R
         app.last_notice(),
         Some("plugin repo-review is no longer available; review refreshed")
     );
-    assert!(!app.current_session_entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(_))
-    )));
+    assert!(
+        !app.session_browser
+            .current_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PluginTrustDecision(_))
+            ))
+    );
     Ok(())
 }
 
@@ -2995,8 +3030,8 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert!(!root_config.terminal.osc52_clipboard);
     assert_eq!(root_config.terminal.scroll_sensitivity, 6);
     assert!(!app.config_is_dirty());
-    assert_eq!(app.permission_default_mode, "allow");
-    assert!(!app.memory_enabled);
+    assert_eq!(app.runtime.permission_default_mode, "allow");
+    assert!(!app.runtime.memory_enabled);
 
     let saved = RootConfig::load(&config_path)?;
     assert_eq!(saved.agent.model, "deepseek-v4-pro");
@@ -3072,12 +3107,12 @@ fn runtime_permission_toggle_persists_default_mode_to_config() -> Result<()> {
         panic!("expected runtime config update action");
     };
     assert_eq!(root_config.permission.default_mode, ApprovalMode::Deny);
-    assert_eq!(app.permission_default_mode, "deny");
+    assert_eq!(app.runtime.permission_default_mode, "deny");
 
     let saved = RootConfig::load(&config_path)?;
     assert_eq!(saved.permission.default_mode, ApprovalMode::Deny);
     let reopened = AppState::from_root_config(&config_path, &saved);
-    assert_eq!(reopened.permission_default_mode, "deny");
+    assert_eq!(reopened.runtime.permission_default_mode, "deny");
     Ok(())
 }
 
@@ -3166,7 +3201,7 @@ fn config_save_is_blocked_while_busy() -> Result<()> {
     state.selected_field = Some(ConfigField::ProviderModel);
     state.draft.provider_model = "deepseek-v4-pro".to_owned();
     state.dirty = true;
-    app.is_busy = true;
+    app.runtime.is_busy = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
@@ -3946,7 +3981,7 @@ fn config_command_is_unavailable_in_setup_mode() -> Result<()> {
         None,
     );
 
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let action = app.submit_input()?;
 
     assert!(action.is_none());

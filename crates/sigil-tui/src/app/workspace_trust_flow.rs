@@ -68,7 +68,7 @@ impl AppState {
 
     pub(crate) fn ensure_current_workspace_trust_decision(&mut self, reason: &str) -> Result<()> {
         let workspace_id = stable_workspace_id(&self.workspace_root)?;
-        if workspace_trust_from_entries(&self.current_session_entries, &workspace_id)
+        if workspace_trust_from_entries(&self.session_browser.current_entries, &workspace_id)
             == Some(WorkspaceTrust::Trusted)
         {
             return Ok(());
@@ -85,12 +85,12 @@ impl AppState {
         let Ok(workspace_id) = stable_workspace_id(&self.workspace_root) else {
             return false;
         };
-        if workspace_trust_from_entries(&self.current_session_entries, &workspace_id)
+        if workspace_trust_from_entries(&self.session_browser.current_entries, &workspace_id)
             == Some(WorkspaceTrust::Trusted)
         {
             return true;
         }
-        self.session_history.iter().any(|entry| {
+        self.session_browser.history.iter().any(|entry| {
             JsonlSessionStore::read_entries(&entry.path)
                 .ok()
                 .and_then(|entries| workspace_trust_from_entries(&entries, &workspace_id))
@@ -127,7 +127,7 @@ impl AppState {
             "{}:{}:{}",
             workspace_id,
             self.session_id,
-            self.current_session_entries.len()
+            self.session_browser.current_entries.len()
         );
         let event_id = stable_event_uuid("sigil.workspace_trust", &seed);
         WorkspaceTrustDecisionEntry {

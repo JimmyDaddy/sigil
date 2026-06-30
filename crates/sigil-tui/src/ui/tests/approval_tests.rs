@@ -571,7 +571,7 @@ fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<
         snapshot_required: false,
         preview: Some(multi_file_preview()),
     })?;
-    app.code_intelligence_diagnostics_by_path.insert(
+    app.runtime.code_intelligence_diagnostics_by_path.insert(
         "src/lib.rs".to_owned(),
         ApprovalDiagnosticSummary {
             errors: 0,

@@ -1,0 +1,387 @@
+use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc};
+
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
+use thiserror::Error as ThisError;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
+
+use crate::{
+    auth::HttpAuthValidator,
+    config::HttpServerConfig,
+    dto::{HttpApprovalDecisionRequest, HttpRunStartRequest, HttpSessionCreateRequest},
+    protocol::HttpCommandEnvelope,
+    registry::{HttpRegistryError, HttpSessionRunRegistry},
+};
+
+const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
+const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Errors returned by the localhost HTTP listener boundary.
+#[derive(Debug, ThisError)]
+pub enum HttpListenerError {
+    /// Server configuration is unsafe or incomplete.
+    #[error("http listener config is invalid: {message}")]
+    Config { message: String },
+    /// Bearer token configuration is unsafe or incomplete.
+    #[error("http listener auth is invalid: {message}")]
+    Auth { message: String },
+    /// TCP listener or socket I/O failed.
+    #[error("http listener io failed: {source}")]
+    Io {
+        #[from]
+        source: std::io::Error,
+    },
+    /// Incoming HTTP request could not be parsed.
+    #[error("http request is invalid: {message}")]
+    Request { message: String },
+    /// Response serialization failed.
+    #[error("http response serialization failed: {message}")]
+    Response { message: String },
+}
+
+/// Minimal localhost HTTP adapter.
+///
+/// This listener owns only HTTP framing, bearer auth and registry routing. Runtime agent
+/// execution still belongs to the injected `HttpRunDriver`.
+pub struct HttpLocalServer {
+    listener: TcpListener,
+    validator: HttpAuthValidator,
+    registry: Arc<HttpSessionRunRegistry>,
+}
+
+impl HttpLocalServer {
+    /// Binds a local HTTP listener using an already resolved bearer token value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config fails safety validation, required auth has no token, or
+    /// the TCP listener cannot bind.
+    pub async fn bind(
+        config: HttpServerConfig,
+        token: Option<&str>,
+        registry: Arc<HttpSessionRunRegistry>,
+    ) -> Result<Self, HttpListenerError> {
+        config
+            .validate()
+            .map_err(|error| HttpListenerError::Config {
+                message: error.to_string(),
+            })?;
+        let validator =
+            config
+                .auth
+                .validator_from_token(token)
+                .map_err(|error| HttpListenerError::Auth {
+                    message: error.to_string(),
+                })?;
+        let listener = TcpListener::bind(config.bind_addr()).await?;
+        Ok(Self {
+            listener,
+            validator,
+            registry,
+        })
+    }
+
+    /// Returns the actual bound address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating system cannot report the bound address.
+    pub fn local_addr(&self) -> Result<SocketAddr, HttpListenerError> {
+        Ok(self.listener.local_addr()?)
+    }
+
+    /// Serves connections until `shutdown` resolves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when accepting a TCP connection fails.
+    pub async fn serve_until_shutdown<F>(self, shutdown: F) -> Result<(), HttpListenerError>
+    where
+        F: Future<Output = ()> + Send,
+    {
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = &mut shutdown => return Ok(()),
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted?;
+                    let validator = self.validator.clone();
+                    let registry = Arc::clone(&self.registry);
+                    tokio::spawn(async move {
+                        let _ = handle_http_connection(stream, validator, registry).await;
+                    });
+                }
+            }
+        }
+    }
+}
+
+async fn handle_http_connection(
+    mut stream: TcpStream,
+    validator: HttpAuthValidator,
+    registry: Arc<HttpSessionRunRegistry>,
+) -> Result<(), HttpListenerError> {
+    let response = match read_http_request(&mut stream).await {
+        Ok(request) => route_http_request(request, &validator, &registry),
+        Err(error) => http_error_response(400, "bad_request", error.to_string()),
+    };
+    write_http_response(&mut stream, response).await
+}
+
+fn route_http_request(
+    request: HttpRequest,
+    validator: &HttpAuthValidator,
+    registry: &HttpSessionRunRegistry,
+) -> HttpResponse {
+    if request.method == "GET" && request.path == "/health" {
+        return json_response(200, json!({ "status": "ok" }));
+    }
+    if request.method != "POST" {
+        return http_error_response(404, "not_found", "http route not found");
+    }
+    if let Err(error) =
+        validator.validate_authorization_header(request.header("authorization").map(String::as_str))
+    {
+        return http_error_response(401, "unauthorized", error.to_string());
+    }
+
+    if request.path == "/sessions" {
+        let Ok(body) = parse_json_body::<HttpSessionCreateRequest>(&request.body) else {
+            return http_error_response(400, "bad_request", "invalid session create body");
+        };
+        let session = registry.create_session(body);
+        return json_response(201, json!(session));
+    }
+
+    if let Some(session_id) = request
+        .path
+        .strip_prefix("/sessions/")
+        .and_then(|suffix| suffix.strip_suffix("/runs"))
+        .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpRunStartRequest>>(&request.body)
+        else {
+            return http_error_response(400, "bad_request", "invalid run start command body");
+        };
+        return match registry.start_run_command(session_id, command) {
+            Ok(receipt) => json_response(201, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if let Some((run_id, call_id)) = approval_route_parts(&request.path) {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpApprovalDecisionRequest>>(&request.body)
+        else {
+            return http_error_response(400, "bad_request", "invalid approval command body");
+        };
+        return match registry.submit_approval_command(run_id, call_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    http_error_response(404, "not_found", "http route not found")
+}
+
+fn approval_route_parts(path: &str) -> Option<(&str, &str)> {
+    let suffix = path.strip_prefix("/runs/")?;
+    let (run_id, call_id) = suffix.split_once("/approvals/")?;
+    if run_id.is_empty() || run_id.contains('/') || call_id.is_empty() || call_id.contains('/') {
+        return None;
+    }
+    Some((run_id, call_id))
+}
+
+fn parse_json_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
+    serde_json::from_slice(body)
+}
+
+async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpListenerError> {
+    let mut buffer = Vec::new();
+    let header_end = loop {
+        if let Some(index) = find_header_end(&buffer) {
+            break index;
+        }
+        if buffer.len() > HTTP_MAX_HEADER_BYTES {
+            return Err(HttpListenerError::Request {
+                message: "request headers exceed limit".to_owned(),
+            });
+        }
+        let mut chunk = [0_u8; 4096];
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(HttpListenerError::Request {
+                message: "request closed before headers completed".to_owned(),
+            });
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    };
+    let header_bytes = &buffer[..header_end];
+    let mut body = buffer[header_end + 4..].to_vec();
+    let header_text = str::from_utf8(header_bytes).map_err(|error| HttpListenerError::Request {
+        message: format!("request headers are not utf-8: {error}"),
+    })?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().ok_or_else(|| HttpListenerError::Request {
+        message: "missing request line".to_owned(),
+    })?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| HttpListenerError::Request {
+            message: "missing request method".to_owned(),
+        })?
+        .to_owned();
+    let path = request_parts
+        .next()
+        .ok_or_else(|| HttpListenerError::Request {
+            message: "missing request path".to_owned(),
+        })?
+        .to_owned();
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(HttpListenerError::Request {
+                message: "malformed request header".to_owned(),
+            });
+        };
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+    }
+    let content_length = headers
+        .get("content-length")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|error| HttpListenerError::Request {
+                    message: format!("invalid content-length: {error}"),
+                })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if content_length > HTTP_MAX_BODY_BYTES {
+        return Err(HttpListenerError::Request {
+            message: "request body exceeds limit".to_owned(),
+        });
+    }
+    while body.len() < content_length {
+        let remaining = content_length - body.len();
+        let mut chunk = vec![0_u8; remaining.min(4096)];
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(HttpListenerError::Request {
+                message: "request closed before body completed".to_owned(),
+            });
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(content_length);
+    Ok(HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    response: HttpResponse,
+) -> Result<(), HttpListenerError> {
+    let body = serde_json::to_vec(&response.body).map_err(|error| HttpListenerError::Response {
+        message: error.to_string(),
+    })?;
+    let head = format!(
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        response.status,
+        http_reason(response.status),
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
+    let status = match error {
+        HttpRegistryError::SessionNotFound { .. } | HttpRegistryError::RunNotFound { .. } => 404,
+        HttpRegistryError::UnsupportedProtocolVersion { .. }
+        | HttpRegistryError::CommandSessionMismatch { .. }
+        | HttpRegistryError::CommandPathSessionMismatch { .. }
+        | HttpRegistryError::StaleCommandSequence { .. }
+        | HttpRegistryError::RunNotActive { .. }
+        | HttpRegistryError::ApprovalNotPending { .. }
+        | HttpRegistryError::ApprovalModeDoesNotAsk { .. }
+        | HttpRegistryError::ApprovalRequestChanged { .. }
+        | HttpRegistryError::ApprovalToolCallChanged { .. }
+        | HttpRegistryError::ApprovalPolicyChanged { .. }
+        | HttpRegistryError::ApprovalExpiryChanged { .. }
+        | HttpRegistryError::ApprovalExpired { .. } => 409,
+        HttpRegistryError::EmptyPrompt | HttpRegistryError::MissingApprovalMode => 400,
+        HttpRegistryError::DriverRejected { .. } => 500,
+    };
+    http_error_response(status, "registry_error", error.to_string())
+}
+
+fn json_response(status: u16, body: Value) -> HttpResponse {
+    HttpResponse { status, body }
+}
+
+fn http_error_response(
+    status: u16,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> HttpResponse {
+    json_response(
+        status,
+        json!({
+            "error": {
+                "code": code.into(),
+                "message": message.into()
+            }
+        }),
+    )
+}
+
+fn http_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        409 => "Conflict",
+        500 => "Internal Server Error",
+        _ => "OK",
+    }
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+impl HttpRequest {
+    fn header(&self, name: &str) -> Option<&String> {
+        self.headers.get(name)
+    }
+}
+
+struct HttpResponse {
+    status: u16,
+    body: Value,
+}

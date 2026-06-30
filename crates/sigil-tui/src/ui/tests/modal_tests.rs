@@ -43,7 +43,7 @@ fn test_config() -> RootConfig {
 #[test]
 fn modal_visual_uses_config_palette_when_config_panel_is_open() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
 
     let visual = modal_visual(&app);

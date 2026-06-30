@@ -1558,7 +1558,7 @@ fn session_restore_and_projection_helpers_cover_empty_and_invalid_paths() -> Res
     );
     assert_eq!(app.audit_log_lines(), vec!["no audit entries".to_owned()]);
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     assert!(
         app.session_view_lines()
             .join("\n")
@@ -1694,16 +1694,16 @@ fn refresh_memory_summary_records_inspect_errors() {
 
     app.refresh_memory_summary();
 
-    assert!(app.memory_enabled);
-    assert_eq!(app.memory_document_count, 0);
-    assert_ne!(app.memory_last_status, "ok");
-    assert!(!app.memory_last_status.is_empty());
+    assert!(app.runtime.memory_enabled);
+    assert_eq!(app.runtime.memory_document_count, 0);
+    assert_ne!(app.runtime.memory_last_status, "ok");
+    assert!(!app.runtime.memory_last_status.is_empty());
 }
 
 #[test]
 fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Result<()> {
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
-    app.session_history = vec![SessionHistoryEntry {
+    app.session_browser.history = vec![SessionHistoryEntry {
         path: PathBuf::from("session-current.jsonl"),
         label: "session-current.jsonl".to_owned(),
         title: Some("alpha".to_owned()),
@@ -1717,14 +1717,14 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
         Some(PathBuf::from("session-current.jsonl"))
     );
 
-    app.session_history.push(SessionHistoryEntry {
+    app.session_browser.history.push(SessionHistoryEntry {
         path: PathBuf::from("session-other.jsonl"),
         label: "session-other.jsonl".to_owned(),
         title: Some("alpha".to_owned()),
         modified_epoch_secs: 0,
         bytes: 0,
     });
-    app.session_history.push(SessionHistoryEntry {
+    app.session_browser.history.push(SessionHistoryEntry {
         path: PathBuf::from("session-third.jsonl"),
         label: "session-third.jsonl".to_owned(),
         title: Some("alpha".to_owned()),

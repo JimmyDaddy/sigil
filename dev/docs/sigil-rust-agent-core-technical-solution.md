@@ -151,7 +151,22 @@ sigil/
           *_tests.rs
     sigil-tools-builtin/
       src/
+        changeset_tool.rs
+        constants.rs
+        execution_backends/
+          bubblewrap.rs
+          docker.rs
+          local.rs
+          mod.rs
+          seatbelt.rs
+        file_tools.rs
         lib.rs
+        path.rs
+        registry.rs
+        shell.rs
+        support.rs
+        terminal_process.rs
+        terminal_tools.rs
         tests/lib_tests.rs
     sigil-code-intel/
       src/
@@ -175,7 +190,16 @@ sigil/
         tests/lib_tests.rs
     sigil-http/
       src/
+        auth.rs
+        config.rs
+        driver.rs
+        dto.rs
         lib.rs
+        listener.rs
+        openapi.rs
+        protocol.rs
+        registry.rs
+        sse.rs
         tests/lib_tests.rs
     sigil/
       src/
@@ -185,9 +209,19 @@ sigil/
       src/
         app.rs
         app/
+          state.rs
           tests/
         runner.rs
         runner/
+          worker_loop/
+            active_run.rs
+            agent_runtime.rs
+            mcp_refresh.rs
+            provider_status.rs
+            queue_driver.rs
+            scheduler.rs
+            task_runtime.rs
+            terminal_refresh.rs
           tests/
         ui.rs
         ui/
@@ -211,21 +245,21 @@ sigil/
 - `sigil-provider-openai-compat`：OpenAI-compatible Chat Completions provider，覆盖通用 streaming text、tool call、usage 和 endpoint/header 配置，不承载 DeepSeek reasoning replay、strict tools、prefix/FIM 或 beta endpoint 语义。
 - `sigil-provider-anthropic`：Anthropic Messages provider，负责 Anthropic 版本 header、beta header、top-level system、`tool_use` / `tool_result` 和 incremental tool argument 映射；kernel 只看到中立的 message、tool spec、usage 和 `ProviderChunk`。
 - `sigil-provider-gemini`：Gemini GenerateContent provider，负责 `systemInstruction`、`functionDeclarations`、`functionCall` / `functionResponse` 和 block reason 映射；Gemini 的 function-response 配对细节保留在 provider crate 内。
-- `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。
+- `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。`lib.rs` 只保留兼容 façade；工具注册、workspace path confinement、文件工具、changeset、shell、persistent terminal 和 non-interactive execution backend 分别维护在对应子模块中，backend 内部再按 local / Seatbelt / Bubblewrap / Docker 拆分。
 - `sigil-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、符号/诊断缓存、只读 code intelligence tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果只通过 bounded tool result 进入 provider-visible history，不注入 system prompt。
 - `sigil-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry 和 run options，避免 TUI / CLI 各自硬编码装配链。它不是新的领域层，kernel 仍然不知道 runtime 存在。
-- `sigil-http`：HTTP/SSE adapter crate。当前承载 server config DTO、bearer auth validator、`PublicRunEvent` SSE serialization、per-run event sequence helper、in-memory session/run registry、run start/cancel 与 approval decision routing；后续只做 HTTP routing 与 server wiring，不依赖 `sigil-tui`，不复制 agent loop。
+- `sigil-http`：HTTP/SSE adapter crate。`lib.rs` 只保留兼容 façade；protocol envelope、server config、bearer auth、loopback listener framing、SSE durable/live event surface、DTO、run driver trait、session/run registry 和 OpenAPI schema 分别维护在对应子模块中。listener 只拥有 HTTP framing/auth/registry routing，不依赖 `sigil-tui`，不复制 agent loop。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`serve` HTTP/SSE adapter preflight 和隐藏 provider 调试命令保留为显式子命令，不承担最终产品心智；`serve` 当前只验证 localhost/token defaults 并输出 routing pending 状态，不启动 HTTP listener；诊断事实由 `sigil-runtime` 提供，避免 CLI 与 TUI 后续各写一套判断。
 - `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs；`.github/workflows/release.yml` 在 tag 发布时构建多平台 archive、生成 provenance attestation、渲染 Homebrew formula asset、准备 npm tarballs 并创建 GitHub release。独立 tap 同步、npm registry 发布、crates.io package name 决策和自更新仍是 release-management 工作。
-- `sigil-tui`：第一用户入口的 TUI 实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
+- `sigil-tui`：第一用户入口的 TUI 实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；`app/state.rs` 承载 `RuntimeStatusState`、`ComposerState`、`ApprovalState` 和 `SessionBrowserState`，避免继续向根 `AppState` 追加散落字段；`runner/worker_loop.rs` 只保留 worker façade，scheduler、active run、queue、MCP refresh、provider status、agent runtime、task runtime 和 terminal refresh 维护在 `runner/worker_loop/*`；TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
 
 这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流则留在 `sigil-tui` 内，因为它们属于第一用户表面的交互模型。
 
 ### 重构后不变量
 
-- `app.rs` 只保留 `AppState` 字段、bootstrap、顶层 key routing 和跨状态编排；新增状态流放入 `app/*`，状态流测试放入 `app/tests/*_tests.rs`。
-- `runner.rs` 只暴露 worker protocol 和 spawn 入口；worker command/message、spawn 装配、event bridge、approval bridge、session/compaction flow 和 loop 逻辑放入 `runner/*`。
+- `app.rs` 只保留 `AppState` façade、bootstrap、顶层 key routing 和跨状态编排；运行状态、composer、approval 和 session browser 字段归入 `app/state.rs` 的领域 bundle；新增状态流放入 `app/*`，状态流测试放入 `app/tests/*_tests.rs`。
+- `runner.rs` 只暴露 worker protocol 和 spawn 入口；worker command/message、spawn 装配、event bridge、approval bridge、session/compaction flow 放入 `runner/*`；worker loop 的 scheduler、active run、queue、MCP/provider refresh、agent/task runtime 和 terminal refresh 放入 `runner/worker_loop/*`。
 - `ui.rs` 只作为 renderer 模块入口和必要 re-export；shell layout、theme、geometry、text、timeline、tool card、markdown、approval、setup/config、modal 等渲染块放入对应 `ui/*`。
 - 单元测试实现不再回填 inline test module；业务文件只保留测试模块声明，测试实现放入同层 `tests/<module>_tests.rs`、领域专属 `app/tests/*` / `runner/tests/*` / `ui/tests/*`，共享 fixture 使用 `common.rs` 或 `*_test_support.rs`。
 - Markdown 只由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一解析和缩进，不允许 assistant timeline、tool preview、approval modal 各自维护解析规则。
@@ -1273,7 +1307,7 @@ pub struct ProviderCapabilities {
 
 这意味着 `kernel` 事件流在 phase 1 就要按 TUI 消费习惯设计，而不是先按“stdout 打印一堆日志”来塑形。
 
-当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛字段、bootstrap、顶层 key routing 和跨状态编排；输入焦点、slash selector、modal、setup/config、session/resume、timeline/scrollback、tool card interaction/focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、view model 等 TUI 普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；provider config/status/context-window 这类入口共享 helper 的测试维护在 `crates/sigil-runtime/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 与 runner 状态机测试分别维护在 `crates/sigil-tui/src/runner/*` 和 `runner/tests/*_tests.rs`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
+当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛 bootstrap、顶层 key routing 和跨状态编排；运行状态、composer、approval 和 session browser 字段归入 `crates/sigil-tui/src/app/state.rs`；输入焦点、slash selector、modal、setup/config、session/resume、timeline/scrollback、tool card interaction/focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、view model 等 TUI 普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；provider config/status/context-window 这类入口共享 helper 的测试维护在 `crates/sigil-runtime/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、event/approval bridge、session/compaction flow 与 runner 状态机测试维护在 `crates/sigil-tui/src/runner/*`，worker loop 的 scheduler、active run、queue、MCP/provider refresh、agent/task runtime 和 terminal refresh 维护在 `runner/worker_loop/*`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
 
 主题切换作为 TUI appearance 能力落在 `crates/sigil-tui/src/ui/theme/`，而不是拆成独立 crate。`sigil-kernel` 只承载可序列化的 `AppearanceConfig`、`ThemeId` 和 `[appearance.colors]` 原始字符串；`sigil-tui` 将其解析为 `ThemePalette`，再由 renderer 消费语义 token。内置主题包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。颜色 override 只允许稳定语义 token 和 `#RRGGBB`，用于 TUI 外观，不进入 session/control state、approval 审计、tool payload 或 provider-visible context。`/config` 里的 Appearance draft 会优先供 renderer 解析，让用户在保存前即时预览完整 config palette，包括背景、边框、标题 chip、正文、弱化文字、选中行、状态和提示 token；保存后运行时 config snapshot 更新并重建 timeline render cache，避免旧消息缓存保留旧主题色。
 

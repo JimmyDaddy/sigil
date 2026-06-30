@@ -124,14 +124,14 @@ fn bootstrap_reports_scratch_dir_creation_failure() {
 #[test]
 fn shift_enter_inserts_newline_without_submitting() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "hello".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "hello".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     let timeline_len = app.timeline.len();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))?;
 
     assert!(action.is_none());
-    assert_eq!(app.input, "hello\n");
+    assert_eq!(app.composer.input, "hello\n");
     assert_eq!(app.timeline.len(), timeline_len);
     assert_eq!(app.composer_input_rows(), 2);
     Ok(())
@@ -140,14 +140,14 @@ fn shift_enter_inserts_newline_without_submitting() -> Result<()> {
 #[test]
 fn shifted_line_feed_key_inserts_newline_without_submitting() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "hello".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "hello".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     let timeline_len = app.timeline.len();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::SHIFT))?;
 
     assert!(action.is_none());
-    assert_eq!(app.input, "hello\n");
+    assert_eq!(app.composer.input, "hello\n");
     assert_eq!(app.timeline.len(), timeline_len);
     assert_eq!(app.composer_input_rows(), 2);
     Ok(())
@@ -156,13 +156,13 @@ fn shifted_line_feed_key_inserts_newline_without_submitting() -> Result<()> {
 #[test]
 fn shifted_carriage_return_key_normalizes_to_newline() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "hello".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "hello".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::SHIFT))?;
 
     assert!(action.is_none());
-    assert_eq!(app.input, "hello\n");
+    assert_eq!(app.composer.input, "hello\n");
     assert_eq!(app.composer_input_rows(), 2);
     Ok(())
 }
@@ -174,7 +174,7 @@ fn composer_ignores_non_printing_control_characters() -> Result<()> {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('\u{1b}'), KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     assert_eq!(app.input_cursor_visual_position(), (0, 0));
     Ok(())
 }
@@ -182,8 +182,8 @@ fn composer_ignores_non_printing_control_characters() -> Result<()> {
 #[test]
 fn carriage_return_key_submits_instead_of_entering_invisible_text() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "hello".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "hello".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE))?;
 
@@ -198,19 +198,19 @@ fn carriage_return_key_submits_instead_of_entering_invisible_text() -> Result<()
 fn composer_readline_line_and_character_shortcuts_move_cursor() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_input_and_cursor("first line\nsecond line".to_owned());
-    app.input_cursor = "first line\nsecond".chars().count();
+    app.composer.input_cursor = "first line\nsecond".chars().count();
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input_cursor, "first line\n".chars().count());
+    assert_eq!(app.composer.input_cursor, "first line\n".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.composer.input_cursor, app.input_char_len());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input_cursor, app.input_char_len() - 1);
+    assert_eq!(app.composer.input_cursor, app.input_char_len() - 1);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.composer.input_cursor, app.input_char_len());
     Ok(())
 }
 
@@ -218,17 +218,17 @@ fn composer_readline_line_and_character_shortcuts_move_cursor() -> Result<()> {
 fn composer_delete_shortcuts_handle_characters_and_unicode() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_input_and_cursor("a你b".to_owned());
-    app.input_cursor = 1;
+    app.composer.input_cursor = 1;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
 
-    assert_eq!(app.input, "ab");
-    assert_eq!(app.input_cursor, 1);
+    assert_eq!(app.composer.input, "ab");
+    assert_eq!(app.composer.input_cursor, 1);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL))?;
 
-    assert_eq!(app.input, "b");
-    assert_eq!(app.input_cursor, 0);
+    assert_eq!(app.composer.input, "b");
+    assert_eq!(app.composer.input_cursor, 0);
     Ok(())
 }
 
@@ -238,33 +238,33 @@ fn composer_word_shortcuts_move_delete_and_yank() -> Result<()> {
     app.set_input_and_cursor("alpha beta gamma".to_owned());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT))?;
-    assert_eq!(app.input_cursor, "alpha beta ".chars().count());
+    assert_eq!(app.composer.input_cursor, "alpha beta ".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT))?;
-    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.composer.input_cursor, app.input_char_len());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "alpha beta ");
-    assert_eq!(app.input_cursor, "alpha beta ".chars().count());
+    assert_eq!(app.composer.input, "alpha beta ");
+    assert_eq!(app.composer.input_cursor, "alpha beta ".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "alpha beta gamma");
-    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.composer.input, "alpha beta gamma");
+    assert_eq!(app.composer.input_cursor, app.input_char_len());
 
-    app.input_cursor = 0;
+    app.composer.input_cursor = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL))?;
-    assert_eq!(app.input_cursor, "alpha".chars().count());
+    assert_eq!(app.composer.input_cursor, "alpha".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT))?;
-    assert_eq!(app.input_cursor, "alpha beta".chars().count());
+    assert_eq!(app.composer.input_cursor, "alpha beta".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "alpha  gamma");
-    assert_eq!(app.input_cursor, "alpha ".chars().count());
+    assert_eq!(app.composer.input, "alpha  gamma");
+    assert_eq!(app.composer.input_cursor, "alpha ".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT))?;
-    assert_eq!(app.input, "alpha ");
-    assert_eq!(app.input_cursor, "alpha ".chars().count());
+    assert_eq!(app.composer.input, "alpha ");
+    assert_eq!(app.composer.input_cursor, "alpha ".chars().count());
     Ok(())
 }
 
@@ -272,21 +272,21 @@ fn composer_word_shortcuts_move_delete_and_yank() -> Result<()> {
 fn composer_ctrl_k_kills_to_line_end_and_ctrl_y_yanks() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_input_and_cursor("one\ntwo\nthree".to_owned());
-    app.input_cursor = "one\n".chars().count();
+    app.composer.input_cursor = "one\n".chars().count();
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "one\n\nthree");
-    assert_eq!(app.input_cursor, "one\n".chars().count());
+    assert_eq!(app.composer.input, "one\n\nthree");
+    assert_eq!(app.composer.input_cursor, "one\n".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "one\ntwo\nthree");
-    assert_eq!(app.input_cursor, "one\ntwo".chars().count());
+    assert_eq!(app.composer.input, "one\ntwo\nthree");
+    assert_eq!(app.composer.input_cursor, "one\ntwo".chars().count());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "one\ntwothree");
+    assert_eq!(app.composer.input, "one\ntwothree");
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "one\ntwo");
+    assert_eq!(app.composer.input, "one\ntwo");
     Ok(())
 }
 
@@ -299,7 +299,7 @@ fn composer_ctrl_j_and_alt_enter_insert_newlines() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT))?;
 
-    assert_eq!(app.input, "hello\n\n");
+    assert_eq!(app.composer.input, "hello\n\n");
     assert_eq!(app.timeline.len(), timeline_len);
     assert_eq!(app.composer_input_rows(), 3);
     Ok(())
@@ -313,8 +313,8 @@ fn composer_paste_inserts_multiline_text_without_submitting() {
 
     app.handle_paste_text("one\r\ntwo\rthree");
 
-    assert_eq!(app.input, "prefix one\ntwo\nthree");
-    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.composer.input, "prefix one\ntwo\nthree");
+    assert_eq!(app.composer.input_cursor, app.input_char_len());
     assert_eq!(app.timeline.len(), timeline_len);
     assert_eq!(app.composer_input_rows(), 3);
 }
@@ -328,7 +328,7 @@ fn large_composer_paste_collapses_display_but_submits_full_text() -> Result<()> 
     app.handle_paste_text(&pasted);
 
     let view_model = crate::view_model::UiViewModel::from_app(&app);
-    assert_eq!(app.input, pasted);
+    assert_eq!(app.composer.input, pasted);
     assert!(view_model.composer.input.contains("[Pasted text #1:"));
     assert!(!view_model.composer.input.contains(&"x".repeat(80)));
     assert!(view_model.composer.input_rows < 3);
@@ -454,22 +454,22 @@ fn config_field_paste_updates_selected_text_without_submitting() {
 fn paste_empty_pending_and_collapsed_cursor_edges_are_noops_or_bounded() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_paste_text("");
-    assert_eq!(app.input, "");
+    assert_eq!(app.composer.input, "");
 
     inject_write_file_approval(&mut app, sample_approval_preview())
         .expect("approval should inject");
     app.handle_paste_text("ignored");
-    assert_eq!(app.input, "");
-    app.pending_approval = None;
+    assert_eq!(app.composer.input, "");
+    app.approval.pending = None;
 
     let pasted = "x".repeat(10_000);
     app.handle_paste_text(&pasted);
-    app.input_cursor = 1;
+    app.composer.input_cursor = 1;
     let display = app.composer_display_input();
     assert!(display.contains("[Pasted text #1:"));
     assert!(app.input_cursor_visual_position().0 > 0);
 
-    app.input_paste_spans[0].end = pasted.len() + 1;
+    app.composer.input_paste_spans[0].end = pasted.len() + 1;
     let display = app.composer_display_input();
     assert_eq!(display, pasted);
 }
@@ -481,22 +481,22 @@ fn composer_ctrl_z_restores_last_esc_cleared_draft_once() -> Result<()> {
 
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
-    assert!(app.input.is_empty());
-    assert_eq!(app.input_cursor, 0);
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer.input_cursor, 0);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))?;
 
-    assert_eq!(app.input, "draft text");
-    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.composer.input, "draft text");
+    assert_eq!(app.composer.input_cursor, app.input_char_len());
     assert_eq!(app.last_notice(), Some("draft restored"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))?;
 
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     Ok(())
 }
 
@@ -511,18 +511,18 @@ fn composer_input_edges_ignore_empty_and_boundary_operations() {
     app.remove_input_word_after_cursor();
     app.kill_input_to_line_end();
     app.yank_input_kill_buffer();
-    assert!(app.input.is_empty());
-    assert_eq!(app.input_cursor, 0);
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer.input_cursor, 0);
 
     app.set_input_and_cursor("alpha".to_owned());
     app.restore_cleared_input_draft();
-    assert_eq!(app.input, "alpha");
-    app.input_cursor = 0;
+    assert_eq!(app.composer.input, "alpha");
+    app.composer.input_cursor = 0;
     app.remove_input_word_before_cursor();
-    assert_eq!(app.input, "alpha");
-    app.input_cursor = app.input_char_len();
+    assert_eq!(app.composer.input, "alpha");
+    app.composer.input_cursor = app.input_char_len();
     app.remove_input_word_after_cursor();
-    assert_eq!(app.input, "alpha");
+    assert_eq!(app.composer.input, "alpha");
 }
 
 #[test]
@@ -558,7 +558,7 @@ fn input_history_persists_and_loads_when_test_flag_is_enabled() -> Result<()> {
     restored.load_input_history();
 
     assert_eq!(
-        restored.input_history,
+        restored.composer.input_history,
         vec!["first prompt".to_owned(), "second prompt".to_owned()]
     );
     Ok(())
@@ -570,8 +570,8 @@ fn composer_alt_modified_non_ascii_text_still_inserts() -> Result<()> {
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('æ'), KeyModifiers::ALT))?;
 
-    assert_eq!(app.input, "æ");
-    assert_eq!(app.input_cursor, 1);
+    assert_eq!(app.composer.input, "æ");
+    assert_eq!(app.composer.input_cursor, 1);
     Ok(())
 }
 
@@ -583,8 +583,8 @@ fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
     ] {
         let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
         app.sync_current_session_state(vec![task_run_entry(status)?]);
-        app.input = "new question".to_owned();
-        app.input_cursor = app.input.chars().count();
+        app.composer.input = "new question".to_owned();
+        app.composer.input_cursor = app.composer.input.chars().count();
 
         let action = app.submit_input()?;
 
@@ -600,9 +600,9 @@ fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
 #[test]
 fn busy_plain_prompt_queues_without_persisting_user_timeline() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.is_busy = true;
-    app.input = "follow up after this finishes".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.runtime.is_busy = true;
+    app.composer.input = "follow up after this finishes".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     let action = app.submit_input()?;
 
@@ -614,7 +614,7 @@ fn busy_plain_prompt_queues_without_persisting_user_timeline() -> Result<()> {
             target: sigil_kernel::ConversationInputTarget::MainThread,
         }) if prompt == "follow up after this finishes"
     ));
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     assert_eq!(app.last_notice(), Some("queued for next turn"));
     assert!(
         !app.timeline
@@ -765,7 +765,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
 fn queue_flow_empty_and_direct_actions_cover_boundaries() -> Result<()> {
     let mut empty_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     assert_eq!(empty_app.queue_strip_rows(), 0);
-    empty_app.composer_queue_panel_focused = true;
+    empty_app.composer.queue_panel_focused = true;
     assert!(!empty_app.move_composer_queue_selection(true));
     assert!(!empty_app.is_composer_queue_panel_focused());
     assert!(empty_app.execute_queue_slash_command("")?.is_none());
@@ -782,21 +782,24 @@ fn queue_flow_empty_and_direct_actions_cover_boundaries() -> Result<()> {
     ]);
     assert_eq!(app.queue_strip_rows(), 5);
     assert!(app.focus_composer_queue_panel());
-    app.composer_queue_selected = 1;
+    app.composer.queue_selected = 1;
     assert!(app.move_composer_queue_selection(false));
-    assert_eq!(app.composer_queue_selected, 0);
+    assert_eq!(app.composer.queue_selected, 0);
 
-    app.composer_queue_action_selected = ComposerQueueAction::Edit;
+    app.composer.queue_action_selected = ComposerQueueAction::Edit;
     assert!(app.execute_selected_queue_action().is_none());
     assert_eq!(
-        app.queue_edit_target.as_ref().map(|id| id.as_str()),
+        app.composer
+            .queue_edit_target
+            .as_ref()
+            .map(|id| id.as_str()),
         Some("queue_1")
     );
-    assert_eq!(app.input, "\nfirst queued prompt");
+    assert_eq!(app.composer.input, "\nfirst queued prompt");
     assert!(app.cancel_queue_edit());
 
-    app.composer_queue_panel_focused = true;
-    app.composer_queue_action_selected = ComposerQueueAction::Delete;
+    app.composer.queue_panel_focused = true;
+    app.composer.queue_action_selected = ComposerQueueAction::Delete;
     let delete = app.execute_selected_queue_action();
     assert!(matches!(
         delete,
@@ -804,9 +807,9 @@ fn queue_flow_empty_and_direct_actions_cover_boundaries() -> Result<()> {
             if queue_id.as_str() == "queue_1"
     ));
 
-    app.queue_edit_target = Some(sigil_kernel::ConversationInputQueueId::new("missing")?);
+    app.composer.queue_edit_target = Some(sigil_kernel::ConversationInputQueueId::new("missing")?);
     app.refresh_conversation_queue_selection();
-    assert!(app.queue_edit_target.is_none());
+    assert!(app.composer.queue_edit_target.is_none());
     Ok(())
 }
 
@@ -818,21 +821,21 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         queued_conversation_input_entry("queue_2", "second queued prompt")?,
     ]);
 
-    app.input = "/queue pause".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue pause".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     let pause = app.submit_input()?;
     assert!(matches!(
         pause,
         Some(AppAction::SetConversationQueuePaused { paused: true })
     ));
 
-    app.input = "/queue show".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue show".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     assert!(app.submit_input()?.is_none());
     assert!(app.is_composer_queue_panel_focused());
 
-    app.input = "/queue next 2".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue next 2".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     let next = app.submit_input()?;
     assert!(matches!(
         next,
@@ -840,8 +843,8 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
             if queue_id.as_str() == "queue_2"
     ));
 
-    app.input = "/queue now 2".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue now 2".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     let now = app.submit_input()?;
     assert!(matches!(
         now,
@@ -849,8 +852,8 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
             if queue_id.as_str() == "queue_2"
     ));
 
-    app.input = "/queue delete second".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue delete second".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     let delete = app.submit_input()?;
     assert!(matches!(
         delete,
@@ -858,13 +861,13 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
             if queue_id.as_str() == "queue_2"
     ));
 
-    app.input = "/queue edit 2".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue edit 2".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     assert!(app.submit_input()?.is_none());
-    assert_eq!(app.input, "second queued prompt");
+    assert_eq!(app.composer.input, "second queued prompt");
 
-    app.input = "updated queued prompt".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "updated queued prompt".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     let edit = app.submit_input()?;
     assert!(matches!(
         edit,
@@ -882,8 +885,8 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         "/queue send 1",
         "/queue send-now 1",
     ] {
-        app.input = command.to_owned();
-        app.input_cursor = app.input.chars().count();
+        app.composer.input = command.to_owned();
+        app.composer.input_cursor = app.composer.input.chars().count();
         assert!(app.submit_input()?.is_some());
     }
     for command in [
@@ -892,16 +895,16 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         "/queue up 2",
         "/queue down 2",
     ] {
-        app.input = command.to_owned();
-        app.input_cursor = app.input.chars().count();
+        app.composer.input = command.to_owned();
+        app.composer.input_cursor = app.composer.input.chars().count();
         assert!(app.submit_input()?.is_some());
     }
-    app.input = "/queue now missing".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue now missing".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     assert!(app.submit_input()?.is_none());
     assert_eq!(app.last_notice(), Some("queue item not found"));
-    app.input = "/queue nonsense".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue nonsense".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     assert!(app.submit_input()?.is_none());
     assert_eq!(
         app.last_notice(),
@@ -917,19 +920,22 @@ fn queue_edit_escape_cancels_without_submitting() -> Result<()> {
         "queue_1",
         "queued prompt",
     )?]);
-    app.input = "/queue edit 1".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue edit 1".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
     assert!(app.submit_input()?.is_none());
     assert_eq!(
-        app.queue_edit_target.as_ref().map(|id| id.as_str()),
+        app.composer
+            .queue_edit_target
+            .as_ref()
+            .map(|id| id.as_str()),
         Some("queue_1")
     );
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert!(app.queue_edit_target.is_none());
-    assert!(app.input.is_empty());
+    assert!(app.composer.queue_edit_target.is_none());
+    assert!(app.composer.input.is_empty());
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.last_notice(), Some("queue edit cancelled"));
     Ok(())
@@ -942,8 +948,8 @@ fn agent_message_command_reports_unavailable_child_view_without_thread_id() -> R
         child_task_id: "orphan_child".to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative("children/orphan.jsonl")?,
     };
-    app.input = "/agent message current hello".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/agent message current hello".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     let action = app.submit_input()?;
 
@@ -959,7 +965,7 @@ fn agent_message_command_reports_unavailable_child_view_without_thread_id() -> R
 fn composer_agent_panel_missing_selection_rejects_message_and_close() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
-    app.composer_agent_panel_focused = true;
+    app.composer.agent_panel_focused = true;
     app.sidebar_agent_selected = usize::MAX;
 
     let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
@@ -976,8 +982,8 @@ fn composer_agent_panel_missing_selection_rejects_message_and_close() -> Result<
 fn agent_message_command_rejects_empty_prompt() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
-    app.input = "/agent message child_1    ".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/agent message child_1    ".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     let action = app.submit_input()?;
 
@@ -996,8 +1002,8 @@ fn queue_slash_selector_exposes_next_turn_language() -> Result<()> {
         "queue_1",
         "first queued prompt",
     )?]);
-    app.input = "/queue ".to_owned();
-    app.input_cursor = app.input.chars().count();
+    app.composer.input = "/queue ".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     let rows = app.slash_selector_rows();
 
@@ -1025,8 +1031,8 @@ fn plain_prompt_with_unfinished_task_starts_new_chat() -> Result<()> {
     ] {
         let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
         app.sync_current_session_state(vec![task_run_entry(status)?]);
-        app.input = "continue with the review".to_owned();
-        app.input_cursor = app.input.chars().count();
+        app.composer.input = "continue with the review".to_owned();
+        app.composer.input_cursor = app.composer.input.chars().count();
 
         let action = app.submit_input()?;
 
@@ -1046,16 +1052,16 @@ fn composer_up_down_navigates_history_when_input_is_empty_without_scrolling() ->
     for index in 0..8 {
         app.push_timeline(TimelineRole::Assistant, format!("message {index}"));
     }
-    app.input_history = vec!["first".to_owned(), "second".to_owned()];
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input_history = vec!["first".to_owned(), "second".to_owned()];
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "second");
+    assert_eq!(app.composer.input, "second");
     assert_eq!(app.timeline_scroll_back, 0);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     assert_eq!(app.timeline_scroll_back, 0);
     Ok(())
 }
@@ -1067,13 +1073,13 @@ fn composer_up_down_without_history_do_not_scroll_transcript() -> Result<()> {
     for index in 0..8 {
         app.push_timeline(TimelineRole::Assistant, format!("message {index}"));
     }
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     assert_eq!(app.timeline_scroll_back, 0);
     Ok(())
 }
@@ -1081,52 +1087,52 @@ fn composer_up_down_without_history_do_not_scroll_transcript() -> Result<()> {
 #[test]
 fn ctrl_p_and_ctrl_n_navigate_prompt_history() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input_history = vec!["first".to_owned(), "second".to_owned()];
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input_history = vec!["first".to_owned(), "second".to_owned()];
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.input, "second");
+    assert_eq!(app.composer.input, "second");
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     Ok(())
 }
 
 #[test]
 fn composer_up_down_navigates_input_history() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "first".to_owned();
+    app.composer.input = "first".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "first"
     ));
-    app.is_busy = false;
+    app.runtime.is_busy = false;
 
-    app.input = "second".to_owned();
+    app.composer.input = "second".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "second"
     ));
-    app.is_busy = false;
+    app.runtime.is_busy = false;
 
-    app.input = "draft".to_owned();
+    app.composer.input = "draft".to_owned();
     app.active_pane = PaneFocus::Composer;
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "second");
+    assert_eq!(app.composer.input, "second");
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "first");
+    assert_eq!(app.composer.input, "first");
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "second");
+    assert_eq!(app.composer.input, "second");
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "draft");
+    assert_eq!(app.composer.input, "draft");
     Ok(())
 }
 
 #[test]
 fn composer_history_navigation_continues_past_slash_entries() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input_history = vec![
+    app.composer.input_history = vec![
         "earlier prompt".to_owned(),
         "/quit".to_owned(),
         "latest prompt".to_owned(),
@@ -1135,19 +1141,19 @@ fn composer_history_navigation_continues_past_slash_entries() -> Result<()> {
     app.set_input_and_cursor(String::new());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "latest prompt");
+    assert_eq!(app.composer.input, "latest prompt");
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "/quit");
+    assert_eq!(app.composer.input, "/quit");
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "earlier prompt");
+    assert_eq!(app.composer.input, "earlier prompt");
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "/quit");
+    assert_eq!(app.composer.input, "/quit");
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "latest prompt");
+    assert_eq!(app.composer.input, "latest prompt");
     Ok(())
 }
 
@@ -1155,78 +1161,78 @@ fn composer_history_navigation_continues_past_slash_entries() -> Result<()> {
 fn input_history_does_not_record_session_control_commands() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
-    app.input = "/quit".to_owned();
+    app.composer.input = "/quit".to_owned();
     assert!(app.submit_input()?.is_none());
     app.should_quit = false;
 
-    app.input = "/new".to_owned();
+    app.composer.input = "/new".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::StartNewSession { .. })
     ));
 
-    app.input = "normal prompt".to_owned();
+    app.composer.input = "normal prompt".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "normal prompt"
     ));
 
-    assert_eq!(app.input_history, vec!["normal prompt".to_owned()]);
+    assert_eq!(app.composer.input_history, vec!["normal prompt".to_owned()]);
     Ok(())
 }
 
 #[test]
 fn composer_up_inside_wrapped_input_moves_cursor_before_history() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "first".to_owned();
+    app.composer.input = "first".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "first"
     ));
-    app.is_busy = false;
+    app.runtime.is_busy = false;
 
     app.active_pane = PaneFocus::Composer;
     app.set_terminal_size(96, 20);
-    app.input = "draft".repeat(20);
-    app.input_cursor = 70;
+    app.composer.input = "draft".repeat(20);
+    app.composer.input_cursor = 70;
     assert!(app.input_cursor_visual_position().1 > 0);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
 
-    assert_eq!(app.input, "draft".repeat(20));
+    assert_eq!(app.composer.input, "draft".repeat(20));
     assert_eq!(app.input_cursor_visual_position().1, 0);
-    assert_eq!(app.input_history_index, None);
+    assert_eq!(app.composer.input_history_index, None);
     Ok(())
 }
 
 #[test]
 fn composer_down_at_bottom_row_navigates_history() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "first".to_owned();
+    app.composer.input = "first".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "first"
     ));
-    app.is_busy = false;
+    app.runtime.is_busy = false;
 
-    app.input = "second".to_owned();
+    app.composer.input = "second".to_owned();
     assert!(matches!(
         app.submit_input()?,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "second"
     ));
-    app.is_busy = false;
+    app.runtime.is_busy = false;
 
     app.active_pane = PaneFocus::Composer;
     app.set_terminal_size(6, 20);
-    app.input = "draft123".to_owned();
-    app.input_cursor = 1;
+    app.composer.input = "draft123".to_owned();
+    app.composer.input_cursor = 1;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "second");
-    app.input_cursor = app.input.chars().count();
+    assert_eq!(app.composer.input, "second");
+    app.composer.input_cursor = app.composer.input.chars().count();
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "draft123");
+    assert_eq!(app.composer.input, "draft123");
     Ok(())
 }
 
@@ -1235,15 +1241,15 @@ fn composer_down_prefers_history_navigation_before_agent_panel_focus() -> Result
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     app.active_pane = PaneFocus::Composer;
-    app.input_history = vec!["first".to_owned(), "second".to_owned()];
+    app.composer.input_history = vec!["first".to_owned(), "second".to_owned()];
     app.set_input_and_cursor("draft".to_owned());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "second");
+    assert_eq!(app.composer.input, "second");
     assert!(!app.is_composer_agent_panel_focused());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.input, "draft");
+    assert_eq!(app.composer.input, "draft");
     assert!(!app.is_composer_agent_panel_focused());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -1256,8 +1262,8 @@ fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     app.active_pane = PaneFocus::Composer;
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
@@ -1282,8 +1288,8 @@ fn composer_agent_panel_message_key_prefills_agent_message_command() -> Result<(
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     app.active_pane = PaneFocus::Composer;
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -1292,8 +1298,11 @@ fn composer_agent_panel_message_key_prefills_agent_message_command() -> Result<(
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert_eq!(app.input, "/agent message child_1 ");
-    assert_eq!(app.input_cursor, app.input.chars().count());
+    assert_eq!(app.composer.input, "/agent message child_1 ");
+    assert_eq!(
+        app.composer.input_cursor,
+        app.composer.input.chars().count()
+    );
     assert!(!app.is_composer_agent_panel_focused());
     assert_eq!(app.last_notice(), Some("compose agent message: child_1"));
     Ok(())
@@ -1304,8 +1313,8 @@ fn composer_agent_panel_main_row_rejects_close_and_message_actions() -> Result<(
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     app.active_pane = PaneFocus::Composer;
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_agent_selected, 0);
@@ -1320,7 +1329,7 @@ fn composer_agent_panel_main_row_rejects_close_and_message_actions() -> Result<(
         app.last_notice(),
         Some("agent message unavailable for main")
     );
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     assert!(app.is_composer_agent_panel_focused());
     Ok(())
 }
@@ -1330,8 +1339,8 @@ fn composer_agent_panel_close_key_requests_selected_terminal_agent_close() -> Re
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     app.active_pane = PaneFocus::Composer;
-    app.input.clear();
-    app.input_cursor = 0;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -1379,7 +1388,7 @@ fn composer_down_moves_wrapped_input_before_agent_panel_focus() -> Result<()> {
     app.active_pane = PaneFocus::Composer;
     app.set_terminal_size(96, 20);
     app.set_input_and_cursor("draft".repeat(20));
-    app.input_cursor = 0;
+    app.composer.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
@@ -1401,15 +1410,15 @@ fn composer_agent_panel_up_and_escape_return_to_input() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(!app.is_composer_agent_panel_focused());
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     Ok(())
 }
 
 #[test]
 fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.is_busy = true;
-    app.input = "queued".to_owned();
+    app.runtime.is_busy = true;
+    app.composer.input = "queued".to_owned();
 
     let action = app.submit_input()?;
 
@@ -1421,7 +1430,7 @@ fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
             target: sigil_kernel::ConversationInputTarget::MainThread,
         }) if prompt == "queued"
     ));
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     assert!(
         app.timeline
             .iter()
@@ -1440,21 +1449,21 @@ fn input_history_is_capped_at_one_hundred_entries() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     for index in 0..101 {
-        app.input = format!("prompt {index}");
+        app.composer.input = format!("prompt {index}");
         assert!(matches!(
             app.submit_input()?,
             Some(AppAction::SubmitPrompt(prompt)) if prompt == format!("prompt {index}")
         ));
-        app.is_busy = false;
+        app.runtime.is_busy = false;
     }
 
-    assert_eq!(app.input_history.len(), 100);
+    assert_eq!(app.composer.input_history.len(), 100);
     assert_eq!(
-        app.input_history.first().map(String::as_str),
+        app.composer.input_history.first().map(String::as_str),
         Some("prompt 1")
     );
     assert_eq!(
-        app.input_history.last().map(String::as_str),
+        app.composer.input_history.last().map(String::as_str),
         Some("prompt 100")
     );
     Ok(())
@@ -1472,42 +1481,42 @@ fn input_helpers_edit_and_navigate_multiline_text() {
     assert_eq!(app.visual_position_for_cursor(5, 4), (1, 2));
     assert_eq!(app.cursor_for_visual_position(1, 1, 4), 4);
 
-    app.input_cursor = usize::MAX;
+    app.composer.input_cursor = usize::MAX;
     app.clamp_input_cursor();
-    assert_eq!(app.input_cursor, 5);
+    assert_eq!(app.composer.input_cursor, 5);
 
     app.move_input_cursor_home();
-    assert_eq!(app.input_cursor, 0);
+    assert_eq!(app.composer.input_cursor, 0);
     assert!(!app.move_input_cursor_vertical(true));
 
     app.remove_input_character_before_cursor();
-    assert_eq!(app.input, "ab\ncd");
+    assert_eq!(app.composer.input, "ab\ncd");
 
     app.move_input_cursor_right();
     app.insert_input_character('X');
-    assert_eq!(app.input, "aXb\ncd");
-    assert_eq!(app.input_cursor, 2);
+    assert_eq!(app.composer.input, "aXb\ncd");
+    assert_eq!(app.composer.input_cursor, 2);
 
     app.remove_input_character_before_cursor();
-    assert_eq!(app.input, "ab\ncd");
+    assert_eq!(app.composer.input, "ab\ncd");
 
     app.move_input_cursor_end();
     assert_eq!(app.input_cursor_visual_row(), 1);
     assert!(app.move_input_cursor_vertical(true));
-    assert_eq!(app.input_cursor, 2);
+    assert_eq!(app.composer.input_cursor, 2);
     assert!(app.move_input_cursor_vertical(false));
-    assert_eq!(app.input_cursor, 5);
+    assert_eq!(app.composer.input_cursor, 5);
     assert!(!app.move_input_cursor_vertical(false));
 
     app.move_input_cursor_left();
     app.move_input_cursor_left();
-    assert_eq!(app.input_cursor, 3);
+    assert_eq!(app.composer.input_cursor, 3);
     app.move_input_cursor_home();
     app.move_input_cursor_left();
-    assert_eq!(app.input_cursor, 0);
+    assert_eq!(app.composer.input_cursor, 0);
     app.move_input_cursor_end();
     app.move_input_cursor_right();
-    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.composer.input_cursor, app.input_char_len());
 }
 
 #[test]
@@ -1516,32 +1525,32 @@ fn input_history_recording_deduplicates_caps_and_restores_draft() {
     for index in 0..=100 {
         app.record_input_history(format!("prompt-{index}"));
     }
-    assert_eq!(app.input_history.len(), 100);
+    assert_eq!(app.composer.input_history.len(), 100);
     assert_eq!(
-        app.input_history.first().map(String::as_str),
+        app.composer.input_history.first().map(String::as_str),
         Some("prompt-1")
     );
 
     app.record_input_history("prompt-100".to_owned());
-    assert_eq!(app.input_history.len(), 100);
+    assert_eq!(app.composer.input_history.len(), 100);
 
-    app.input = "draft".to_owned();
+    app.composer.input = "draft".to_owned();
     app.navigate_input_history(true);
-    assert_eq!(app.input, "prompt-100");
+    assert_eq!(app.composer.input, "prompt-100");
 
     for _ in 0..200 {
         app.navigate_input_history(true);
     }
-    assert_eq!(app.input, "prompt-1");
-    assert_eq!(app.input_history_index, Some(0));
+    assert_eq!(app.composer.input, "prompt-1");
+    assert_eq!(app.composer.input_history_index, Some(0));
 
     app.navigate_input_history(true);
-    assert_eq!(app.input, "prompt-1");
+    assert_eq!(app.composer.input, "prompt-1");
 
     for _ in 0..200 {
         app.navigate_input_history(false);
     }
-    assert_eq!(app.input, "draft");
-    assert_eq!(app.input_history_index, None);
-    assert_eq!(app.input_history_draft, None);
+    assert_eq!(app.composer.input, "draft");
+    assert_eq!(app.composer.input_history_index, None);
+    assert_eq!(app.composer.input_history_draft, None);
 }

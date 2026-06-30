@@ -69,12 +69,12 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
             .any(|span| span.content.as_ref().contains("src/lib.rs"))
     }));
 
-    app.input = "draft".to_owned();
+    app.composer.input = "draft".to_owned();
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
-    assert_eq!(app.input, "draft");
+    assert_eq!(app.composer.input, "draft");
     assert_eq!(app.selected_tool_activity_key, Some(first_key.clone()));
 
-    app.input.clear();
+    app.composer.input.clear();
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert_eq!(app.selected_tool_activity_key, None);
     assert_eq!(app.last_notice(), Some("activity focus cleared"));

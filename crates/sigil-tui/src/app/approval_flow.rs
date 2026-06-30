@@ -12,13 +12,13 @@ use super::{
 
 impl AppState {
     pub fn approval_preview_lines(&self) -> Vec<String> {
-        let Some(pending) = &self.pending_approval else {
+        let Some(pending) = &self.approval.pending else {
             return self.session_view_lines();
         };
 
         let mut lines = Vec::new();
         if let Some(preview) = &pending.preview {
-            if !self.approval_metadata_collapsed {
+            if !self.approval.metadata_collapsed {
                 lines.push(format!(
                     "tool={}  id={}  mode={}",
                     pending.call.name,
@@ -48,13 +48,14 @@ impl AppState {
             if !preview.file_diffs.is_empty() {
                 lines.push(format!(
                     "file {}/{}",
-                    self.approval_selected_file_index
+                    self.approval
+                        .selected_file_index
                         .min(preview.file_diffs.len() - 1)
                         + 1,
                     preview.file_diffs.len()
                 ));
                 for (index, file) in preview.file_diffs.iter().enumerate() {
-                    let selected = if index == self.approval_selected_file_index {
+                    let selected = if index == self.approval.selected_file_index {
                         ">"
                     } else {
                         " "
@@ -72,20 +73,20 @@ impl AppState {
                 .unwrap_or(preview.body.as_str());
             let diff = self.transform_approval_diff(diff);
             let hunk_positions = self.approval_hunk_positions();
-            let active_hunk_line = match self.approval_diff_mode {
+            let active_hunk_line = match self.approval.diff_mode {
                 ApprovalDiffMode::Full => hunk_positions
-                    .get(self.approval_selected_hunk_index)
+                    .get(self.approval.selected_hunk_index)
                     .copied()
                     .unwrap_or(usize::MAX),
                 ApprovalDiffMode::CurrentHunk | ApprovalDiffMode::ChangedOnly => 0,
             };
             lines.push(format!(
                 "mode={}  hunk {}/{}  [,] hunk  ,/. file  m meta  v view",
-                self.approval_diff_mode.label(),
+                self.approval.diff_mode.label(),
                 if hunk_positions.is_empty() {
                     0
                 } else {
-                    self.approval_selected_hunk_index + 1
+                    self.approval.selected_hunk_index + 1
                 },
                 hunk_positions.len()
             ));
@@ -134,7 +135,7 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> Option<Option<AppAction>> {
-        if let Some(pending) = &self.pending_approval {
+        if let Some(pending) = &self.approval.pending {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     return Some(Some(AppAction::ApprovalDecision {
@@ -162,14 +163,14 @@ impl AppState {
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     return Some(Some(AppAction::ApprovalDecision {
                         call_id: pending.call.id.clone(),
-                        approved: self.approval_selected_action.approved(),
+                        approved: self.approval.selected_action.approved(),
                     }));
                 }
                 _ => {}
             }
         }
 
-        if self.pending_approval.is_none() || key.modifiers.contains(KeyModifiers::CONTROL) {
+        if self.approval.pending.is_none() || key.modifiers.contains(KeyModifiers::CONTROL) {
             return None;
         }
 
@@ -206,10 +207,10 @@ impl AppState {
                 Some(None)
             }
             KeyCode::Left | KeyCode::Right => {
-                self.approval_selected_action = self.approval_selected_action.toggled();
+                self.approval.selected_action = self.approval.selected_action.toggled();
                 self.push_event(
                     "approval:action",
-                    if self.approval_selected_action.approved() {
+                    if self.approval.selected_action.approved() {
                         "allow"
                     } else {
                         "deny"
@@ -251,7 +252,7 @@ impl AppState {
     }
 
     pub(crate) fn approval_modal_view(&self) -> Option<ApprovalModalView> {
-        let pending = self.pending_approval.as_ref()?;
+        let pending = self.approval.pending.as_ref()?;
         let access_label = approval_access_label(&pending.spec);
         let source_agent = self.pending_approval_source_agent(&pending.call.id);
         let Some(preview) = pending.preview.as_ref() else {
@@ -264,10 +265,10 @@ impl AppState {
                 preview_summary: approval_subject_summary(&pending.subjects)
                     .unwrap_or_else(|| "Tool preview unavailable for this call.".to_owned()),
                 change_set: None,
-                metadata_collapsed: self.approval_metadata_collapsed,
+                metadata_collapsed: self.approval.metadata_collapsed,
                 file_rows: Vec::new(),
                 changed_files: Vec::new(),
-                diff_mode_label: self.approval_diff_mode.label(),
+                diff_mode_label: self.approval.diff_mode.label(),
                 active_hunk_index: 0,
                 hunk_total: 0,
                 diff_label: pending.call.name.clone(),
@@ -276,7 +277,7 @@ impl AppState {
                     kind: ApprovalDiffLineKind::Context,
                     active_hunk: false,
                 }],
-                selected_action: self.approval_selected_action,
+                selected_action: self.approval.selected_action,
             });
         };
 
@@ -292,13 +293,14 @@ impl AppState {
         let active_hunk_index = if hunk_positions.is_empty() {
             0
         } else {
-            self.approval_selected_hunk_index
+            self.approval
+                .selected_hunk_index
                 .min(hunk_positions.len() - 1)
                 + 1
         };
-        let active_hunk_line = match self.approval_diff_mode {
+        let active_hunk_line = match self.approval.diff_mode {
             ApprovalDiffMode::Full => hunk_positions
-                .get(self.approval_selected_hunk_index)
+                .get(self.approval.selected_hunk_index)
                 .copied()
                 .unwrap_or(usize::MAX),
             ApprovalDiffMode::CurrentHunk | ApprovalDiffMode::ChangedOnly => transformed_lines
@@ -337,7 +339,7 @@ impl AppState {
                         .get(&normalize_approval_diagnostic_path(&file.path))
                         .map(|metadata| metadata.risk.clone()),
                     path: file.path.clone(),
-                    selected: index == self.approval_selected_file_index,
+                    selected: index == self.approval.selected_file_index,
                     diagnostics: self.approval_diagnostics_for_path(&file.path),
                 })
                 .collect()
@@ -354,7 +356,7 @@ impl AppState {
                         .get(&normalize_approval_diagnostic_path(path))
                         .map(|metadata| metadata.risk.clone()),
                     path: path.clone(),
-                    selected: index == self.approval_selected_file_index,
+                    selected: index == self.approval.selected_file_index,
                     diagnostics: self.approval_diagnostics_for_path(path),
                 })
                 .collect()
@@ -375,39 +377,42 @@ impl AppState {
             preview_title: preview.title.clone(),
             preview_summary: preview.summary.clone(),
             change_set,
-            metadata_collapsed: self.approval_metadata_collapsed,
+            metadata_collapsed: self.approval.metadata_collapsed,
             file_rows,
             changed_files: preview.changed_files.clone(),
-            diff_mode_label: self.approval_diff_mode.label(),
+            diff_mode_label: self.approval.diff_mode.label(),
             active_hunk_index,
             hunk_total: hunk_positions.len(),
             diff_label,
             diff_lines,
-            selected_action: self.approval_selected_action,
+            selected_action: self.approval.selected_action,
         })
     }
 
     fn selected_approval_diff(&self) -> Option<&str> {
         let preview = self
-            .pending_approval
+            .approval
+            .pending
             .as_ref()
             .and_then(|pending| pending.preview.as_ref())?;
         preview
             .file_diffs
-            .get(self.approval_selected_file_index)
+            .get(self.approval.selected_file_index)
             .map(|file| file.diff.as_str())
             .or_else(|| (!preview.body.is_empty()).then_some(preview.body.as_str()))
     }
 
     fn approval_diagnostics_for_path(&self, path: &str) -> Option<ApprovalDiagnosticSummary> {
-        self.code_intelligence_diagnostics_by_path
+        self.runtime
+            .code_intelligence_diagnostics_by_path
             .get(&normalize_approval_diagnostic_path(path))
             .copied()
     }
 
     fn pending_approval_source_agent(&self, call_id: &str) -> Option<String> {
-        let projection =
-            sigil_kernel::AgentThreadStateProjection::from_entries(&self.current_session_entries);
+        let projection = sigil_kernel::AgentThreadStateProjection::from_entries(
+            &self.session_browser.current_entries,
+        );
         let route = projection
             .approval_routes
             .values()
@@ -446,7 +451,7 @@ impl AppState {
     }
 
     fn transform_approval_diff(&self, diff: &str) -> String {
-        match self.approval_diff_mode {
+        match self.approval.diff_mode {
             ApprovalDiffMode::Full => diff.to_owned(),
             ApprovalDiffMode::CurrentHunk => self.extract_current_hunk(diff),
             ApprovalDiffMode::ChangedOnly => self.extract_changed_only(diff),
@@ -460,7 +465,8 @@ impl AppState {
             return diff.to_owned();
         }
         let hunk_index = self
-            .approval_selected_hunk_index
+            .approval
+            .selected_hunk_index
             .min(hunk_positions.len().saturating_sub(1));
         let start = hunk_positions[hunk_index];
         let end = hunk_positions
@@ -492,14 +498,14 @@ impl AppState {
     }
 
     pub(super) fn toggle_approval_metadata(&mut self) -> bool {
-        if self.pending_approval.is_none() {
+        if self.approval.pending.is_none() {
             return false;
         }
-        self.approval_metadata_collapsed = !self.approval_metadata_collapsed;
-        self.approval_scroll_back = 0;
+        self.approval.metadata_collapsed = !self.approval.metadata_collapsed;
+        self.approval.scroll_back = 0;
         self.push_event(
             "approval:view",
-            if self.approval_metadata_collapsed {
+            if self.approval.metadata_collapsed {
                 "metadata collapsed"
             } else {
                 "metadata expanded"
@@ -509,12 +515,12 @@ impl AppState {
     }
 
     pub(super) fn cycle_approval_diff_mode(&mut self) -> bool {
-        if self.pending_approval.is_none() {
+        if self.approval.pending.is_none() {
             return false;
         }
-        self.approval_diff_mode = self.approval_diff_mode.next();
-        self.approval_scroll_back = 0;
-        self.push_event("approval:view", self.approval_diff_mode.label());
+        self.approval.diff_mode = self.approval.diff_mode.next();
+        self.approval.scroll_back = 0;
+        self.push_event("approval:view", self.approval.diff_mode.label());
         true
     }
 
@@ -523,23 +529,24 @@ impl AppState {
         if hunk_positions.is_empty() {
             return false;
         }
-        let previous_index = self.approval_selected_hunk_index;
+        let previous_index = self.approval.selected_hunk_index;
         let next_index = if next {
-            (self.approval_selected_hunk_index + 1).min(hunk_positions.len() - 1)
+            (self.approval.selected_hunk_index + 1).min(hunk_positions.len() - 1)
         } else {
-            self.approval_selected_hunk_index.saturating_sub(1)
+            self.approval.selected_hunk_index.saturating_sub(1)
         };
         if next_index == previous_index {
             return false;
         }
-        self.approval_selected_hunk_index = next_index;
-        self.approval_scroll_back = hunk_positions[self.approval_selected_hunk_index];
+        self.approval.selected_hunk_index = next_index;
+        self.approval.scroll_back = hunk_positions[self.approval.selected_hunk_index];
         true
     }
 
     pub(super) fn switch_approval_file(&mut self, next: bool) -> bool {
         let Some(preview) = self
-            .pending_approval
+            .approval
+            .pending
             .as_ref()
             .and_then(|pending| pending.preview.as_ref())
         else {
@@ -549,16 +556,16 @@ impl AppState {
             return false;
         }
 
-        let previous_index = self.approval_selected_file_index;
+        let previous_index = self.approval.selected_file_index;
         if next {
-            self.approval_selected_file_index =
-                (self.approval_selected_file_index + 1).min(preview.file_diffs.len() - 1);
+            self.approval.selected_file_index =
+                (self.approval.selected_file_index + 1).min(preview.file_diffs.len() - 1);
         } else {
-            self.approval_selected_file_index = self.approval_selected_file_index.saturating_sub(1);
+            self.approval.selected_file_index = self.approval.selected_file_index.saturating_sub(1);
         }
-        self.approval_selected_hunk_index = 0;
-        self.approval_scroll_back = 0;
-        previous_index != self.approval_selected_file_index
+        self.approval.selected_hunk_index = 0;
+        self.approval.scroll_back = 0;
+        previous_index != self.approval.selected_file_index
     }
 }
 

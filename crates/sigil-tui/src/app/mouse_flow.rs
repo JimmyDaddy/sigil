@@ -27,7 +27,7 @@ impl AppState {
                 self.mark_mouse_left_down();
                 self.handle_mouse_left_down_target(target, input, layout)
             }
-            crate::mouse::MouseInputKind::Drag if self.pending_approval.is_none() => {
+            crate::mouse::MouseInputKind::Drag if self.approval.pending.is_none() => {
                 self.mark_mouse_left_down();
                 self.cancel_tool_card_body_click();
                 if let Some(position) = layout.live_text_position_at(input.column, input.row) {
@@ -41,7 +41,7 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::MouseInputKind::LeftUp if self.pending_approval.is_none() => {
+            crate::mouse::MouseInputKind::LeftUp if self.approval.pending.is_none() => {
                 let had_left_down = self.take_mouse_left_down();
                 if let Some(entry_index) = self.take_pending_tool_card_body_click(target) {
                     let anchor =
@@ -145,7 +145,7 @@ impl AppState {
                 self.handle_config_mouse_footer_action(index)
             }
             crate::mouse::HitTarget::ApprovalFileRow { index }
-                if self.pending_approval.is_some() =>
+                if self.approval.pending.is_some() =>
             {
                 if self.select_approval_file_index(index) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
@@ -153,33 +153,34 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalHunkPrevious if self.pending_approval.is_some() => {
+            crate::mouse::HitTarget::ApprovalHunkPrevious if self.approval.pending.is_some() => {
                 if self.jump_approval_hunk(false) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalHunkNext if self.pending_approval.is_some() => {
+            crate::mouse::HitTarget::ApprovalHunkNext if self.approval.pending.is_some() => {
                 if self.jump_approval_hunk(true) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
-            crate::mouse::HitTarget::ApprovalDiffViewToggle if self.pending_approval.is_some() => {
+            crate::mouse::HitTarget::ApprovalDiffViewToggle if self.approval.pending.is_some() => {
                 self.cycle_approval_diff_mode();
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
-            crate::mouse::HitTarget::ApprovalMetadataToggle if self.pending_approval.is_some() => {
+            crate::mouse::HitTarget::ApprovalMetadataToggle if self.approval.pending.is_some() => {
                 self.toggle_approval_metadata();
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::ApprovalAction { approved }
-                if self.pending_approval.is_some() =>
+                if self.approval.pending.is_some() =>
             {
                 let call_id = self
-                    .pending_approval
+                    .approval
+                    .pending
                     .as_ref()
                     .map(|pending| pending.call.id.clone())
                     .expect("approval action target requires pending approval");
@@ -188,18 +189,18 @@ impl AppState {
                 ))
             }
             crate::mouse::HitTarget::SlashCandidate { index }
-                if self.pending_approval.is_none() =>
+                if self.approval.pending.is_none() =>
             {
                 self.click_slash_candidate(index)
             }
             crate::mouse::HitTarget::ToolCardHeader { entry_index }
             | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
-                if self.pending_approval.is_none() =>
+                if self.approval.pending.is_none() =>
             {
                 self.click_tool_card_toggle_target(entry_index, input, layout, target)
             }
             crate::mouse::HitTarget::ToolCard { entry_index }
-                if self.pending_approval.is_none() =>
+                if self.approval.pending.is_none() =>
             {
                 self.begin_tool_card_body_click(entry_index);
                 self.set_mouse_hover_target(Some(target));
@@ -215,22 +216,22 @@ impl AppState {
                 }
             }
             crate::mouse::HitTarget::ThinkingBlock { entry_index }
-                if self.pending_approval.is_none() =>
+                if self.approval.pending.is_none() =>
             {
                 Ok(self.click_thinking_block(entry_index, target))
             }
-            crate::mouse::HitTarget::Composer if self.pending_approval.is_none() => {
+            crate::mouse::HitTarget::Composer if self.approval.pending.is_none() => {
                 Ok(self.click_composer(input, layout))
             }
             crate::mouse::HitTarget::InfoRailAgentRow { index }
-                if self.pending_approval.is_none() =>
+                if self.approval.pending.is_none() =>
             {
                 Ok(self.click_info_rail_agent_row(index, target))
             }
-            crate::mouse::HitTarget::InfoRail if self.pending_approval.is_none() => {
+            crate::mouse::HitTarget::InfoRail if self.approval.pending.is_none() => {
                 Ok(self.click_info_rail(target))
             }
-            _ if self.pending_approval.is_none() => {
+            _ if self.approval.pending.is_none() => {
                 Ok(self.click_live_text_or_background(input, layout))
             }
             _ => Ok(crate::mouse::AppMouseOutcome::Noop),
@@ -389,7 +390,7 @@ impl AppState {
         target: crate::mouse::HitTarget,
         upward: bool,
     ) -> Result<crate::mouse::AppMouseOutcome> {
-        if self.pending_approval.is_some() {
+        if self.approval.pending.is_some() {
             return match target {
                 crate::mouse::HitTarget::ApprovalModal
                 | crate::mouse::HitTarget::ApprovalDiffArea
@@ -543,28 +544,29 @@ impl AppState {
 
     fn select_approval_file_index(&mut self, index: usize) -> bool {
         let Some(file_count) = self
-            .pending_approval
+            .approval
+            .pending
             .as_ref()
             .and_then(|pending| pending.preview.as_ref())
             .map(|preview| preview.file_diffs.len())
         else {
             return false;
         };
-        if index >= file_count || self.approval_selected_file_index == index {
+        if index >= file_count || self.approval.selected_file_index == index {
             return false;
         }
-        self.approval_selected_file_index = index;
-        self.approval_selected_hunk_index = 0;
-        self.approval_scroll_back = 0;
+        self.approval.selected_file_index = index;
+        self.approval.selected_hunk_index = 0;
+        self.approval.scroll_back = 0;
         true
     }
 
     fn scroll_approval_with_mouse(&mut self, upward: bool) {
         let delta = self.terminal_scroll_sensitivity();
         if upward {
-            self.approval_scroll_back = self.approval_scroll_back.saturating_sub(delta);
+            self.approval.scroll_back = self.approval.scroll_back.saturating_sub(delta);
         } else {
-            self.approval_scroll_back = self.approval_scroll_back.saturating_add(delta);
+            self.approval.scroll_back = self.approval.scroll_back.saturating_add(delta);
         }
     }
 
@@ -586,11 +588,11 @@ impl AppState {
             position.column,
             width,
         );
-        if next_cursor == self.input_cursor {
+        if next_cursor == self.composer.input_cursor {
             return false;
         }
-        self.input_paste_spans.clear();
-        self.input_cursor = next_cursor;
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = next_cursor;
         self.reset_input_history_navigation();
         self.reset_slash_selector();
         true

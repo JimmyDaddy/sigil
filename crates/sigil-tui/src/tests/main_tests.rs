@@ -101,7 +101,7 @@ fn next_mouse_capture_action_tracks_runtime_terminal_config_changes() {
 fn mouse_layout_snapshot_tracks_inline_frame_origin() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 40);
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let frame_area = Rect::new(0, 7, 120, 20);
 
     let layout = mouse_layout_snapshot(frame_area, Rect::new(0, 0, 120, 40), &app);
@@ -291,7 +291,7 @@ fn busy_run_defers_terminal_scrollback_sync() {
 
     assert!(should_sync_terminal_scrollback(&app));
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
 
     assert!(!should_sync_terminal_scrollback(&app));
 }
@@ -318,13 +318,13 @@ fn next_poll_interval_prefers_busy_then_seed_then_idle() {
         ..ScrollbackSyncState::default()
     };
 
-    app.is_busy = true;
+    app.runtime.is_busy = true;
     assert_eq!(
         next_poll_interval(&app, &ScrollbackSyncState::default()),
         BUSY_POLL_INTERVAL
     );
 
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     assert_eq!(
         next_poll_interval(&app, &pending_seed),
         SCROLLBACK_SEED_POLL_INTERVAL
@@ -768,14 +768,14 @@ fn app_with_scrollback() -> AppState {
         prompt: "follow-up".to_owned(),
     })
     .expect("run started should render");
-    app.is_busy = false;
+    app.runtime.is_busy = false;
     app
 }
 
 #[test]
 fn poll_interval_prefers_busy_then_seed_then_idle() {
     let mut busy_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    busy_app.is_busy = true;
+    busy_app.runtime.is_busy = true;
     assert_eq!(
         poll_interval(&busy_app, &ScrollbackSyncState::default()),
         BUSY_POLL_INTERVAL
@@ -955,8 +955,8 @@ fn scrollback_separator_mentions_session_provider_and_model() {
     let separator = scrollback_plain_line(&scrollback_separator(&app));
 
     assert!(separator.contains("---- session "));
-    assert!(separator.contains(&app.provider_name));
-    assert!(separator.contains(&app.model_name));
+    assert!(separator.contains(&app.runtime.provider_name));
+    assert!(separator.contains(&app.runtime.model_name));
 }
 
 #[test]
@@ -1091,7 +1091,7 @@ fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
 
     assert!(!app.is_setup_mode());
     assert!(worker.is_some());
-    assert_eq!(app.provider_name, "deepseek");
+    assert_eq!(app.runtime.provider_name, "deepseek");
     Ok(())
 }
 

@@ -12,7 +12,7 @@ impl AppState {
             return;
         }
         if let Ok(history) = read_input_history(&self.input_history_path(), INPUT_HISTORY_LIMIT) {
-            self.input_history = history;
+            self.composer.input_history = history;
         }
     }
 
@@ -20,42 +20,46 @@ impl AppState {
         if !should_record_input_history_entry(&prompt) {
             return;
         }
-        if !push_input_history_entry(&mut self.input_history, prompt, INPUT_HISTORY_LIMIT) {
+        if !push_input_history_entry(
+            &mut self.composer.input_history,
+            prompt,
+            INPUT_HISTORY_LIMIT,
+        ) {
             return;
         }
         self.persist_input_history();
     }
 
     pub(super) fn reset_input_history_navigation(&mut self) {
-        self.input_history_index = None;
-        self.input_history_draft = None;
+        self.composer.input_history_index = None;
+        self.composer.input_history_draft = None;
     }
 
     pub(super) fn navigate_input_history(&mut self, older: bool) {
-        if self.input_history.is_empty() {
+        if self.composer.input_history.is_empty() {
             return;
         }
 
         if older {
-            match self.input_history_index {
+            match self.composer.input_history_index {
                 Some(0) => {}
                 Some(index) => {
-                    self.input_history_index = Some(index - 1);
+                    self.composer.input_history_index = Some(index - 1);
                 }
                 None => {
-                    self.input_history_draft = Some(self.input.clone());
-                    self.input_history_index = Some(self.input_history.len() - 1);
+                    self.composer.input_history_draft = Some(self.composer.input.clone());
+                    self.composer.input_history_index = Some(self.composer.input_history.len() - 1);
                 }
             }
         } else {
-            match self.input_history_index {
-                Some(index) if index + 1 < self.input_history.len() => {
-                    self.input_history_index = Some(index + 1);
+            match self.composer.input_history_index {
+                Some(index) if index + 1 < self.composer.input_history.len() => {
+                    self.composer.input_history_index = Some(index + 1);
                 }
                 Some(_) => {
-                    let draft = self.input_history_draft.take().unwrap_or_default();
+                    let draft = self.composer.input_history_draft.take().unwrap_or_default();
                     self.set_input_and_cursor(draft);
-                    self.input_history_index = None;
+                    self.composer.input_history_index = None;
                     self.reset_slash_selector();
                     return;
                 }
@@ -63,8 +67,8 @@ impl AppState {
             }
         }
 
-        if let Some(index) = self.input_history_index
-            && let Some(value) = self.input_history.get(index)
+        if let Some(index) = self.composer.input_history_index
+            && let Some(value) = self.composer.input_history.get(index)
         {
             self.set_input_and_cursor(value.clone());
             self.discard_cleared_input_draft();
@@ -80,7 +84,7 @@ impl AppState {
         if !input_history_persistence_enabled() {
             return;
         }
-        let _ = write_input_history(&self.input_history_path(), &self.input_history);
+        let _ = write_input_history(&self.input_history_path(), &self.composer.input_history);
     }
 }
 

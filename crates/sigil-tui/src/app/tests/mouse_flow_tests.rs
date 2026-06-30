@@ -363,7 +363,7 @@ fn mouse_click_setup_save_runs_validation() -> Result<()> {
 fn mouse_click_config_section_selects_step() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let memory_index = ConfigSection::Memory
@@ -388,7 +388,7 @@ fn mouse_click_config_section_selects_step() -> Result<()> {
 fn mouse_click_config_field_selects_then_activates() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let provider_index = ConfigField::fields_for_section(ConfigSection::Provider)
@@ -417,7 +417,7 @@ fn mouse_click_config_field_selects_then_activates() -> Result<()> {
 fn mouse_click_config_footer_action_executes() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let close_index = ConfigFooterAction::actions_for_section(ConfigSection::Provider)
@@ -460,7 +460,7 @@ fn mouse_click_setup_and_config_invalid_targets_are_noops() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
@@ -538,7 +538,7 @@ fn mouse_click_setup_and_config_invalid_targets_are_noops() -> Result<()> {
 fn mouse_click_config_field_is_noop_when_mcp_has_no_servers() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/config".to_owned();
+    app.composer.input = "/config".to_owned();
     let _ = app.submit_input()?;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = config_field_point(&layout, 0);
@@ -577,14 +577,14 @@ fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.set_terminal_size(120, 20);
-    app.input = "/resume".to_owned();
+    app.composer.input = "/resume".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point(&layout, 0);
 
     let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(first, AppMouseOutcome::Redraw));
-    assert!(app.input.starts_with("/resume "));
+    assert!(app.composer.input.starts_with("/resume "));
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point(&layout, 0);
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
@@ -600,7 +600,7 @@ fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
 fn layout_snapshot_hits_slash_candidate_over_live_panel() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point(&layout, 1);
 
@@ -830,8 +830,8 @@ fn timeline_text_selection_helpers_cover_invalid_and_empty_states() {
 fn mouse_click_composer_focuses_and_positions_cursor() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "hello world".to_owned();
-    app.input_cursor = app.input_char_len();
+    app.composer.input = "hello world".to_owned();
+    app.composer.input_cursor = app.input_char_len();
     app.active_pane = PaneFocus::Activity;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let column = layout.composer_input.x.saturating_add(2);
@@ -841,17 +841,17 @@ fn mouse_click_composer_focuses_and_positions_cursor() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert_eq!(app.input_cursor, 2);
+    assert_eq!(app.composer.input_cursor, 2);
 
     let unchanged =
         app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(unchanged, AppMouseOutcome::Redraw));
-    assert_eq!(app.input_cursor, 2);
+    assert_eq!(app.composer.input_cursor, 2);
 
     let mut composer_only_layout = layout.clone();
     composer_only_layout.composer_input = Rect::default();
-    app.input_cursor = 7;
+    app.composer.input_cursor = 7;
     let focus_only = app.handle_mouse_event(
         mouse(
             MouseInputKind::LeftDown,
@@ -862,7 +862,7 @@ fn mouse_click_composer_focuses_and_positions_cursor() -> Result<()> {
     )?;
 
     assert!(matches!(focus_only, AppMouseOutcome::Redraw));
-    assert_eq!(app.input_cursor, 7);
+    assert_eq!(app.composer.input_cursor, 7);
     Ok(())
 }
 
@@ -870,7 +870,7 @@ fn mouse_click_composer_focuses_and_positions_cursor() -> Result<()> {
 fn mouse_press_tool_card_body_selects_without_toggling() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "draft".to_owned();
+    app.composer.input = "draft".to_owned();
     push_sample_tool_cards(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let first_entry_index = app.tool_activity_entry_indices()[0];
@@ -884,7 +884,7 @@ fn mouse_press_tool_card_body_selects_without_toggling() -> Result<()> {
         Some("call:call-first".to_owned())
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
-    assert_eq!(app.input, "draft");
+    assert_eq!(app.composer.input, "draft");
     assert!(app.expanded_tool_activity_keys.is_empty());
     assert!(app.collapsed_tool_activity_keys.is_empty());
     Ok(())
@@ -1245,7 +1245,7 @@ fn mouse_click_tool_card_without_text_hit_clears_selection() -> Result<()> {
 fn mouse_click_regular_slash_candidate_executes() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
 
@@ -1254,7 +1254,7 @@ fn mouse_click_regular_slash_candidate_executes() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert!(app.is_config_mode());
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     Ok(())
 }
 
@@ -1262,7 +1262,7 @@ fn mouse_click_regular_slash_candidate_executes() -> Result<()> {
 fn mouse_release_only_slash_candidate_executes_without_prior_down() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
 
@@ -1271,7 +1271,7 @@ fn mouse_release_only_slash_candidate_executes_without_prior_down() -> Result<()
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert!(app.is_config_mode());
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     Ok(())
 }
 
@@ -1279,7 +1279,7 @@ fn mouse_release_only_slash_candidate_executes_without_prior_down() -> Result<()
 fn mouse_down_then_release_slash_candidate_does_not_execute_release_again() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
 
@@ -1296,14 +1296,14 @@ fn mouse_down_then_release_slash_candidate_does_not_execute_release_again() -> R
 fn mouse_click_dangerous_slash_candidate_requires_second_click() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/compact");
 
     let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(first, AppMouseOutcome::Redraw));
-    assert_eq!(app.input, "/compact");
+    assert_eq!(app.composer.input, "/compact");
     assert_eq!(app.last_notice(), Some("click again to confirm /compact"));
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
@@ -1314,7 +1314,7 @@ fn mouse_click_dangerous_slash_candidate_requires_second_click() -> Result<()> {
         second,
         AppMouseOutcome::Action(AppAction::CompactNow)
     ));
-    assert!(app.input.is_empty());
+    assert!(app.composer.input.is_empty());
     Ok(())
 }
 
@@ -1322,7 +1322,7 @@ fn mouse_click_dangerous_slash_candidate_requires_second_click() -> Result<()> {
 fn mouse_click_quit_shows_confirmation_in_slash_row() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/q".to_owned();
+    app.composer.input = "/q".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/quit");
 
@@ -1330,7 +1330,7 @@ fn mouse_click_quit_shows_confirmation_in_slash_row() -> Result<()> {
 
     assert!(matches!(first, AppMouseOutcome::Redraw));
     assert!(!app.should_quit);
-    assert_eq!(app.input, "/quit");
+    assert_eq!(app.composer.input, "/quit");
     let rows = app.slash_selector_rows();
     let (_, description) = rows
         .iter()
@@ -1346,7 +1346,7 @@ fn mouse_click_slash_candidate_is_noop_when_approval_is_pending() -> Result<()> 
     app.set_terminal_size(120, 20);
     app.active_pane = PaneFocus::Activity;
     inject_write_file_approval(&mut app, sample_approval_preview())?;
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
@@ -1355,7 +1355,7 @@ fn mouse_click_slash_candidate_is_noop_when_approval_is_pending() -> Result<()> 
 
     assert!(matches!(outcome, AppMouseOutcome::Noop));
     assert_eq!(app.active_pane, PaneFocus::Activity);
-    assert_eq!(app.input, "/");
+    assert_eq!(app.composer.input, "/");
     Ok(())
 }
 
@@ -1419,7 +1419,7 @@ fn mouse_click_background_path_is_noop_without_state_change() -> Result<()> {
 #[test]
 fn keyboard_enter_dangerous_slash_command_needs_no_mouse_confirmation() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/compact".to_owned();
+    app.composer.input = "/compact".to_owned();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
@@ -1451,7 +1451,7 @@ fn mouse_scroll_live_panel_moves_timeline_even_when_activity_focused() -> Result
 fn mouse_scroll_slash_overlay_moves_candidate_selection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/".to_owned();
+    app.composer.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let slash = layout.slash_overlay.expect("expected slash overlay");
     let (column, row) = point_in(slash.overlay);
@@ -1494,7 +1494,7 @@ fn mouse_scroll_approval_modal_moves_approval_scroll() -> Result<()> {
         app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
-    assert!(app.approval_scroll_back > 0);
+    assert!(app.approval.scroll_back > 0);
     Ok(())
 }
 
@@ -1509,7 +1509,7 @@ fn mouse_scroll_behind_approval_modal_is_noop() -> Result<()> {
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, 0, 0), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Noop));
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.scroll_back, 0);
     assert_eq!(app.timeline_scroll_back, 0);
     Ok(())
 }
@@ -1808,7 +1808,7 @@ fn mouse_scroll_approval_with_pending_approval_scrolls_upward() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     inject_write_file_approval(&mut app, sample_approval_preview())?;
-    app.approval_scroll_back = 5;
+    app.approval.scroll_back = 5;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let approval = layout.approval_modal.expect("expected approval area");
     let (column, row) = point_in(approval);
@@ -1816,7 +1816,7 @@ fn mouse_scroll_approval_with_pending_approval_scrolls_upward() -> Result<()> {
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::ScrollUp, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
-    assert_eq!(app.approval_scroll_back, 2);
+    assert_eq!(app.approval.scroll_back, 2);
     Ok(())
 }
 
@@ -1836,9 +1836,9 @@ fn mouse_click_approval_file_row_selects_file() -> Result<()> {
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
-    assert_eq!(app.approval_selected_file_index, 1);
-    assert_eq!(app.approval_selected_hunk_index, 0);
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.selected_file_index, 1);
+    assert_eq!(app.approval.selected_hunk_index, 0);
+    assert_eq!(app.approval.scroll_back, 0);
     Ok(())
 }
 
@@ -1859,7 +1859,8 @@ fn mouse_click_selected_or_missing_approval_file_is_noop() -> Result<()> {
 
     assert!(matches!(same, AppMouseOutcome::Noop));
 
-    app.pending_approval
+    app.approval
+        .pending
         .as_mut()
         .and_then(|pending| pending.preview.as_mut())
         .expect("expected preview")
@@ -1889,7 +1890,7 @@ fn mouse_scroll_approval_file_row_scrolls_modal() -> Result<()> {
         app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
-    assert_eq!(app.approval_scroll_back, 3);
+    assert_eq!(app.approval.scroll_back, 3);
     Ok(())
 }
 
@@ -1908,27 +1909,27 @@ fn mouse_click_approval_diff_controls_update_modal_state() -> Result<()> {
     let hunk_next =
         app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
     assert!(matches!(hunk_next, AppMouseOutcome::Redraw));
-    assert_eq!(app.approval_selected_hunk_index, 1);
-    assert!(app.approval_scroll_back > 0);
+    assert_eq!(app.approval.selected_hunk_index, 1);
+    assert!(app.approval.scroll_back > 0);
 
     let (column, row) = point_in(hit_areas.hunk_previous);
     let hunk_previous =
         app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
     assert!(matches!(hunk_previous, AppMouseOutcome::Redraw));
-    assert_eq!(app.approval_selected_hunk_index, 0);
+    assert_eq!(app.approval.selected_hunk_index, 0);
 
     let (column, row) = point_in(hit_areas.diff_view_toggle);
     let view_toggle =
         app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
     assert!(matches!(view_toggle, AppMouseOutcome::Redraw));
-    assert_eq!(app.approval_diff_mode.label(), "current-hunk");
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.diff_mode.label(), "current-hunk");
+    assert_eq!(app.approval.scroll_back, 0);
 
     let (column, row) = point_in(hit_areas.metadata_toggle);
     let metadata_toggle =
         app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
     assert!(matches!(metadata_toggle, AppMouseOutcome::Redraw));
-    assert!(app.approval_metadata_collapsed);
+    assert!(app.approval.metadata_collapsed);
     Ok(())
 }
 
@@ -1947,15 +1948,15 @@ fn mouse_click_approval_hunk_control_without_available_move_is_noop() -> Result<
     let previous = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(previous, AppMouseOutcome::Noop));
-    assert_eq!(app.approval_selected_hunk_index, 0);
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.selected_hunk_index, 0);
+    assert_eq!(app.approval.scroll_back, 0);
 
     let (column, row) = point_in(hit_areas.hunk_next);
     let next = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(next, AppMouseOutcome::Noop));
-    assert_eq!(app.approval_selected_hunk_index, 0);
-    assert_eq!(app.approval_scroll_back, 0);
+    assert_eq!(app.approval.selected_hunk_index, 0);
+    assert_eq!(app.approval.scroll_back, 0);
     Ok(())
 }
 
@@ -1978,7 +1979,7 @@ fn mouse_scroll_stale_approval_action_target_without_pending_is_noop() -> Result
         .as_ref()
         .expect("expected approval hit areas")
         .allow_action;
-    app.pending_approval = None;
+    app.approval.pending = None;
     let (column, row) = point_in(allow_action);
 
     let outcome =

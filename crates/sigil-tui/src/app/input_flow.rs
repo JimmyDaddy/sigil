@@ -27,17 +27,17 @@ impl AppState {
     }
 
     pub(super) fn input_char_len(&self) -> usize {
-        self.input.chars().count()
+        self.composer.input.chars().count()
     }
 
     pub(super) fn set_input_and_cursor(&mut self, input: String) {
-        self.input = input;
-        self.input_cursor = self.input_char_len();
-        self.input_paste_spans.clear();
+        self.composer.input = input;
+        self.composer.input_cursor = self.input_char_len();
+        self.composer.input_paste_spans.clear();
     }
 
     pub(super) fn clamp_input_cursor(&mut self) {
-        self.input_cursor = self.input_cursor.min(self.input_char_len());
+        self.composer.input_cursor = self.composer.input_cursor.min(self.input_char_len());
     }
 
     pub(super) fn input_last_visual_row(&self) -> usize {
@@ -56,20 +56,20 @@ impl AppState {
     }
 
     pub(super) fn input_cursor_visual_row(&self) -> usize {
-        self.visual_position_for_cursor(self.input_cursor, self.composer_wrap_width())
+        self.visual_position_for_cursor(self.composer.input_cursor, self.composer_wrap_width())
             .0
     }
 
     pub(super) fn insert_input_character(&mut self, character: char) {
-        self.input_paste_spans.clear();
+        self.composer.input_paste_spans.clear();
         self.discard_cleared_input_draft();
-        let byte_index = char_to_byte_index(&self.input, self.input_cursor);
-        self.input.insert(byte_index, character);
-        self.input_cursor += 1;
+        let byte_index = char_to_byte_index(&self.composer.input, self.composer.input_cursor);
+        self.composer.input.insert(byte_index, character);
+        self.composer.input_cursor += 1;
     }
 
     pub(super) fn insert_input_text(&mut self, text: &str) {
-        self.input_paste_spans.clear();
+        self.composer.input_paste_spans.clear();
         self.insert_input_text_preserving_paste_spans(text);
     }
 
@@ -78,9 +78,9 @@ impl AppState {
             return;
         }
         self.discard_cleared_input_draft();
-        let byte_index = char_to_byte_index(&self.input, self.input_cursor);
-        self.input.insert_str(byte_index, text);
-        self.input_cursor += text.chars().count();
+        let byte_index = char_to_byte_index(&self.composer.input, self.composer.input_cursor);
+        self.composer.input.insert_str(byte_index, text);
+        self.composer.input_cursor += text.chars().count();
     }
 
     pub fn handle_paste_text(&mut self, text: &str) {
@@ -103,7 +103,7 @@ impl AppState {
             self.handle_config_paste_text(&pasted);
             return;
         }
-        if self.pending_approval.is_some() {
+        if self.approval.pending.is_some() {
             return;
         }
 
@@ -115,13 +115,13 @@ impl AppState {
     }
 
     fn insert_paste_text(&mut self, text: &str) {
-        let start = self.input_cursor;
+        let start = self.composer.input_cursor;
         let char_count = text.chars().count();
         self.insert_input_text_preserving_paste_spans(text);
         if char_count < LARGE_PASTE_COLLAPSE_THRESHOLD_CHARS {
             return;
         }
-        self.input_paste_spans.push(ComposerPasteSpan {
+        self.composer.input_paste_spans.push(ComposerPasteSpan {
             start,
             end: start + char_count,
             char_count,
@@ -130,123 +130,123 @@ impl AppState {
     }
 
     pub(crate) fn composer_display_input(&self) -> String {
-        if self.input_paste_spans.is_empty() {
-            return self.input.clone();
+        if self.composer.input_paste_spans.is_empty() {
+            return self.composer.input.clone();
         }
 
         let mut display = String::new();
         let mut cursor = 0usize;
-        for (index, span) in self.input_paste_spans.iter().enumerate() {
+        for (index, span) in self.composer.input_paste_spans.iter().enumerate() {
             if span.start < cursor || span.end > self.input_char_len() {
                 continue;
             }
-            display.push_str(&input_char_range(&self.input, cursor..span.start));
+            display.push_str(&input_char_range(&self.composer.input, cursor..span.start));
             display.push_str(&paste_span_placeholder(index + 1, span));
             cursor = span.end;
         }
         display.push_str(&input_char_range(
-            &self.input,
+            &self.composer.input,
             cursor..self.input_char_len(),
         ));
         display
     }
 
     fn composer_display_cursor(&self) -> usize {
-        if self.input_paste_spans.is_empty() {
-            return self.input_cursor;
+        if self.composer.input_paste_spans.is_empty() {
+            return self.composer.input_cursor;
         }
 
         let mut adjustment = 0isize;
-        for (index, span) in self.input_paste_spans.iter().enumerate() {
+        for (index, span) in self.composer.input_paste_spans.iter().enumerate() {
             let placeholder_len = paste_span_placeholder(index + 1, span).chars().count();
-            if self.input_cursor <= span.start {
+            if self.composer.input_cursor <= span.start {
                 break;
             }
-            if self.input_cursor < span.end {
+            if self.composer.input_cursor < span.end {
                 let span_start = (span.start as isize + adjustment).max(0) as usize;
                 return span_start + placeholder_len;
             }
             adjustment += placeholder_len as isize - span.char_count as isize;
         }
-        (self.input_cursor as isize + adjustment).max(0) as usize
+        (self.composer.input_cursor as isize + adjustment).max(0) as usize
     }
 
     pub(super) fn remove_input_character_before_cursor(&mut self) {
-        if self.input_cursor == 0 {
+        if self.composer.input_cursor == 0 {
             return;
         }
-        self.input_paste_spans.clear();
-        self.remove_input_range(self.input_cursor - 1..self.input_cursor);
+        self.composer.input_paste_spans.clear();
+        self.remove_input_range(self.composer.input_cursor - 1..self.composer.input_cursor);
     }
 
     pub(super) fn remove_input_character_at_cursor(&mut self) {
-        if self.input_cursor >= self.input_char_len() {
+        if self.composer.input_cursor >= self.input_char_len() {
             return;
         }
-        self.input_paste_spans.clear();
-        self.remove_input_range(self.input_cursor..self.input_cursor + 1);
+        self.composer.input_paste_spans.clear();
+        self.remove_input_range(self.composer.input_cursor..self.composer.input_cursor + 1);
     }
 
     pub(super) fn remove_input_word_before_cursor(&mut self) {
         let start = self.previous_input_word_start();
-        if start == self.input_cursor {
+        if start == self.composer.input_cursor {
             return;
         }
-        self.kill_input_range(start..self.input_cursor);
+        self.kill_input_range(start..self.composer.input_cursor);
     }
 
     pub(super) fn remove_input_word_after_cursor(&mut self) {
         let end = self.next_input_word_end();
-        if end == self.input_cursor {
+        if end == self.composer.input_cursor {
             return;
         }
-        self.kill_input_range(self.input_cursor..end);
+        self.kill_input_range(self.composer.input_cursor..end);
     }
 
     pub(super) fn move_input_cursor_left(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = self.input_cursor.saturating_sub(1);
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = self.composer.input_cursor.saturating_sub(1);
     }
 
     pub(super) fn move_input_cursor_right(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = (self.input_cursor + 1).min(self.input_char_len());
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = (self.composer.input_cursor + 1).min(self.input_char_len());
     }
 
     pub(super) fn move_input_cursor_home(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = 0;
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = 0;
     }
 
     pub(super) fn move_input_cursor_end(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = self.input_char_len();
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = self.input_char_len();
     }
 
     pub(super) fn move_input_cursor_line_start(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = self.current_input_line_start();
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = self.current_input_line_start();
     }
 
     pub(super) fn move_input_cursor_line_end(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = self.current_input_line_end();
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = self.current_input_line_end();
     }
 
     pub(super) fn move_input_cursor_word_left(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = self.previous_input_word_start();
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = self.previous_input_word_start();
     }
 
     pub(super) fn move_input_cursor_word_right(&mut self) {
-        self.input_paste_spans.clear();
-        self.input_cursor = self.next_input_word_end();
+        self.composer.input_paste_spans.clear();
+        self.composer.input_cursor = self.next_input_word_end();
     }
 
     pub(super) fn kill_input_to_line_end(&mut self) {
         let line_end = self.current_input_line_end();
-        let range = if self.input_cursor < line_end {
-            Some(self.input_cursor..line_end)
+        let range = if self.composer.input_cursor < line_end {
+            Some(self.composer.input_cursor..line_end)
         } else if line_end < self.input_char_len() {
             Some(line_end..line_end + 1)
         } else {
@@ -258,25 +258,25 @@ impl AppState {
     }
 
     pub(super) fn yank_input_kill_buffer(&mut self) {
-        if let Some(text) = self.input_kill_buffer.clone() {
+        if let Some(text) = self.composer.input_kill_buffer.clone() {
             self.insert_input_text(&text);
         }
     }
 
     pub(super) fn clear_input_preserving_draft(&mut self) {
-        if !self.input.is_empty() {
-            self.cleared_input_draft = Some(self.input.clone());
+        if !self.composer.input.is_empty() {
+            self.composer.cleared_input_draft = Some(self.composer.input.clone());
         }
-        self.input.clear();
-        self.input_cursor = 0;
-        self.input_paste_spans.clear();
+        self.composer.input.clear();
+        self.composer.input_cursor = 0;
+        self.composer.input_paste_spans.clear();
     }
 
     pub(super) fn restore_cleared_input_draft(&mut self) -> bool {
-        if !self.input.is_empty() {
+        if !self.composer.input.is_empty() {
             return false;
         }
-        let Some(draft) = self.cleared_input_draft.take() else {
+        let Some(draft) = self.composer.cleared_input_draft.take() else {
             return false;
         };
         self.set_input_and_cursor(draft);
@@ -284,31 +284,31 @@ impl AppState {
     }
 
     pub(super) fn discard_cleared_input_draft(&mut self) {
-        self.cleared_input_draft = None;
+        self.composer.cleared_input_draft = None;
     }
 
     pub(super) fn move_input_cursor_vertical(&mut self, up: bool) -> bool {
-        self.input_paste_spans.clear();
+        self.composer.input_paste_spans.clear();
         let width = self.composer_wrap_width();
-        let (row, column) = self.visual_position_for_cursor(self.input_cursor, width);
+        let (row, column) = self.visual_position_for_cursor(self.composer.input_cursor, width);
         if up {
             if row == 0 {
                 return false;
             }
-            self.input_cursor = self.cursor_for_visual_position(row - 1, column, width);
+            self.composer.input_cursor = self.cursor_for_visual_position(row - 1, column, width);
             return true;
         }
 
         let next = self.cursor_for_visual_position(row + 1, column, width);
-        if next == self.input_cursor {
+        if next == self.composer.input_cursor {
             return false;
         }
-        self.input_cursor = next;
+        self.composer.input_cursor = next;
         true
     }
 
     pub(super) fn visual_position_for_cursor(&self, cursor: usize, width: usize) -> (usize, usize) {
-        visual_position_for_cursor_in(&self.input, cursor, width)
+        visual_position_for_cursor_in(&self.composer.input, cursor, width)
     }
 
     pub(super) fn cursor_for_visual_position(
@@ -340,9 +340,10 @@ impl AppState {
     }
 
     fn current_input_line_start(&self) -> usize {
-        self.input
+        self.composer
+            .input
             .chars()
-            .take(self.input_cursor)
+            .take(self.composer.input_cursor)
             .enumerate()
             .filter_map(|(index, character)| (character == '\n').then_some(index + 1))
             .last()
@@ -350,17 +351,18 @@ impl AppState {
     }
 
     fn current_input_line_end(&self) -> usize {
-        self.input
+        self.composer
+            .input
             .chars()
             .enumerate()
-            .skip(self.input_cursor)
+            .skip(self.composer.input_cursor)
             .find_map(|(index, character)| (character == '\n').then_some(index))
             .unwrap_or_else(|| self.input_char_len())
     }
 
     fn previous_input_word_start(&self) -> usize {
-        let characters = self.input.chars().collect::<Vec<_>>();
-        let mut index = self.input_cursor.min(characters.len());
+        let characters = self.composer.input.chars().collect::<Vec<_>>();
+        let mut index = self.composer.input_cursor.min(characters.len());
         while index > 0 && !is_input_word_character(characters[index - 1]) {
             index -= 1;
         }
@@ -371,8 +373,8 @@ impl AppState {
     }
 
     fn next_input_word_end(&self) -> usize {
-        let characters = self.input.chars().collect::<Vec<_>>();
-        let mut index = self.input_cursor.min(characters.len());
+        let characters = self.composer.input.chars().collect::<Vec<_>>();
+        let mut index = self.composer.input_cursor.min(characters.len());
         while index < characters.len() && !is_input_word_character(characters[index]) {
             index += 1;
         }
@@ -393,7 +395,7 @@ impl AppState {
     fn kill_input_range(&mut self, range: Range<usize>) {
         let removed = self.remove_input_range(range);
         if !removed.is_empty() {
-            self.input_kill_buffer = Some(removed);
+            self.composer.input_kill_buffer = Some(removed);
         }
     }
 
@@ -401,15 +403,17 @@ impl AppState {
         let input_len = self.input_char_len();
         let start = range.start.min(input_len);
         let end = range.end.min(input_len).max(start);
-        let byte_start = char_to_byte_index(&self.input, start);
-        let byte_end = char_to_byte_index(&self.input, end);
-        let removed = self.input[byte_start..byte_end].to_owned();
+        let byte_start = char_to_byte_index(&self.composer.input, start);
+        let byte_end = char_to_byte_index(&self.composer.input, end);
+        let removed = self.composer.input[byte_start..byte_end].to_owned();
         if byte_start == byte_end && replacement.is_empty() {
             return removed;
         }
-        self.input_paste_spans.clear();
-        self.input.replace_range(byte_start..byte_end, replacement);
-        self.input_cursor = start + replacement.chars().count();
+        self.composer.input_paste_spans.clear();
+        self.composer
+            .input
+            .replace_range(byte_start..byte_end, replacement);
+        self.composer.input_cursor = start + replacement.chars().count();
         removed
     }
 

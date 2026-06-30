@@ -163,7 +163,7 @@ pub(crate) fn info_rail_session_lines(app: &AppState) -> Vec<String> {
     let mut lines = vec![
         format!(
             "model: {} · {}",
-            app.model_name,
+            app.runtime.model_name,
             app.reasoning_effort_label()
         ),
         format!(
@@ -172,10 +172,10 @@ pub(crate) fn info_rail_session_lines(app: &AppState) -> Vec<String> {
             short_session_label(&app.session_id)
         ),
     ];
-    if app.memory_enabled {
+    if app.runtime.memory_enabled {
         lines.push(format!(
             "memory: {} docs · {}",
-            app.memory_document_count, app.memory_last_status
+            app.runtime.memory_document_count, app.runtime.memory_last_status
         ));
     } else {
         lines.push("memory: off".to_owned());
@@ -193,10 +193,10 @@ pub(crate) fn info_rail_session_lines(app: &AppState) -> Vec<String> {
 fn detail_info_rail_session_lines(app: &AppState) -> Vec<String> {
     app.session_sidebar_lines()
         .into_iter()
-        .chain(std::iter::once(if app.memory_enabled {
+        .chain(std::iter::once(if app.runtime.memory_enabled {
             format!(
                 "memory: {} docs · {}",
-                app.memory_document_count, app.memory_last_status
+                app.runtime.memory_document_count, app.runtime.memory_last_status
             )
         } else {
             "memory: off".to_owned()
@@ -206,12 +206,15 @@ fn detail_info_rail_session_lines(app: &AppState) -> Vec<String> {
 }
 
 pub(crate) fn info_rail_permission_lines(app: &AppState) -> Vec<String> {
-    let scope = if app.is_busy {
+    let scope = if app.runtime.is_busy {
         "locked during run"
     } else {
         "saved default"
     };
-    vec![format!("mode: {} · {scope}", app.permission_default_mode)]
+    vec![format!(
+        "mode: {} · {scope}",
+        app.runtime.permission_default_mode
+    )]
 }
 
 fn compact_info_rail_task_lines(app: &AppState) -> Vec<String> {
@@ -243,7 +246,7 @@ fn compact_info_rail_usage_lines(app: &AppState) -> Vec<String> {
 }
 
 fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
-    let mut controls = global_control_hints(app.is_busy && app.pending_approval.is_none());
+    let mut controls = global_control_hints(app.runtime.is_busy && app.approval.pending.is_none());
     if app.has_tool_cards() {
         controls.retain(|hint| !hint.starts_with("Ctrl-T: thinking"));
         controls.extend(tool_card_control_hints());
@@ -307,8 +310,8 @@ impl ComposerViewModel {
                 app.active_agent_label()
             ),
             phase: app.run_phase(),
-            provider_name: app.provider_name.clone(),
-            model_name: app.model_name.clone(),
+            provider_name: app.runtime.provider_name.clone(),
+            model_name: app.runtime.model_name.clone(),
             reasoning_effort_label: app.reasoning_effort_label().to_owned(),
             agent_rows: app.composer_agent_rows(),
             agent_panel_focused: app.is_composer_agent_panel_focused(),
@@ -784,7 +787,7 @@ impl FooterViewModel {
     fn from_app(app: &AppState) -> Self {
         Self {
             phase: app.run_phase(),
-            is_busy: app.is_busy && app.pending_approval.is_none(),
+            is_busy: app.runtime.is_busy && app.approval.pending.is_none(),
             run_label: footer_run_label(app),
             hints: footer_hints(app),
             context_label: app.context_usage_line(),
@@ -804,15 +807,15 @@ fn footer_hints(app: &AppState) -> String {
     if app.pending_plan_approval().is_some() {
         return format!("{agent} · A ask · W workspace edits · C continue · Esc discard");
     }
-    if app.pending_approval.is_some() {
+    if app.approval.pending.is_some() {
         return format!("{agent} · Y allow · N deny · V diff");
     }
-    if app.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
+    if app.runtime.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
         return format!(
             "{agent} · Enter queue next turn · Ctrl-B background · Esc interrupt · Ctrl-T details"
         );
     }
-    if app.is_busy {
+    if app.runtime.is_busy {
         return format!("{agent} · Enter queue next turn · Esc interrupt · Ctrl-T details");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {

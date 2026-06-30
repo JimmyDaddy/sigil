@@ -26,7 +26,7 @@ use sigil_runtime::{BalanceSnapshot, deepseek_provider_status_config};
 
 impl AppState {
     fn set_agent_wait_phase(&mut self, profile_id: &str) {
-        self.run_phase = RunPhase::Agent(profile_id.to_owned());
+        self.runtime.run_phase = RunPhase::Agent(profile_id.to_owned());
         self.last_notice = Some(format!("waiting for agent @{profile_id}"));
         self.push_phase_marker(format!("agent|{profile_id}"));
     }
@@ -164,25 +164,26 @@ impl AppState {
     }
 
     pub fn has_pending_worker_commands(&self) -> bool {
-        !self.pending_worker_commands.is_empty()
+        !self.runtime.pending_worker_commands.is_empty()
     }
 
     pub fn drain_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
-        std::mem::take(&mut self.pending_worker_commands)
+        std::mem::take(&mut self.runtime.pending_worker_commands)
     }
 
     pub(super) fn enqueue_worker_command(&mut self, command: WorkerCommand) {
-        self.pending_worker_commands.push(command);
+        self.runtime.pending_worker_commands.push(command);
     }
 
     pub(super) fn next_background_request_id(&mut self) -> u64 {
-        let request_id = self.next_background_request_id;
-        self.next_background_request_id = self.next_background_request_id.saturating_add(1);
+        let request_id = self.runtime.next_background_request_id;
+        self.runtime.next_background_request_id =
+            self.runtime.next_background_request_id.saturating_add(1);
         request_id
     }
 
     pub(super) fn cancel_model_picker_refresh(&mut self) {
-        if let Some(refresh) = self.active_model_picker_refresh.take() {
+        if let Some(refresh) = self.runtime.active_model_picker_refresh.take() {
             self.enqueue_worker_command(WorkerCommand::CancelProviderModelsRefresh {
                 request_id: refresh.request_id,
             });
@@ -190,37 +191,37 @@ impl AppState {
     }
 
     pub(super) fn schedule_balance_refresh(&mut self) {
-        if self.active_balance_refresh_id.is_some() || self.is_setup_mode() {
+        if self.runtime.active_balance_refresh_id.is_some() || self.is_setup_mode() {
             return;
         }
         let Some(root_config) = self.config_snapshot.as_ref() else {
-            self.balance_snapshot.status = "n/a".to_owned();
+            self.runtime.balance_snapshot.status = "n/a".to_owned();
             self.refresh_usage_sidebar_cache();
             return;
         };
         if normalize_provider_name(&root_config.agent.provider) != DEEPSEEK_PROVIDER_KEY {
-            self.balance_snapshot.available = false;
-            self.balance_snapshot.status = "n/a".to_owned();
+            self.runtime.balance_snapshot.available = false;
+            self.runtime.balance_snapshot.status = "n/a".to_owned();
             self.refresh_usage_sidebar_cache();
             return;
         }
         let provider_config = deepseek_provider_status_config(root_config);
         let Ok(provider_config) = provider_config else {
-            self.balance_snapshot.status = "balance unavailable".to_owned();
+            self.runtime.balance_snapshot.status = "balance unavailable".to_owned();
             self.refresh_usage_sidebar_cache();
             return;
         };
         if provider_config.api_key.is_none() {
-            self.balance_snapshot.available = false;
-            self.balance_snapshot.status = "missing auth".to_owned();
+            self.runtime.balance_snapshot.available = false;
+            self.runtime.balance_snapshot.status = "missing auth".to_owned();
             self.refresh_usage_sidebar_cache();
             return;
         }
 
-        self.balance_snapshot.status = "loading".to_owned();
+        self.runtime.balance_snapshot.status = "loading".to_owned();
         self.refresh_usage_sidebar_cache();
         let request_id = self.next_background_request_id();
-        self.active_balance_refresh_id = Some(request_id);
+        self.runtime.active_balance_refresh_id = Some(request_id);
         self.enqueue_worker_command(WorkerCommand::RefreshProviderBalance {
             request_id,
             provider_config,
@@ -232,11 +233,11 @@ impl AppState {
         request_id: u64,
         snapshot: BalanceSnapshot,
     ) -> bool {
-        if self.active_balance_refresh_id != Some(request_id) {
+        if self.runtime.active_balance_refresh_id != Some(request_id) {
             return false;
         }
-        self.active_balance_refresh_id = None;
-        self.balance_snapshot = snapshot.clone();
+        self.runtime.active_balance_refresh_id = None;
+        self.runtime.balance_snapshot = snapshot.clone();
         self.push_event("balance", snapshot.status);
         self.refresh_usage_sidebar_cache();
         true
@@ -248,13 +249,14 @@ impl AppState {
         base_url: String,
         result: Result<Vec<String>, String>,
     ) -> bool {
-        let Some(active) = self.active_model_picker_refresh.as_ref() else {
+        let Some(active) = self.runtime.active_model_picker_refresh.as_ref() else {
             return false;
         };
         if active.request_id != request_id {
             return false;
         }
         let active = self
+            .runtime
             .active_model_picker_refresh
             .take()
             .expect("active refresh checked above");
@@ -270,35 +272,35 @@ impl AppState {
         match message {
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
-                self.is_busy = true;
-                self.run_phase = RunPhase::Thinking;
-                self.mcp_progress = None;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
+                self.runtime.mcp_progress = None;
                 self.last_notice = Some("thinking".to_owned());
-                self.push_phase_marker(format!("thinking|{}", self.model_name));
+                self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
                 self.push_event("run:start", prompt);
             }
             WorkerMessage::PlanRunStarted { prompt } => {
-                self.is_busy = true;
-                self.run_phase = RunPhase::Thinking;
-                self.mcp_progress = None;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
+                self.runtime.mcp_progress = None;
                 self.last_notice = Some("planning".to_owned());
-                self.push_phase_marker(format!("plan|{}", self.model_name));
+                self.push_phase_marker(format!("plan|{}", self.runtime.model_name));
                 self.push_event("plan:start", prompt);
             }
             WorkerMessage::AgentRunStarted { profile_id, prompt } => {
-                self.is_busy = true;
-                self.run_phase = RunPhase::Agent(profile_id.clone());
-                self.mcp_progress = None;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Agent(profile_id.clone());
+                self.runtime.mcp_progress = None;
                 self.last_notice = Some(format!("waiting for agent @{profile_id}"));
                 self.push_phase_marker(format!("agent|{profile_id}"));
                 self.push_event("agent:start", prompt);
             }
             WorkerMessage::AgentResultContinuationStarted { thread_ids } => {
-                self.is_busy = true;
-                self.run_phase = RunPhase::Thinking;
-                self.mcp_progress = None;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
+                self.runtime.mcp_progress = None;
                 self.last_notice = Some("agent result ready; resuming main".to_owned());
-                self.push_phase_marker(format!("agent-result|{}", self.model_name));
+                self.push_phase_marker(format!("agent-result|{}", self.runtime.model_name));
                 let threads = thread_ids
                     .iter()
                     .map(sigil_kernel::AgentThreadId::as_str)
@@ -326,11 +328,11 @@ impl AppState {
                 self.push_event("queue:update", summary);
             }
             WorkerMessage::ConversationQueueDispatchStarted { queue_id, prompt } => {
-                self.is_busy = true;
-                self.run_phase = RunPhase::Thinking;
-                self.mcp_progress = None;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
+                self.runtime.mcp_progress = None;
                 self.last_notice = Some("running queued input".to_owned());
-                self.push_phase_marker(format!("queued|{}", self.model_name));
+                self.push_phase_marker(format!("queued|{}", self.runtime.model_name));
                 self.push_timeline(TimelineRole::User, prompt.clone());
                 self.push_event(
                     "queue:dispatch",
@@ -352,12 +354,12 @@ impl AppState {
                 result,
                 entries,
             } => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 self.sync_current_session_state(entries);
@@ -385,20 +387,20 @@ impl AppState {
                 );
             }
             WorkerMessage::TaskRunStarted { task_id, objective } => {
-                self.is_busy = true;
-                self.run_phase = RunPhase::Thinking;
-                self.mcp_progress = None;
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
+                self.runtime.mcp_progress = None;
                 self.last_notice = Some(format!("planning task {task_id}"));
-                self.push_phase_marker(format!("task|{}", self.model_name));
+                self.push_phase_marker(format!("task|{}", self.runtime.model_name));
                 self.push_event("task:start", format!("{task_id} {objective}"));
             }
             WorkerMessage::RunFinished { result, entries } => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 self.last_notice = Some("agent idle".to_owned());
@@ -416,12 +418,12 @@ impl AppState {
                 );
             }
             WorkerMessage::PlanRunFinished { result, entries } => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 self.sync_current_session_state(entries);
@@ -444,8 +446,8 @@ impl AppState {
                 );
             }
             WorkerMessage::PlanApproved { entry, entries } => {
-                self.is_busy = false;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.approval.pending = None;
                 self.clear_pending_plan_approval();
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
@@ -464,12 +466,12 @@ impl AppState {
                 entries,
             } => {
                 let notice = task_run_finish_notice(&task_id, status, &entries);
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 self.last_notice = Some(notice);
@@ -488,12 +490,12 @@ impl AppState {
                 model_name,
                 entries,
             } => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 self.restore_session_view(
@@ -535,15 +537,15 @@ impl AppState {
                 model_name,
                 entries,
             } => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
-                self.session_delta_stats = sigil_kernel::SessionStats::default();
+                self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
                     session_log_path,
                     provider_name,
@@ -559,15 +561,15 @@ impl AppState {
                 model_name,
                 entries,
             } => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
-                self.session_delta_stats = sigil_kernel::SessionStats::default();
+                self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
                     session_log_path,
                     provider_name,
@@ -585,12 +587,12 @@ impl AppState {
                 trigger,
                 entries,
             } => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.streaming_assistant_index = None;
                 self.finish_streaming_reasoning_entry();
                 match trigger {
@@ -605,8 +607,8 @@ impl AppState {
                     }
                     CompactionTrigger::AutomaticHardThreshold => {
                         self.session_log_path = session_log_path;
-                        self.provider_name = provider_name;
-                        self.model_name = model_name;
+                        self.runtime.provider_name = provider_name;
+                        self.runtime.model_name = model_name;
                         self.sync_current_session_state(entries);
                         self.latest_compaction_record = Some((*record).clone());
                         self.recompute_compaction_status(false);
@@ -674,12 +676,12 @@ impl AppState {
                 self.open_mcp_elicitation(request, response_tx);
             }
             WorkerMessage::RunFailed(error) => {
-                self.is_busy = false;
-                self.run_phase = RunPhase::Idle;
-                self.mcp_progress = None;
-                self.pending_approval = None;
+                self.runtime.is_busy = false;
+                self.runtime.run_phase = RunPhase::Idle;
+                self.runtime.mcp_progress = None;
+                self.approval.pending = None;
                 self.modal_state = None;
-                self.last_phase_marker = None;
+                self.runtime.last_phase_marker = None;
                 self.streaming_assistant_index = None;
                 self.finish_streaming_reasoning_entry();
                 self.refresh_usage_sidebar_cache();
@@ -715,7 +717,8 @@ impl AppState {
                 message: error.clone(),
             },
         };
-        self.mcp_server_statuses
+        self.runtime
+            .mcp_server_statuses
             .insert(server_name.clone(), runtime_status);
         self.push_event(
             "mcp",
@@ -724,7 +727,7 @@ impl AppState {
     }
 
     fn apply_mcp_progress(&mut self, notification: sigil_runtime::McpProgressNotification) {
-        self.mcp_progress = Some(super::McpProgressState {
+        self.runtime.mcp_progress = Some(super::McpProgressState {
             server_name: notification.server_name.clone(),
             detail: mcp_progress_detail(&notification),
         });
@@ -752,7 +755,7 @@ impl AppState {
         match action {
             AppAction::SubmitPrompt(prompt) => WorkerCommand::SubmitPrompt {
                 prompt,
-                reasoning_effort: self.reasoning_effort.clone(),
+                reasoning_effort: self.runtime.reasoning_effort.clone(),
             },
             AppAction::QueueConversationInput {
                 prompt,
@@ -762,7 +765,7 @@ impl AppState {
                 prompt,
                 kind,
                 target,
-                reasoning_effort: self.reasoning_effort.clone(),
+                reasoning_effort: self.runtime.reasoning_effort.clone(),
             },
             AppAction::CancelQueuedConversationInput { queue_id } => {
                 WorkerCommand::CancelQueuedConversationInput { queue_id }
@@ -771,7 +774,7 @@ impl AppState {
                 WorkerCommand::EditQueuedConversationInput {
                     queue_id,
                     prompt,
-                    reasoning_effort: self.reasoning_effort.clone(),
+                    reasoning_effort: self.runtime.reasoning_effort.clone(),
                 }
             }
             AppAction::MoveQueuedConversationInput {
@@ -792,7 +795,7 @@ impl AppState {
             }
             AppAction::SubmitPlanPrompt(prompt) => WorkerCommand::SubmitPlanPrompt {
                 prompt,
-                reasoning_effort: self.reasoning_effort.clone(),
+                reasoning_effort: self.runtime.reasoning_effort.clone(),
             },
             AppAction::ApprovePlan {
                 plan_text,
@@ -811,7 +814,7 @@ impl AppState {
             } => WorkerCommand::InvokeInlineSkill {
                 skill_id,
                 arguments,
-                reasoning_effort: self.reasoning_effort.clone(),
+                reasoning_effort: self.runtime.reasoning_effort.clone(),
             },
             AppAction::InvokeChildSessionSkill {
                 skill_id,
@@ -894,19 +897,21 @@ impl AppState {
         }
         let updated_server_lines = if let Some(lines) = code_intelligence_server_lines(result) {
             for (key, line) in lines {
-                self.code_intelligence_server_lines.insert(key, line);
+                self.runtime
+                    .code_intelligence_server_lines
+                    .insert(key, line);
             }
             true
         } else {
             false
         };
         if let Some(status_line) = code_diagnostics_status_line(result) {
-            self.code_intelligence_status = status_line;
-            self.code_intelligence_diagnostics_line = Some(code_diagnostics_sidebar_line(
-                &self.code_intelligence_status,
+            self.runtime.code_intelligence_status = status_line;
+            self.runtime.code_intelligence_diagnostics_line = Some(code_diagnostics_sidebar_line(
+                &self.runtime.code_intelligence_status,
             ));
             if let Some(summaries) = code_diagnostics_by_path(result) {
-                self.code_intelligence_diagnostics_by_path = summaries;
+                self.runtime.code_intelligence_diagnostics_by_path = summaries;
             }
         } else if let Some(status_line) = result
             .metadata
@@ -915,25 +920,28 @@ impl AppState {
             .and_then(|details| details.get("status_line"))
             .and_then(serde_json::Value::as_str)
         {
-            self.code_intelligence_status = status_line.to_owned();
+            self.runtime.code_intelligence_status = status_line.to_owned();
             if result.is_error() && !updated_server_lines {
-                self.code_intelligence_server_lines.insert(
+                self.runtime.code_intelligence_server_lines.insert(
                     "status".to_owned(),
-                    format!("status: {}", self.code_intelligence_status),
+                    format!("status: {}", self.runtime.code_intelligence_status),
                 );
             }
         } else if result.is_error() {
-            self.code_intelligence_status = "degraded tool error".to_owned();
+            self.runtime.code_intelligence_status = "degraded tool error".to_owned();
             if !updated_server_lines {
-                self.code_intelligence_server_lines.insert(
+                self.runtime.code_intelligence_server_lines.insert(
                     "status".to_owned(),
-                    format!("status: {}", self.code_intelligence_status),
+                    format!("status: {}", self.runtime.code_intelligence_status),
                 );
             }
         } else {
-            self.code_intelligence_status = "ready".to_owned();
+            self.runtime.code_intelligence_status = "ready".to_owned();
         }
-        self.push_event("code_intelligence", self.code_intelligence_status.clone());
+        self.push_event(
+            "code_intelligence",
+            self.runtime.code_intelligence_status.clone(),
+        );
     }
 
     fn apply_mcp_activation_tool_status(&mut self, result: &ToolResult) {
@@ -1226,17 +1234,17 @@ impl EventHandler for AppState {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         match event {
             RunEvent::TextDelta(delta) => {
-                self.run_phase = RunPhase::Streaming;
+                self.runtime.run_phase = RunPhase::Streaming;
                 self.push_phase_marker("streaming".to_owned());
                 self.append_assistant_delta(&delta);
             }
             RunEvent::ReasoningDelta(delta) => {
-                self.run_phase = RunPhase::Thinking;
-                self.push_phase_marker(format!("thinking|{}", self.model_name));
+                self.runtime.run_phase = RunPhase::Thinking;
+                self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
                 self.append_reasoning_delta(&delta);
             }
             RunEvent::ToolCallStarted(call) => {
-                self.run_phase = RunPhase::Tool(call.name.clone());
+                self.runtime.run_phase = RunPhase::Tool(call.name.clone());
                 if agent_tool_name(&call.name) {
                     self.downgrade_streaming_assistant_entry_to_thinking();
                 }
@@ -1246,8 +1254,8 @@ impl EventHandler for AppState {
                 self.push_event("tool:start", format!("{} {}", call.name, call.id));
             }
             RunEvent::ToolCallArgsDelta { .. } => {
-                if !matches!(self.run_phase, RunPhase::Tool(_)) {
-                    self.run_phase = RunPhase::Tool("tool".to_owned());
+                if !matches!(self.runtime.run_phase, RunPhase::Tool(_)) {
+                    self.runtime.run_phase = RunPhase::Tool("tool".to_owned());
                 }
             }
             RunEvent::ToolCallCompleted(call) => {
@@ -1259,7 +1267,7 @@ impl EventHandler for AppState {
                 if let Some(profile_id) = spawn_agent_profile_id(&call) {
                     self.set_agent_wait_phase(&profile_id);
                 } else {
-                    self.run_phase = RunPhase::Tool(call.name.clone());
+                    self.runtime.run_phase = RunPhase::Tool(call.name.clone());
                     self.push_phase_marker(format!("tool|{}", call.name));
                 }
                 self.push_event("tool:complete", format!("{} {}", call.name, call.id));
@@ -1275,7 +1283,7 @@ impl EventHandler for AppState {
                 snapshot_required,
                 preview,
             } => {
-                self.run_phase = RunPhase::Tool(call.name.clone());
+                self.runtime.run_phase = RunPhase::Tool(call.name.clone());
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 if let Some(preview) = preview.as_ref() {
@@ -1291,7 +1299,7 @@ impl EventHandler for AppState {
                             )
                         });
                 }
-                self.pending_approval = Some(PendingApproval {
+                self.approval.pending = Some(PendingApproval {
                     call: call.clone(),
                     spec,
                     subjects,
@@ -1303,11 +1311,11 @@ impl EventHandler for AppState {
                     preview,
                 });
                 self.active_pane = PaneFocus::Activity;
-                self.approval_scroll_back = 0;
-                self.approval_metadata_collapsed = false;
-                self.approval_selected_file_index = 0;
-                self.approval_selected_hunk_index = 0;
-                self.approval_selected_action = ApprovalAction::Deny;
+                self.approval.scroll_back = 0;
+                self.approval.metadata_collapsed = false;
+                self.approval.selected_file_index = 0;
+                self.approval.selected_hunk_index = 0;
+                self.approval.selected_action = ApprovalAction::Deny;
                 self.last_notice = Some(format!("approve {}", call.name));
                 self.push_event("approval:request", format!("{} {}", call.name, call.id));
                 self.push_timeline(
@@ -1321,17 +1329,18 @@ impl EventHandler for AppState {
                 reason,
             } => {
                 let approved_agent_profile = approved.then(|| {
-                    self.pending_approval
+                    self.approval
+                        .pending
                         .as_ref()
                         .and_then(|pending| spawn_agent_profile_id(&pending.call))
                 });
-                self.pending_approval = None;
+                self.approval.pending = None;
                 self.active_pane = PaneFocus::Composer;
                 if let Some(Some(profile_id)) = approved_agent_profile {
                     self.set_agent_wait_phase(&profile_id);
                 } else {
-                    self.run_phase = RunPhase::Thinking;
-                    self.push_phase_marker(format!("thinking|{}", self.model_name));
+                    self.runtime.run_phase = RunPhase::Thinking;
+                    self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
                 }
                 self.push_event(
                     "approval:resolved",
@@ -1356,12 +1365,12 @@ impl EventHandler for AppState {
             RunEvent::ToolResult(result) => {
                 let is_agent_tool = agent_tool_name(&result.tool_name);
                 if !is_agent_tool {
-                    self.run_phase = RunPhase::Tool(result.tool_name.clone());
+                    self.runtime.run_phase = RunPhase::Tool(result.tool_name.clone());
                 }
                 self.finish_streaming_reasoning_entry();
                 if is_agent_tool {
-                    self.run_phase = RunPhase::Thinking;
-                    self.push_phase_marker(format!("thinking|{}", self.model_name));
+                    self.runtime.run_phase = RunPhase::Thinking;
+                    self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
                 } else {
                     self.push_phase_marker(format!("tool|{}", result.tool_name));
                 }
@@ -1381,8 +1390,8 @@ impl EventHandler for AppState {
                 self.push_event("tool:result", format!("{} {}", result.tool_name, status));
             }
             RunEvent::Usage(usage) => {
-                self.stats.apply_usage(&usage);
-                self.session_delta_stats.apply_usage(&usage);
+                self.runtime.stats.apply_usage(&usage);
+                self.runtime.session_delta_stats.apply_usage(&usage);
                 self.recompute_compaction_status(true);
                 self.refresh_usage_sidebar_cache();
                 self.push_event(
@@ -1431,7 +1440,7 @@ impl EventHandler for AppState {
                 }
                 ControlEntry::ToolExecution(execution) => {
                     if matches!(execution.status, ToolExecutionStatus::Started) {
-                        self.run_phase = RunPhase::Tool(execution.tool_name.clone());
+                        self.runtime.run_phase = RunPhase::Tool(execution.tool_name.clone());
                         self.push_phase_marker(format!("tool|{}", execution.tool_name));
                     }
                     let control = ControlEntry::ToolExecution(execution);
@@ -1480,10 +1489,10 @@ impl EventHandler for AppState {
             }
             RunEvent::AssistantMessage(message) => {
                 if let Some(tool_name) = message.tool_calls.first().map(|call| call.name.clone()) {
-                    self.run_phase = RunPhase::Tool(tool_name.clone());
+                    self.runtime.run_phase = RunPhase::Tool(tool_name.clone());
                     self.push_phase_marker(format!("tool|{tool_name}"));
                 } else {
-                    self.run_phase = RunPhase::Streaming;
+                    self.runtime.run_phase = RunPhase::Streaming;
                     self.push_phase_marker("streaming".to_owned());
                 }
                 self.finish_streaming_assistant_entry();
