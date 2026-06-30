@@ -883,19 +883,31 @@ fn footer_run_label(app: &AppState) -> String {
 
 fn footer_hints(app: &AppState) -> String {
     let agent = format!("agent: {}", app.active_agent_label());
+    let queue = app.composer_queue_summary();
     if app.pending_plan_approval().is_some() {
         return format!("{agent} · A ask · W workspace edits · C continue · Esc discard");
     }
     if app.approval.pending.is_some() {
         return format!("{agent} · Y allow · N deny · V diff");
     }
+    if app.is_composer_queue_panel_focused() {
+        return format!("{agent} · Queue ↑↓ item · Tab action · Enter run · Esc input");
+    }
     if app.runtime.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
+        let queue = queue
+            .as_deref()
+            .map(|summary| format!("{summary} · "))
+            .unwrap_or_default();
         return format!(
-            "{agent} · Enter queue next turn · Ctrl-B background · Esc interrupt · Ctrl-T details"
+            "{agent} · {queue}Enter queue next turn · Ctrl-B background · Esc interrupt · Ctrl-T details"
         );
     }
     if app.runtime.is_busy {
-        return format!("{agent} · Enter queue next turn · Esc interrupt · Ctrl-T details");
+        let queue = queue
+            .as_deref()
+            .map(|summary| format!("{summary} · "))
+            .unwrap_or_default();
+        return format!("{agent} · {queue}Enter queue next turn · Esc interrupt · Ctrl-T details");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
         if app.has_agent_mention_selector() {
@@ -903,11 +915,11 @@ fn footer_hints(app: &AppState) -> String {
         }
         return format!("{agent} · ↑↓ choose · Tab accept · Enter run · Esc close");
     }
-    if app.is_composer_queue_panel_focused() {
-        return format!("{agent} · Queue ↑↓ item · Tab action · Enter run · Esc input");
-    }
     if app.is_composer_agent_panel_focused() {
         return format!("{agent} · ↑↓ agent · Enter switch · C close · M message · Esc input");
+    }
+    if let Some(queue) = queue {
+        return format!("{agent} · {queue} · /queue focus");
     }
     format!("{agent} · Enter send · Shift-Enter newline · Alt-A agent · / commands")
 }

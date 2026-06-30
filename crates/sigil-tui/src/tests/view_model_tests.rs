@@ -1079,6 +1079,14 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
             ControlEntry::ConversationInputQueued(queued),
         )],
     })?;
+    let unfocused_queue_view = UiViewModel::from_app(&queue_app);
+    assert!(
+        unfocused_queue_view
+            .footer
+            .hints
+            .contains("queue 1 item · next main thread: queued prompt")
+    );
+    assert!(unfocused_queue_view.footer.hints.contains("/queue focus"));
     queue_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let queue_view = UiViewModel::from_app(&queue_app);
     assert!(queue_view.footer.hints.contains("Queue"));

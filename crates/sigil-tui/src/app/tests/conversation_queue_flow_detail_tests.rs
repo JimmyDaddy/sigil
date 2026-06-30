@@ -8,10 +8,24 @@ fn queued_item(
     kind: sigil_kernel::ConversationInputKind,
     status: sigil_kernel::ConversationInputStatus,
 ) -> sigil_kernel::ConversationQueueItemProjection {
+    queued_item_with_target(
+        id,
+        sigil_kernel::ConversationInputTarget::MainThread,
+        kind,
+        status,
+    )
+}
+
+fn queued_item_with_target(
+    id: &str,
+    target: sigil_kernel::ConversationInputTarget,
+    kind: sigil_kernel::ConversationInputKind,
+    status: sigil_kernel::ConversationInputStatus,
+) -> sigil_kernel::ConversationQueueItemProjection {
     sigil_kernel::ConversationQueueItemProjection {
         queued: sigil_kernel::ConversationInputQueuedEntry {
             queue_id: sigil_kernel::ConversationInputQueueId::new(id).expect("valid queue id"),
-            target: sigil_kernel::ConversationInputTarget::MainThread,
+            target,
             kind,
             prompt_hash: format!("sha256:{id}"),
             prompt: format!("{id} prompt"),
@@ -60,13 +74,20 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
         AppAction::PromoteQueuedConversationInput { ref queue_id }
             if queue_id.as_str() == "queue_2"
     ));
+    assert_eq!(
+        app.composer_queue_summary().as_deref(),
+        Some("queue 2 items · next main thread: first")
+    );
 
     let paused = queued_item(
         "queue_paused",
         sigil_kernel::ConversationInputKind::Chat,
         sigil_kernel::ConversationInputStatus::Queued,
     );
-    assert_eq!(queue_item_detail(&paused, true), "paused · chat");
+    assert_eq!(
+        queue_item_detail(&paused, true),
+        "paused · main thread · chat"
+    );
     assert_eq!(
         queue_status_kind(sigil_kernel::ConversationInputStatus::Queued, true),
         StatusKind::Warning
@@ -75,19 +96,19 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
     for (kind, label) in [
         (
             sigil_kernel::ConversationInputKind::PlanPrompt,
-            "queued · plan",
+            "queued · main thread · plan",
         ),
         (
             sigil_kernel::ConversationInputKind::AgentMention,
-            "queued · agent",
+            "queued · main thread · agent",
         ),
         (
             sigil_kernel::ConversationInputKind::AgentMessage,
-            "queued · message",
+            "queued · main thread · message",
         ),
         (
             sigil_kernel::ConversationInputKind::Unknown,
-            "queued · unknown",
+            "queued · main thread · unknown",
         ),
     ] {
         assert_eq!(
@@ -102,6 +123,27 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
             label
         );
     }
+    let agent_thread = queued_item_with_target(
+        "queue_agent",
+        sigil_kernel::ConversationInputTarget::AgentThread {
+            thread_id: sigil_kernel::AgentThreadId::new("agent_chat_1")
+                .expect("valid agent thread id"),
+        },
+        sigil_kernel::ConversationInputKind::AgentMessage,
+        sigil_kernel::ConversationInputStatus::Queued,
+    );
+    assert_eq!(
+        queue_item_detail(&agent_thread, false),
+        "queued · agent mailbox agent_chat_1 · message"
+    );
+    let mut agent_queue_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    agent_queue_app.sync_current_session_state(vec![sigil_kernel::SessionLogEntry::Control(
+        sigil_kernel::ControlEntry::ConversationInputQueued(agent_thread.queued.clone()),
+    )]);
+    assert_eq!(
+        agent_queue_app.composer_queue_summary().as_deref(),
+        Some("queue 1 item · next agent mailbox agent_chat_1: queue_agent prompt")
+    );
 
     for (status, label, kind) in [
         (

@@ -51,6 +51,18 @@ impl AppState {
         self.conversation_queue_projection().paused
     }
 
+    pub(crate) fn composer_queue_summary(&self) -> Option<String> {
+        let projection = self.conversation_queue_projection();
+        let count = projection.items.len();
+        let next = projection.items.first()?;
+        let plural = if count == 1 { "" } else { "s" };
+        Some(format!(
+            "queue {count} item{plural} · next {}: {}",
+            queue_target_label(&next.queued.target),
+            queue_prompt_preview(next)
+        ))
+    }
+
     pub(crate) fn selected_composer_queue_action(&self) -> ComposerQueueAction {
         self.composer.queue_action_selected
     }
@@ -394,16 +406,40 @@ fn queue_item_detail(item: &ConversationQueueItemProjection, paused: bool) -> St
         queue_status_label(item.status)
     };
     format!(
-        "{} · {}",
+        "{} · {} · {}",
         status,
-        match item.queued.kind {
-            sigil_kernel::ConversationInputKind::Chat => "chat",
-            sigil_kernel::ConversationInputKind::PlanPrompt => "plan",
-            sigil_kernel::ConversationInputKind::AgentMention => "agent",
-            sigil_kernel::ConversationInputKind::AgentMessage => "message",
-            sigil_kernel::ConversationInputKind::Unknown => "unknown",
-        }
+        queue_target_label(&item.queued.target),
+        queue_kind_label(item.queued.kind),
     )
+}
+
+fn queue_target_label(target: &sigil_kernel::ConversationInputTarget) -> String {
+    match target {
+        sigil_kernel::ConversationInputTarget::MainThread => "main thread".to_owned(),
+        sigil_kernel::ConversationInputTarget::AgentThread { thread_id } => {
+            format!("agent mailbox {}", thread_id.as_str())
+        }
+    }
+}
+
+fn queue_kind_label(kind: sigil_kernel::ConversationInputKind) -> &'static str {
+    match kind {
+        sigil_kernel::ConversationInputKind::Chat => "chat",
+        sigil_kernel::ConversationInputKind::PlanPrompt => "plan",
+        sigil_kernel::ConversationInputKind::AgentMention => "agent",
+        sigil_kernel::ConversationInputKind::AgentMessage => "message",
+        sigil_kernel::ConversationInputKind::Unknown => "unknown",
+    }
+}
+
+fn queue_prompt_preview(item: &ConversationQueueItemProjection) -> String {
+    const MAX_CHARS: usize = 48;
+    let label = queue_prompt_label(item);
+    let mut preview = label.chars().take(MAX_CHARS).collect::<String>();
+    if label.chars().count() > MAX_CHARS {
+        preview.push_str("...");
+    }
+    preview
 }
 
 fn queue_status_kind(status: ConversationInputStatus, paused: bool) -> StatusKind {
