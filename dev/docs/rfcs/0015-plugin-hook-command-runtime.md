@@ -1,6 +1,6 @@
 # RFC-0015 Plugin Hook Command Runtime
 
-状态：draft / E15.1-E15.7 implemented / sandbox handoff remains gated
+状态：draft / E15.1-E15.7 implemented / E05.15 core semantics implemented
 
 创建日期：2026-06-29
 

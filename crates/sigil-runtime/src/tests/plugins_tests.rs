@@ -11,14 +11,15 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentConfig, ApprovalMode, CodeIntelligenceConfig, CompactionConfig, ExecutionBackend,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture, ExecutionNetworkReceipt,
-    ExecutionReceipt, ExecutionRequest, JsonlSessionStore, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
-    McpServerStartup, MemoryConfig, MutationEventRecorder, PermissionConfig, PluginCapability,
-    PluginHookExecutionStatus, PluginHookKind, PluginHookOutputArtifactRef, PluginSkillRef,
-    PluginTrustDecision, PluginTrustEntry, ProviderCapabilities, ReasoningStreamSupport,
-    RedactionState, RootConfig, SecretRedactor, SessionConfig, SessionStreamRecord, SkillConfig,
-    SkillIndexSnapshot, SkillSource, TaskConfig, ToolAccess, ToolCategory, ToolEffect,
-    WorkspaceConfig, WorkspaceMutationDetected,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel, ExecutionFuture,
+    ExecutionNetworkReceipt, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
+    JsonlSessionStore, MAX_PLUGIN_HOOK_ARTIFACT_REFS, McpServerStartup, MemoryConfig,
+    MutationEventRecorder, PermissionConfig, PluginCapability, PluginHookExecutionStatus,
+    PluginHookKind, PluginHookOutputArtifactRef, PluginSkillRef, PluginTrustDecision,
+    PluginTrustEntry, ProviderCapabilities, ReasoningStreamSupport, RedactionState, RootConfig,
+    SecretRedactor, SessionConfig, SessionStreamRecord, SkillConfig, SkillIndexSnapshot,
+    SkillSource, TaskConfig, ToolAccess, ToolCategory, ToolEffect, WorkspaceConfig,
+    WorkspaceMutationDetected,
 };
 
 use super::{
@@ -640,7 +641,10 @@ timeout_ms = 45000
     let registration = report.registrations.hooks[0].clone();
     let backend = RecordingExecutionBackend::default();
     let requests = backend.requests.clone();
-    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+    let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
+        Arc::new(backend),
+        ExecutionSandboxProfile::WorkspaceWrite,
+    );
 
     let outcome = runner
         .execute(PluginHookExecutionRequest::new(
@@ -679,6 +683,16 @@ timeout_ms = 45000
     assert_eq!(outcome.started.command, vec!["hook-runner", "--json"]);
     assert_eq!(outcome.started.backend, ExecutionBackendKind::Local);
     assert_eq!(
+        outcome.started.execution_coverage,
+        ExecutionCoverageLabel::LocalBackendEnforced
+    );
+    assert_eq!(
+        outcome.started.sandbox_profile,
+        ExecutionSandboxProfile::WorkspaceWrite
+    );
+    assert!(outcome.started.egress_logging);
+    assert!(!outcome.started.allow_secrets);
+    assert_eq!(
         outcome.started.capability_digest,
         report.manifests[0]
             .capability_digest()
@@ -695,7 +709,98 @@ timeout_ms = 45000
     );
     assert_eq!(outcome.finished.stdout_bytes, 2);
     assert_eq!(outcome.finished.stderr_bytes, 0);
+    assert_eq!(
+        outcome.finished.execution_coverage,
+        ExecutionCoverageLabel::LocalBackendEnforced
+    );
+    assert_eq!(
+        outcome.finished.sandbox_profile,
+        ExecutionSandboxProfile::WorkspaceWrite
+    );
+    assert!(outcome.finished.egress_logging);
+    assert!(!outcome.finished.allow_secrets);
     assert_eq!(outcome.receipt.stdout, b"ok");
+}
+
+#[tokio::test]
+async fn trusted_plugin_hook_runner_records_configured_sandbox_policy_evidence() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "context-pack"
+event = "context"
+kind = "context"
+command = "hook-runner"
+declared_effect = "read_only"
+egress_logging = false
+allow_secrets = true
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+    let backend = RecordingExecutionBackend {
+        backend_kind: ExecutionBackendKind::MacosSeatbelt,
+        capabilities: ExecutionBackendCapabilities {
+            filesystem_isolation: true,
+            process_isolation: true,
+            ..ExecutionBackendCapabilities::default()
+        },
+        network: ExecutionNetworkReceipt::unsupported(
+            "macos_seatbelt backend does not enforce network denial",
+        ),
+        ..RecordingExecutionBackend::default()
+    };
+    let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
+        Arc::new(backend),
+        ExecutionSandboxProfile::WorkspaceWrite,
+    );
+
+    let outcome = runner
+        .execute(PluginHookExecutionRequest::new(
+            report.registrations.hooks[0].clone(),
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect("hook execution should succeed");
+
+    assert_eq!(outcome.started.backend, ExecutionBackendKind::MacosSeatbelt);
+    assert!(outcome.started.backend_capabilities.filesystem_isolation);
+    assert!(outcome.started.backend_capabilities.process_isolation);
+    assert_eq!(
+        outcome.started.execution_coverage,
+        ExecutionCoverageLabel::LocalBackendEnforced
+    );
+    assert_eq!(
+        outcome.started.sandbox_profile,
+        ExecutionSandboxProfile::WorkspaceWrite
+    );
+    assert!(!outcome.started.egress_logging);
+    assert!(outcome.started.allow_secrets);
+    assert_eq!(
+        outcome.finished.backend,
+        ExecutionBackendKind::MacosSeatbelt
+    );
+    assert_eq!(
+        outcome.finished.network.policy,
+        sigil_kernel::ExecutionNetworkPolicy::Unsupported
+    );
+    assert_eq!(
+        outcome.finished.sandbox_profile,
+        ExecutionSandboxProfile::WorkspaceWrite
+    );
+    assert!(!outcome.finished.egress_logging);
+    assert!(outcome.finished.allow_secrets);
 }
 
 #[tokio::test]
@@ -1602,6 +1707,9 @@ id: same
 #[derive(Clone)]
 struct RecordingExecutionBackend {
     requests: Arc<Mutex<Vec<ExecutionRequest>>>,
+    backend_kind: ExecutionBackendKind,
+    capabilities: ExecutionBackendCapabilities,
+    network: ExecutionNetworkReceipt,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     workspace_write: Option<(String, String)>,
@@ -1611,6 +1719,9 @@ impl Default for RecordingExecutionBackend {
     fn default() -> Self {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
+            backend_kind: ExecutionBackendKind::Local,
+            capabilities: ExecutionBackendCapabilities::default(),
+            network: ExecutionNetworkReceipt::default(),
             stdout: b"ok".to_vec(),
             stderr: Vec::new(),
             workspace_write: None,
@@ -1620,11 +1731,11 @@ impl Default for RecordingExecutionBackend {
 
 impl ExecutionBackend for RecordingExecutionBackend {
     fn kind(&self) -> ExecutionBackendKind {
-        ExecutionBackendKind::Local
+        self.backend_kind
     }
 
     fn capabilities(&self) -> ExecutionBackendCapabilities {
-        ExecutionBackendCapabilities::default()
+        self.capabilities
     }
 
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
@@ -1632,6 +1743,9 @@ impl ExecutionBackend for RecordingExecutionBackend {
         let stdout = self.stdout.clone();
         let stderr = self.stderr.clone();
         let workspace_write = self.workspace_write.clone();
+        let backend_kind = self.backend_kind;
+        let capabilities = self.capabilities;
+        let network = self.network.clone();
         Box::pin(async move {
             if let Some((relative_path, content)) = workspace_write {
                 let workspace_root = request
@@ -1646,9 +1760,9 @@ impl ExecutionBackend for RecordingExecutionBackend {
             }
             requests.lock().expect("requests should lock").push(request);
             Ok(ExecutionReceipt {
-                backend: ExecutionBackendKind::Local,
-                capabilities: ExecutionBackendCapabilities::default(),
-                network: ExecutionNetworkReceipt::default(),
+                backend: backend_kind,
+                capabilities,
+                network,
                 resources: Default::default(),
                 exit_code: Some(0),
                 stdout,

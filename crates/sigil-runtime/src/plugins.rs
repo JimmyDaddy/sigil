@@ -9,14 +9,14 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackend,
-    ExecutionReceipt, ExecutionRequest, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
-    MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig, MutationEventRecorder,
-    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginHookExecutionFinishedEntry,
-    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookOutputArtifactRef,
-    PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef, PluginManifest,
-    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState, SecretRedactor,
-    SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope, WorkspaceMutationScan,
-    validate_plugin_id,
+    ExecutionCoverageLabel, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
+    MAX_PLUGIN_HOOK_ARTIFACT_REFS, MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig,
+    MutationEventRecorder, PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef,
+    PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
+    PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef,
+    PluginManifest, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState,
+    SecretRedactor, SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope,
+    WorkspaceMutationScan, validate_plugin_id,
 };
 use uuid::Uuid;
 
@@ -148,12 +148,27 @@ pub struct PluginHookExecutionOutcome {
 /// Runs trusted plugin hook commands through the configured non-interactive execution backend.
 pub struct PluginHookExecutionRunner {
     backend: Arc<dyn ExecutionBackend>,
+    sandbox_profile: ExecutionSandboxProfile,
 }
 
 impl PluginHookExecutionRunner {
     #[must_use]
     pub fn new(backend: Arc<dyn ExecutionBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_sandbox_profile(
+        backend: Arc<dyn ExecutionBackend>,
+        sandbox_profile: ExecutionSandboxProfile,
+    ) -> Self {
+        Self {
+            backend,
+            sandbox_profile,
+        }
     }
 
     /// Executes one plugin hook command and returns durable evidence entries.
@@ -192,6 +207,10 @@ impl PluginHookExecutionRunner {
         let tool_name = plugin_hook_tool_name(&registration.plugin_id, &hook_id);
         let backend = self.backend.kind();
         let backend_capabilities = self.backend.capabilities();
+        let execution_coverage = ExecutionCoverageLabel::LocalBackendEnforced;
+        let sandbox_profile = self.sandbox_profile;
+        let egress_logging = registration.hook.egress_logging;
+        let allow_secrets = registration.hook.allow_secrets;
         let started = PluginHookExecutionStartedEntry {
             execution_id: execution_id.clone(),
             plugin_id: registration.plugin_id.clone(),
@@ -204,6 +223,10 @@ impl PluginHookExecutionRunner {
             timeout_ms: registration.hook.timeout_ms,
             backend,
             backend_capabilities,
+            execution_coverage,
+            sandbox_profile,
+            egress_logging,
+            allow_secrets,
         };
         let mutation_scan = begin_plugin_hook_mutation_scan(
             request.mutation_recorder.as_ref(),
@@ -287,6 +310,10 @@ impl PluginHookExecutionRunner {
             timed_out: receipt.timed_out,
             backend: receipt.backend,
             backend_capabilities: receipt.capabilities,
+            execution_coverage,
+            sandbox_profile,
+            egress_logging,
+            allow_secrets,
             network: receipt.network.clone(),
             resources: receipt.resources.clone(),
         };

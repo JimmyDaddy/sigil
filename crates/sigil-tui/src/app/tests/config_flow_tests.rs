@@ -2468,6 +2468,7 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     ));
     assert!(detail.contains("- Runtime: trusted hooks run through execution backend"));
     assert!(detail.contains("- Evidence: mutating hooks record workspace evidence"));
+    assert!(detail.contains("- Audit: session records backend, profile, network"));
     assert!(detail.contains("- Inspect: run /doctor for command and issue details"));
     assert!(!detail.contains("- Hook 1 command:"));
     assert!(!detail.contains("- Hook 1 policy:"));
@@ -2597,6 +2598,7 @@ required = true
         "- Hook effects: read_only=0 workspace_write=0 external_write=0 network=0 unknown=4",
         "- Runtime: trusted hooks run through execution backend",
         "- Evidence: mutating hooks record workspace evidence",
+        "- Audit: session records backend, profile, network",
         "- Inspect: run /doctor for command and issue details",
         "- MCP 1: tools-1",
         "- MCP 1 command: node server-1.js",

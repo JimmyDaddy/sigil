@@ -15,8 +15,9 @@ use crate::{
     },
     event::EventId,
     execution_backend::{
-        ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageSummary,
-        ExecutionNetworkReceipt, ExecutionResourceReceipt,
+        ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel,
+        ExecutionCoverageSummary, ExecutionNetworkReceipt, ExecutionResourceReceipt,
+        ExecutionSandboxProfile,
     },
     permission::ApprovalMode,
     session::{ControlEntry, SessionLogEntry},
@@ -34,6 +35,10 @@ fn default_plugin_hook_timeout_ms() -> u64 {
 
 fn default_plugin_hook_declared_effect() -> ToolEffect {
     ToolEffect::Unknown
+}
+
+fn default_plugin_hook_execution_coverage() -> ExecutionCoverageLabel {
+    ExecutionCoverageLabel::UnknownExternal
 }
 
 /// Canonical prefix for plugin manifest content digests.
@@ -482,6 +487,14 @@ pub struct PluginHookExecutionStartedEntry {
     pub timeout_ms: u64,
     pub backend: ExecutionBackendKind,
     pub backend_capabilities: ExecutionBackendCapabilities,
+    #[serde(default = "default_plugin_hook_execution_coverage")]
+    pub execution_coverage: ExecutionCoverageLabel,
+    #[serde(default)]
+    pub sandbox_profile: ExecutionSandboxProfile,
+    #[serde(default = "default_plugin_egress_logging")]
+    pub egress_logging: bool,
+    #[serde(default)]
+    pub allow_secrets: bool,
 }
 
 /// Stable completion state for one plugin hook command process.
@@ -511,6 +524,14 @@ pub struct PluginHookExecutionFinishedEntry {
     pub timed_out: bool,
     pub backend: ExecutionBackendKind,
     pub backend_capabilities: ExecutionBackendCapabilities,
+    #[serde(default = "default_plugin_hook_execution_coverage")]
+    pub execution_coverage: ExecutionCoverageLabel,
+    #[serde(default)]
+    pub sandbox_profile: ExecutionSandboxProfile,
+    #[serde(default = "default_plugin_egress_logging")]
+    pub egress_logging: bool,
+    #[serde(default)]
+    pub allow_secrets: bool,
     #[serde(default)]
     pub network: ExecutionNetworkReceipt,
     #[serde(default)]

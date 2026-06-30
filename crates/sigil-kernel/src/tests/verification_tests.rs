@@ -10,11 +10,11 @@ use crate::{
     CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType,
     EvidenceReceipt, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
-    ExecutionBackendKind, ExecutionFuture, ExecutionNetworkPolicy, ExecutionNetworkReceipt,
-    ExecutionReceipt, ExecutionRequest, FileMetadataPlatform, FileType, JsonlSessionStore,
-    MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, PluginHookExecutionFinishedEntry,
-    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
-    PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream,
+    ExecutionBackendKind, ExecutionCoverageLabel, ExecutionFuture, ExecutionNetworkPolicy,
+    ExecutionNetworkReceipt, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
+    FileMetadataPlatform, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
+    PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
+    PluginHookKind, PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream,
     PluginVerificationHookReceiptRequest, ReadinessInput, ReadinessProjectionMode, ReadinessReason,
     ReceiptStatus, RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session,
     SessionLogEntry, SessionStreamRecord, SnapshotEntryState, ToolEffect,
@@ -3974,6 +3974,10 @@ fn plugin_verification_hook_started(effect: ToolEffect) -> PluginHookExecutionSt
         timeout_ms: 30_000,
         backend: ExecutionBackendKind::MacosSeatbelt,
         backend_capabilities: capabilities,
+        execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
+        sandbox_profile: ExecutionSandboxProfile::WorkspaceWrite,
+        egress_logging: true,
+        allow_secrets: false,
     }
 }
 
@@ -3999,6 +4003,10 @@ fn plugin_verification_hook_finished(
         timed_out: status == PluginHookExecutionStatus::TimedOut,
         backend: started.backend,
         backend_capabilities: started.backend_capabilities,
+        execution_coverage: started.execution_coverage,
+        sandbox_profile: started.sandbox_profile,
+        egress_logging: started.egress_logging,
+        allow_secrets: started.allow_secrets,
         network: ExecutionNetworkReceipt::denied("plugin hook sandbox denied network"),
         resources: Default::default(),
     }

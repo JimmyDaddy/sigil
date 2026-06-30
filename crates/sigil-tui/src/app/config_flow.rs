@@ -2767,6 +2767,10 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
         "mutating hooks record workspace evidence",
     ));
     lines.push(render_config_readonly_row(
+        "Audit",
+        "session records backend, profile, network",
+    ));
+    lines.push(render_config_readonly_row(
         "Inspect",
         "run /doctor for command and issue details",
     ));

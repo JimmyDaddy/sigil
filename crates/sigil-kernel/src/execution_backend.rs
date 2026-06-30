@@ -390,6 +390,16 @@ pub enum ExecutionSandboxProfile {
 
 impl ExecutionSandboxProfile {
     #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unconfined => "unconfined",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::BuildOffline => "build_offline",
+            Self::BuildNetworked => "build_networked",
+        }
+    }
+
+    #[must_use]
     pub fn spec(self) -> ExecutionSandboxProfileSpec {
         match self {
             Self::Unconfined => ExecutionSandboxProfileSpec {
@@ -569,6 +579,20 @@ pub enum ExecutionCoverageLabel {
     PluginManaged,
     RemoteService,
     UnknownExternal,
+}
+
+impl ExecutionCoverageLabel {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KernelMediated => "kernel_mediated",
+            Self::LocalBackendEnforced => "local_backend_enforced",
+            Self::ExternalMcpServer => "external_mcp_server",
+            Self::PluginManaged => "plugin_managed",
+            Self::RemoteService => "remote_service",
+            Self::UnknownExternal => "unknown_external",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

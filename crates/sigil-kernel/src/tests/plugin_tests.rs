@@ -3,13 +3,14 @@ use anyhow::Result;
 use crate::{
     ApprovalMode, ContextPackOptions, ContextSensitivity, ContextSource, ContextTrustLevel,
     ControlEntry, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel,
-    ExecutionNetworkReceipt, McpServerConfig, McpServerStartup, PluginAgentRef, PluginCapability,
-    PluginHookContextOptions, PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry,
-    PluginHookExecutionStatus, PluginHookKind, PluginHookOutputEnvelope, PluginHookOutputStream,
-    PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef, PluginStateProjection,
-    PluginTrustDecision, PluginTrustEntry, RedactionState, SessionLogEntry, ToolEffect,
-    pack_context_items, plugin_hook_output_context_items, plugin_manifest_digests_match,
-    validate_plugin_id, validate_plugin_manifest_digest, validate_plugin_version,
+    ExecutionNetworkReceipt, ExecutionSandboxProfile, McpServerConfig, McpServerStartup,
+    PluginAgentRef, PluginCapability, PluginHookContextOptions, PluginHookExecutionFinishedEntry,
+    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
+    PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef, PluginManifest,
+    PluginManifestSnapshot, PluginSkillRef, PluginStateProjection, PluginTrustDecision,
+    PluginTrustEntry, RedactionState, SessionLogEntry, ToolEffect, pack_context_items,
+    plugin_hook_output_context_items, plugin_manifest_digests_match, validate_plugin_id,
+    validate_plugin_manifest_digest, validate_plugin_version,
 };
 
 const VALID_PLUGIN_DIGEST: &str =
@@ -247,6 +248,10 @@ fn plugin_hook_execution_control_entries_round_trip() {
         timeout_ms: 30_000,
         backend: ExecutionBackendKind::Local,
         backend_capabilities: ExecutionBackendCapabilities::default(),
+        execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
+        sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        egress_logging: true,
+        allow_secrets: false,
     };
     let finished = PluginHookExecutionFinishedEntry {
         execution_id: started.execution_id.clone(),
@@ -262,6 +267,10 @@ fn plugin_hook_execution_control_entries_round_trip() {
         timed_out: false,
         backend: ExecutionBackendKind::Local,
         backend_capabilities: ExecutionBackendCapabilities::default(),
+        execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
+        sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        egress_logging: true,
+        allow_secrets: false,
         network: ExecutionNetworkReceipt::default(),
         resources: Default::default(),
     };

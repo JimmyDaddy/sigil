@@ -8,14 +8,15 @@ use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfilePolicyEntry, AgentProfileSnapshot,
     AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
     ApprovalMode, CompactionConfig, CompactionRecord, DurableEventType,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt, JsonlSessionStore,
-    McpElicitationDecision, McpElicitationEntry, MemoryConfig, PlanApprovalExpiry,
-    PlanApprovalPermission, PluginCapability, PluginHookExecutionFinishedEntry,
-    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
-    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SessionStreamRecord,
-    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
-    SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
-    ToolEffect, ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel,
+    ExecutionNetworkReceipt, ExecutionSandboxProfile, JsonlSessionStore, McpElicitationDecision,
+    McpElicitationEntry, MemoryConfig, PlanApprovalExpiry, PlanApprovalPermission,
+    PluginCapability, PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry,
+    PluginHookExecutionStatus, PluginHookKind, PluginManifestSnapshot, PluginTrustDecision,
+    PluginTrustEntry, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
+    SkillRunMode, SkillSource, SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry,
+    ToolApprovalUserDecision, ToolEffect, ToolError, ToolErrorKind, ToolResultMeta,
+    WorkspaceConfig,
 };
 
 #[test]
@@ -1921,11 +1922,15 @@ fn render_session_control_entries_cover_remaining_labels() {
             timeout_ms: 30_000,
             backend: ExecutionBackendKind::Local,
             backend_capabilities: ExecutionBackendCapabilities::default(),
+            execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
+            sandbox_profile: ExecutionSandboxProfile::Unconfined,
+            egress_logging: true,
+            allow_secrets: false,
         }),
     ));
     assert_eq!(
         plugin_hook_started,
-        "[ctl] plugin hook repo-review:verify-repo started kind=verification effect=workspace_write backend=local"
+        "[ctl] plugin hook repo-review:verify-repo started kind=verification effect=workspace_write backend=local profile=unconfined coverage=local_backend_enforced"
     );
 
     let plugin_hook_finished = render_session_log_entry(&SessionLogEntry::Control(
@@ -1943,13 +1948,17 @@ fn render_session_control_entries_cover_remaining_labels() {
             timed_out: false,
             backend: ExecutionBackendKind::Local,
             backend_capabilities: ExecutionBackendCapabilities::default(),
+            execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
+            sandbox_profile: ExecutionSandboxProfile::Unconfined,
+            egress_logging: true,
+            allow_secrets: false,
             network: ExecutionNetworkReceipt::unknown("local backend"),
             resources: Default::default(),
         }),
     ));
     assert_eq!(
         plugin_hook_finished,
-        "[ctl] plugin hook repo-review:verify-repo finished status=succeeded exit=0 stdout=12 stderr=0"
+        "[ctl] plugin hook repo-review:verify-repo finished status=succeeded exit=0 stdout=12 stderr=0 backend=local network=unknown"
     );
 
     let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1").expect("valid queue id");
