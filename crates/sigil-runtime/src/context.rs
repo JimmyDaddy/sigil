@@ -66,8 +66,9 @@ pub fn context_candidates_from_repo_query(
         }
     }
 
+    let explicit_candidate_count = candidates.len();
     let terms = lexical_query_terms(query);
-    if !terms.is_empty() && candidates.len() < REPO_CONTEXT_MAX_ITEMS {
+    if explicit_candidate_count == 0 && !terms.is_empty() {
         collect_lexical_file_candidates(&workspace_root, &terms, &mut candidates);
     }
 

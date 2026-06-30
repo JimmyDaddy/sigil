@@ -140,6 +140,68 @@ fn context_retrieves_repo_file_candidates_from_query() -> Result<()> {
 }
 
 #[test]
+fn context_repo_candidates_keep_explicit_path_prompts_precise() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("guides"))?;
+    fs::write(
+        temp.path().join("guides/setup.md"),
+        "English setup guide for the sample workspace.\n",
+    )?;
+    fs::write(
+        temp.path().join("guides/setup.zh-CN.md"),
+        "中文安装指南：先配置凭据，再运行检查。\n",
+    )?;
+    fs::create_dir_all(temp.path().join("packages/installer"))?;
+    fs::write(
+        temp.path().join("packages/installer/setup.md"),
+        "Package installer setup notes for a different component.\n",
+    )?;
+
+    let context =
+        context_candidates_from_repo_query(temp.path(), "总结 guides/setup.zh-CN.md 的流程")?;
+
+    let ids = context
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["repo-file:guides/setup.zh-CN.md"]);
+    assert_eq!(
+        context
+            .snippets
+            .get("repo-file:guides/setup.zh-CN.md")
+            .map(String::as_str),
+        Some("中文安装指南：先配置凭据，再运行检查。\n")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_repo_candidates_keep_lexical_fallback_without_explicit_paths() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("docs/specs"))?;
+    fs::write(
+        temp.path().join("docs/specs/evaluation-harness.md"),
+        "Evaluation harness runner and deterministic model evaluation policy.\n",
+    )?;
+    fs::write(
+        temp.path().join("docs/specs/context-engine.md"),
+        "Context engine and retrieval design.\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "which document covers evaluation harness policy",
+    )?;
+
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:docs/specs/evaluation-harness.md")
+    );
+    Ok(())
+}
+
+#[test]
 fn context_repo_candidates_do_not_read_secret_like_files() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join(".env"), "SIGIL_API_KEY=secret-value\n")?;
