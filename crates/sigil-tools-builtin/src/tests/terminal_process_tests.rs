@@ -11,9 +11,10 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
-    ExecutionSandboxProfile, TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus, ExecutionConfig,
+    ExecutionIsolationPolicy, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
 };
 use tokio::{
     fs::OpenOptions,
@@ -23,7 +24,10 @@ use tokio::{
     time::sleep,
 };
 
-use super::{TerminalBackendKind, TerminalProcessManager, TerminalPtySize, TerminalStartRequest};
+use super::{
+    TerminalBackendKind, TerminalExecutionConfig, TerminalProcessManager, TerminalPtySize,
+    TerminalStartRequest,
+};
 use serial_test::serial;
 
 #[test]
@@ -450,6 +454,219 @@ async fn terminal_process_manager_pty_records_context_and_env() -> Result<()> {
     );
     let read = manager.read(&entry.handle.task_id, 0, 1024).await?;
     assert!(read.content.contains("env:ok"));
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[serial]
+#[tokio::test]
+async fn terminal_process_manager_macos_seatbelt_pty_records_sandbox_and_denies_external_write()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let outside_path = outside.path().join("denied.txt");
+    let shell = "/bin/sh".to_owned();
+    let execution_config = ExecutionConfig {
+        backend: ExecutionBackendKind::MacosSeatbelt,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        profile: ExecutionSandboxProfile::WorkspaceWrite,
+        fallback: ExecutionSandboxFallback::Deny,
+        ..ExecutionConfig::default()
+    };
+    let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
+        temp.path(),
+        temp.path().join("terminal-artifacts"),
+        PathBuf::from("terminal-artifacts"),
+        TerminalExecutionConfig::from_execution_config(&execution_config),
+    )?;
+    let entry = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-sandboxed-pty")?),
+                command: concat!(
+                    "printf ok > allowed.txt; ",
+                    "if printf nope > \"$OUTSIDE_PATH\" 2>/dev/null; ",
+                    "then echo external-write-unexpected; exit 7; ",
+                    "else echo external-write-blocked; fi"
+                )
+                .to_owned(),
+                cwd: None,
+                shell: Some(shell),
+                env: BTreeMap::from([(
+                    "OUTSIDE_PATH".to_owned(),
+                    outside_path.to_string_lossy().into_owned(),
+                )]),
+            },
+            None,
+        )
+        .await?;
+
+    assert_eq!(
+        entry.handle.execution_backend,
+        Some(TerminalExecutionBackendKind::SandboxedPty)
+    );
+    assert_eq!(
+        entry.handle.execution_backend_capabilities,
+        Some(TerminalExecutionBackendCapabilities::sandboxed_pty())
+    );
+    assert_eq!(
+        entry.handle.enforcement_backend,
+        Some(ExecutionBackendKind::MacosSeatbelt)
+    );
+    let enforcement = entry
+        .handle
+        .enforcement_backend_capabilities
+        .expect("sandboxed pty should record enforcement capabilities");
+    assert!(enforcement.filesystem_isolation);
+    assert!(enforcement.process_isolation);
+    assert!(enforcement.persistent_pty);
+    assert_eq!(
+        entry.handle.sandbox_profile,
+        Some(ExecutionSandboxProfile::WorkspaceWrite)
+    );
+
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+    assert!(matches!(
+        final_entry.status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("allowed.txt"))?,
+        "ok"
+    );
+    assert!(!outside_path.exists());
+    let read = manager.read(&entry.handle.task_id, 0, 2048).await?;
+    assert!(read.content.contains("external-write-blocked"));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[serial]
+#[ignore = "requires Linux host with bubblewrap user/mount namespaces"]
+#[tokio::test]
+async fn terminal_process_manager_linux_bubblewrap_pty_records_sandbox_and_denies_external_write()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let outside = tempfile::tempdir_in("/var/tmp")?;
+    let outside_path = outside.path().join("denied.txt");
+    let execution_config = ExecutionConfig {
+        backend: ExecutionBackendKind::LinuxBubblewrap,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        profile: ExecutionSandboxProfile::WorkspaceWrite,
+        fallback: ExecutionSandboxFallback::Deny,
+        ..ExecutionConfig::default()
+    };
+    let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
+        temp.path(),
+        temp.path().join("terminal-artifacts"),
+        PathBuf::from("terminal-artifacts"),
+        TerminalExecutionConfig::from_execution_config(&execution_config),
+    )?;
+    let entry = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-bubblewrap-pty")?),
+                command: concat!(
+                    "printf ok > allowed.txt; ",
+                    "if printf nope > \"$OUTSIDE_PATH\" 2>/dev/null; ",
+                    "then echo external-write-unexpected; exit 7; ",
+                    "else echo external-write-blocked; fi"
+                )
+                .to_owned(),
+                cwd: None,
+                shell: Some(test_shell(temp.path())?),
+                env: BTreeMap::from([(
+                    "OUTSIDE_PATH".to_owned(),
+                    outside_path.to_string_lossy().into_owned(),
+                )]),
+            },
+            None,
+        )
+        .await?;
+
+    assert_eq!(
+        entry.handle.execution_backend,
+        Some(TerminalExecutionBackendKind::SandboxedPty)
+    );
+    assert_eq!(
+        entry.handle.execution_backend_capabilities,
+        Some(TerminalExecutionBackendCapabilities::sandboxed_pty())
+    );
+    assert_eq!(
+        entry.handle.enforcement_backend,
+        Some(ExecutionBackendKind::LinuxBubblewrap)
+    );
+    let enforcement = entry
+        .handle
+        .enforcement_backend_capabilities
+        .expect("sandboxed pty should record enforcement capabilities");
+    assert!(enforcement.filesystem_isolation);
+    assert!(enforcement.network_isolation);
+    assert!(enforcement.process_isolation);
+    assert!(enforcement.persistent_pty);
+    assert_eq!(
+        entry.handle.sandbox_profile,
+        Some(ExecutionSandboxProfile::WorkspaceWrite)
+    );
+
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+    assert!(matches!(
+        final_entry.status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("allowed.txt"))?,
+        "ok"
+    );
+    assert!(!outside_path.exists());
+    let read = manager.read(&entry.handle.task_id, 0, 2048).await?;
+    assert!(read.content.contains("external-write-blocked"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[tokio::test]
+async fn terminal_process_manager_docker_pty_fails_closed_without_local_fallback() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let execution_config = ExecutionConfig {
+        backend: ExecutionBackendKind::Docker,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        profile: ExecutionSandboxProfile::WorkspaceWrite,
+        fallback: ExecutionSandboxFallback::Unconfined,
+        container_image: Some("sigil-test:latest".to_owned()),
+    };
+    let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
+        temp.path(),
+        temp.path().join("terminal-artifacts"),
+        PathBuf::from("terminal-artifacts"),
+        TerminalExecutionConfig::from_execution_config(&execution_config),
+    )?;
+
+    let error = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-docker-pty")?),
+                command: "printf should-not-run".to_owned(),
+                cwd: None,
+                shell: Some(test_shell(temp.path())?),
+                env: Default::default(),
+            },
+            None,
+        )
+        .await
+        .expect_err("docker pty should fail closed instead of falling back to local pty");
+
+    assert!(
+        error
+            .to_string()
+            .contains("docker execution backend does not support persistent terminal pty")
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("unconfined fallback is not used for terminal pty tasks")
+    );
     Ok(())
 }
 

@@ -640,7 +640,7 @@ fn register_local_tools(
 ) -> Result<()> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     let execution_backend = build_configured_execution_backend(root_config)?;
-    sigil_tools_builtin::register_builtin_tools_with_paths_and_execution_backend(
+    sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_and_execution_config(
         registry,
         sigil_tools_builtin::BuiltinToolPaths {
             changesets_root: paths.changesets_root.clone(),
@@ -651,6 +651,7 @@ fn register_local_tools(
             scratch_label: "cache/tmp".to_owned(),
         },
         execution_backend,
+        &root_config.execution,
     );
     sigil_code_intel::register_code_intelligence_tools(
         registry,

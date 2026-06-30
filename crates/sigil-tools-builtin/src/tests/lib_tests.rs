@@ -161,7 +161,7 @@ fn macos_seatbelt_backend_satisfies_required_sandbox_policy() -> Result<()> {
     assert!(capabilities.filesystem_isolation);
     assert!(!capabilities.network_isolation);
     assert!(capabilities.process_isolation);
-    assert!(!capabilities.persistent_pty);
+    assert!(capabilities.persistent_pty);
     assert!(!capabilities.workspace_snapshot);
     Ok(())
 }
@@ -193,7 +193,7 @@ fn linux_bubblewrap_backend_declares_enforced_mvp_capabilities() {
     assert!(capabilities.network_isolation);
     assert!(capabilities.process_isolation);
     assert!(!capabilities.resource_limits);
-    assert!(!capabilities.persistent_pty);
+    assert!(capabilities.persistent_pty);
     assert!(!capabilities.workspace_snapshot);
 }
 

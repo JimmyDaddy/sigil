@@ -20,6 +20,7 @@ pub use execution_backends::{
 pub use registry::{
     BuiltinToolPaths, register_builtin_tools, register_builtin_tools_with_paths,
     register_builtin_tools_with_paths_and_execution_backend,
+    register_builtin_tools_with_paths_execution_backend_and_execution_config,
 };
 pub use terminal_process::{
     MAX_TERMINAL_INPUT_BYTES, TerminalBackendKind, TerminalInputResult, TerminalProcessManager,

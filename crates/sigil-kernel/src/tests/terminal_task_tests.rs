@@ -176,6 +176,10 @@ fn terminal_task_status_labels_and_terminal_state_are_stable() {
         "local_process"
     );
     assert_eq!(TerminalExecutionBackendKind::LocalPty.as_str(), "local_pty");
+    assert_eq!(
+        TerminalExecutionBackendKind::SandboxedPty.as_str(),
+        "sandboxed_pty"
+    );
     assert_eq!(TerminalTaskStatus::Starting.as_str(), "starting");
     assert_eq!(TerminalTaskStatus::Running.as_str(), "running");
     assert_eq!(

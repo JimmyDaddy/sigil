@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::Stdio,
@@ -17,7 +18,8 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_s
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionSandboxProfile,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
+    ExecutionRequest, ExecutionSandboxFallback, ExecutionSandboxProfile,
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
     TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, terminal_cleanup_receipt_for_status,
 };
@@ -28,6 +30,12 @@ use tokio::{
     sync::{Mutex, mpsc, oneshot},
     task::{self, JoinHandle},
     time::{Duration, sleep, timeout},
+};
+
+use crate::execution_backends::{
+    LinuxBubblewrapExecutionBackend, MacosSeatbeltExecutionBackend,
+    ensure_linux_bubblewrap_available, ensure_macos_seatbelt_available, find_executable_on_path,
+    linux_bubblewrap_args, macos_seatbelt_workspace_write_profile,
 };
 
 pub const TERMINAL_TASK_ARTIFACT_ROOT: &str = "state/artifacts/tasks";
@@ -97,6 +105,254 @@ impl Default for TerminalPtySize {
             rows: DEFAULT_TERMINAL_PTY_ROWS,
             cols: DEFAULT_TERMINAL_PTY_COLS,
         }
+    }
+}
+
+/// Execution policy used by persistent terminal tasks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalExecutionConfig {
+    backend: ExecutionBackendKind,
+    profile: ExecutionSandboxProfile,
+    fallback: ExecutionSandboxFallback,
+    requires_sandbox: bool,
+    network_allowed: bool,
+}
+
+impl TerminalExecutionConfig {
+    #[must_use]
+    pub fn from_execution_config(config: &ExecutionConfig) -> Self {
+        Self {
+            backend: config.backend,
+            profile: config.profile,
+            fallback: config.fallback,
+            requires_sandbox: config.requires_sandbox(),
+            network_allowed: config.profile_spec().network_allowed,
+        }
+    }
+
+    fn resolve_pty_execution(
+        &self,
+        resolved_cwd: &Path,
+        shell: &str,
+        command: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<TerminalPtyExecution> {
+        match self.backend {
+            ExecutionBackendKind::Local => {
+                if self.requires_sandbox {
+                    return self.fallback_or_error(
+                        "local execution backend cannot enforce persistent terminal sandbox",
+                    );
+                }
+                Ok(local_pty_execution(resolved_cwd, shell, command, env))
+            }
+            ExecutionBackendKind::MacosSeatbelt => {
+                self.resolve_macos_seatbelt_pty_execution(resolved_cwd, shell, command, env)
+            }
+            ExecutionBackendKind::LinuxBubblewrap => {
+                self.resolve_linux_bubblewrap_pty_execution(resolved_cwd, shell, command, env)
+            }
+            ExecutionBackendKind::Docker => self.fallback_or_error(
+                "docker execution backend does not support persistent terminal pty",
+            ),
+        }
+    }
+
+    fn resolve_macos_seatbelt_pty_execution(
+        &self,
+        resolved_cwd: &Path,
+        shell: &str,
+        command: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<TerminalPtyExecution> {
+        let backend = MacosSeatbeltExecutionBackend::default();
+        let capabilities = backend.capabilities();
+        self.validate_terminal_capabilities(capabilities)?;
+        if let Err(error) = ensure_macos_seatbelt_available(&backend) {
+            return self.fallback_or_error(error.to_string());
+        }
+
+        let profile = macos_seatbelt_workspace_write_profile(resolved_cwd);
+        let command_spec = TerminalPtyCommandSpec {
+            program: PathBuf::from("/usr/bin/sandbox-exec"),
+            args: vec![
+                OsString::from("-p"),
+                OsString::from(profile),
+                OsString::from(shell),
+                OsString::from("-lc"),
+                OsString::from(command),
+            ],
+            cwd: resolved_cwd.to_path_buf(),
+            env: env.clone(),
+        };
+        Ok(TerminalPtyExecution::sandboxed(
+            ExecutionBackendKind::MacosSeatbelt,
+            capabilities,
+            self.profile,
+            command_spec,
+        ))
+    }
+
+    fn resolve_linux_bubblewrap_pty_execution(
+        &self,
+        resolved_cwd: &Path,
+        shell: &str,
+        command: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<TerminalPtyExecution> {
+        let Some(bwrap) = find_executable_on_path("bwrap") else {
+            return self
+                .fallback_or_error("linux_bubblewrap execution backend requires bwrap on PATH");
+        };
+        let backend = LinuxBubblewrapExecutionBackend::new(bwrap.clone(), self.network_allowed);
+        let capabilities = backend.capabilities();
+        self.validate_terminal_capabilities(capabilities)?;
+        if let Err(error) = ensure_linux_bubblewrap_available(&backend) {
+            return self.fallback_or_error(error.to_string());
+        }
+
+        let request = ExecutionRequest {
+            program: shell.to_owned(),
+            args: vec!["-lc".to_owned(), command.to_owned()],
+            cwd: resolved_cwd.to_path_buf(),
+            env: env.clone(),
+            timeout_ms: None,
+            timeout_secs: 0,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        };
+        let mut args = linux_bubblewrap_args(resolved_cwd, &request, self.network_allowed);
+        args.push(OsString::from(shell));
+        args.push(OsString::from("-lc"));
+        args.push(OsString::from(command));
+        let command_spec = TerminalPtyCommandSpec {
+            program: bwrap,
+            args,
+            cwd: resolved_cwd.to_path_buf(),
+            env: env.clone(),
+        };
+        Ok(TerminalPtyExecution::sandboxed(
+            ExecutionBackendKind::LinuxBubblewrap,
+            capabilities,
+            self.profile,
+            command_spec,
+        ))
+    }
+
+    fn validate_terminal_capabilities(
+        &self,
+        capabilities: ExecutionBackendCapabilities,
+    ) -> Result<()> {
+        let config = ExecutionConfig {
+            backend: self.backend,
+            isolation: if self.requires_sandbox {
+                sigil_kernel::ExecutionIsolationPolicy::RequireSandbox
+            } else {
+                sigil_kernel::ExecutionIsolationPolicy::AllowLocal
+            },
+            profile: self.profile,
+            fallback: self.fallback,
+            container_image: None,
+        };
+        let requirements = config.required_capabilities_for_persistent_pty();
+        let missing = capabilities.missing_requirements(requirements);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        self.fallback_or_error(format!(
+            "execution backend {} missing persistent terminal capabilities: {}",
+            self.backend.as_str(),
+            missing
+                .iter()
+                .map(|capability| capability.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))?;
+        Ok(())
+    }
+
+    fn fallback_or_error<T>(&self, reason: impl Into<String>) -> Result<T> {
+        let reason = reason.into();
+        match self.fallback {
+            ExecutionSandboxFallback::Unconfined => {
+                bail!(
+                    "persistent terminal sandbox unavailable: {reason}; unconfined fallback is not used for terminal pty tasks"
+                )
+            }
+            ExecutionSandboxFallback::Deny | ExecutionSandboxFallback::Prompt => {
+                bail!("persistent terminal sandbox unavailable: {reason}")
+            }
+        }
+    }
+}
+
+impl Default for TerminalExecutionConfig {
+    fn default() -> Self {
+        Self {
+            backend: ExecutionBackendKind::Local,
+            profile: ExecutionSandboxProfile::Unconfined,
+            fallback: ExecutionSandboxFallback::Deny,
+            requires_sandbox: false,
+            network_allowed: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalPtyExecution {
+    execution_backend: TerminalExecutionBackendKind,
+    execution_backend_capabilities: TerminalExecutionBackendCapabilities,
+    enforcement_backend: ExecutionBackendKind,
+    enforcement_backend_capabilities: ExecutionBackendCapabilities,
+    sandbox_profile: ExecutionSandboxProfile,
+    command: TerminalPtyCommandSpec,
+}
+
+impl TerminalPtyExecution {
+    fn sandboxed(
+        enforcement_backend: ExecutionBackendKind,
+        enforcement_backend_capabilities: ExecutionBackendCapabilities,
+        sandbox_profile: ExecutionSandboxProfile,
+        command: TerminalPtyCommandSpec,
+    ) -> Self {
+        Self {
+            execution_backend: TerminalExecutionBackendKind::SandboxedPty,
+            execution_backend_capabilities: TerminalExecutionBackendCapabilities::sandboxed_pty(),
+            enforcement_backend,
+            enforcement_backend_capabilities,
+            sandbox_profile,
+            command,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalPtyCommandSpec {
+    program: PathBuf,
+    args: Vec<OsString>,
+    cwd: PathBuf,
+    env: BTreeMap<String, String>,
+}
+
+fn local_pty_execution(
+    resolved_cwd: &Path,
+    shell: &str,
+    command: &str,
+    env: &BTreeMap<String, String>,
+) -> TerminalPtyExecution {
+    TerminalPtyExecution {
+        execution_backend: TerminalExecutionBackendKind::LocalPty,
+        execution_backend_capabilities: TerminalExecutionBackendCapabilities::local_pty(),
+        enforcement_backend: ExecutionBackendKind::Local,
+        enforcement_backend_capabilities: ExecutionBackendCapabilities::default(),
+        sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        command: TerminalPtyCommandSpec {
+            program: PathBuf::from(shell),
+            args: vec![OsString::from("-lc"), OsString::from(command)],
+            cwd: resolved_cwd.to_path_buf(),
+            env: env.clone(),
+        },
     }
 }
 
@@ -189,6 +445,7 @@ pub struct TerminalProcessManager {
     workspace_root: PathBuf,
     artifact_root: PathBuf,
     artifact_label_root: PathBuf,
+    terminal_execution: TerminalExecutionConfig,
     tasks: Arc<Mutex<BTreeMap<TerminalTaskId, ManagedTerminalTask>>>,
     permission_contexts: Arc<StdMutex<BTreeMap<TerminalTaskId, TerminalTaskPermissionContext>>>,
     next_counter: Arc<AtomicU64>,
@@ -224,10 +481,30 @@ impl TerminalProcessManager {
         artifact_root: impl AsRef<Path>,
         artifact_label_root: impl Into<PathBuf>,
     ) -> Result<Self> {
+        Self::new_with_artifact_root_and_terminal_execution(
+            workspace_root,
+            artifact_root,
+            artifact_label_root,
+            TerminalExecutionConfig::default(),
+        )
+    }
+
+    /// Creates a process manager with an injected terminal execution policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace root cannot be canonicalized.
+    pub fn new_with_artifact_root_and_terminal_execution(
+        workspace_root: impl AsRef<Path>,
+        artifact_root: impl AsRef<Path>,
+        artifact_label_root: impl Into<PathBuf>,
+        terminal_execution: TerminalExecutionConfig,
+    ) -> Result<Self> {
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         Ok(Self {
             artifact_root: absolute_path_from(&workspace_root, artifact_root.as_ref()),
             artifact_label_root: artifact_label_root.into(),
+            terminal_execution,
             workspace_root,
             tasks: Arc::new(Mutex::new(BTreeMap::new())),
             permission_contexts: Arc::new(StdMutex::new(BTreeMap::new())),
@@ -255,11 +532,7 @@ impl TerminalProcessManager {
     /// created, the task id already exists, or process spawn fails.
     pub async fn start(&self, request: TerminalStartRequest) -> Result<TerminalTaskEntry> {
         let plan = self
-            .prepare_start(
-                request,
-                TerminalExecutionBackendKind::LocalProcess,
-                TerminalExecutionBackendCapabilities::local_process(),
-            )
+            .prepare_start(request, TerminalStartMode::LocalProcess)
             .await?;
 
         let mut command_process = Command::new(&plan.shell);
@@ -328,11 +601,7 @@ impl TerminalProcessManager {
         request: TerminalStartRequest,
         pty_size: Option<TerminalPtySize>,
     ) -> Result<TerminalTaskEntry> {
-        let backend_kind = TerminalExecutionBackendKind::LocalPty;
-        let backend_capabilities = TerminalExecutionBackendCapabilities::local_pty();
-        let plan = self
-            .prepare_start(request, backend_kind, backend_capabilities)
-            .await?;
+        let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
         let pty_runtime = spawn_pty_runtime(&plan, pty_size.unwrap_or_default())?;
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let managed = ManagedTerminalTask {
@@ -632,8 +901,7 @@ impl TerminalProcessManager {
     async fn prepare_start(
         &self,
         request: TerminalStartRequest,
-        execution_backend: TerminalExecutionBackendKind,
-        execution_backend_capabilities: TerminalExecutionBackendCapabilities,
+        mode: TerminalStartMode,
     ) -> Result<TerminalTaskStartPlan> {
         let command = request.command.trim().to_owned();
         if command.is_empty() {
@@ -648,6 +916,14 @@ impl TerminalProcessManager {
         let artifacts = self.artifacts_for(&task_id)?;
         let resolved_cwd = resolve_terminal_cwd(&self.workspace_root, request.cwd.as_deref())?;
         let shell = request.shell.unwrap_or_else(|| "sh".to_owned());
+        let env = request.env;
+        let execution = match mode {
+            TerminalStartMode::LocalProcess => local_process_execution(),
+            TerminalStartMode::Pty => self
+                .terminal_execution
+                .resolve_pty_execution(&resolved_cwd.absolute, &shell, &command, &env)?
+                .into(),
+        };
 
         {
             let tasks = self.tasks.lock().await;
@@ -668,11 +944,11 @@ impl TerminalProcessManager {
             shell: shell.clone(),
             log_path: artifacts.relative_output.clone(),
             created_at_ms,
-            execution_backend: Some(execution_backend),
-            execution_backend_capabilities: Some(execution_backend_capabilities),
-            enforcement_backend: Some(ExecutionBackendKind::Local),
-            enforcement_backend_capabilities: Some(ExecutionBackendCapabilities::default()),
-            sandbox_profile: Some(ExecutionSandboxProfile::Unconfined),
+            execution_backend: Some(execution.execution_backend),
+            execution_backend_capabilities: Some(execution.execution_backend_capabilities),
+            enforcement_backend: Some(execution.enforcement_backend),
+            enforcement_backend_capabilities: Some(execution.enforcement_backend_capabilities),
+            sandbox_profile: Some(execution.sandbox_profile),
         };
         let initial_entry = TerminalTaskEntry {
             handle: handle.clone(),
@@ -689,11 +965,51 @@ impl TerminalProcessManager {
             task_id,
             command,
             shell,
-            env: request.env,
+            env,
             artifacts,
             resolved_cwd,
             initial_entry,
+            pty_command: execution.pty_command,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalStartMode {
+    LocalProcess,
+    Pty,
+}
+
+struct TerminalStartExecution {
+    execution_backend: TerminalExecutionBackendKind,
+    execution_backend_capabilities: TerminalExecutionBackendCapabilities,
+    enforcement_backend: ExecutionBackendKind,
+    enforcement_backend_capabilities: ExecutionBackendCapabilities,
+    sandbox_profile: ExecutionSandboxProfile,
+    pty_command: Option<TerminalPtyCommandSpec>,
+}
+
+fn local_process_execution() -> TerminalStartExecution {
+    TerminalStartExecution {
+        execution_backend: TerminalExecutionBackendKind::LocalProcess,
+        execution_backend_capabilities: TerminalExecutionBackendCapabilities::local_process(),
+        enforcement_backend: ExecutionBackendKind::Local,
+        enforcement_backend_capabilities: ExecutionBackendCapabilities::default(),
+        sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        pty_command: None,
+    }
+}
+
+impl From<TerminalPtyExecution> for TerminalStartExecution {
+    fn from(execution: TerminalPtyExecution) -> Self {
+        Self {
+            execution_backend: execution.execution_backend,
+            execution_backend_capabilities: execution.execution_backend_capabilities,
+            enforcement_backend: execution.enforcement_backend,
+            enforcement_backend_capabilities: execution.enforcement_backend_capabilities,
+            sandbox_profile: execution.sandbox_profile,
+            pty_command: Some(execution.command),
+        }
     }
 }
 
@@ -732,6 +1048,7 @@ struct TerminalTaskStartPlan {
     artifacts: TerminalTaskArtifacts,
     resolved_cwd: ResolvedTerminalCwd,
     initial_entry: TerminalTaskEntry,
+    pty_command: Option<TerminalPtyCommandSpec>,
 }
 
 struct PtyRuntime {
@@ -795,11 +1112,16 @@ fn spawn_pty_runtime(plan: &TerminalTaskStartPlan, size: TerminalPtySize) -> Res
     let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_PTY_INPUT_QUEUE_BOUND);
     spawn_pty_input_thread(writer, input_rx);
 
-    let mut command = CommandBuilder::new(&plan.shell);
-    command.arg("-lc");
-    command.arg(&plan.command);
-    command.cwd(&plan.resolved_cwd.absolute);
-    for (key, value) in &plan.env {
+    let command_spec = plan
+        .pty_command
+        .as_ref()
+        .ok_or_else(|| anyhow!("terminal pty command plan is unavailable"))?;
+    let mut command = CommandBuilder::new(&command_spec.program);
+    for arg in &command_spec.args {
+        command.arg(arg);
+    }
+    command.cwd(&command_spec.cwd);
+    for (key, value) in &command_spec.env {
         command.env(key, value);
     }
     let mut child = slave

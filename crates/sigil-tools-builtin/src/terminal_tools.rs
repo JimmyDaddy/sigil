@@ -26,9 +26,9 @@ use crate::{
     },
     support::{optional_string, optional_usize, required_string},
     terminal_process::{
-        MAX_TERMINAL_INPUT_BYTES, TerminalInputResult, TerminalProcessManager, TerminalPtySize,
-        TerminalReadResult, TerminalResizeResult, TerminalStartRequest,
-        TerminalTaskPermissionContext,
+        MAX_TERMINAL_INPUT_BYTES, TerminalExecutionConfig, TerminalInputResult,
+        TerminalProcessManager, TerminalPtySize, TerminalReadResult, TerminalResizeResult,
+        TerminalStartRequest, TerminalTaskPermissionContext,
     },
 };
 
@@ -62,10 +62,18 @@ pub(crate) struct TerminalCancelTool {
 
 #[derive(Default)]
 pub(crate) struct TerminalProcessManagers {
+    terminal_execution_config: TerminalExecutionConfig,
     managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
 }
 
 impl TerminalProcessManagers {
+    pub(crate) fn new(terminal_execution_config: TerminalExecutionConfig) -> Self {
+        Self {
+            terminal_execution_config,
+            managers: StdMutex::new(BTreeMap::new()),
+        }
+    }
+
     pub(crate) fn manager_for(
         &self,
         workspace_root: &Path,
@@ -83,11 +91,14 @@ impl TerminalProcessManagers {
             return Ok(Arc::clone(manager));
         }
 
-        let manager = Arc::new(TerminalProcessManager::new_with_artifact_root(
-            &workspace_root,
-            artifact_root,
-            artifact_label_root.to_path_buf(),
-        )?);
+        let manager = Arc::new(
+            TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
+                &workspace_root,
+                artifact_root,
+                artifact_label_root.to_path_buf(),
+                self.terminal_execution_config.clone(),
+            )?,
+        );
         managers.insert(key, Arc::clone(&manager));
         Ok(manager)
     }

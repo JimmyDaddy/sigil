@@ -642,6 +642,13 @@ impl ExecutionConfig {
     }
 
     #[must_use]
+    pub fn required_capabilities_for_persistent_pty(&self) -> ExecutionCapabilityRequirements {
+        let mut requirements = self.required_capabilities();
+        requirements.persistent_pty = true;
+        requirements
+    }
+
+    #[must_use]
     pub fn requires_sandbox(&self) -> bool {
         self.isolation.requires_sandbox() || self.required_capabilities().requires_basic_sandbox()
     }

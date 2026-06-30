@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / E05.1-E05.9 implemented with real macOS/Linux/Docker conformance where applicable / E05.16 minimal doctor implemented / productization remains
+状态：draft / E05.1-E05.9, E05.11-E05.13 implemented with real macOS/Linux/Docker conformance where applicable / E05.16 minimal doctor implemented / productization remains
 
 创建日期：2026-06-28
 
@@ -27,7 +27,7 @@
 
 后续切片增加 execution coverage labels，用于明确 shell、MCP、插件和远端能力分别由哪个边界控制。该模型只描述真实覆盖关系，不把 MCP、插件或远端服务宣传成本地 shell sandbox 保护。
 
-Persistent terminal 切片不把 PTY 伪装成 non-interactive bash。它先把 terminal task 的 backend kind/capability 写入 durable handle 和 tool metadata，让 projection、恢复和 UI 能区分 local process 与 local PTY 边界。E05.13 的前置 lifecycle metadata 已让 terminal handle 额外记录 enforcement backend、sandbox profile、backend capability summary 和 cleanup receipt；TUI terminal card 会显示 `local unconfined` / cleanup fact，避免把当前 local PTY 宣传成 sandboxed PTY。
+Persistent terminal 切片不把 PTY 伪装成 non-interactive bash。它先把 terminal task 的 backend kind/capability 写入 durable handle 和 tool metadata，让 projection、恢复和 UI 能区分 local process 与 local PTY 边界。E05.13 已采用 PTY wrapper 路线：`TerminalProcessManager` 继续管理 start/input/resize/cancel/output lifecycle，macOS Seatbelt 与 Linux Bubblewrap 负责包裹 PTY child 的 enforcement command。TUI terminal card 展示 `local unconfined` 或 `sandboxed_pty + enforcement backend` 事实，避免把普通 LocalPty 宣传成 sandboxed PTY。
 
 ## 2. Goals
 
@@ -39,7 +39,7 @@ Persistent terminal 切片不把 PTY 伪装成 non-interactive bash。它先把 
 ## 3. Non-goals
 
 - 本 RFC 不一次实现所有平台 sandbox。
-- 本切片不迁移 persistent terminal / PTY。
+- 本 RFC 不把 non-interactive `ExecutionBackend::execute` 强行扩成 persistent terminal API；PTY lifecycle 由 terminal manager 管理，backend 只提供 enforcement wrapper。
 - 本切片不承诺 MCP、插件或远端工具受本地 shell sandbox 保护。
 - 本切片不新增普通用户可见操作面。
 
@@ -104,6 +104,15 @@ pub trait ExecutionBackend {
   - local PTY terminal 标记为 `local_pty`，支持 persistent PTY、input、resize、cancel 和 output log。
   - terminal tool result details 和 session restore payload 会带出这些字段，`TerminalTaskEntry::from_tool_result_details` 可从 metadata 重建；旧日志缺字段时保持兼容。
   - TUI terminal card 已展示 terminal enforcement boundary 和 cleanup status；当前 local process/local PTY 明确显示为 `local unconfined`，不宣传为 sandbox。
+- 已完成 E05.13 persistent terminal sandbox backend core semantics：
+  - 新增 `TerminalExecutionBackendKind::SandboxedPty` 与 `TerminalExecutionBackendCapabilities::sandboxed_pty()`。
+  - runtime 将 `[execution]` 配置传给 terminal manager，terminal PTY 与 non-interactive `bash` 共用同一个 backend/profile/fallback 配置来源。
+  - macOS PTY child 通过 `/usr/bin/sandbox-exec -p <workspace-write-profile> <shell> -lc <command>` 启动，并记录 `enforcement_backend = macos_seatbelt`。
+  - Linux PTY child 通过 `bwrap ... -- <shell> -lc <command>` 启动，复用 non-interactive Bubblewrap mount/network args，并记录 `enforcement_backend = linux_bubblewrap`。
+  - Seatbelt 和 Bubblewrap backend 现在声明 `persistent_pty = true`；Docker 仍声明 `persistent_pty = false`。
+  - Docker persistent PTY 请求会 fail closed，不静默 fallback 到 local PTY；Docker `exec -it` / attach / resize / cleanup 属于后续 productization，不属于本切片。
+  - macOS real PTY test 覆盖 workspace 内写入允许、workspace 外写入拒绝、metadata 和 output capture。
+  - Linux ignored real PTY manager test 覆盖 Bubblewrap PTY wrapper 的 workspace 内写入允许、workspace 外写入拒绝、metadata 和 output capture；需要显式在支持 bwrap user/mount namespace 的 Linux host 上运行。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已完成 E05.6 capability truthfulness 修正：macOS Seatbelt backend 不再声明 `network_isolation`，`build_offline` 会拒绝该 backend，sandbox conformance tests 不再把 loopback `nc` 行为当成网络隔离证明。
 - 已完成 E05.7 capability matrix / selection contract：
@@ -144,7 +153,7 @@ pub trait ExecutionBackend {
 
 - 增加 Windows backend，并明确后续平台 capability 差异。
 - 扩展 sandbox conformance tests 到 Windows 和后续 backend-specific profile enforcement。
-- 为 persistent terminal 接入真正 OS sandbox backend。当前已记录 local process / local PTY backend metadata，但仍不表示 PTY 进程已受 Seatbelt/Bubblewrap/container 强制隔离。
+- 为 Docker/container persistent terminal 增加真正 `exec -it` / attach / resize / cleanup productization（如果后续产品需要）。当前 macOS Seatbelt 与 Linux Bubblewrap 已支持 PTY wrapper；Docker 仍 fail closed。
 - 将 execution coverage labels 接入更完整的 TUI/runtime detail views；当前已提供 kernel/plugin summary API 和测试覆盖。
 
 2026-06-29 productization slice expansion:
@@ -155,8 +164,8 @@ pub trait ExecutionBackend {
 - E05.10 Windows Restricted Backend Spike：Windows restricted token / job object / cleanup 能力验证，必须有 Windows 环境。
 - E05.11 Network Policy Enforcement and Receipt：已完成 network allowed/denied/unsupported/unknown receipt、verification binding/hash 集成和 bash metadata 展示；macOS Seatbelt 仍不宣传网络隔离。
 - E05.12 Resource Limits and Process Cleanup：已完成 core semantics 和 Local non-interactive cleanup path；container/bwrap/Windows/PTY 等 backend-specific cleanup 继续由后续切片落地。
-- E05.13 Persistent Terminal Sandbox Backend：pre-lifecycle metadata contract 已实现；完整 PTY/long-lived process sandbox lifecycle 仍 gated，等待 backend 支持 persistent PTY 或 container exec lifecycle。
-- 2026-06-30 gate audit：E05.13 仍不能转为 implementation slice。当前 `ExecutionBackend` 是 non-interactive one-shot API；terminal backend kind 只有 `LocalProcess` / `LocalPty`；`LocalPty` 明确记录为 `local + unconfined`；macOS Seatbelt、Linux Bubblewrap 和 Docker backend 均声明 `persistent_pty=false`。解锁前必须先选择 Docker exec session、Bubblewrap PTY wrapper 或 backend-agnostic long-lived session trait 路线。
+- E05.13 Persistent Terminal Sandbox Backend：core semantics 已完成；采用 Seatbelt/Bubblewrap PTY wrapper 路线，不扩展 one-shot `ExecutionBackend::execute`。
+- 2026-06-30 implementation note：macOS Seatbelt 与 Linux Bubblewrap backend 现在声明 `persistent_pty=true`，`terminal_start` PTY 会记录 `sandboxed_pty` 和真实 enforcement backend。Docker backend 仍不支持 persistent PTY；后续若需要 Docker terminal，应另拆 container lifecycle/productization 切片。
 - E05.14 MCP Stdio Sandbox Handoff：本地 stdio MCP server 通过 execution backend 或明确标记 outside local sandbox。
 - E05.15 Plugin Hook Process Sandbox Handoff：未来插件 hook command runtime 必须经过 execution backend 或显式 unconfined/unsupported。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。
@@ -188,6 +197,13 @@ cargo test -p sigil-tui config
 cargo test -p sigil-tools-builtin terminal_process
 cargo test -p sigil-kernel terminal
 cargo test -p sigil-tui terminal
+cargo check -p sigil-tools-builtin
+cargo check -p sigil-runtime
+cargo test -p sigil-kernel terminal_task
+cargo test -p sigil-tools-builtin terminal_process_manager
+cargo test -p sigil-tools-builtin seatbelt_backend
+cargo test -p sigil-tools-builtin bubblewrap_backend
+cargo test -p sigil-runtime build_tool_registry_routes_terminal_pty_through_configured_sandbox_backend
 cargo test -p sigil-kernel root_config_loads_docker_execution_backend
 cargo test -p sigil-tools-builtin docker_backend
 cargo test -p sigil-tools-builtin docker_backend_checks_daemon
@@ -204,10 +220,11 @@ cargo test -p sigil-tools-builtin linux_bubblewrap -- --nocapture
 ruby -e "require 'yaml'; YAML.load_file('.github/workflows/sandbox-conformance.yml'); puts 'ok'"
 gh workflow run sandbox-conformance.yml --repo JimmyDaddy/sigil --ref main
 gh run watch 28369483689 --repo JimmyDaddy/sigil --exit-status
-ssh root@<linux-host> 'bwrap --die-with-parent --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev /bin/true'
-ssh root@<linux-host> 'cd /var/tmp/sigil-e05-8 && CARGO_BUILD_JOBS=1 cargo test --locked -p sigil-tools-builtin tests::linux_bubblewrap_execution_backend_real_conformance -- --ignored --exact --nocapture'
+ssh <linux-user>@<linux-host> 'bwrap --die-with-parent --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev /bin/true'
+ssh <linux-user>@<linux-host> 'cd /var/tmp/sigil-e05-8 && CARGO_BUILD_JOBS=1 cargo test --locked -p sigil-tools-builtin tests::linux_bubblewrap_execution_backend_real_conformance -- --ignored --exact --nocapture'
+ssh <linux-user>@<linux-host> 'cd /var/tmp/sigil-e05-13 && CARGO_BUILD_JOBS=1 cargo test --locked -p sigil-tools-builtin terminal_process::tests::terminal_process_manager_linux_bubblewrap_pty_records_sandbox_and_denies_external_write -- --ignored --exact --nocapture'
 ```
 
-注意：`macos_seatbelt` 只证明 macOS non-interactive command backend 的最小 enforcement。Docker backend 已通过本机真实 daemon conformance，但只覆盖 non-interactive command execution。完整跨平台 sandbox、persistent terminal sandbox 和 MCP/plugin 进程隔离仍属于后续切片。E05.3 的 terminal metadata 只让 durable state 清楚记录 local process / local PTY 能力边界，不提供额外隔离。E05.4 的 coverage label 只说明哪些边界不受 local shell sandbox 覆盖，不提供额外隔离。
+注意：`macos_seatbelt` 证明 macOS non-interactive command backend 和 PTY wrapper 的 workspace-write filesystem/process enforcement；它仍不声明 network isolation。Docker backend 已通过本机真实 daemon conformance，但只覆盖 non-interactive command execution。完整 Windows sandbox、Docker/container PTY、MCP/plugin 进程隔离仍属于后续切片。E05.4 的 coverage label 只说明哪些边界不受 local shell sandbox 覆盖，不提供额外隔离。
 
 `Sandbox Conformance` run `28369483689` 验证了默认 diagnostic-only workflow 行为：host namespace preflight 成功记录 unsupported runner，Linux Bubblewrap conformance step 被跳过，workflow 以 success 结束。该结果不是 Bubblewrap conformance success。外部 Ubuntu Linux host 使用 `bubblewrap 0.11.1` 和仓库 pinned Rust `1.94.1` 跑通 `tests::linux_bubblewrap_execution_backend_real_conformance`；该测试证明 E05.8 的 real Linux conformance。

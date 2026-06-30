@@ -30,15 +30,13 @@ pub use local::LocalExecutionBackend;
 pub use seatbelt::MacosSeatbeltExecutionBackend;
 
 pub(crate) use bubblewrap::ensure_linux_bubblewrap_available;
+pub(crate) use bubblewrap::linux_bubblewrap_args;
 pub(crate) use docker::ensure_docker_available;
 pub(crate) use seatbelt::ensure_macos_seatbelt_available;
+pub(crate) use seatbelt::macos_seatbelt_workspace_write_profile;
 
 #[cfg(test)]
-pub(crate) use bubblewrap::linux_bubblewrap_args;
-#[cfg(test)]
 pub(crate) use docker::current_user_group_flag;
-#[cfg(test)]
-pub(crate) use seatbelt::macos_seatbelt_workspace_write_profile;
 
 /// Builds the configured execution backend for built-in tools.
 ///

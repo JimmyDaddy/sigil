@@ -62,7 +62,7 @@ impl ExecutionBackend for LinuxBubblewrapExecutionBackend {
             network_isolation: true,
             process_isolation: true,
             resource_limits: false,
-            persistent_pty: false,
+            persistent_pty: true,
             workspace_snapshot: false,
         }
     }

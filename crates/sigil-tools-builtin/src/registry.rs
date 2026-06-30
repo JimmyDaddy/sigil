@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use sigil_kernel::{ExecutionBackend, ToolRegistry};
+use sigil_kernel::{ExecutionBackend, ExecutionConfig, ToolRegistry};
 
 use crate::{
     changeset_tool::ApplyChangeSetTool,
@@ -13,7 +13,7 @@ use crate::{
         DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, WriteFileTool,
     },
     shell::BashTool,
-    terminal_process,
+    terminal_process::{self, TerminalExecutionConfig},
     terminal_tools::{
         TerminalCancelTool, TerminalInputTool, TerminalProcessManagers, TerminalReadTool,
         TerminalResizeTool, TerminalStartTool,
@@ -71,7 +71,35 @@ pub fn register_builtin_tools_with_paths_and_execution_backend(
     paths: BuiltinToolPaths,
     execution_backend: Arc<dyn ExecutionBackend>,
 ) {
-    let terminal_managers = Arc::new(TerminalProcessManagers::default());
+    register_builtin_tools_with_paths_execution_backend_and_terminal_config(
+        registry,
+        paths,
+        execution_backend,
+        TerminalExecutionConfig::default(),
+    );
+}
+
+pub fn register_builtin_tools_with_paths_execution_backend_and_execution_config(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    execution_backend: Arc<dyn ExecutionBackend>,
+    execution_config: &ExecutionConfig,
+) {
+    register_builtin_tools_with_paths_execution_backend_and_terminal_config(
+        registry,
+        paths,
+        execution_backend,
+        TerminalExecutionConfig::from_execution_config(execution_config),
+    );
+}
+
+fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    execution_backend: Arc<dyn ExecutionBackend>,
+    terminal_execution_config: TerminalExecutionConfig,
+) {
+    let terminal_managers = Arc::new(TerminalProcessManagers::new(terminal_execution_config));
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
     registry.register(Arc::new(ReadFileTool));

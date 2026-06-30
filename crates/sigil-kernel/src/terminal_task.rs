@@ -73,6 +73,7 @@ pub struct TerminalTaskHandle {
 pub enum TerminalExecutionBackendKind {
     LocalProcess,
     LocalPty,
+    SandboxedPty,
 }
 
 impl TerminalExecutionBackendKind {
@@ -80,6 +81,7 @@ impl TerminalExecutionBackendKind {
         match self {
             Self::LocalProcess => "local_process",
             Self::LocalPty => "local_pty",
+            Self::SandboxedPty => "sandboxed_pty",
         }
     }
 }
@@ -116,6 +118,11 @@ impl TerminalExecutionBackendCapabilities {
             cancel: true,
             output_log: true,
         }
+    }
+
+    #[must_use]
+    pub fn sandboxed_pty() -> Self {
+        Self::local_pty()
     }
 }
 

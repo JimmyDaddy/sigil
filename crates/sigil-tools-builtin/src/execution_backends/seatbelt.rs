@@ -59,7 +59,7 @@ impl ExecutionBackend for MacosSeatbeltExecutionBackend {
             network_isolation: false,
             process_isolation: true,
             resource_limits: false,
-            persistent_pty: false,
+            persistent_pty: true,
             workspace_snapshot: false,
         }
     }

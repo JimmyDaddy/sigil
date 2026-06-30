@@ -12,13 +12,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ControlEntry,
-    ExecutionBackendKind, ExecutionIsolationPolicy, ExecutionSandboxProfile, InteractionMode,
-    JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
-    PermissionConfig, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport,
-    RoleModelConfig, RootConfig, Session, SessionConfig, SessionLogEntry, SkillDescriptor,
-    SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig,
-    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
-    ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ExecutionBackendKind, ExecutionIsolationPolicy, ExecutionSandboxFallback,
+    ExecutionSandboxProfile, InteractionMode, JsonlSessionStore, LanguageServerConfig,
+    McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ProviderCapabilities,
+    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionConfig,
+    SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool,
+    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
@@ -938,6 +938,57 @@ async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -
         build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await?;
 
     assert!(registry.specs().iter().any(|spec| spec.name == "bash"));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_backend() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.execution.backend = ExecutionBackendKind::MacosSeatbelt;
+    config.execution.isolation = ExecutionIsolationPolicy::RequireSandbox;
+    config.execution.profile = ExecutionSandboxProfile::WorkspaceWrite;
+    config.execution.fallback = ExecutionSandboxFallback::Deny;
+    let registry =
+        build_tool_registry(&config, &provider.capabilities(), temp.path().to_path_buf()).await?;
+
+    let result = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            ToolCall {
+                id: "terminal-sandboxed-pty".to_owned(),
+                name: "terminal_start".to_owned(),
+                args_json: json!({
+                    "task_id": "runtime-sandboxed-pty",
+                    "command": "printf runtime > runtime.txt",
+                    "shell": "/bin/sh",
+                    "pty": true
+                })
+                .to_string(),
+            },
+        )
+        .await?;
+
+    assert!(!result.is_error());
+    assert_eq!(
+        result.metadata.details["execution_backend"],
+        json!("sandboxed_pty")
+    );
+    assert_eq!(
+        result.metadata.details["enforcement_backend"],
+        json!("macos_seatbelt")
+    );
+    assert_eq!(
+        result.metadata.details["sandbox_profile"],
+        json!("workspace_write")
+    );
+    assert_eq!(
+        result.metadata.details["enforcement_backend_capabilities"]["persistent_pty"],
+        json!(true)
+    );
     Ok(())
 }
 
