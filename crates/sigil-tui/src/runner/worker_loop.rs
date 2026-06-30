@@ -97,6 +97,8 @@ pub(in crate::runner) use terminal_refresh::{
 };
 
 #[cfg(test)]
+pub(in crate::runner) use agent_runtime::chat_agent_run_input_with_repo_context;
+#[cfg(test)]
 pub(in crate::runner) use agent_runtime::queued_background_ready_transient_context;
 pub(in crate::runner) use agent_runtime::{
     agent_delegation_requirement_for_prompt, append_mcp_elicitation_audits,

@@ -138,6 +138,36 @@ pub struct ContextItem {
     pub body_ref: ContextBodyRef,
 }
 
+/// Runtime-selected context candidates for one request assembly pass.
+///
+/// The kernel owns packing and validation, but it must not own repository scans, LSP startup, or
+/// plugin execution. Runtime layers provide already-screened candidates through this neutral
+/// container, preserving snippets for model-visible Context V0 rendering.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeContextCandidates {
+    pub items: Vec<ContextItem>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub snippets: BTreeMap<ContextItemId, String>,
+}
+
+impl RuntimeContextCandidates {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.snippets.is_empty()
+    }
+
+    pub fn extend(&mut self, mut other: Self) {
+        self.items.append(&mut other.items);
+        self.snippets.append(&mut other.snippets);
+    }
+}
+
 impl ContextItem {
     /// Validates trust and egress labels before an item can be attached to a digest.
     ///

@@ -390,6 +390,7 @@ where
         options.reasoning_effort = Some(reasoning_effort);
     }
     let delegation_requirement = agent_delegation_requirement_for_prompt(&prompt);
+    let workspace_root = options.workspace_root.clone();
     agent_supervisor.reset_turn_budget();
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
@@ -408,15 +409,12 @@ where
         let mut run_session = run_session;
         let result = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-            let mut input = if plan_mode {
-                let mut transient_context = plan_mode_transient_context(prompt);
-                transient_context.extend(background_ready_context);
-                AgentRunInput::without_persisted_user_message(transient_context)
-            } else if background_ready_context.is_empty() {
-                AgentRunInput::user(prompt)
-            } else {
-                AgentRunInput::transient(prompt, background_ready_context)
-            };
+            let mut input = chat_agent_run_input_with_repo_context(
+                &workspace_root,
+                prompt,
+                plan_mode,
+                background_ready_context,
+            );
             if let Some(requirement) = delegation_requirement {
                 input = input.with_agent_delegation_requirement(requirement);
             }
@@ -470,6 +468,27 @@ where
         approval_tx,
         elicitation_audit_buffer,
     })
+}
+
+pub(in crate::runner) fn chat_agent_run_input_with_repo_context(
+    workspace_root: &Path,
+    prompt: String,
+    plan_mode: bool,
+    background_ready_context: Vec<ModelMessage>,
+) -> AgentRunInput {
+    let runtime_context =
+        sigil_runtime::context_candidates_from_repo_query(workspace_root, &prompt)
+            .unwrap_or_default();
+    let input = if plan_mode {
+        let mut transient_context = plan_mode_transient_context(prompt);
+        transient_context.extend(background_ready_context);
+        AgentRunInput::without_persisted_user_message(transient_context)
+    } else if background_ready_context.is_empty() {
+        AgentRunInput::user(prompt)
+    } else {
+        AgentRunInput::transient(prompt, background_ready_context)
+    };
+    input.with_runtime_context(runtime_context)
 }
 
 pub(in crate::runner) fn append_mcp_elicitation_audits(

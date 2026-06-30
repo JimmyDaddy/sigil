@@ -68,7 +68,10 @@ pub use agent_tools::{
     register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
-pub use context::{context_items_from_plugin_hook_output, context_items_from_task_memory};
+pub use context::{
+    context_candidates_from_repo_query, context_items_from_plugin_hook_output,
+    context_items_from_task_memory,
+};
 pub use context_window::{
     ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
     resolve_context_window_tokens,

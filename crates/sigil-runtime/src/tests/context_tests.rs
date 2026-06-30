@@ -1,10 +1,15 @@
+use std::fs;
+
 use anyhow::Result;
 use sigil_kernel::{
-    FileChangeRef, PluginHookContextOptions, PluginHookOutputEnvelope, PluginHookOutputStream,
-    RedactionState, SourcedFact, TaskMemoryV1,
+    ContextInclusionReason, ContextSource, FileChangeRef, PluginHookContextOptions,
+    PluginHookOutputEnvelope, PluginHookOutputStream, RedactionState, SourcedFact, TaskMemoryV1,
 };
 
-use super::{context_items_from_plugin_hook_output, context_items_from_task_memory};
+use super::{
+    context_candidates_from_repo_query, context_items_from_plugin_hook_output,
+    context_items_from_task_memory,
+};
 
 fn runtime_task_memory() -> TaskMemoryV1 {
     TaskMemoryV1 {
@@ -105,6 +110,61 @@ fn context_retrieves_plugin_hook_output_with_extension_labels() -> Result<()> {
             .get("plugin-hook:repo-review:context-rules:hook-exec-runtime:stdout")
             .map(String::as_str),
         Some("Prefer the existing context V0 adapter.")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_retrieves_repo_file_candidates_from_query() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(
+        temp.path().join("README.md"),
+        "Sigil runtime context provider wiring notes\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(temp.path(), "summarize README.md")?;
+
+    assert!(context.items.iter().any(|item| {
+        item.id == "repo-file:README.md"
+            && item.source == ContextSource::RepositoryFile
+            && item.inclusion_reason == ContextInclusionReason::RetrievalHit
+    }));
+    assert_eq!(
+        context
+            .snippets
+            .get("repo-file:README.md")
+            .map(String::as_str),
+        Some("Sigil runtime context provider wiring notes\n")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_repo_candidates_do_not_read_secret_like_files() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join(".env"), "SIGIL_API_KEY=secret-value\n")?;
+
+    let context = context_candidates_from_repo_query(temp.path(), "inspect .env")?;
+
+    let item = context
+        .items
+        .iter()
+        .find(|item| item.id == "repo-file:.env")
+        .expect("secret-like file context item");
+    assert_eq!(item.source, ContextSource::RepositoryFile);
+    assert_eq!(
+        item.inclusion_reason,
+        ContextInclusionReason::ExcludedSecret
+    );
+    assert_eq!(
+        context.snippets.get("repo-file:.env").map(String::as_str),
+        Some("secret-like repository file omitted from automatic context")
+    );
+    assert!(
+        !context
+            .snippets
+            .values()
+            .any(|snippet| snippet.contains("secret-value"))
     );
     Ok(())
 }

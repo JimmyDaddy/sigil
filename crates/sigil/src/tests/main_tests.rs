@@ -25,7 +25,8 @@ use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, ServeOptions, ServeStartupPlan,
     StdoutEventHandler, build_serve_startup_plan, default_session_path, drain_provider_stream,
     render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
-    render_serve_startup_plan, render_version, resolve_workspace_root, serve_command,
+    render_serve_startup_plan, render_version, resolve_workspace_root, run_input_with_repo_context,
+    serve_command,
 };
 
 fn boxed_chunk_stream(
@@ -81,6 +82,30 @@ fn default_session_path_uses_configured_log_dir_and_jsonl_suffix() {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("session-"))
     );
+}
+
+#[test]
+fn run_input_with_repo_context_attaches_repository_candidates() -> Result<()> {
+    let workspace = unique_temp_workspace("sigil-cli-context")?;
+    fs::write(
+        workspace.join("README.md"),
+        "Sigil is a TUI-first Rust coding agent.",
+    )?;
+
+    let input = run_input_with_repo_context(&workspace, "summarize README.md".to_owned());
+
+    assert!(input.runtime_context.items.iter().any(|item| {
+        item.id == "repo-file:README.md"
+            && matches!(item.source, sigil_kernel::ContextSource::RepositoryFile)
+    }));
+    fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+fn unique_temp_workspace(prefix: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 #[test]

@@ -1,13 +1,13 @@
 use std::{collections::BTreeMap, sync::mpsc};
 
 use sigil_kernel::{
-    AgentConfig, CodeIntelligenceConfig, CompactionConfig, ControlEntry, DurableEventType,
-    JsonlSessionStore, McpServerConfig, MemoryConfig, MutationArtifactCleanupRequested,
-    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus, MutationEventRecorder,
-    PermissionConfig, RootConfig, RunEvent, Session, SessionConfig, SessionStreamRecord,
-    StorageConfig, TaskConfig, TaskId, ToolEffect, VerificationCheckConfig, VerificationConfig,
-    WorkspaceConfig, WorkspaceTrust, WorkspaceTrustDecisionEntry, bytes_hash,
-    config::TerminalConfig, stable_workspace_id,
+    AgentConfig, CodeIntelligenceConfig, CompactionConfig, ContextSource, ControlEntry,
+    DurableEventType, JsonlSessionStore, McpServerConfig, MemoryConfig,
+    MutationArtifactCleanupRequested, MutationArtifactLifecycleRecorded,
+    MutationArtifactLifecycleStatus, MutationEventRecorder, PermissionConfig, RootConfig, RunEvent,
+    Session, SessionConfig, SessionStreamRecord, StorageConfig, TaskConfig, TaskId, ToolEffect,
+    VerificationCheckConfig, VerificationConfig, WorkspaceConfig, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, bytes_hash, config::TerminalConfig, stable_workspace_id,
 };
 
 use crate::runner::{
@@ -15,10 +15,50 @@ use crate::runner::{
     protocol::WorkerMessage,
     worker_loop::{
         VerificationCheckPromotionKind, VerificationCheckPromotionOutcome,
-        clean_mutation_artifacts, delete_mutation_artifact, materialize_task_verification_config,
-        promote_workspace_verification_check,
+        chat_agent_run_input_with_repo_context, clean_mutation_artifacts, delete_mutation_artifact,
+        materialize_task_verification_config, promote_workspace_verification_check,
     },
 };
+
+#[test]
+fn chat_agent_run_input_with_repo_context_attaches_repository_candidates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("README.md"),
+        "Sigil is a TUI-first Rust coding agent.",
+    )
+    .expect("write README");
+
+    let input = chat_agent_run_input_with_repo_context(
+        temp.path(),
+        "summarize README.md".to_owned(),
+        false,
+        Vec::new(),
+    );
+
+    assert!(input.persisted_user_message.is_some());
+    assert!(input.runtime_context.items.iter().any(|item| {
+        item.id == "repo-file:README.md" && matches!(item.source, ContextSource::RepositoryFile)
+    }));
+}
+
+#[test]
+fn chat_agent_run_input_with_repo_context_preserves_plan_mode_transience() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("README.md"), "plan context").expect("write README");
+
+    let input = chat_agent_run_input_with_repo_context(
+        temp.path(),
+        "plan from README.md".to_owned(),
+        true,
+        Vec::new(),
+    );
+
+    assert!(input.persisted_user_message.is_none());
+    assert!(input.runtime_context.items.iter().any(|item| {
+        item.id == "repo-file:README.md" && matches!(item.source, ContextSource::RepositoryFile)
+    }));
+}
 
 #[test]
 fn materialize_task_verification_config_records_specs_policy_and_events() {

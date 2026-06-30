@@ -29,7 +29,8 @@ use crate::{
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     context_engine::{
         ContextItem, ContextPackOptions, ContextSensitivity, ContextSource, ContextTrustLevel,
-        PackedContext, SessionArchive, SessionArchiveEntry, pack_context_items,
+        PackedContext, RuntimeContextCandidates, SessionArchive, SessionArchiveEntry,
+        pack_context_items,
     },
     conversation_queue::{
         ConversationInputEditedEntry, ConversationInputQueueControlEntry,
@@ -2036,10 +2037,43 @@ impl Session {
         traffic_partition_key: Option<String>,
         transient_messages: &[ModelMessage],
     ) -> Result<CompletionRequest> {
+        self.build_request_with_transient_messages_and_context(
+            workspace_root,
+            memory_config,
+            tools,
+            reasoning_effort,
+            previous_response_handle,
+            traffic_partition_key,
+            transient_messages,
+            RuntimeContextCandidates::default(),
+        )
+    }
+
+    /// Builds one provider request with extra transient messages and runtime-selected Context V0
+    /// candidates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when memory loading, prefix materialization, context packing, or durable
+    /// control writes fail.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_request_with_transient_messages_and_context(
+        &mut self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        tools: Vec<ToolSpec>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
+    ) -> Result<CompletionRequest> {
         let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
         let projected_messages = self.projected_messages();
         let mut request_messages = memory.messages.clone();
-        if let Some(context_message) = self.runtime_context_v0_message(&projected_messages) {
+        if let Some(context_message) =
+            self.runtime_context_v0_message(&projected_messages, runtime_context)
+        {
             request_messages.push(context_message);
         }
         request_messages.extend(projected_messages);
@@ -2082,8 +2116,9 @@ impl Session {
     fn runtime_context_v0_message(
         &self,
         projected_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
     ) -> Option<ModelMessage> {
-        self.build_runtime_context_v0_message(projected_messages)
+        self.build_runtime_context_v0_message(projected_messages, runtime_context)
             .ok()
             .flatten()
     }
@@ -2091,19 +2126,19 @@ impl Session {
     fn build_runtime_context_v0_message(
         &self,
         projected_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
     ) -> Result<Option<ModelMessage>> {
-        let Some((latest_user_index, query)) = latest_user_context_query(projected_messages) else {
-            return Ok(None);
-        };
-
-        let archive =
-            session_archive_from_projected_messages(projected_messages, latest_user_index);
-        let hits = archive.search_bm25(&query, REQUEST_CONTEXT_V0_SESSION_ARCHIVE_LIMIT);
         let mut snippets = BTreeMap::new();
         let mut items = Vec::new();
-        for hit in hits {
-            snippets.insert(hit.item.id.clone(), hit.snippet);
-            items.push(hit.item);
+
+        if let Some((latest_user_index, query)) = latest_user_context_query(projected_messages) {
+            let archive =
+                session_archive_from_projected_messages(projected_messages, latest_user_index);
+            let hits = archive.search_bm25(&query, REQUEST_CONTEXT_V0_SESSION_ARCHIVE_LIMIT);
+            for hit in hits {
+                snippets.insert(hit.item.id.clone(), hit.snippet);
+                items.push(hit.item);
+            }
         }
 
         if let Some(record) = self.latest_compaction_record()
@@ -2113,6 +2148,9 @@ impl Session {
             insert_task_memory_context_snippets(task_memory, &mut snippets);
             items.extend(task_items);
         }
+
+        snippets.extend(runtime_context.snippets);
+        items.extend(runtime_context.items);
 
         if items.is_empty() {
             return Ok(None);

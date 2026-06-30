@@ -11,8 +11,9 @@ use crate::{
     AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState, CandidateCheck, ChangeSet,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, ConversationInputKind,
-    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, ContextBodyRef,
+    ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
+    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
     ConversationInputStatusEntry, ConversationInputTarget, DomainEvent, DomainPayload,
     DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, ExecutionMutationProfile,
@@ -21,20 +22,20 @@ use crate::{
     PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PluginCapability,
     PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, ProjectionCursor,
     ProviderContinuationState, ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus,
-    RedactionState, RequiredAction, ResponseHandle, RunStatus, SandboxProfileRequirement,
-    SessionRef, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillRunMode, SkillSource, SkillTrustState, StoredEvent, TaskId, TaskMemoryV1, TaskPlanEntry,
-    TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
-    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
-    ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot,
-    ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent,
-    UsageStats, VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, provider::ModelMessage,
-    stable_event_hash,
+    RedactionState, RequiredAction, ResponseHandle, RunStatus, RuntimeContextCandidates,
+    SandboxProfileRequirement, SessionRef, SessionStreamRecord, SkillDescriptor,
+    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
+    TaskId, TaskMemoryV1, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
+    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit,
+    ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats, VerificationAutoRunPolicy,
+    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
+    VerificationScope, VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
+    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -3834,6 +3835,56 @@ fn build_request_injects_context_v0_from_latest_task_memory() -> Result<()> {
     assert!(context_text.contains("task-memory:runtime-memory:objective"));
     assert!(context_text.contains("Keep context provenance inspectable"));
     assert!(context_text.contains("event-objective"));
+    Ok(())
+}
+
+#[test]
+fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("Summarize README.md"))?;
+    let mut runtime_context = RuntimeContextCandidates::new();
+    let item = ContextItem {
+        id: "repo-file:README.md".to_owned(),
+        source: ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some("snapshot-readme".to_owned()),
+        token_cost: 4,
+        score: Some(100.0),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: ContextBodyRef::inline("Sigil readme context"),
+    };
+    runtime_context
+        .snippets
+        .insert(item.id.clone(), "Sigil readme context".to_owned());
+    runtime_context.items.push(item);
+
+    let request = session.build_request_with_transient_messages_and_context(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+        &[],
+        runtime_context,
+    )?;
+
+    let context_messages = request_context_v0_messages(&request);
+    assert_eq!(context_messages.len(), 1);
+    let context_text = context_messages[0]
+        .content
+        .as_deref()
+        .expect("context content");
+    assert!(context_text.contains("repo-file:README.md"));
+    assert!(context_text.contains("repository_file"));
+    assert!(context_text.contains("Sigil readme context"));
+    assert!(context_text.contains("snapshot-readme"));
+    let prefix = session.latest_prefix_snapshot().expect("prefix snapshot");
+    assert!(prefix.materialized_text.contains("repo-file:README.md"));
     Ok(())
 }
 

@@ -287,9 +287,9 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
     )?;
     let mut handler = StdoutEventHandler;
     let result = agent
-        .run(
+        .run_with_input(
             &mut session,
-            prompt,
+            run_input_with_repo_context(&workspace_root, prompt),
             sigil_runtime::build_run_options(
                 &root_config,
                 workspace_root,
@@ -297,7 +297,8 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
             ),
             &mut handler,
         )
-        .await?;
+        .await?
+        .result;
     if !result.final_text.is_empty() {
         println!();
     }
@@ -305,6 +306,16 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
         eprintln!("session log: {}", path.display());
     }
     Ok(())
+}
+
+fn run_input_with_repo_context(
+    workspace_root: &Path,
+    prompt: String,
+) -> sigil_kernel::AgentRunInput {
+    let runtime_context =
+        sigil_runtime::context_candidates_from_repo_query(workspace_root, &prompt)
+            .unwrap_or_default();
+    sigil_kernel::AgentRunInput::user(prompt).with_runtime_context(runtime_context)
 }
 
 async fn prefix_command(

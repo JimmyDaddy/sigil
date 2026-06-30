@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CheckpointRestored, ExecutionMutationProfile, MutationCommitted, MutationReconciled,
-    MutationResolution, PlanApprovalExpiry, WorkspaceMutationDetected,
+    MutationResolution, PlanApprovalExpiry, RuntimeContextCandidates, WorkspaceMutationDetected,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
     config::{CompactionConfig, MemoryConfig},
     event::{DurableEventType, EventClass, EventHandler, RunEvent},
@@ -73,6 +73,7 @@ pub struct AgentRunResult {
 pub struct AgentRunInput {
     pub persisted_user_message: Option<String>,
     pub transient_context: Vec<ModelMessage>,
+    pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
 }
@@ -82,6 +83,7 @@ impl AgentRunInput {
         Self {
             persisted_user_message: Some(prompt.into()),
             transient_context: Vec::new(),
+            runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
         }
@@ -91,6 +93,7 @@ impl AgentRunInput {
         Self {
             persisted_user_message: Some(prompt.into()),
             transient_context,
+            runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
         }
@@ -100,6 +103,7 @@ impl AgentRunInput {
         Self {
             persisted_user_message: None,
             transient_context,
+            runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
         }
@@ -107,6 +111,11 @@ impl AgentRunInput {
 
     pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
         self.task_plan_update = Some(context);
+        self
+    }
+
+    pub fn with_runtime_context(mut self, context: RuntimeContextCandidates) -> Self {
+        self.runtime_context = context;
         self
     }
 
@@ -443,6 +452,7 @@ where
         let AgentRunInput {
             persisted_user_message,
             mut transient_context,
+            runtime_context,
             task_plan_update,
             agent_delegation,
         } = input;
@@ -498,7 +508,7 @@ where
             if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
             }
-            let request = session.build_request_with_transient_messages(
+            let request = session.build_request_with_transient_messages_and_context(
                 &options.workspace_root,
                 &options.memory_config,
                 tool_specs,
@@ -506,6 +516,7 @@ where
                 previous_response_handle.clone(),
                 options.traffic_partition_key.clone(),
                 &transient_context,
+                runtime_context.clone(),
             )?;
 
             let mut stream = match self.provider.stream(request).await {

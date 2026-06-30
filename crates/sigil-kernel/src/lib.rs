@@ -76,9 +76,9 @@ pub use context_engine::{
     ContextQualityFindingKind, ContextQualityItemEvidence, ContextQualityReportArtifacts,
     ContextQualityReportManifest, ContextRepoRevision, ContextSensitivity, ContextSource,
     ContextTruncation, ContextTrustLevel, DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES, PackedContext,
-    SessionArchive, SessionArchiveEntry, SessionArchiveEntryId, SessionArchiveSearchHit,
-    build_context_quality_evidence_pack, estimate_context_token_cost, pack_context_items,
-    write_context_quality_evidence_artifacts,
+    RuntimeContextCandidates, SessionArchive, SessionArchiveEntry, SessionArchiveEntryId,
+    SessionArchiveSearchHit, build_context_quality_evidence_pack, estimate_context_token_cost,
+    pack_context_items, write_context_quality_evidence_artifacts,
 };
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,

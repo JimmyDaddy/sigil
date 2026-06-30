@@ -1,3 +1,4 @@
+use super::agent_runtime::chat_agent_run_input_with_repo_context;
 use super::*;
 
 pub(in crate::runner) fn run_worker_loop<P>(
@@ -606,18 +607,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let run_id = next_run_id;
                 next_run_id += 1;
                 let delegation_requirement = agent_delegation_requirement_for_prompt(&prompt);
+                let workspace_root = options.workspace_root.clone();
 
                 let handle = runtime.spawn(async move {
                     let mut run_session = run_session;
                     let result = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-                        let mut input = if plan_mode {
-                            AgentRunInput::without_persisted_user_message(
-                                plan_mode_transient_context(prompt),
-                            )
-                        } else {
-                            AgentRunInput::user(prompt)
-                        };
+                        let mut input = chat_agent_run_input_with_repo_context(
+                            &workspace_root,
+                            prompt,
+                            plan_mode,
+                            Vec::new(),
+                        );
                         if let Some(requirement) = delegation_requirement {
                             input = input.with_agent_delegation_requirement(requirement);
                         }
