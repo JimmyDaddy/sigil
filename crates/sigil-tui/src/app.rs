@@ -19,6 +19,7 @@ mod modal_flow;
 mod mouse_flow;
 mod runtime_status;
 mod session_flow;
+mod session_review;
 mod setup_flow;
 mod slash_flow;
 mod state;
@@ -211,6 +212,7 @@ struct SessionViewCache {
     agent_child_items: Vec<AgentSidebarItem>,
     agent_graph_summary_line: Option<String>,
     compaction_preview_line: Option<String>,
+    session_review_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1983,6 +1985,10 @@ impl AppState {
         vec![parts.join(" · ")]
     }
 
+    pub(crate) fn session_review_sidebar_lines(&self) -> Vec<String> {
+        self.session_view_cache().session_review_lines.clone()
+    }
+
     pub(crate) fn task_sidebar_lines(&self) -> Vec<String> {
         self.session_view_cache().task_sidebar_lines.clone()
     }
@@ -2044,6 +2050,10 @@ impl AppState {
             agent_child_items,
             agent_graph_summary_line,
             compaction_preview_line: self.compaction_preview_sidebar_line(entries),
+            session_review_lines: session_review::session_review_sidebar_lines(
+                &self.session_log_path,
+                entries,
+            ),
         }
     }
 

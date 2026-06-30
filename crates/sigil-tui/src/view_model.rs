@@ -205,6 +205,7 @@ fn detail_info_rail_session_lines(app: &AppState) -> Vec<String> {
             "memory: off".to_owned()
         }))
         .chain(app.task_memory_sidebar_lines())
+        .chain(app.session_review_sidebar_lines())
         .collect()
 }
 

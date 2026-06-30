@@ -19,6 +19,8 @@ mod performance_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod session_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod session_review_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod setup_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod slash_flow_tests;
