@@ -294,18 +294,66 @@ pub(crate) fn tool_card_commands() -> impl Iterator<Item = UiCommand> {
 }
 
 pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
-    let mut lines = vec!["Core shortcuts".to_owned()];
-    lines.extend(
-        COMMAND_SPECS
-            .iter()
-            .filter(|spec| spec.surface == CommandSurface::Global)
-            .filter_map(command_spec_help_line),
-    );
+    let mut lines = vec!["Session".to_owned()];
+    lines.extend(command_help_lines([
+        UiCommand::OpenKeyboardHelp,
+        UiCommand::SubmitPrompt,
+        UiCommand::CancelOrQuit,
+        UiCommand::StartNewSession,
+        UiCommand::CompactNow,
+    ]));
     lines.extend([
         "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer.".to_owned(),
         "Paste: Insert pasted text without submitting; large pastes are folded in the composer display.".to_owned(),
-        "@agent or trusted /agent-name: Invoke an enabled trusted agent profile with a prompt.".to_owned(),
-        "Ctrl-B while waiting for a foreground agent: Move that agent to the background.".to_owned(),
+        "Enter while busy: Queue a follow-up for the next safe turn.".to_owned(),
+        String::new(),
+        "Review".to_owned(),
+    ]);
+    lines.extend(command_help_lines([
+        UiCommand::CheckChangedFilesDiagnostics,
+    ]));
+    if include_tool_cards {
+        lines.extend(command_help_lines([
+            UiCommand::FocusLatestToolCard,
+            UiCommand::SelectNextToolCard,
+            UiCommand::SelectPreviousToolCard,
+            UiCommand::ToggleSelectedToolCard,
+            UiCommand::ClearToolCardFocus,
+            UiCommand::CancelFocusedTerminalTask,
+        ]));
+    }
+    lines.extend([
+        String::new(),
+        "Approval".to_owned(),
+        "Y/N: Allow or deny the pending tool call.".to_owned(),
+        "V: Inspect the pending diff or preview when available.".to_owned(),
+        "Esc: Dismiss plan approval or return to the active run when allowed.".to_owned(),
+        String::new(),
+        "Agents".to_owned(),
+    ]);
+    lines.extend(command_help_lines([
+        UiCommand::CycleAgentView,
+        UiCommand::CycleAgentViewPrevious,
+    ]));
+    lines.extend([
+        "@agent or trusted /agent-name: Invoke an enabled trusted agent profile with a prompt."
+            .to_owned(),
+        "Ctrl-B while waiting for a foreground agent: Move that agent to the background."
+            .to_owned(),
+        "/agent message <agent|current> <prompt>: Send a targeted child-agent mailbox message."
+            .to_owned(),
+        String::new(),
+        "Config".to_owned(),
+    ]);
+    lines.extend(command_help_lines([
+        UiCommand::ToggleWriteMode,
+        UiCommand::ToggleInfoRailDetail,
+        UiCommand::OpenConfig,
+        UiCommand::OpenDoctor,
+    ]));
+    lines.extend([
+        String::new(),
+        "Navigation".to_owned(),
         "Ctrl-A/E: Move to the start/end of the current composer line.".to_owned(),
         "Ctrl-B/F or Left/Right: Move the composer cursor by character.".to_owned(),
         "Alt-B/F or Ctrl-Left/Right: Move the composer cursor by word.".to_owned(),
@@ -314,18 +362,8 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Ctrl-Z: Restore the last draft cleared with Esc.".to_owned(),
         "Up/Down or Ctrl-P/N: Navigate prompt history.".to_owned(),
         "PageUp/PageDown or Ctrl-U/D: Scroll transcript by page.".to_owned(),
-        String::new(),
     ]);
-    if include_tool_cards {
-        lines.push("Activities".to_owned());
-        lines.extend(
-            COMMAND_SPECS
-                .iter()
-                .filter(|spec| spec.surface == CommandSurface::ToolCard)
-                .filter_map(command_spec_help_line),
-        );
-        lines.push(String::new());
-    }
+    lines.push(String::new());
     lines
 }
 
@@ -356,6 +394,18 @@ fn command_spec_control_hint(spec: &UiCommandSpec) -> Option<String> {
 fn command_spec_help_line(spec: &UiCommandSpec) -> Option<String> {
     let trigger = spec.keys.first().map(|key| key.label).or(spec.slash)?;
     Some(format!("{trigger}: {}", spec.help))
+}
+
+fn command_help_lines(commands: impl IntoIterator<Item = UiCommand>) -> Vec<String> {
+    commands
+        .into_iter()
+        .filter_map(|command| {
+            COMMAND_SPECS
+                .iter()
+                .find(|spec| spec.command == command)
+                .and_then(command_spec_help_line)
+        })
+        .collect()
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

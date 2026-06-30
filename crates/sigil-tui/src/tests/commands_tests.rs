@@ -87,16 +87,40 @@ fn command_metadata_generates_help_and_control_hints() {
     );
 
     let help = keyboard_help_lines(true);
+    for section in [
+        "Session",
+        "Review",
+        "Approval",
+        "Agents",
+        "Config",
+        "Navigation",
+    ] {
+        assert!(help.iter().any(|line| line == section));
+    }
     assert!(help.iter().any(|line| line.contains("F1:")));
+    assert!(help.iter().any(|line| line.starts_with("/new:")));
+    assert!(help.iter().any(|line| line.starts_with("/compact:")));
     assert!(help.iter().any(|line| {
         line == "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer."
     }));
     assert!(help.iter().any(|line| {
         line == "Paste: Insert pasted text without submitting; large pastes are folded in the composer display."
     }));
+    assert!(
+        help.iter()
+            .any(|line| line == "Enter while busy: Queue a follow-up for the next safe turn.")
+    );
     assert!(help.iter().any(|line| {
         line == "@agent or trusted /agent-name: Invoke an enabled trusted agent profile with a prompt."
     }));
+    assert!(
+        help.iter()
+            .any(|line| line == "Y/N: Allow or deny the pending tool call.")
+    );
+    assert!(
+        help.iter()
+            .any(|line| line == "V: Inspect the pending diff or preview when available.")
+    );
     assert!(
         help.iter().any(|line| {
             line == "Ctrl-A/E: Move to the start/end of the current composer line."
@@ -137,7 +161,6 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(help.iter().any(|line| {
         line == "Shift-Alt-A: Switch the visible main chat to the previous parent or child agent."
     }));
-    assert!(help.iter().any(|line| line == "Activities"));
     assert!(help.iter().any(|line| line.contains("Ctrl-G:")));
     assert!(
         help.iter()

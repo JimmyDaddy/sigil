@@ -146,7 +146,7 @@ required = true
 fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
-    let backend = TestBackend::new(96, 24);
+    let backend = TestBackend::new(112, 42);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render(frame, &app))?;
@@ -158,7 +158,9 @@ fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Core shortcuts"));
+    assert!(rendered.contains("Session"));
+    assert!(rendered.contains("Review"));
+    assert!(rendered.contains("Navigation"));
     Ok(())
 }
 
