@@ -14,7 +14,6 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-http = { path = "../sigil-http" }
-sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
 sigil-runtime = { path = "../sigil-runtime" }
 sigil-tui = { path = "../sigil-tui" }
 

@@ -16,10 +16,11 @@ use sigil_kernel::{
     Agent, EventHandler, InteractionMode, JsonlSessionStore, ProviderChunk, RootConfig, RunEvent,
     Session, UsageStats, resolve_workspace_root,
 };
-use sigil_provider_deepseek::{
-    DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, DeepSeekProvider,
-};
 use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
+use sigil_runtime::{
+    DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest, stream_deepseek_fim_debug,
+    stream_deepseek_prefix_debug,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BuildInfo {
@@ -69,6 +70,8 @@ enum Commands {
         #[arg(long = "no-token", action = clap::ArgAction::SetTrue)]
         no_token: bool,
     },
+    // Hidden provider-specific developer diagnostics. Keep ordinary users on the
+    // TUI, `run`, `doctor`, or explicit provider configuration surfaces.
     #[command(hide = true)]
     Prefix {
         prompt: String,
@@ -311,19 +314,19 @@ async fn prefix_command(
     stop: Vec<String>,
     model: Option<String>,
 ) -> Result<()> {
-    let (root_config, provider) = load_deepseek_provider(config_path)?;
-    let traffic_partition_key =
-        headless_traffic_partition_key(&root_config, config_path, launch_cwd);
-    let mut stream = provider
-        .stream_prefix_completion(DeepSeekPrefixCompletionRequest {
-            model,
+    let root_config = RootConfig::load(config_path)?;
+    let mut stream = stream_deepseek_prefix_debug(
+        &root_config,
+        config_path,
+        launch_cwd,
+        DeepSeekPrefixDebugRequest {
             prompt,
             assistant_prefix,
             stop,
-            reasoning_effort: None,
-            traffic_partition_key,
-        })
-        .await?;
+            model,
+        },
+    )
+    .await?;
     drain_provider_stream(&mut stream).await
 }
 
@@ -335,34 +338,19 @@ async fn fim_command(
     model: Option<String>,
     max_tokens: Option<u32>,
 ) -> Result<()> {
-    let (_, provider) = load_deepseek_provider(config_path)?;
-    let mut stream = provider
-        .stream_fim_completion(DeepSeekFimCompletionRequest {
-            model,
+    let root_config = RootConfig::load(config_path)?;
+    let mut stream = stream_deepseek_fim_debug(
+        &root_config,
+        DeepSeekFimDebugRequest {
             prompt,
             suffix,
             max_tokens,
             stop,
-        })
-        .await?;
+            model,
+        },
+    )
+    .await?;
     drain_provider_stream(&mut stream).await
-}
-
-fn load_deepseek_provider(config_path: &Path) -> Result<(RootConfig, DeepSeekProvider)> {
-    let root_config = RootConfig::load(config_path)?;
-    let provider = DeepSeekProvider::new(sigil_runtime::load_deepseek_config(&root_config)?)?;
-    Ok((root_config, provider))
-}
-
-fn headless_traffic_partition_key(
-    root_config: &RootConfig,
-    config_path: &Path,
-    launch_cwd: &Path,
-) -> Option<String> {
-    let workspace_root =
-        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
-    sigil_runtime::build_run_options(root_config, workspace_root, InteractionMode::Headless)
-        .traffic_partition_key
 }
 
 fn default_session_path(session_log_dir: &Path) -> PathBuf {

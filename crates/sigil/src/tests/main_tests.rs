@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
     EventHandler, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess, ToolCall,
@@ -309,6 +309,17 @@ fn cli_parses_hidden_prefix_command_options() -> Result<()> {
             && model.as_deref() == Some("deepseek-test")
     ));
     Ok(())
+}
+
+#[test]
+fn cli_help_hides_provider_debug_commands() {
+    let help = Cli::command().render_long_help().to_string();
+
+    assert!(help.contains("run"));
+    assert!(help.contains("doctor"));
+    assert!(help.contains("serve"));
+    assert!(!help.contains("prefix"));
+    assert!(!help.contains("fim"));
 }
 
 #[test]

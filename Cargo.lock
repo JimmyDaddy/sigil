@@ -2243,7 +2243,6 @@ dependencies = [
  "serde_json",
  "sigil-http",
  "sigil-kernel",
- "sigil-provider-deepseek",
  "sigil-runtime",
  "sigil-tui",
  "tokio",

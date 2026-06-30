@@ -52,7 +52,7 @@
 
 当前实现已经从早期骨架进入“crate 边界稳定、crate 内按职责拆分”的阶段。本节描述的是当前代码事实，不再只是推荐草案；后续重构必须先判断是否继续维护这些 facade 与子模块边界。
 
-当前 provider 边界已经进一步收敛：`sigil-runtime` 统一持有 provider-specific config parsing、provider-neutral config draft DTO、provider status request DTO、provider status refresh task manager、API key env label、DeepSeek 余额/模型列表请求和 provider/model context-window metadata resolver；`sigil-tui` 只消费这些 DTO/view/result，不直接依赖 provider crate 或 HTTP client。后续新增 provider 或 provider 状态面时，先扩展 runtime 表面，再让入口层消费 provider-neutral 结果。
+当前 provider 边界已经进一步收敛：`sigil-runtime` 统一持有 provider-specific config parsing、provider-neutral config draft DTO、provider status request DTO、provider status refresh task manager、API key env label、DeepSeek 余额/模型列表请求、隐藏 DeepSeek prefix / FIM developer debug adapter 和 provider/model context-window metadata resolver；`sigil` binary 和 `sigil-tui` 只消费这些 runtime DTO/view/result/adapter，不直接依赖 provider crate 或 HTTP client。后续新增 provider 或 provider 状态面时，先扩展 runtime 表面，再让入口层消费 provider-neutral 结果。
 
 ```text
 sigil/

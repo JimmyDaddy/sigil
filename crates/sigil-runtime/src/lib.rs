@@ -45,6 +45,7 @@ pub mod paths;
 pub mod plugins;
 pub mod product_view;
 pub mod provider_config;
+pub mod provider_debug;
 pub mod provider_status;
 pub mod session_control;
 pub mod skills;
@@ -96,6 +97,10 @@ pub use provider_config::{
     default_setup_provider_model, normalize_provider_name, provider_api_key_env_name,
     provider_config_fields, provider_status_config_from_fields, set_active_provider_model,
     set_provider_config_fields,
+};
+pub use provider_debug::{
+    DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest, ProviderDebugStream,
+    stream_deepseek_fim_debug, stream_deepseek_prefix_debug,
 };
 pub use provider_status::{
     BalanceSnapshot, ProviderStatusTaskManager, ProviderStatusTaskResult,
