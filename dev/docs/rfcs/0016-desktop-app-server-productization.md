@@ -1,6 +1,6 @@
 # RFC-0016 Desktop and App Server Productization
 
-状态：draft / E16.1-E16.5 implemented / desktop adapter decision-gated
+状态：draft / E16.1-E16.6 implemented / projection escalation gated
 
 创建日期：2026-06-29
 
@@ -67,9 +67,17 @@ E16.4 进展：
 E16.5 进展：
 
 - `sigil-http` 已新增 `http_openapi_document()`，覆盖当前已实现的 MVP local command surface。
-- OpenAPI 文档只描述已实现路由：`GET /health`、`POST /sessions`、`POST /sessions/{session_id}/runs` 和 `POST /runs/{run_id}/approvals/{call_id}`。
+- OpenAPI 文档只描述已实现路由：`GET /health`、session create/list/get、run start/get/cancel、finite durable event replay，以及 approval decision submission。
 - Approval command route 已接入 listener，复用 `HttpCommandEnvelope<HttpApprovalDecisionRequest>`、stale approval guard 和 command retry de-duplication。
 - 文档组件覆盖 bearer auth、command envelope、run-start payload、approval guard 字段、receipt 和 shared error response。
+
+E16.6 进展：
+
+- 已选择 library-level HTTP route smoke + headless adapter proof，不进入完整桌面壳、不接 `sigil serve` 产品入口、不引入 SQLite projection。
+- Listener 已补齐最小外部客户端查询/控制面：`GET /sessions`、`GET /sessions/{session_id}`、`GET /runs/{run_id}`、`POST /runs/{run_id}/cancel`。
+- Run cancel 使用 `HttpCommandEnvelope<HttpRunCancelRequest>` 和 `HttpRunCancelCommandReceipt`，复用 command id retry de-duplication、session match 和 stale stream-sequence guard。
+- `GET /runs/{run_id}/events` 提供有限 `text/event-stream` durable replay，并使用 `Last-Event-ID` cursor；transient live events 仍通过 `HttpLiveEventBus` primitive 证明，不承诺可重放。
+- `desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events` 覆盖 connect/list/start/cancel/approval/durable replay/transient-live-only 边界，证明外部/桌面 adapter 使用同一 registry/driver/protocol 路径，而不是复制 agent loop。
 
 安全依据：
 
@@ -145,7 +153,7 @@ cargo test -p sigil-tui runner
 ## 8. Open Questions
 
 - Whether OpenAPI should cover all commands in MVP or only session/run/approval commands.
-- Which desktop smoke surface should be built first.
+- E16.7 何时由真实 desktop/server query pressure 触发 SQLite/materialized projection escalation。
 
 ## 9. References
 

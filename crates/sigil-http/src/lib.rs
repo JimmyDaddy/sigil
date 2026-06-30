@@ -16,9 +16,9 @@ pub use driver::{
 };
 pub use dto::{
     HttpApprovalCommandReceipt, HttpApprovalDecision, HttpApprovalDecisionRecord,
-    HttpApprovalDecisionRequest, HttpPendingApproval, HttpRunApprovalMode, HttpRunSnapshot,
-    HttpRunStartCommandReceipt, HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest,
-    HttpSessionSnapshot,
+    HttpApprovalDecisionRequest, HttpPendingApproval, HttpRunApprovalMode,
+    HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt,
+    HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest, HttpSessionSnapshot,
 };
 pub use listener::{HttpListenerError, HttpLocalServer};
 pub use openapi::{HTTP_OPENAPI_VERSION, http_openapi_document};

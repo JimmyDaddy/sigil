@@ -37,6 +37,20 @@ pub fn http_openapi_document() -> Value {
                 }
             },
             "/sessions": {
+                "get": {
+                    "summary": "List local session handles",
+                    "responses": {
+                        "200": {
+                            "description": "Session list",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionListResponse" }
+                                }
+                            }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" }
+                    }
+                },
                 "post": {
                     "summary": "Create a local session handle",
                     "requestBody": {
@@ -57,6 +71,24 @@ pub fn http_openapi_document() -> Value {
                             }
                         },
                         "401": { "$ref": "#/components/responses/Unauthorized" }
+                    }
+                }
+            },
+            "/sessions/{session_id}": {
+                "get": {
+                    "summary": "Get a local session handle",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Session snapshot",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionSnapshot" }
+                                }
+                            }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" }
                     }
                 }
             },
@@ -82,6 +114,79 @@ pub fn http_openapi_document() -> Value {
                             }
                         },
                         "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" }
+                    }
+                }
+            },
+            "/runs/{run_id}": {
+                "get": {
+                    "summary": "Get a run snapshot",
+                    "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+                    "responses": {
+                        "200": {
+                            "description": "Run snapshot",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/RunSnapshot" }
+                                }
+                            }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" }
+                    }
+                }
+            },
+            "/runs/{run_id}/cancel": {
+                "post": {
+                    "summary": "Request run cancellation",
+                    "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/RunCancelCommand" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Run-cancel command receipt",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/RunCancelCommandReceipt" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" }
+                    }
+                }
+            },
+            "/runs/{run_id}/events": {
+                "get": {
+                    "summary": "Replay durable run events as finite SSE frames",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/RunId" },
+                        {
+                            "name": "Last-Event-ID",
+                            "in": "header",
+                            "required": false,
+                            "schema": { "type": "string" }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Finite text/event-stream replay for durable events",
+                            "content": {
+                                "text/event-stream": {
+                                    "schema": { "type": "string" }
+                                }
+                            }
+                        },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
                         "409": { "$ref": "#/components/responses/Conflict" }
@@ -167,12 +272,21 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionSnapshot": {
                     "type": "object",
-                    "required": ["id", "label", "created_at_ms", "run_ids"],
+                    "required": ["id", "run_ids"],
                     "properties": {
                         "id": { "type": "string" },
                         "label": { "type": ["string", "null"] },
-                        "created_at_ms": { "type": "integer", "format": "uint64" },
                         "run_ids": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "SessionListResponse": {
+                    "type": "object",
+                    "required": ["sessions"],
+                    "properties": {
+                        "sessions": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/SessionSnapshot" }
+                        }
                     }
                 },
                 "CommandEnvelopeBase": {
@@ -224,24 +338,53 @@ pub fn http_openapi_document() -> Value {
                         "replayed": { "type": "boolean" }
                     }
                 },
+                "RunCancelCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/RunCancelRequest" }
+                            }
+                        }
+                    ]
+                },
+                "RunCancelRequest": {
+                    "type": "object",
+                    "properties": {
+                        "reason": { "type": ["string", "null"] }
+                    }
+                },
+                "RunCancelCommandReceipt": {
+                    "type": "object",
+                    "required": ["command_id", "client_id", "session_id", "run", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "run": { "$ref": "#/components/schemas/RunSnapshot" },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
                 "RunSnapshot": {
                     "type": "object",
-                    "required": ["id", "session_id", "status", "prompt", "approval_mode", "created_at_ms", "updated_at_ms", "stream_sequence", "pending_approval_call_ids"],
+                    "required": ["id", "session_id", "status", "approval_mode", "prompt_preview", "pending_approval_call_ids", "stream_sequence"],
                     "properties": {
                         "id": { "type": "string" },
                         "session_id": { "type": "string" },
                         "status": { "$ref": "#/components/schemas/RunStatus" },
-                        "prompt": { "type": "string" },
                         "approval_mode": { "$ref": "#/components/schemas/RunApprovalMode" },
-                        "created_at_ms": { "type": "integer", "format": "uint64" },
-                        "updated_at_ms": { "type": "integer", "format": "uint64" },
+                        "prompt_preview": { "type": "string" },
                         "stream_sequence": { "type": "integer", "format": "uint64" },
                         "pending_approval_call_ids": { "type": "array", "items": { "type": "string" } }
                     }
                 },
                 "RunStatus": {
                     "type": "string",
-                    "enum": ["starting", "running", "waiting_for_approval", "completed", "cancelled", "failed"]
+                    "enum": ["starting", "running", "waiting_for_approval", "cancel_requested", "finished", "failed"]
                 },
                 "ApprovalDecisionCommand": {
                     "allOf": [

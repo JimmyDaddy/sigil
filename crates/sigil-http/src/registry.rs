@@ -10,8 +10,9 @@ use crate::{
     driver::{HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart},
     dto::{
         HttpApprovalCommandReceipt, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
-        HttpPendingApproval, HttpRunApprovalMode, HttpRunSnapshot, HttpRunStartCommandReceipt,
-        HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest, HttpSessionSnapshot,
+        HttpPendingApproval, HttpRunApprovalMode, HttpRunCancelCommandReceipt,
+        HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt, HttpRunStartRequest,
+        HttpRunStatus, HttpSessionCreateRequest, HttpSessionSnapshot,
     },
     protocol::HttpCommandEnvelope,
 };
@@ -124,6 +125,17 @@ impl HttpSessionRunRegistry {
         let snapshot = session.snapshot();
         state.sessions.insert(id, session);
         snapshot
+    }
+
+    /// Lists HTTP adapter sessions in deterministic id order.
+    #[must_use]
+    pub fn list_sessions(&self) -> Vec<HttpSessionSnapshot> {
+        let state = self.lock_state();
+        state
+            .sessions
+            .values()
+            .map(HttpSessionState::snapshot)
+            .collect()
     }
 
     /// Returns one HTTP adapter session snapshot.
@@ -301,6 +313,7 @@ impl HttpSessionRunRegistry {
             }
             run.previous_status = Some(run.status);
             run.status = HttpRunStatus::CancelRequested;
+            run.advance_stream_sequence();
             HttpRunDriverCancel {
                 session_id: run.session_id.clone(),
                 run_id: run.id.clone(),
@@ -320,6 +333,73 @@ impl HttpSessionRunRegistry {
         }
 
         self.get_run(run_id)
+    }
+
+    /// Requests cancellation from a command envelope with retry de-duplication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command version is unsupported, the command points to a different
+    /// session, the optimistic state guard is stale, or the normal cancellation path rejects it.
+    pub fn cancel_run_command(
+        &self,
+        run_id: &str,
+        command: HttpCommandEnvelope<HttpRunCancelRequest>,
+    ) -> Result<HttpRunCancelCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        let key = HttpCommandKey {
+            session_id: command.session_id.clone(),
+            client_id: command.client_id.clone(),
+            command_id: command.command_id.clone(),
+        };
+        {
+            let state = self.lock_state();
+            if let Some(receipt) = state.run_cancel_command_receipts.get(&key) {
+                return Ok(receipt.clone().replayed());
+            }
+            let run = state
+                .runs
+                .get(run_id)
+                .ok_or_else(|| HttpRegistryError::RunNotFound {
+                    run_id: run_id.to_owned(),
+                })?;
+            if run.session_id != command.session_id {
+                return Err(HttpRegistryError::CommandSessionMismatch {
+                    command_session_id: command.session_id,
+                    run_id: run_id.to_owned(),
+                    run_session_id: run.session_id.clone(),
+                });
+            }
+            if let Some(expected) = command.expected_stream_sequence
+                && expected != run.stream_sequence
+            {
+                return Err(HttpRegistryError::StaleCommandSequence {
+                    run_id: run_id.to_owned(),
+                    expected,
+                    actual: run.stream_sequence,
+                });
+            }
+        }
+
+        let run = self.cancel_run(run_id)?;
+        let receipt = HttpRunCancelCommandReceipt {
+            command_id: command.command_id,
+            client_id: command.client_id,
+            session_id: command.session_id,
+            expected_stream_sequence: command.expected_stream_sequence,
+            correlation_id: command.correlation_id,
+            run,
+            replayed: false,
+        };
+        let mut state = self.lock_state();
+        state
+            .run_cancel_command_receipts
+            .insert(key, receipt.clone());
+        Ok(receipt)
     }
 
     /// Registers one pending approval for an active run.
@@ -512,6 +592,7 @@ struct HttpRegistryState {
     sessions: BTreeMap<String, HttpSessionState>,
     runs: BTreeMap<String, HttpRunState>,
     run_start_command_receipts: BTreeMap<HttpCommandKey, HttpRunStartCommandReceipt>,
+    run_cancel_command_receipts: BTreeMap<HttpCommandKey, HttpRunCancelCommandReceipt>,
     command_receipts: BTreeMap<HttpCommandKey, HttpApprovalCommandReceipt>,
     next_session_number: u64,
     next_run_number: u64,

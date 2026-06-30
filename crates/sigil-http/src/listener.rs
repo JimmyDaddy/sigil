@@ -11,9 +11,13 @@ use tokio::{
 use crate::{
     auth::HttpAuthValidator,
     config::HttpServerConfig,
-    dto::{HttpApprovalDecisionRequest, HttpRunStartRequest, HttpSessionCreateRequest},
+    dto::{
+        HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest,
+        HttpSessionCreateRequest,
+    },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
+    sse::{HTTP_RUN_EVENT_SSE_NAME, HttpLiveEventBus, HttpSseEvent},
 };
 
 const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -50,6 +54,7 @@ pub struct HttpLocalServer {
     listener: TcpListener,
     validator: HttpAuthValidator,
     registry: Arc<HttpSessionRunRegistry>,
+    event_bus: Arc<HttpLiveEventBus>,
 }
 
 impl HttpLocalServer {
@@ -63,6 +68,27 @@ impl HttpLocalServer {
         config: HttpServerConfig,
         token: Option<&str>,
         registry: Arc<HttpSessionRunRegistry>,
+    ) -> Result<Self, HttpListenerError> {
+        Self::bind_with_event_bus(
+            config,
+            token,
+            registry,
+            Arc::new(HttpLiveEventBus::new(128)),
+        )
+        .await
+    }
+
+    /// Binds a local HTTP listener with an externally owned event bus.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config fails safety validation, required auth has no token, or
+    /// the TCP listener cannot bind.
+    pub async fn bind_with_event_bus(
+        config: HttpServerConfig,
+        token: Option<&str>,
+        registry: Arc<HttpSessionRunRegistry>,
+        event_bus: Arc<HttpLiveEventBus>,
     ) -> Result<Self, HttpListenerError> {
         config
             .validate()
@@ -81,6 +107,7 @@ impl HttpLocalServer {
             listener,
             validator,
             registry,
+            event_bus,
         })
     }
 
@@ -110,8 +137,9 @@ impl HttpLocalServer {
                     let (stream, _) = accepted?;
                     let validator = self.validator.clone();
                     let registry = Arc::clone(&self.registry);
+                    let event_bus = Arc::clone(&self.event_bus);
                     tokio::spawn(async move {
-                        let _ = handle_http_connection(stream, validator, registry).await;
+                        let _ = handle_http_connection(stream, validator, registry, event_bus).await;
                     });
                 }
             }
@@ -123,9 +151,10 @@ async fn handle_http_connection(
     mut stream: TcpStream,
     validator: HttpAuthValidator,
     registry: Arc<HttpSessionRunRegistry>,
+    event_bus: Arc<HttpLiveEventBus>,
 ) -> Result<(), HttpListenerError> {
     let response = match read_http_request(&mut stream).await {
-        Ok(request) => route_http_request(request, &validator, &registry),
+        Ok(request) => route_http_request(request, &validator, &registry, &event_bus),
         Err(error) => http_error_response(400, "bad_request", error.to_string()),
     };
     write_http_response(&mut stream, response).await
@@ -135,12 +164,10 @@ fn route_http_request(
     request: HttpRequest,
     validator: &HttpAuthValidator,
     registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
 ) -> HttpResponse {
     if request.method == "GET" && request.path == "/health" {
         return json_response(200, json!({ "status": "ok" }));
-    }
-    if request.method != "POST" {
-        return http_error_response(404, "not_found", "http route not found");
     }
     if let Err(error) =
         validator.validate_authorization_header(request.header("authorization").map(String::as_str))
@@ -148,7 +175,11 @@ fn route_http_request(
         return http_error_response(401, "unauthorized", error.to_string());
     }
 
-    if request.path == "/sessions" {
+    if request.method == "GET" && request.path == "/sessions" {
+        return json_response(200, json!({ "sessions": registry.list_sessions() }));
+    }
+
+    if request.method == "POST" && request.path == "/sessions" {
         let Ok(body) = parse_json_body::<HttpSessionCreateRequest>(&request.body) else {
             return http_error_response(400, "bad_request", "invalid session create body");
         };
@@ -156,11 +187,24 @@ fn route_http_request(
         return json_response(201, json!(session));
     }
 
-    if let Some(session_id) = request
-        .path
-        .strip_prefix("/sessions/")
-        .and_then(|suffix| suffix.strip_suffix("/runs"))
-        .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        return match registry.get_session(session_id) {
+            Ok(session) => json_response(200, json!(session)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/runs"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {
         let Ok(command) =
             parse_json_body::<HttpCommandEnvelope<HttpRunStartRequest>>(&request.body)
@@ -173,7 +217,54 @@ fn route_http_request(
         };
     }
 
-    if let Some((run_id, call_id)) = approval_route_parts(&request.path) {
+    if request.method == "GET"
+        && let Some(run_id) = request
+            .path
+            .strip_prefix("/runs/")
+            .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
+    {
+        return match registry.get_run(run_id) {
+            Ok(run) => json_response(200, json!(run)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(run_id) = request
+            .path
+            .strip_prefix("/runs/")
+            .and_then(|suffix| suffix.strip_suffix("/cancel"))
+            .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpRunCancelRequest>>(&request.body)
+        else {
+            return http_error_response(400, "bad_request", "invalid run cancel command body");
+        };
+        return match registry.cancel_run_command(run_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(run_id) = request
+            .path
+            .strip_prefix("/runs/")
+            .and_then(|suffix| suffix.strip_suffix("/events"))
+            .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
+    {
+        return run_events_response(
+            registry,
+            event_bus,
+            run_id,
+            request.header("last-event-id").map(String::as_str),
+        );
+    }
+
+    if request.method == "POST"
+        && let Some((run_id, call_id)) = approval_route_parts(&request.path)
+    {
         let Ok(command) =
             parse_json_body::<HttpCommandEnvelope<HttpApprovalDecisionRequest>>(&request.body)
         else {
@@ -186,6 +277,39 @@ fn route_http_request(
     }
 
     http_error_response(404, "not_found", "http route not found")
+}
+
+fn run_events_response(
+    registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
+    run_id: &str,
+    last_event_id: Option<&str>,
+) -> HttpResponse {
+    let run = match registry.get_run(run_id) {
+        Ok(run) => run,
+        Err(error) => return registry_error_response(error),
+    };
+    let events = match event_bus.replay_run_after(&run.session_id, run_id, last_event_id) {
+        Ok(events) => events,
+        Err(error) => return http_error_response(409, "replay_error", error.to_string()),
+    };
+    let mut body = String::new();
+    for event in events {
+        let data = match serde_json::to_string(&event) {
+            Ok(data) => data,
+            Err(error) => {
+                return http_error_response(500, "sse_error", error.to_string());
+            }
+        };
+        let frame = match HttpSseEvent::with_id(event.replay_id, HTTP_RUN_EVENT_SSE_NAME, data) {
+            Ok(frame) => frame,
+            Err(error) => {
+                return http_error_response(500, "sse_error", error.to_string());
+            }
+        };
+        body.push_str(&frame.encode());
+    }
+    bytes_response(200, "text/event-stream", body.into_bytes())
 }
 
 fn approval_route_parts(path: &str) -> Option<(&str, &str)> {
@@ -299,17 +423,15 @@ async fn write_http_response(
     stream: &mut TcpStream,
     response: HttpResponse,
 ) -> Result<(), HttpListenerError> {
-    let body = serde_json::to_vec(&response.body).map_err(|error| HttpListenerError::Response {
-        message: error.to_string(),
-    })?;
     let head = format!(
-        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         response.status,
         http_reason(response.status),
-        body.len()
+        response.content_type,
+        response.body.len()
     );
     stream.write_all(head.as_bytes()).await?;
-    stream.write_all(&body).await?;
+    stream.write_all(&response.body).await?;
     stream.shutdown().await?;
     Ok(())
 }
@@ -336,7 +458,30 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
 }
 
 fn json_response(status: u16, body: Value) -> HttpResponse {
-    HttpResponse { status, body }
+    match serde_json::to_vec(&body) {
+        Ok(body) => bytes_response(status, "application/json", body),
+        Err(error) => {
+            let fallback = json!({
+                "error": {
+                    "code": "response_error",
+                    "message": error.to_string()
+                }
+            });
+            let fallback = match serde_json::to_vec(&fallback) {
+                Ok(fallback) => fallback,
+                Err(_) => b"{\"error\":{\"code\":\"response_error\"}}".to_vec(),
+            };
+            bytes_response(500, "application/json", fallback)
+        }
+    }
+}
+
+fn bytes_response(status: u16, content_type: &'static str, body: Vec<u8>) -> HttpResponse {
+    HttpResponse {
+        status,
+        content_type,
+        body,
+    }
 }
 
 fn http_error_response(
@@ -383,5 +528,6 @@ impl HttpRequest {
 
 struct HttpResponse {
     status: u16,
-    body: Value,
+    content_type: &'static str,
+    body: Vec<u8>,
 }

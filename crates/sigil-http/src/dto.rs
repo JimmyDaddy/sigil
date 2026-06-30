@@ -39,6 +39,15 @@ pub struct HttpRunStartRequest {
     pub approval_mode: Option<HttpRunApprovalMode>,
 }
 
+/// Request body for cancelling one run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct HttpRunCancelRequest {
+    /// Optional user-facing reason for diagnostics and future audit surfaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Approval policy accepted by the HTTP run start endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,6 +251,35 @@ pub struct HttpRunStartCommandReceipt {
 }
 
 impl HttpRunStartCommandReceipt {
+    pub(crate) fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
+/// Receipt for an envelope-routed run cancel command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpRunCancelCommandReceipt {
+    /// Command id used for retry de-duplication.
+    pub command_id: String,
+    /// Client that submitted the command.
+    pub client_id: String,
+    /// Session id from the command envelope.
+    pub session_id: String,
+    /// Optional optimistic state guard supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_stream_sequence: Option<u64>,
+    /// Optional durable correlation id supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Run snapshot produced by the existing registry/driver path.
+    pub run: HttpRunSnapshot,
+    /// Whether this response was replayed from a prior command id.
+    pub replayed: bool,
+}
+
+impl HttpRunCancelCommandReceipt {
     pub(crate) fn replayed(mut self) -> Self {
         self.replayed = true;
         self
