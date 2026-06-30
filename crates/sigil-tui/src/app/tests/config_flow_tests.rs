@@ -598,7 +598,10 @@ fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
 
     app.handle_worker_message(WorkerMessage::McpActivationStatus {
         server_name: Some("filesystem".to_owned()),
-        status: McpActivationStatus::Ready { added_tools: 3 },
+        status: McpActivationStatus::Ready {
+            added_tools: 3,
+            process_coverage: None,
+        },
     })?;
 
     assert_eq!(
@@ -3630,7 +3633,9 @@ fn config_permission_and_mcp_details_render_rule_and_pin_summaries() -> Result<(
         .expect("config state should still exist");
     state.set_section(ConfigSection::Mcp);
     state.selected_mcp_server_index = 0;
-    assert!(app.config_detail_lines().join("\n").contains("Pin: off"));
+    let off_lines = app.config_detail_lines().join("\n");
+    assert!(off_lines.contains("Pin: off"));
+    assert!(off_lines.contains("Boundary: local stdio outside local sandbox"));
 
     let state = app
         .config_state

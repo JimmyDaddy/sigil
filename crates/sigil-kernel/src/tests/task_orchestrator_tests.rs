@@ -4367,6 +4367,7 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
             workspace_revision: 4,
             reason: WorkspaceMutationDetectionReason::SnapshotChanged,
             unknown_dirty: false,
+            metadata: Default::default(),
         })?,
     )?;
     let mcp_detected = store.append_event(
@@ -4385,6 +4386,7 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
             workspace_revision: 5,
             reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
             unknown_dirty: true,
+            metadata: Default::default(),
         })?,
     )?;
     let restored = store.append_event(

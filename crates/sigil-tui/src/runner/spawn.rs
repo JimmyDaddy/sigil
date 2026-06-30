@@ -177,6 +177,9 @@ fn spawn_eager_mcp_startup_tasks(
                         server_name: Some(server_name.clone()),
                         status: McpActivationStatus::Ready {
                             added_tools: result.added_tools,
+                            process_coverage: sigil_runtime::mcp_process_receipts_summary(
+                                &result.process_launch_receipts,
+                            ),
                         },
                     });
                 }

@@ -315,7 +315,14 @@ pub enum McpActivationStatus {
     Activating,
     Refreshing,
     Deferred,
-    Stale { capability: String },
-    Ready { added_tools: usize },
-    Failed { error: String },
+    Stale {
+        capability: String,
+    },
+    Ready {
+        added_tools: usize,
+        process_coverage: Option<String>,
+    },
+    Failed {
+        error: String,
+    },
 }

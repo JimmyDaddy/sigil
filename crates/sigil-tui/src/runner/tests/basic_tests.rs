@@ -667,16 +667,24 @@ fn activate_lazy_mcp_reports_ready_status_when_server_registers_tools() -> Resul
             message,
             WorkerMessage::McpActivationStatus {
                 server_name: Some(server_name),
-                status: McpActivationStatus::Ready { added_tools: 1 },
+                status: McpActivationStatus::Ready {
+                    added_tools: 1,
+                    process_coverage: Some(process_coverage),
+                },
             } if server_name == "ready-lazy"
+                && process_coverage == "local stdio outside local sandbox"
         )
     })?;
     assert!(matches!(
         ready,
         WorkerMessage::McpActivationStatus {
             server_name: Some(ref server_name),
-            status: McpActivationStatus::Ready { added_tools: 1 },
+            status: McpActivationStatus::Ready {
+                added_tools: 1,
+                process_coverage: Some(ref process_coverage),
+            },
         } if server_name == "ready-lazy"
+            && process_coverage == "local stdio outside local sandbox"
     ));
 
     let notice = worker.recv_until(|message| matches!(message, WorkerMessage::Notice(_)))?;

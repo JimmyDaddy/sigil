@@ -9,8 +9,24 @@ fn mcp_activation_event_detail_formats_scope_and_errors() {
         "server=filesystem deferred"
     );
     assert_eq!(
-        mcp_activation_event_detail(None, &McpActivationStatus::Ready { added_tools: 3 }),
+        mcp_activation_event_detail(
+            None,
+            &McpActivationStatus::Ready {
+                added_tools: 3,
+                process_coverage: None,
+            },
+        ),
         "ready tools=3"
+    );
+    assert_eq!(
+        mcp_activation_event_detail(
+            Some("filesystem"),
+            &McpActivationStatus::Ready {
+                added_tools: 2,
+                process_coverage: Some("local stdio outside local sandbox".to_owned()),
+            },
+        ),
+        "server=filesystem ready tools=2 coverage=local stdio outside local sandbox"
     );
     assert_eq!(
         mcp_activation_event_detail(

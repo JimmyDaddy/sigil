@@ -11,11 +11,12 @@ use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
     ExecutionConfig, ExecutionIsolationPolicy, ExecutionNetworkPolicy, ExecutionReceipt,
-    ExecutionRequest, ExecutionResourceLimitKind, ExecutionTimeoutSource, JsonlSessionStore,
-    MutationEventRecorder, SessionStreamRecord, TerminalExecutionBackendCapabilities,
-    TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxProfile, ExecutionTimeoutSource,
+    JsonlSessionStore, MutationEventRecorder, SessionStreamRecord,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCall,
+    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolRegistry,
+    ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -90,6 +91,77 @@ fn local_execution_backend_policy_fails_closed_when_sandbox_required() -> Result
         error.to_string().contains(
             "execution isolation require_sandbox requires filesystem and process isolation"
         )
+    );
+    Ok(())
+}
+
+#[test]
+fn long_lived_stdio_process_plan_local_unconfined_is_outside_sandbox() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let plan = super::long_lived_stdio_process_plan(
+        &ExecutionConfig::default(),
+        "sh",
+        &["-c".to_owned(), "true".to_owned()],
+        temp.path(),
+        &BTreeMap::new(),
+    )?;
+
+    assert_eq!(plan.backend, ExecutionBackendKind::Local);
+    assert_eq!(plan.sandbox_profile, ExecutionSandboxProfile::Unconfined);
+    assert!(!plan.sandboxed);
+    assert_eq!(plan.program, PathBuf::from("sh"));
+    Ok(())
+}
+
+#[test]
+fn long_lived_stdio_process_plan_local_required_sandbox_fails_closed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let result = super::long_lived_stdio_process_plan(
+        &ExecutionConfig {
+            backend: ExecutionBackendKind::Local,
+            isolation: ExecutionIsolationPolicy::RequireSandbox,
+            ..ExecutionConfig::default()
+        },
+        "sh",
+        &["-c".to_owned(), "true".to_owned()],
+        temp.path(),
+        &BTreeMap::new(),
+    );
+
+    let Err(error) = result else {
+        panic!("local stdio MCP process must fail closed when sandbox is required");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("local execution backend cannot enforce local stdio sandbox")
+    );
+    Ok(())
+}
+
+#[test]
+fn long_lived_stdio_process_plan_docker_fails_closed_for_stdio_mcp() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let result = super::long_lived_stdio_process_plan(
+        &ExecutionConfig {
+            backend: ExecutionBackendKind::Docker,
+            profile: ExecutionSandboxProfile::WorkspaceWrite,
+            container_image: Some("redis:8-alpine".to_owned()),
+            ..ExecutionConfig::default()
+        },
+        "sh",
+        &["-c".to_owned(), "true".to_owned()],
+        temp.path(),
+        &BTreeMap::new(),
+    );
+
+    let Err(error) = result else {
+        panic!("docker stdio MCP process must fail closed until container lifecycle is supported");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("docker execution backend does not support long-lived stdio MCP processes")
     );
     Ok(())
 }

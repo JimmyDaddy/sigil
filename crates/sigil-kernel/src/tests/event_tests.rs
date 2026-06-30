@@ -499,6 +499,7 @@ fn typed_event_decode_covers_mutation_and_verification_family() {
         workspace_revision: 4,
         reason: WorkspaceMutationDetectionReason::ScanUnavailable,
         unknown_dirty: true,
+        metadata: Default::default(),
     };
     let detected_event = StoredEvent::new(
         DurableEventType::WorkspaceMutationDetected,

@@ -32,6 +32,9 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
                 config_state,
                 &app.selected_mcp_runtime_status_label(config_state),
             ));
+            if let Some(boundary) = app.selected_mcp_boundary_label(config_state) {
+                lines.push(render_config_readonly_row("Boundary", &boundary));
+            }
         }
     }
     lines.push(String::new());

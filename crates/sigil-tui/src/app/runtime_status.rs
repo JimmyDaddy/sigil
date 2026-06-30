@@ -125,9 +125,16 @@ pub(crate) enum McpServerRuntimeStatus {
     Deferred,
     Activating,
     Refreshing,
-    Stale { capability: String },
-    Ready { tool_count: Option<usize> },
-    Failed { message: String },
+    Stale {
+        capability: String,
+    },
+    Ready {
+        tool_count: Option<usize>,
+        process_coverage: Option<String>,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 impl McpServerRuntimeStatus {
@@ -137,10 +144,23 @@ impl McpServerRuntimeStatus {
             Self::Activating => "activating".to_owned(),
             Self::Refreshing => "refreshing".to_owned(),
             Self::Stale { capability } => format!("stale {capability}"),
-            Self::Ready { tool_count: None } => "ready".to_owned(),
+            Self::Ready {
+                tool_count: None,
+                process_coverage: None,
+            } => "ready".to_owned(),
             Self::Ready {
                 tool_count: Some(count),
+                process_coverage: None,
             } => format!("ready {}", count_label(*count, "tool", "tools")),
+            Self::Ready {
+                tool_count,
+                process_coverage: Some(process_coverage),
+            } => {
+                let tools = tool_count
+                    .map(|count| count_label(count, "tool", "tools"))
+                    .unwrap_or_else(|| "tools".to_owned());
+                format!("ready {tools} · {process_coverage}")
+            }
             Self::Failed { message } => {
                 format!("failed: {}", summarize_mcp_failure(message, server_name))
             }

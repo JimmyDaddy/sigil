@@ -1,4 +1,7 @@
 use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
     sync::Arc,
@@ -12,7 +15,7 @@ use sigil_kernel::{
     ExecutionBackendSelectionDiagnostic, ExecutionCleanupReceipt, ExecutionConfig,
     ExecutionNetworkReceipt, ExecutionReceipt, ExecutionRequest, ExecutionResourceLimitKind,
     ExecutionResourceLimitReceipt, ExecutionResourceReceipt, ExecutionSandboxFallback,
-    ExecutionTimeoutSource,
+    ExecutionSandboxProfile, ExecutionTimeoutSource,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -37,6 +40,156 @@ pub(crate) use seatbelt::macos_seatbelt_workspace_write_profile;
 
 #[cfg(test)]
 pub(crate) use docker::current_user_group_flag;
+
+/// Command plan for a long-lived stdio process that needs the same sandbox policy as built-in tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongLivedStdioProcessPlan {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    pub cwd: PathBuf,
+    pub env: BTreeMap<String, String>,
+    pub backend: ExecutionBackendKind,
+    pub backend_capabilities: ExecutionBackendCapabilities,
+    pub sandbox_profile: ExecutionSandboxProfile,
+    pub sandboxed: bool,
+}
+
+/// Builds a command plan for long-lived stdio processes such as local MCP servers.
+///
+/// # Errors
+///
+/// Returns an error when the configured backend cannot preserve long-lived stdio pipes while
+/// satisfying the requested sandbox/profile policy.
+pub fn long_lived_stdio_process_plan(
+    config: &ExecutionConfig,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<LongLivedStdioProcessPlan> {
+    if program.trim().is_empty() {
+        bail!("long-lived stdio process command must not be empty");
+    }
+    let canonical_cwd = fs::canonicalize(cwd)
+        .with_context(|| format!("failed to canonicalize cwd {}", cwd.display()))?;
+    match config.backend {
+        ExecutionBackendKind::Local => {
+            if config.requires_sandbox() {
+                bail!(
+                    "MCP stdio sandbox unavailable: local execution backend cannot enforce local stdio sandbox"
+                );
+            }
+            Ok(LongLivedStdioProcessPlan {
+                program: PathBuf::from(program),
+                args: args.iter().map(OsString::from).collect(),
+                cwd: canonical_cwd,
+                env: env.clone(),
+                backend: ExecutionBackendKind::Local,
+                backend_capabilities: ExecutionBackendCapabilities::default(),
+                sandbox_profile: ExecutionSandboxProfile::Unconfined,
+                sandboxed: false,
+            })
+        }
+        ExecutionBackendKind::MacosSeatbelt => {
+            let backend = MacosSeatbeltExecutionBackend::default()
+                .with_network_allowed(config.profile_spec().network_allowed);
+            let capabilities = backend.capabilities();
+            validate_long_lived_stdio_capabilities(config, capabilities)?;
+            if let Err(error) = ensure_macos_seatbelt_available(&backend) {
+                bail!("MCP stdio sandbox unavailable: {error}");
+            }
+            let profile = macos_seatbelt_workspace_write_profile(&canonical_cwd);
+            let mut planned_args = vec![
+                OsString::from("-p"),
+                OsString::from(profile),
+                OsString::from(program),
+            ];
+            planned_args.extend(args.iter().map(OsString::from));
+            Ok(LongLivedStdioProcessPlan {
+                program: PathBuf::from("/usr/bin/sandbox-exec"),
+                args: planned_args,
+                cwd: canonical_cwd,
+                env: env.clone(),
+                backend: ExecutionBackendKind::MacosSeatbelt,
+                backend_capabilities: capabilities,
+                sandbox_profile: config.profile,
+                sandboxed: true,
+            })
+        }
+        ExecutionBackendKind::LinuxBubblewrap => {
+            let Some(bwrap) = find_executable_on_path("bwrap") else {
+                bail!(
+                    "MCP stdio sandbox unavailable: linux_bubblewrap execution backend requires bwrap on PATH"
+                );
+            };
+            let backend = LinuxBubblewrapExecutionBackend::new(
+                bwrap.clone(),
+                config.profile_spec().network_allowed,
+            );
+            let capabilities = backend.capabilities();
+            validate_long_lived_stdio_capabilities(config, capabilities)?;
+            if let Err(error) = ensure_linux_bubblewrap_available(&backend) {
+                bail!("MCP stdio sandbox unavailable: {error}");
+            }
+            let request = ExecutionRequest {
+                program: program.to_owned(),
+                args: args.to_vec(),
+                cwd: canonical_cwd.clone(),
+                env: env.clone(),
+                timeout_ms: None,
+                timeout_secs: 0,
+                cpu_time_ms: None,
+                memory_limit_bytes: None,
+                process_count_limit: None,
+            };
+            let mut planned_args = linux_bubblewrap_args(
+                &canonical_cwd,
+                &request,
+                config.profile_spec().network_allowed,
+            );
+            planned_args.push(OsString::from(program));
+            planned_args.extend(args.iter().map(OsString::from));
+            Ok(LongLivedStdioProcessPlan {
+                program: bwrap,
+                args: planned_args,
+                cwd: canonical_cwd,
+                env: env.clone(),
+                backend: ExecutionBackendKind::LinuxBubblewrap,
+                backend_capabilities: capabilities,
+                sandbox_profile: config.profile,
+                sandboxed: true,
+            })
+        }
+        ExecutionBackendKind::Docker => {
+            bail!(
+                "MCP stdio sandbox unavailable: docker execution backend does not support long-lived stdio MCP processes"
+            )
+        }
+    }
+}
+
+fn validate_long_lived_stdio_capabilities(
+    config: &ExecutionConfig,
+    capabilities: ExecutionBackendCapabilities,
+) -> Result<()> {
+    let requirements = config.required_capabilities_for_persistent_pty();
+    let missing = capabilities.missing_requirements(requirements);
+    if !missing.is_empty() {
+        bail!(
+            "MCP stdio sandbox unavailable: execution backend {} missing capabilities: {}",
+            config.backend.as_str(),
+            missing
+                .iter()
+                .map(|capability| capability.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if let Err(error) = config.validate_profile_capabilities(capabilities) {
+        bail!("MCP stdio sandbox unavailable: {error}");
+    }
+    Ok(())
+}
 
 /// Builds the configured execution backend for built-in tools.
 ///

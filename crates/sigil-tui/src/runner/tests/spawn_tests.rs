@@ -274,8 +274,12 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         ready,
         WorkerMessage::McpActivationStatus {
             server_name: Some(ref server_name),
-            status: McpActivationStatus::Ready { added_tools: 1 },
+            status: McpActivationStatus::Ready {
+                added_tools: 1,
+                process_coverage: Some(ref process_coverage),
+            },
         } if server_name == "ready-eager"
+            && process_coverage == "local stdio outside local sandbox"
     ));
     let records = JsonlSessionStore::read_event_records(&session_log_path)?;
     let lifecycle_mutation = records.into_iter().find_map(|record| {

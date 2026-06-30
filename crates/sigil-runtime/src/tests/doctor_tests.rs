@@ -245,9 +245,14 @@ allow_secrets = false
         secret_source_label(SecretSource::ConfigPlaintext),
         "config plaintext"
     );
-    assert!(report.checks.iter().any(|check| check.name == "mcp:local"
-        && check.status == DoctorStatus::Ok
-        && check.message.contains("command=available")));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "mcp:local"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("command=available")
+            && check
+                .message
+                .contains("boundary=local stdio outside local sandbox")
+    }));
     assert!(
         report
             .checks

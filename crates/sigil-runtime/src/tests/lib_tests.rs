@@ -26,15 +26,16 @@ use sigil_provider_gemini::{GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, SIGIL_GEMINI
 use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV};
 
 use super::{
-    SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
-    build_plan_prompt_tool_registry, build_provider, build_role_provider, build_role_run_options,
-    build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
-    build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
-    load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
-    provider_capabilities_for_name, provider_capability_view,
-    refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
-    resolve_anthropic_api_key, resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
-    resolve_gemini_api_key, resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
+    McpProcessLaunchRequest, McpProcessLauncher, SecretSource, activate_lazy_mcp_tools,
+    activate_lazy_mcp_tools_detailed, build_plan_prompt_tool_registry, build_provider,
+    build_role_provider, build_role_run_options, build_role_skill_tool_registry,
+    build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
+    build_tool_registry_without_eager_mcp, load_anthropic_config, load_deepseek_config,
+    load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
+    provider_capability_view, refresh_mcp_server_tools_with_mcp_handlers,
+    register_lazy_mcp_activation_tool, resolve_anthropic_api_key, resolve_deepseek_api_key,
+    resolve_deepseek_api_key_with_session, resolve_gemini_api_key,
+    resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
 };
 
@@ -922,6 +923,146 @@ async fn build_tool_registry_fails_closed_when_profile_requires_sandbox() -> Res
         error
             .to_string()
             .contains("execution profile WorkspaceWrite requires filesystem and process isolation")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Result<()> {
+    if tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("true")
+        .output()
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let launcher = super::ConfiguredMcpProcessLauncher {
+        execution: sigil_kernel::ExecutionConfig::default(),
+    };
+    let launch = launcher.launch(McpProcessLaunchRequest {
+        server_name: "local".to_owned(),
+        command: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "sleep 1".to_owned()],
+        working_dir: Some(temp.path().to_path_buf()),
+        env: Default::default(),
+        startup_timeout_secs: 1,
+        classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+    })?;
+
+    assert_eq!(
+        launch.receipt.coverage,
+        sigil_mcp::McpProcessCoverage::LocalStdioOutsideSandbox
+    );
+    assert_eq!(launch.receipt.backend, Some(ExecutionBackendKind::Local));
+    assert_eq!(
+        launch.receipt.sandbox_profile,
+        Some(ExecutionSandboxProfile::Unconfined)
+    );
+
+    let mut child = launch.child;
+    let _ = child.kill().await;
+    Ok(())
+}
+
+#[test]
+fn configured_mcp_process_launcher_local_required_sandbox_fails_closed() {
+    let launcher = super::ConfiguredMcpProcessLauncher {
+        execution: sigil_kernel::ExecutionConfig {
+            backend: ExecutionBackendKind::Local,
+            isolation: ExecutionIsolationPolicy::RequireSandbox,
+            ..sigil_kernel::ExecutionConfig::default()
+        },
+    };
+    let result = launcher.launch(McpProcessLaunchRequest {
+        server_name: "local".to_owned(),
+        command: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "true".to_owned()],
+        working_dir: None,
+        env: Default::default(),
+        startup_timeout_secs: 1,
+        classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+    });
+
+    let Err(error) = result else {
+        panic!("local MCP launcher must fail closed when sandbox is required");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("local execution backend cannot enforce local stdio sandbox")
+    );
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_external_write()
+-> Result<()> {
+    if !Path::new("/usr/bin/sandbox-exec").exists() {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let outside = temp.path().join("outside.txt");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "SIGIL_TEST_OUTSIDE".to_owned(),
+        outside.to_string_lossy().into_owned(),
+    );
+    let launcher = super::ConfiguredMcpProcessLauncher {
+        execution: sigil_kernel::ExecutionConfig {
+            backend: ExecutionBackendKind::MacosSeatbelt,
+            isolation: ExecutionIsolationPolicy::RequireSandbox,
+            profile: ExecutionSandboxProfile::WorkspaceWrite,
+            ..sigil_kernel::ExecutionConfig::default()
+        },
+    };
+    let launch = launcher.launch(McpProcessLaunchRequest {
+        server_name: "seatbelt".to_owned(),
+        command: "sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            "printf ok > inside.txt; if printf nope > \"$SIGIL_TEST_OUTSIDE\"; then printf outside-wrote; else printf outside-denied; fi".to_owned(),
+        ],
+        working_dir: Some(workspace.clone()),
+        env,
+        startup_timeout_secs: 1,
+        classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+    })?;
+
+    assert_eq!(
+        launch.receipt.classification,
+        sigil_mcp::McpProcessClass::LocalStdioSandboxed
+    );
+    assert_eq!(
+        launch.receipt.coverage,
+        sigil_mcp::McpProcessCoverage::LocalStdioSandboxed
+    );
+    assert_eq!(
+        launch.receipt.backend,
+        Some(ExecutionBackendKind::MacosSeatbelt)
+    );
+    assert_eq!(
+        launch.receipt.sandbox_profile,
+        Some(ExecutionSandboxProfile::WorkspaceWrite)
+    );
+
+    let output = launch.child.wait_with_output().await?;
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("outside-denied"),
+        "stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(workspace.join("inside.txt"))?, "ok");
+    assert!(
+        !outside.exists(),
+        "MCP stdio Seatbelt wrapper must deny writes outside the workspace"
     );
     Ok(())
 }

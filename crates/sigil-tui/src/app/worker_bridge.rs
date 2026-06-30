@@ -710,8 +710,12 @@ impl AppState {
             McpActivationStatus::Stale { capability } => McpServerRuntimeStatus::Stale {
                 capability: capability.clone(),
             },
-            McpActivationStatus::Ready { added_tools } => McpServerRuntimeStatus::Ready {
+            McpActivationStatus::Ready {
+                added_tools,
+                process_coverage,
+            } => McpServerRuntimeStatus::Ready {
                 tool_count: Some(*added_tools),
+                process_coverage: process_coverage.clone(),
             },
             McpActivationStatus::Failed { error } => McpServerRuntimeStatus::Failed {
                 message: error.clone(),
@@ -969,9 +973,16 @@ impl AppState {
             .and_then(serde_json::Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(0);
+        let process_coverage = content
+            .get("process_coverage")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         self.apply_mcp_activation_status(
             Some(server_name.to_owned()),
-            McpActivationStatus::Ready { added_tools },
+            McpActivationStatus::Ready {
+                added_tools,
+                process_coverage,
+            },
         );
     }
 
@@ -1065,7 +1076,13 @@ fn mcp_activation_event_detail(server_name: Option<&str>, status: &McpActivation
         McpActivationStatus::Refreshing => "refreshing".to_owned(),
         McpActivationStatus::Deferred => "deferred".to_owned(),
         McpActivationStatus::Stale { capability } => format!("stale {capability}"),
-        McpActivationStatus::Ready { added_tools } => format!("ready tools={added_tools}"),
+        McpActivationStatus::Ready {
+            added_tools,
+            process_coverage,
+        } => process_coverage
+            .as_deref()
+            .map(|coverage| format!("ready tools={added_tools} coverage={coverage}"))
+            .unwrap_or_else(|| format!("ready tools={added_tools}")),
         McpActivationStatus::Failed { error } => format!("failed {}", summarize_error(error)),
     };
     format!("{scope}{status}")

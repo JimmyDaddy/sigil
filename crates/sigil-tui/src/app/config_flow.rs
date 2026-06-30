@@ -2002,6 +2002,18 @@ impl AppState {
             .label_for_server(Some(&config.name))
     }
 
+    pub(super) fn selected_mcp_boundary_label(&self, config_state: &ConfigState) -> Option<String> {
+        let root_config = &config_state.draft.base_root_config;
+        let server = root_config
+            .mcp_servers
+            .get(config_state.selected_mcp_server_index)?;
+        Some(sigil_runtime::mcp_stdio_boundary_summary(
+            root_config,
+            &self.workspace_root,
+            server,
+        ))
+    }
+
     fn render_code_intelligence_readiness_summary(
         &self,
         config_state: &ConfigState,

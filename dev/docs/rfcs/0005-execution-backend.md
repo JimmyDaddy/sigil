@@ -113,6 +113,15 @@ pub trait ExecutionBackend {
   - Docker persistent PTY 请求会 fail closed，不静默 fallback 到 local PTY；Docker `exec -it` / attach / resize / cleanup 属于后续 productization，不属于本切片。
   - macOS real PTY test 覆盖 workspace 内写入允许、workspace 外写入拒绝、metadata 和 output capture。
   - Linux ignored real PTY manager test 覆盖 Bubblewrap PTY wrapper 的 workspace 内写入允许、workspace 外写入拒绝、metadata 和 output capture；需要显式在支持 bwrap user/mount namespace 的 Linux host 上运行。
+- 已开始 E05.14 MCP stdio sandbox handoff：
+  - 新增 MCP stdio process launcher / launch receipt boundary，`sigil-mcp` 不再直接把 process coverage 隐式等同于 local child process。
+  - 默认 local launcher 保持兼容行为，但 receipt 明确标记 `local_stdio_outside_sandbox`。
+  - runtime 会向 eager startup、lazy activation 和 manual refresh 注入 configured MCP launcher。
+  - `sigil-tools-builtin` 提供 long-lived stdio launch plan：local unconfined 允许但不声明 sandbox；local required-sandbox 和 Docker MCP stdio fail closed；macOS Seatbelt 与 Linux Bubblewrap 可在 capability checks 通过时包装本地 stdio process。
+  - MCP lifecycle unknown-dirty evidence 现在携带 coarse process coverage metadata，runtime activation/refresh result 会传播 process launch receipts。
+  - `/doctor`、`/config` MCP detail 和 TUI MCP activation status 会显示 coarse boundary summary，例如 `local stdio outside local sandbox`。
+  - macOS Seatbelt MCP stdio launcher conformance 已验证 sandboxed launch receipt、workspace 内写入允许和 workspace 外写入拒绝。
+  - 远端 MCP、Docker/container MCP lifecycle 和 per-server user config matrix 仍不在本切片范围；如需推进应另拆 productization 切片。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已完成 E05.6 capability truthfulness 修正：macOS Seatbelt backend 不再声明 `network_isolation`，`build_offline` 会拒绝该 backend，sandbox conformance tests 不再把 loopback `nc` 行为当成网络隔离证明。
 - 已完成 E05.7 capability matrix / selection contract：
@@ -166,7 +175,7 @@ pub trait ExecutionBackend {
 - E05.12 Resource Limits and Process Cleanup：已完成 core semantics 和 Local non-interactive cleanup path；container/bwrap/Windows/PTY 等 backend-specific cleanup 继续由后续切片落地。
 - E05.13 Persistent Terminal Sandbox Backend：core semantics 已完成；采用 Seatbelt/Bubblewrap PTY wrapper 路线，不扩展 one-shot `ExecutionBackend::execute`。
 - 2026-06-30 implementation note：macOS Seatbelt 与 Linux Bubblewrap backend 现在声明 `persistent_pty=true`，`terminal_start` PTY 会记录 `sandboxed_pty` 和真实 enforcement backend。Docker backend 仍不支持 persistent PTY；后续若需要 Docker terminal，应另拆 container lifecycle/productization 切片。
-- E05.14 MCP Stdio Sandbox Handoff：本地 stdio MCP server 通过 execution backend 或明确标记 outside local sandbox。
+- E05.14 MCP Stdio Sandbox Handoff：core semantics 已完成；本地 stdio MCP server 通过 injected launcher 启动，runtime/session/doctor/TUI 可见 process coverage，macOS Seatbelt conformance 已覆盖真实 sandboxed stdio process。
 - E05.15 Plugin Hook Process Sandbox Handoff：未来插件 hook command runtime 必须经过 execution backend 或显式 unconfined/unsupported。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。
 

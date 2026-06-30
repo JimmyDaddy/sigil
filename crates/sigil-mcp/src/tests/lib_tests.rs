@@ -18,10 +18,11 @@ use tokio::{
 };
 
 use super::{
-    McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, McpListChangedKind,
-    McpListChangedNotification, McpProgressNotification, McpPromptToolKind, McpRuntimeEventHandler,
-    McpToolRegistrationOptions, activate_lazy_mcp_tools, register_mcp_tools,
-    register_mcp_tools_with_options, unsupported_mcp_runtime_event_handler,
+    LocalMcpProcessLauncher, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
+    McpListChangedKind, McpListChangedNotification, McpProcessClass, McpProcessCoverage,
+    McpProcessLaunchRequest, McpProcessLauncher, McpProgressNotification, McpPromptToolKind,
+    McpRuntimeEventHandler, McpToolRegistrationOptions, activate_lazy_mcp_tools,
+    register_mcp_tools, register_mcp_tools_with_options, unsupported_mcp_runtime_event_handler,
 };
 
 async fn register_mcp_tools_with_capabilities(
@@ -231,6 +232,51 @@ fn test_provider_capabilities() -> ProviderCapabilities {
         supports_system_fingerprint: false,
         tool_name_max_chars: 64,
     }
+}
+
+#[tokio::test]
+async fn local_mcp_process_launcher_marks_stdio_outside_sandbox() -> Result<()> {
+    if Command::new("sh")
+        .arg("-c")
+        .arg("true")
+        .output()
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let launch = LocalMcpProcessLauncher.launch(McpProcessLaunchRequest {
+        server_name: "local".to_owned(),
+        command: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "sleep 1".to_owned()],
+        working_dir: Some(temp.path().to_path_buf()),
+        env: Default::default(),
+        startup_timeout_secs: 1,
+        classification: McpProcessClass::LocalStdioConfigured,
+    })?;
+
+    assert_eq!(
+        launch.receipt.classification,
+        McpProcessClass::LocalStdioConfigured
+    );
+    assert_eq!(
+        launch.receipt.coverage,
+        McpProcessCoverage::LocalStdioOutsideSandbox
+    );
+    assert_eq!(
+        launch.receipt.backend,
+        Some(sigil_kernel::ExecutionBackendKind::Local)
+    );
+    assert_eq!(
+        launch.receipt.sandbox_profile,
+        Some(sigil_kernel::ExecutionSandboxProfile::Unconfined)
+    );
+
+    let mut child = launch.child;
+    let _ = child.kill().await;
+    Ok(())
 }
 
 #[tokio::test]
@@ -471,6 +517,20 @@ while True:
     assert_eq!(payload.tool_call_id, None);
     assert_eq!(payload.tool_name, "mcp_server:lifecycle");
     assert!(payload.unknown_dirty);
+    assert_eq!(
+        payload
+            .metadata
+            .get("mcp_process_coverage")
+            .map(String::as_str),
+        Some("local_stdio_outside_sandbox")
+    );
+    assert_eq!(
+        payload
+            .metadata
+            .get("mcp_process_backend")
+            .map(String::as_str),
+        Some("local")
+    );
     Ok(())
 }
 
@@ -485,7 +545,7 @@ async fn mcp_lifecycle_mutation_failure_adds_server_context() -> Result<()> {
     let options = McpToolRegistrationOptions::eager()?
         .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store));
 
-    let error = super::record_mcp_server_lifecycle_unknown_dirty(&options, "filesystem")
+    let error = super::record_mcp_server_lifecycle_unknown_dirty(&options, "filesystem", None)
         .expect_err("directory-backed session path should fail mutation evidence append");
 
     assert!(

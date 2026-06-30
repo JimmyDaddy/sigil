@@ -15,7 +15,8 @@ pub use changeset_tool::{
 };
 pub use execution_backends::{
     DockerExecutionBackend, LinuxBubblewrapExecutionBackend, LocalExecutionBackend,
-    MacosSeatbeltExecutionBackend, build_execution_backend,
+    LongLivedStdioProcessPlan, MacosSeatbeltExecutionBackend, build_execution_backend,
+    long_lived_stdio_process_plan,
 };
 pub use registry::{
     BuiltinToolPaths, register_builtin_tools, register_builtin_tools_with_paths,

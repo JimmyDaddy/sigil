@@ -158,6 +158,8 @@ pub struct WorkspaceMutationDetected {
     pub workspace_revision: WorkspaceRevision,
     pub reason: WorkspaceMutationDetectionReason,
     pub unknown_dirty: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// Pre-execution mutation profile persisted with write-capable tool execution starts.
@@ -1099,6 +1101,7 @@ impl MutationEventRecorder {
             reason,
             unknown_dirty: before.workspace_knowledge.is_unknown_dirty()
                 || after.workspace_knowledge.is_unknown_dirty(),
+            metadata: BTreeMap::new(),
         };
         self.append_workspace_mutation_detected(&payload).map(Some)
     }
@@ -1135,6 +1138,7 @@ impl MutationEventRecorder {
             workspace_revision: workspace_revision.saturating_add(1),
             reason: WorkspaceMutationDetectionReason::ScanUnavailable,
             unknown_dirty: true,
+            metadata: BTreeMap::new(),
         };
         self.append_workspace_mutation_detected(&payload)
     }
@@ -1148,6 +1152,25 @@ impl MutationEventRecorder {
         workspace_root: impl AsRef<Path>,
         process_name: impl Into<String>,
         tool_effect: ToolEffect,
+    ) -> Result<StoredEvent> {
+        self.record_external_process_unknown_dirty_with_metadata(
+            workspace_root,
+            process_name,
+            tool_effect,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Records a conservative unknown-dirty external process lifecycle with audit metadata.
+    ///
+    /// Metadata is not model-visible evidence. It exists to make durable session audit and product
+    /// surfaces explicit about the external process boundary that caused the unknown-dirty state.
+    pub fn record_external_process_unknown_dirty_with_metadata(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        process_name: impl Into<String>,
+        tool_effect: ToolEffect,
+        metadata: BTreeMap<String, String>,
     ) -> Result<StoredEvent> {
         let workspace_root = workspace_root.as_ref();
         let workspace_id = stable_workspace_id(workspace_root)?;
@@ -1173,6 +1196,7 @@ impl MutationEventRecorder {
             workspace_revision: workspace_revision.saturating_add(1),
             reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
             unknown_dirty: true,
+            metadata,
         };
         self.append_workspace_mutation_detected(&payload)
     }
@@ -1208,6 +1232,7 @@ impl MutationEventRecorder {
             workspace_revision,
             reason: WorkspaceMutationDetectionReason::ScanUnavailable,
             unknown_dirty: true,
+            metadata: BTreeMap::new(),
         };
         self.append_workspace_mutation_detected(&payload)
     }

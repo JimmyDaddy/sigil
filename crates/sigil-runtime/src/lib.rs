@@ -15,8 +15,9 @@ use sigil_kernel::{
 };
 pub use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
-    McpListChangedKind, McpListChangedNotification, McpProgressNotification,
-    McpRuntimeEventHandler,
+    McpListChangedKind, McpListChangedNotification, McpProcessCoverage, McpProcessLaunch,
+    McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher, McpProgressNotification,
+    McpRuntimeEventHandler, McpToolRegistrationReport,
 };
 use sigil_provider_anthropic::{
     ANTHROPIC_API_KEY_ENV, AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV,
@@ -34,6 +35,7 @@ use sigil_provider_openai_compat::{
     OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider,
     OpenAiCompatibleProviderConfig, openai_compatible_capabilities,
 };
+use tokio::process::Command;
 
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
@@ -425,7 +427,8 @@ pub async fn build_tool_registry_with_mcp_handlers(
             .with_working_dir(workspace_root.clone())
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(Arc::clone(&elicitation_handler))
-            .with_runtime_event_handler(Arc::clone(&runtime_event_handler)),
+            .with_runtime_event_handler(Arc::clone(&runtime_event_handler))
+            .with_process_launcher(configured_mcp_process_launcher(root_config)),
     )
     .await?;
     register_lazy_mcp_activation_tool(
@@ -496,10 +499,11 @@ pub async fn activate_lazy_mcp_tools(
 }
 
 /// Detailed result for one lazy MCP activation attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LazyMcpActivationResult {
     pub matched_servers: usize,
     pub added_tools: usize,
+    pub process_launch_receipts: Vec<McpProcessLaunchReceipt>,
 }
 
 /// Activates lazy MCP servers and reports both matched server and added tool counts.
@@ -603,6 +607,7 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
         return Ok(LazyMcpActivationResult {
             matched_servers: 0,
             added_tools: 0,
+            process_launch_receipts: Vec::new(),
         });
     }
 
@@ -613,24 +618,28 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
         .with_working_dir(workspace_root.clone())
         .with_secret_redactor(secret_redactor_for_root_config(root_config))
         .with_elicitation_handler(elicitation_handler)
-        .with_runtime_event_handler(runtime_event_handler);
+        .with_runtime_event_handler(runtime_event_handler)
+        .with_process_launcher(configured_mcp_process_launcher(root_config));
     if let Some(recorder) = mutation_recorder {
         registration_options =
             registration_options.with_mutation_recorder(workspace_root.clone(), recorder);
     }
-    sigil_mcp::register_mcp_tools_with_options(registry, &servers, registration_options).await?;
+    let report =
+        sigil_mcp::register_mcp_tools_with_report(registry, &servers, registration_options).await?;
     Ok(LazyMcpActivationResult {
         matched_servers: servers.len(),
         added_tools: registry.specs().len().saturating_sub(before),
+        process_launch_receipts: report.process_launch_receipts,
     })
 }
 
 /// Detailed result for one MCP server refresh.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpRefreshResult {
     pub matched_servers: usize,
     pub removed_tools: usize,
     pub added_tools: usize,
+    pub process_launch_receipts: Vec<McpProcessLaunchReceipt>,
 }
 
 fn register_local_tools(
@@ -678,6 +687,66 @@ pub fn build_configured_execution_backend(
     root_config: &RootConfig,
 ) -> Result<Arc<dyn ExecutionBackend>> {
     sigil_tools_builtin::build_execution_backend(&root_config.execution)
+}
+
+fn configured_mcp_process_launcher(root_config: &RootConfig) -> Arc<dyn McpProcessLauncher> {
+    Arc::new(ConfiguredMcpProcessLauncher {
+        execution: root_config.execution.clone(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ConfiguredMcpProcessLauncher {
+    execution: sigil_kernel::ExecutionConfig,
+}
+
+impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
+    fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        let cwd = request
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let plan = sigil_tools_builtin::long_lived_stdio_process_plan(
+            &self.execution,
+            &request.command,
+            &request.args,
+            &cwd,
+            &request.env,
+        )?;
+        let mut command = Command::new(&plan.program);
+        command
+            .args(&plan.args)
+            .current_dir(&plan.cwd)
+            .envs(&plan.env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn MCP server {}", request.server_name))?;
+        let coverage = if plan.sandboxed {
+            sigil_mcp::McpProcessCoverage::LocalStdioSandboxed
+        } else {
+            sigil_mcp::McpProcessCoverage::LocalStdioOutsideSandbox
+        };
+        let classification = if plan.sandboxed {
+            sigil_mcp::McpProcessClass::LocalStdioSandboxed
+        } else {
+            request.classification
+        };
+        Ok(McpProcessLaunch {
+            child,
+            receipt: McpProcessLaunchReceipt {
+                server_name: request.server_name,
+                classification,
+                coverage,
+                backend: Some(plan.backend),
+                backend_capabilities: Some(plan.backend_capabilities),
+                sandbox_profile: Some(plan.sandbox_profile),
+            },
+        })
+    }
 }
 
 /// Refreshes provider-visible tools for one configured MCP server.
@@ -733,6 +802,7 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
             matched_servers: 0,
             removed_tools: 0,
             added_tools: 0,
+            process_launch_receipts: Vec::new(),
         });
     };
 
@@ -747,23 +817,29 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
             .with_working_dir(workspace_root.clone())
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(elicitation_handler)
-            .with_runtime_event_handler(runtime_event_handler);
+            .with_runtime_event_handler(runtime_event_handler)
+            .with_process_launcher(configured_mcp_process_launcher(root_config));
     if let Some(recorder) = mutation_recorder {
         registration_options =
             registration_options.with_mutation_recorder(workspace_root.clone(), recorder);
     }
-    if let Err(error) =
-        sigil_mcp::register_mcp_tools_with_options(registry, &servers, registration_options).await
-    {
-        for tool in removed {
-            registry.register(tool);
-        }
-        return Err(error);
-    }
+    let report =
+        match sigil_mcp::register_mcp_tools_with_report(registry, &servers, registration_options)
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                for tool in removed {
+                    registry.register(tool);
+                }
+                return Err(error);
+            }
+        };
     Ok(McpRefreshResult {
         matched_servers: servers.len(),
         removed_tools,
         added_tools: registry.specs().len().saturating_sub(before),
+        process_launch_receipts: report.process_launch_receipts,
     })
 }
 
@@ -884,6 +960,7 @@ impl Tool for McpActivateServerTool {
                 "already_ready",
                 1,
                 0,
+                &[],
             ));
         }
 
@@ -905,6 +982,7 @@ impl Tool for McpActivateServerTool {
             "ready",
             result.matched_servers,
             result.added_tools,
+            &result.process_launch_receipts,
         ))
     }
 }
@@ -933,6 +1011,7 @@ fn activation_result(
     status: &str,
     matched_servers: usize,
     added_tools: usize,
+    process_launch_receipts: &[McpProcessLaunchReceipt],
 ) -> ToolResult {
     ToolResult::ok(
         call_id,
@@ -942,10 +1021,82 @@ fn activation_result(
             "status": status,
             "matched_servers": matched_servers,
             "added_tools": added_tools,
+            "process_coverage": mcp_process_receipts_summary(process_launch_receipts),
         })
         .to_string(),
         ToolResultMeta::default(),
     )
+}
+
+#[must_use]
+pub fn mcp_process_receipts_summary(receipts: &[McpProcessLaunchReceipt]) -> Option<String> {
+    if receipts.is_empty() {
+        return None;
+    }
+    Some(
+        receipts
+            .iter()
+            .map(mcp_process_receipt_summary)
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+fn mcp_process_receipt_summary(receipt: &McpProcessLaunchReceipt) -> String {
+    match receipt.coverage {
+        McpProcessCoverage::LocalStdioSandboxed => {
+            let backend = receipt
+                .backend
+                .map(|backend| backend.as_str())
+                .unwrap_or("unknown");
+            let profile = receipt
+                .sandbox_profile
+                .map(mcp_sandbox_profile_label)
+                .unwrap_or("unknown");
+            format!("sandboxed local stdio ({backend}, {profile})")
+        }
+        McpProcessCoverage::LocalStdioOutsideSandbox => {
+            "local stdio outside local sandbox".to_owned()
+        }
+        McpProcessCoverage::RemoteOrExternal => {
+            "external MCP; local sandbox does not apply".to_owned()
+        }
+        McpProcessCoverage::Unsupported => "MCP stdio sandbox unsupported".to_owned(),
+    }
+}
+
+#[must_use]
+pub fn mcp_stdio_boundary_summary(
+    root_config: &RootConfig,
+    workspace_root: &std::path::Path,
+    server: &McpServerConfig,
+) -> String {
+    match sigil_tools_builtin::long_lived_stdio_process_plan(
+        &root_config.execution,
+        &server.command,
+        &server.args,
+        workspace_root,
+        &Default::default(),
+    ) {
+        Ok(plan) if plan.sandboxed => {
+            format!(
+                "sandboxed local stdio ({}, {})",
+                plan.backend.as_str(),
+                mcp_sandbox_profile_label(plan.sandbox_profile)
+            )
+        }
+        Ok(_) => "local stdio outside local sandbox".to_owned(),
+        Err(error) => format!("unsupported: {error}"),
+    }
+}
+
+fn mcp_sandbox_profile_label(profile: sigil_kernel::ExecutionSandboxProfile) -> &'static str {
+    match profile {
+        sigil_kernel::ExecutionSandboxProfile::Unconfined => "unconfined",
+        sigil_kernel::ExecutionSandboxProfile::WorkspaceWrite => "workspace_write",
+        sigil_kernel::ExecutionSandboxProfile::BuildOffline => "build_offline",
+        sigil_kernel::ExecutionSandboxProfile::BuildNetworked => "build_networked",
+    }
 }
 
 fn required_server_name(args: &Value) -> Result<&str> {

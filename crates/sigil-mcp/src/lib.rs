@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -6,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalMode, McpServerConfig, McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy,
+    ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionSandboxProfile,
+    McpServerConfig, McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy,
     MutationEventRecorder, ProviderCapabilities, SecretRedactor, Tool, ToolAccess, ToolCategory,
     ToolContext, ToolEffect, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
     ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
@@ -35,6 +40,12 @@ pub struct McpToolRegistrationOptions {
     pub startup: McpServerStartup,
     pub mutation_recorder: Option<MutationEventRecorder>,
     pub mutation_workspace_root: Option<PathBuf>,
+    pub process_launcher: Arc<dyn McpProcessLauncher>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpToolRegistrationReport {
+    pub process_launch_receipts: Vec<McpProcessLaunchReceipt>,
 }
 
 impl McpToolRegistrationOptions {
@@ -57,6 +68,7 @@ impl McpToolRegistrationOptions {
             startup,
             mutation_recorder: None,
             mutation_workspace_root: None,
+            process_launcher: Arc::new(LocalMcpProcessLauncher),
         })
     }
 
@@ -105,6 +117,214 @@ impl McpToolRegistrationOptions {
         self.mutation_recorder = Some(mutation_recorder);
         self
     }
+
+    pub fn with_process_launcher(mut self, process_launcher: Arc<dyn McpProcessLauncher>) -> Self {
+        self.process_launcher = process_launcher;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpProcessClass {
+    LocalStdioConfigured,
+    LocalStdioPluginDeclared,
+    LocalStdioSandboxed,
+    RemoteOrExternal,
+    UnsupportedLongLivedBackend,
+}
+
+impl McpProcessClass {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalStdioConfigured => "local_stdio_configured",
+            Self::LocalStdioPluginDeclared => "local_stdio_plugin_declared",
+            Self::LocalStdioSandboxed => "local_stdio_sandboxed",
+            Self::RemoteOrExternal => "remote_or_external",
+            Self::UnsupportedLongLivedBackend => "unsupported_long_lived_backend",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpProcessCoverage {
+    LocalStdioOutsideSandbox,
+    LocalStdioSandboxed,
+    RemoteOrExternal,
+    Unsupported,
+}
+
+impl McpProcessCoverage {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalStdioOutsideSandbox => "local_stdio_outside_sandbox",
+            Self::LocalStdioSandboxed => "local_stdio_sandboxed",
+            Self::RemoteOrExternal => "remote_or_external",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpProcessLaunchRequest {
+    pub server_name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub working_dir: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
+    pub startup_timeout_secs: u64,
+    pub classification: McpProcessClass,
+}
+
+impl McpProcessLaunchRequest {
+    fn from_config(config: &McpServerConfig, working_dir: Option<PathBuf>) -> Self {
+        Self {
+            server_name: config.name.clone(),
+            command: config.command.clone(),
+            args: config.args.clone(),
+            working_dir,
+            env: BTreeMap::new(),
+            startup_timeout_secs: config.startup_timeout_secs,
+            classification: McpProcessClass::LocalStdioConfigured,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct McpProcessLaunchReceipt {
+    pub server_name: String,
+    pub classification: McpProcessClass,
+    pub coverage: McpProcessCoverage,
+    pub backend: Option<ExecutionBackendKind>,
+    pub backend_capabilities: Option<ExecutionBackendCapabilities>,
+    pub sandbox_profile: Option<ExecutionSandboxProfile>,
+}
+
+impl McpProcessLaunchReceipt {
+    #[must_use]
+    pub fn local_outside_sandbox(request: &McpProcessLaunchRequest) -> Self {
+        Self {
+            server_name: request.server_name.clone(),
+            classification: request.classification,
+            coverage: McpProcessCoverage::LocalStdioOutsideSandbox,
+            backend: Some(ExecutionBackendKind::Local),
+            backend_capabilities: Some(ExecutionBackendCapabilities::default()),
+            sandbox_profile: Some(ExecutionSandboxProfile::Unconfined),
+        }
+    }
+
+    #[must_use]
+    pub fn audit_metadata(&self) -> BTreeMap<String, String> {
+        let mut metadata = BTreeMap::from([
+            (
+                "mcp_process_class".to_owned(),
+                self.classification.as_str().to_owned(),
+            ),
+            (
+                "mcp_process_coverage".to_owned(),
+                self.coverage.as_str().to_owned(),
+            ),
+        ]);
+        if let Some(backend) = self.backend {
+            metadata.insert(
+                "mcp_process_backend".to_owned(),
+                backend.as_str().to_owned(),
+            );
+        }
+        if let Some(profile) = self.sandbox_profile {
+            metadata.insert(
+                "mcp_process_profile".to_owned(),
+                mcp_sandbox_profile_label(profile).to_owned(),
+            );
+        }
+        if let Some(capabilities) = self.backend_capabilities {
+            metadata.insert(
+                "mcp_process_backend_capabilities".to_owned(),
+                mcp_backend_capability_labels(capabilities).join(","),
+            );
+        }
+        metadata
+    }
+}
+
+fn mcp_sandbox_profile_label(profile: ExecutionSandboxProfile) -> &'static str {
+    match profile {
+        ExecutionSandboxProfile::Unconfined => "unconfined",
+        ExecutionSandboxProfile::WorkspaceWrite => "workspace_write",
+        ExecutionSandboxProfile::BuildOffline => "build_offline",
+        ExecutionSandboxProfile::BuildNetworked => "build_networked",
+    }
+}
+
+fn mcp_backend_capability_labels(capabilities: ExecutionBackendCapabilities) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if capabilities.filesystem_isolation {
+        labels.push("filesystem");
+    }
+    if capabilities.network_isolation {
+        labels.push("network");
+    }
+    if capabilities.process_isolation {
+        labels.push("process");
+    }
+    if capabilities.resource_limits {
+        labels.push("resource");
+    }
+    if capabilities.persistent_pty {
+        labels.push("persistent_pty");
+    }
+    if capabilities.workspace_snapshot {
+        labels.push("workspace_snapshot");
+    }
+    if labels.is_empty() {
+        labels.push("none");
+    }
+    labels
+}
+
+pub struct McpProcessLaunch {
+    pub child: Child,
+    pub receipt: McpProcessLaunchReceipt,
+}
+
+pub trait McpProcessLauncher: Send + Sync {
+    /// Launches one local MCP stdio process and returns its coverage receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configured process cannot be spawned or a required sandbox
+    /// coverage cannot be provided.
+    fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch>;
+}
+
+#[derive(Debug)]
+pub struct LocalMcpProcessLauncher;
+
+impl McpProcessLauncher for LocalMcpProcessLauncher {
+    fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        let mut command = Command::new(&request.command);
+        command
+            .args(&request.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(working_dir) = &request.working_dir {
+            command.current_dir(working_dir);
+        }
+        command.envs(&request.env);
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn MCP server {}", request.server_name))?;
+        Ok(McpProcessLaunch {
+            child,
+            receipt: McpProcessLaunchReceipt::local_outside_sandbox(&request),
+        })
+    }
 }
 
 pub async fn register_mcp_tools(
@@ -126,6 +346,16 @@ pub async fn register_mcp_tools_with_options(
     servers: &[McpServerConfig],
     options: McpToolRegistrationOptions,
 ) -> Result<()> {
+    register_mcp_tools_with_report(registry, servers, options)
+        .await
+        .map(|_| ())
+}
+
+pub async fn register_mcp_tools_with_report(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    options: McpToolRegistrationOptions,
+) -> Result<McpToolRegistrationReport> {
     register_mcp_tools_for_startup(registry, servers, options).await
 }
 
@@ -133,12 +363,13 @@ async fn register_mcp_tools_for_startup(
     registry: &mut ToolRegistry,
     servers: &[McpServerConfig],
     options: McpToolRegistrationOptions,
-) -> Result<()> {
+) -> Result<McpToolRegistrationReport> {
     let mut used_provider_names = registry
         .specs()
         .into_iter()
         .map(|spec| spec.name)
         .collect::<BTreeSet<_>>();
+    let mut report = McpToolRegistrationReport::default();
     for server in servers {
         if server.startup != options.startup {
             if options.startup == McpServerStartup::Eager
@@ -153,7 +384,6 @@ async fn register_mcp_tools_for_startup(
             continue;
         }
 
-        record_mcp_server_lifecycle_unknown_dirty(&options, &server.name)?;
         let client = match McpClient::spawn(
             server.clone(),
             options.roots.clone(),
@@ -161,11 +391,13 @@ async fn register_mcp_tools_for_startup(
             options.secret_redactor.clone(),
             Arc::clone(&options.elicitation_handler),
             Arc::clone(&options.runtime_event_handler),
+            Arc::clone(&options.process_launcher),
         )
         .await
         {
-            Ok(client) => Arc::new(client),
+            Ok(client) => client,
             Err(error) if !server.required => {
+                record_mcp_server_lifecycle_unknown_dirty(&options, &server.name, None)?;
                 warn!(
                     server = %server.name,
                     trust_class = server.trust.trust_class.as_str(),
@@ -174,8 +406,15 @@ async fn register_mcp_tools_for_startup(
                 );
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                record_mcp_server_lifecycle_unknown_dirty(&options, &server.name, None)?;
+                return Err(error);
+            }
         };
+        let process_receipt = client.process_receipt().clone();
+        record_mcp_server_lifecycle_unknown_dirty(&options, &server.name, Some(&process_receipt))?;
+        report.process_launch_receipts.push(process_receipt);
+        let client = Arc::new(client);
         let tools = match client.list_tools().await {
             Ok(tools) => tools,
             Err(error) if !server.required => {
@@ -266,23 +505,33 @@ async fn register_mcp_tools_for_startup(
             }
         }
     }
-    Ok(())
+    Ok(report)
 }
 
 fn record_mcp_server_lifecycle_unknown_dirty(
     options: &McpToolRegistrationOptions,
     server_name: &str,
+    receipt: Option<&McpProcessLaunchReceipt>,
 ) -> Result<()> {
     let (Some(recorder), Some(workspace_root)) =
         (&options.mutation_recorder, &options.mutation_workspace_root)
     else {
         return Ok(());
     };
+    let metadata = receipt
+        .map(McpProcessLaunchReceipt::audit_metadata)
+        .unwrap_or_else(|| {
+            BTreeMap::from([(
+                "mcp_process_coverage".to_owned(),
+                McpProcessCoverage::Unsupported.as_str().to_owned(),
+            )])
+        });
     recorder
-        .record_external_process_unknown_dirty(
+        .record_external_process_unknown_dirty_with_metadata(
             workspace_root,
             format!("mcp_server:{server_name}"),
             ToolEffect::Unknown,
+            metadata,
         )
         .with_context(|| {
             format!("failed to record MCP server {server_name} lifecycle mutation evidence")
@@ -729,6 +978,7 @@ struct McpInitializeOutcome {
 
 struct McpClient {
     _child: Mutex<Child>,
+    _process_receipt: McpProcessLaunchReceipt,
     _stderr_task: JoinHandle<()>,
     connection: Mutex<Connection>,
     server_name: String,
@@ -748,6 +998,10 @@ struct Connection {
 }
 
 impl McpClient {
+    fn process_receipt(&self) -> &McpProcessLaunchReceipt {
+        &self._process_receipt
+    }
+
     async fn spawn(
         config: McpServerConfig,
         roots: Vec<PathBuf>,
@@ -755,20 +1009,11 @@ impl McpClient {
         secret_redactor: SecretRedactor,
         elicitation_handler: Arc<dyn McpElicitationHandler>,
         runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+        process_launcher: Arc<dyn McpProcessLauncher>,
     ) -> Result<Self> {
-        let mut command = Command::new(&config.command);
-        command
-            .args(&config.args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(working_dir) = working_dir {
-            command.current_dir(working_dir);
-        }
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("failed to spawn MCP server {}", config.name))?;
+        let launch_request = McpProcessLaunchRequest::from_config(&config, working_dir);
+        let launch = process_launcher.launch(launch_request)?;
+        let mut child = launch.child;
 
         let stdin = child
             .stdin
@@ -786,6 +1031,7 @@ impl McpClient {
 
         let mut client = Self {
             _child: Mutex::new(child),
+            _process_receipt: launch.receipt,
             _stderr_task: stderr_task,
             connection: Mutex::new(Connection {
                 stdin,

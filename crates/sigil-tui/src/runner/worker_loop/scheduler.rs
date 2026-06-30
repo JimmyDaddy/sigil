@@ -1631,6 +1631,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             server_name: server_name.clone(),
                             status: McpActivationStatus::Ready {
                                 added_tools: result.added_tools,
+                                process_coverage: sigil_runtime::mcp_process_receipts_summary(
+                                    &result.process_launch_receipts,
+                                ),
                             },
                         });
                         let detail = server_name

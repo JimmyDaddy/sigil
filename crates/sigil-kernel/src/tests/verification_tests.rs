@@ -2894,6 +2894,7 @@ fn mcp_unknown_dirty_adds_user_visible_source_reason() {
                 workspace_revision: 1,
                 reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
                 unknown_dirty: true,
+                metadata: Default::default(),
             },
         ));
 

@@ -133,6 +133,7 @@ fn session_review_warns_for_unknown_mutation_without_precise_rewind() -> Result<
         workspace_revision: 2,
         reason: sigil_kernel::WorkspaceMutationDetectionReason::SnapshotChanged,
         unknown_dirty: true,
+        metadata: Default::default(),
     };
     store.append_event(
         DurableEventType::WorkspaceMutationDetected,

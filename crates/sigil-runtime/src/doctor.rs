@@ -179,7 +179,7 @@ pub fn build_doctor_report_with_options(
     check_legacy_workspace_state(&mut report, config_path, &sigil_paths);
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
     check_provider(&mut report, &root_config);
-    check_mcp_servers(&mut report, &root_config.mcp_servers, &workspace_root);
+    check_mcp_servers(&mut report, &root_config, &workspace_root);
     check_plugin_hooks(
         &mut report,
         canonical_workspace.as_deref().unwrap_or(&workspace_root),
@@ -793,11 +793,8 @@ fn secret_source_label(source: SecretSource) -> &'static str {
     }
 }
 
-fn check_mcp_servers(
-    report: &mut DoctorReport,
-    servers: &[McpServerConfig],
-    workspace_root: &Path,
-) {
+fn check_mcp_servers(report: &mut DoctorReport, root_config: &RootConfig, workspace_root: &Path) {
+    let servers = &root_config.mcp_servers;
     if servers.is_empty() {
         report.push(DoctorStatus::Ok, "mcp", "no servers configured");
         return;
@@ -820,7 +817,7 @@ fn check_mcp_servers(
             status,
             format!("mcp:{}", server.name),
             format!(
-                "{} required={} command={} trust={} approval={} secrets={} pin={}",
+                "{} required={} command={} trust={} approval={} secrets={} pin={} boundary={}",
                 server.startup.as_str(),
                 server.required,
                 command_status.as_str(),
@@ -836,6 +833,7 @@ fn check_mcp_servers(
                 } else {
                     "off"
                 },
+                crate::mcp_stdio_boundary_summary(root_config, workspace_root, server),
             ),
             remediation,
         );
