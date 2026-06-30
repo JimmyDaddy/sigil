@@ -62,10 +62,7 @@ fn config_storage_footer_dispatches_mutation_artifact_cleanup() -> Result<()> {
     state.set_section(ConfigSection::Storage);
     state.focus_footer(ConfigFooterAction::CleanMutationArtifacts);
 
-    assert_eq!(
-        app.config_footer_action_labels(),
-        vec!["save", "save+close", "clean", "close"]
-    );
+    assert_eq!(app.config_footer_action_labels(), vec!["clean", "close"]);
     assert_eq!(app.config_selected_field_label(), Some("clean_artifacts"));
     assert!(
         app.config_nav_lines()
@@ -121,10 +118,7 @@ fn config_storage_footer_keeps_artifact_delete_out_of_primary_actions() -> Resul
         detail
             .contains("i footer clean records lifecycle events; artifact details are audit/debug")
     );
-    assert_eq!(
-        app.config_footer_action_labels(),
-        vec!["save", "save+close", "clean", "close"]
-    );
+    assert_eq!(app.config_footer_action_labels(), vec!["clean", "close"]);
     assert!(!app.config_footer_action_labels().contains(&"delete"));
     Ok(())
 }
@@ -166,7 +160,7 @@ fn config_storage_section_shows_artifact_retention_overrides() {
         .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
         .expect("storage down should be handled");
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("action save"));
+    assert_eq!(app.last_notice(), Some("action clean_artifacts"));
 }
 
 #[test]
@@ -325,7 +319,7 @@ fn config_storage_up_down_moves_artifact_selection() -> Result<()> {
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("action save"));
+    assert_eq!(app.last_notice(), Some("action clean_artifacts"));
     Ok(())
 }
 
@@ -481,10 +475,10 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
     assert_eq!(app.config_selected_field_label(), Some("save"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+    assert_eq!(app.config_selected_field_label(), Some("close"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("close"));
+    assert_eq!(app.config_selected_field_label(), Some("save"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("Provider"));
@@ -502,7 +496,7 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     assert_eq!(app.config_selected_field_label(), None);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("save"));
+    assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("MCP"));
@@ -515,33 +509,30 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     assert_eq!(state.selected_field, None);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Plugins"));
-    assert_eq!(app.config_selected_field_label(), None);
+    assert_eq!(app.config_section_title(), Some("Compaction"));
+    assert_eq!(app.config_selected_field_label(), Some("Auto compact"));
 
     app.config_state
         .as_mut()
         .expect("config state should still exist")
         .set_section(ConfigSection::Mcp);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("save"));
+    assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Plugins"));
-    assert_eq!(app.config_selected_field_label(), None);
+    assert_eq!(app.config_section_title(), Some("MCP"));
+    assert_eq!(app.config_selected_field_label(), Some("close"));
 
     app.config_state
         .as_mut()
         .expect("config state should still exist")
         .set_section(ConfigSection::Mcp);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("Model"));
+    assert_eq!(app.config_section_title(), Some("Appearance"));
+    assert_eq!(app.config_selected_field_label(), Some("Theme"));
     Ok(())
 }
 
@@ -729,14 +720,9 @@ fn config_left_right_switches_steps() -> Result<()> {
     app.open_config_panel();
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Storage"));
-    // Right again to reach Permissions (step 3 now, was step 2 before Storage was added).
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Permissions"));
     assert_eq!(app.config_selected_field_label(), Some("Mode"));
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Storage"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
     assert_eq!(app.config_selected_field_label(), Some("Model"));
@@ -797,7 +783,7 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     assert_eq!(lines[0], "Provider 1/12 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] storage permissions memory compaction code intel terminal appearance agents skills plugins mcp"
+        "[provider] permissions memory compaction mcp appearance"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -830,7 +816,7 @@ fn config_permissions_step_uses_policy_summary_and_details() {
 
     assert!(detail.contains("[permissions]"));
     assert!(detail.contains("Mode: standard"));
-    assert!(detail.contains("Checks: manual"));
+    assert!(!detail.contains("Checks: manual"));
     assert!(detail.contains("[workspace]"));
     assert!(detail.contains("Workspace trust: unknown"));
     assert!(detail.contains("User checks: 0 configured"));
@@ -855,7 +841,7 @@ fn config_permissions_step_uses_policy_summary_and_details() {
     assert!(!detail.lines().any(|line| line.starts_with("overrides:")));
     assert!(!detail.contains("subject="));
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("Permissions: Enter cycle mode/checks"));
+    assert!(nav.contains("Permissions: Enter cycle mode"));
     assert!(nav.contains("Permissions: task checks run from task status"));
     assert!(!nav.contains("footer approve"));
 }
@@ -1743,10 +1729,7 @@ slash_names = ["review-agent"]
     assert!(nav.contains("Agents: Up/Down select"));
     assert!(nav.contains("Agents: PgUp/PgDn wrap"));
     assert!(nav.contains("Agents: footer trust/disable"));
-    assert_eq!(
-        app.config_footer_action_labels(),
-        vec!["trust", "disable", "close"]
-    );
+    assert_eq!(app.config_footer_action_labels(), vec!["trust", "disable"]);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
     assert!(
@@ -2492,10 +2475,7 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(nav.contains("Plugins: Up/Down select"));
     assert!(nav.contains("Plugins: PgUp/PgDn wrap"));
     assert!(nav.contains("Plugins: footer approve/deny"));
-    assert_eq!(
-        app.config_footer_action_labels(),
-        vec!["approve", "deny", "close"]
-    );
+    assert_eq!(app.config_footer_action_labels(), vec!["approve", "deny"]);
     Ok(())
 }
 
@@ -3390,9 +3370,8 @@ fn config_footer_save_and_close_works_without_function_keys() -> Result<()> {
     state.selected_field = Some(ConfigField::ProviderName);
     state.draft.provider_api_key = "saved-from-footer-close".to_owned();
     state.dirty = true;
+    state.focus_footer(ConfigFooterAction::SaveAndClose);
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     let Some(AppAction::ConfigSaved { root_config }) = action else {
@@ -3702,7 +3681,7 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Storage"));
+    assert_eq!(app.config_section_title(), Some("Permissions"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
@@ -4056,8 +4035,8 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
         state.focus_footer(ConfigFooterAction::SaveAndClose);
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("save"));
-    assert_eq!(app.last_notice(), Some("action save"));
+    assert_eq!(app.config_selected_field_label(), Some("close"));
+    assert_eq!(app.last_notice(), Some("action close"));
 
     {
         let state = app

@@ -131,19 +131,11 @@ fn config_section_flow_wraps() {
 fn config_footer_action_navigation_wraps() {
     assert_eq!(
         ConfigFooterAction::Save.next_for_section(ConfigSection::Provider),
-        ConfigFooterAction::SaveAndClose
-    );
-    assert_eq!(
-        ConfigFooterAction::Close.next_for_section(ConfigSection::Provider),
-        ConfigFooterAction::Save
+        ConfigFooterAction::Close
     );
     assert_eq!(
         ConfigFooterAction::Save.previous_for_section(ConfigSection::Provider),
         ConfigFooterAction::Close
-    );
-    assert_eq!(
-        ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Storage),
-        ConfigFooterAction::CleanMutationArtifacts
     );
     assert_eq!(
         ConfigFooterAction::CleanMutationArtifacts.next_for_section(ConfigSection::Storage),
@@ -154,20 +146,16 @@ fn config_footer_action_navigation_wraps() {
         ConfigFooterAction::CleanMutationArtifacts
     );
     assert_eq!(
-        ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Permissions),
-        ConfigFooterAction::Close
-    );
-    assert_eq!(
-        ConfigFooterAction::Close.previous_for_section(ConfigSection::Permissions),
-        ConfigFooterAction::SaveAndClose
-    );
-    assert_eq!(
-        ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Mcp),
-        ConfigFooterAction::ActivateMcp
+        ConfigFooterAction::Close.next_for_section(ConfigSection::Permissions),
+        ConfigFooterAction::Save
     );
     assert_eq!(
         ConfigFooterAction::ActivateMcp.next_for_section(ConfigSection::Mcp),
         ConfigFooterAction::Close
+    );
+    assert_eq!(
+        ConfigFooterAction::Close.previous_for_section(ConfigSection::Mcp),
+        ConfigFooterAction::ActivateMcp
     );
     assert_eq!(
         ConfigFooterAction::UseSkill.next_for_section(ConfigSection::Skills),
@@ -183,10 +171,6 @@ fn config_footer_action_navigation_wraps() {
     );
     assert_eq!(
         ConfigFooterAction::BlockAgent.next_for_section(ConfigSection::Agents),
-        ConfigFooterAction::Close
-    );
-    assert_eq!(
-        ConfigFooterAction::Close.next_for_section(ConfigSection::Agents),
         ConfigFooterAction::TrustAgent
     );
     assert_eq!(
@@ -194,7 +178,7 @@ fn config_footer_action_navigation_wraps() {
         ConfigFooterAction::DenyPlugin
     );
     assert_eq!(
-        ConfigFooterAction::Close.next_for_section(ConfigSection::Plugins),
+        ConfigFooterAction::DenyPlugin.next_for_section(ConfigSection::Plugins),
         ConfigFooterAction::ApprovePlugin
     );
 }
@@ -461,10 +445,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::fields_for_section(ConfigSection::Storage), &[]);
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Permissions),
-        &[
-            ConfigField::PermissionsDefaultMode,
-            ConfigField::VerificationAutoRun,
-        ]
+        &[ConfigField::PermissionsDefaultMode]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
@@ -1054,14 +1035,11 @@ fn config_state_moves_fields_and_footer_boundaries() {
     assert!(!state.focus_field(ConfigField::McpName));
     assert_eq!(state.selected_field, Some(ConfigField::ProviderApiKey));
     assert_eq!(state.move_field(true), ConfigFieldMove::Moved);
-    assert_eq!(state.selected_field, Some(ConfigField::ProviderBaseUrl));
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
     state.focus_footer(ConfigFooterAction::Close);
     assert!(state.footer_selected);
     state.move_footer_action(false);
-    assert_eq!(
-        state.selected_footer_action,
-        ConfigFooterAction::SaveAndClose
-    );
+    assert_eq!(state.selected_footer_action, ConfigFooterAction::Save);
     assert!(state.focus_last_field());
     assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
     assert!(!state.footer_selected);

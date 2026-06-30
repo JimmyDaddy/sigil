@@ -44,6 +44,15 @@ pub(crate) enum ConfigSection {
 }
 
 impl ConfigSection {
+    pub(crate) const DEFAULT_FLOW: [Self; 6] = [
+        Self::Provider,
+        Self::Permissions,
+        Self::Memory,
+        Self::Compaction,
+        Self::Mcp,
+        Self::Appearance,
+    ];
+
     pub(crate) const FLOW: [Self; 12] = [
         Self::Provider,
         Self::Storage,
@@ -58,6 +67,18 @@ impl ConfigSection {
         Self::Plugins,
         Self::Mcp,
     ];
+
+    pub(crate) fn visible_flow(show_advanced: bool) -> &'static [Self] {
+        if show_advanced {
+            &Self::FLOW
+        } else {
+            &Self::DEFAULT_FLOW
+        }
+    }
+
+    pub(crate) fn is_default_surface(self) -> bool {
+        Self::DEFAULT_FLOW.contains(&self)
+    }
 
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -93,6 +114,13 @@ impl ConfigSection {
         }
     }
 
+    pub(crate) fn step_token(self) -> &'static str {
+        match self {
+            Self::CodeIntelligence => "code-intel",
+            _ => self.nav_label(),
+        }
+    }
+
     pub(crate) fn summary(self) -> &'static str {
         match self {
             Self::Provider => "provider settings",
@@ -110,6 +138,7 @@ impl ConfigSection {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn next_flow(self) -> Self {
         let index = Self::FLOW
             .iter()
@@ -118,6 +147,7 @@ impl ConfigSection {
         Self::FLOW[(index + 1) % Self::FLOW.len()]
     }
 
+    #[cfg(test)]
     pub(crate) fn previous_flow(self) -> Self {
         let index = Self::FLOW
             .iter()
@@ -146,9 +176,16 @@ pub(crate) enum ConfigField {
     ProviderName,
     ProviderModel,
     ProviderApiKey,
+    // Low-frequency provider endpoint/FIM controls remain part of the persisted
+    // draft model, but the default config flow keeps them in sigil.toml.
+    #[allow(dead_code)]
     ProviderBaseUrl,
+    #[allow(dead_code)]
     ProviderFimModel,
     PermissionsDefaultMode,
+    // Verification auto-run is a policy-file concern. Task status owns
+    // immediate run/retry actions in the product surface.
+    #[allow(dead_code)]
     VerificationAutoRun,
     MemoryEnabled,
     CompactionEnabled,
@@ -198,15 +235,13 @@ pub(crate) enum ConfigField {
 }
 
 impl ConfigField {
-    const PROVIDER_FIELDS: [Self; 5] = [
+    const PROVIDER_FIELDS: [Self; 3] = [
         Self::ProviderModel,
         Self::ProviderApiKey,
-        Self::ProviderBaseUrl,
-        Self::ProviderFimModel,
         Self::ProviderName,
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
-    const PERMISSION_FIELDS: [Self; 2] = [Self::PermissionsDefaultMode, Self::VerificationAutoRun];
+    const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsDefaultMode];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
         Self::CompactionEnabled,
@@ -464,6 +499,7 @@ impl ConfigField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigFooterAction {
     Save,
+    #[cfg(test)]
     SaveAndClose,
     CleanMutationArtifacts,
     ActivateMcp,
@@ -482,23 +518,13 @@ pub(crate) enum ConfigFooterAction {
 }
 
 impl ConfigFooterAction {
-    const DEFAULT_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
-    const STORAGE_ORDER: [Self; 4] = [
-        Self::Save,
-        Self::SaveAndClose,
-        Self::CleanMutationArtifacts,
-        Self::Close,
-    ];
-    const PERMISSIONS_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
-    const MCP_ORDER: [Self; 4] = [
-        Self::Save,
-        Self::SaveAndClose,
-        Self::ActivateMcp,
-        Self::Close,
-    ];
-    const AGENTS_ORDER: [Self; 3] = [Self::TrustAgent, Self::BlockAgent, Self::Close];
+    const DEFAULT_ORDER: [Self; 2] = [Self::Save, Self::Close];
+    const STORAGE_ORDER: [Self; 2] = [Self::CleanMutationArtifacts, Self::Close];
+    const PERMISSIONS_ORDER: [Self; 2] = [Self::Save, Self::Close];
+    const MCP_ORDER: [Self; 2] = [Self::ActivateMcp, Self::Close];
+    const AGENTS_ORDER: [Self; 2] = [Self::TrustAgent, Self::BlockAgent];
     const SKILLS_ORDER: [Self; 2] = [Self::UseSkill, Self::Close];
-    const PLUGINS_ORDER: [Self; 3] = [Self::ApprovePlugin, Self::DenyPlugin, Self::Close];
+    const PLUGINS_ORDER: [Self; 2] = [Self::ApprovePlugin, Self::DenyPlugin];
 
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
@@ -524,6 +550,7 @@ impl ConfigFooterAction {
     pub(crate) fn button_label(self) -> &'static str {
         match self {
             Self::Save => "save",
+            #[cfg(test)]
             Self::SaveAndClose => "save+close",
             Self::CleanMutationArtifacts => "clean",
             Self::ActivateMcp => "activate",
@@ -545,6 +572,7 @@ impl ConfigFooterAction {
     pub(crate) fn field_label(self) -> &'static str {
         match self {
             Self::Save => "save",
+            #[cfg(test)]
             Self::SaveAndClose => "save_and_close",
             Self::CleanMutationArtifacts => "clean_artifacts",
             Self::ActivateMcp => "activate_mcp",
@@ -1155,6 +1183,7 @@ fn normalize_hex_color_override(value: &str) -> Result<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigState {
     pub(crate) selected_section: ConfigSection,
+    pub(crate) show_advanced: bool,
     pub(crate) selected_field: Option<ConfigField>,
     pub(crate) footer_selected: bool,
     pub(crate) selected_footer_action: ConfigFooterAction,
@@ -1179,6 +1208,7 @@ impl ConfigState {
         let selected_section = ConfigSection::Provider;
         Self {
             selected_section,
+            show_advanced: false,
             selected_field: ConfigField::fields_for_section(selected_section)
                 .first()
                 .copied(),
@@ -1202,6 +1232,9 @@ impl ConfigState {
     }
 
     pub(crate) fn set_section(&mut self, section: ConfigSection) {
+        if !section.is_default_surface() {
+            self.show_advanced = true;
+        }
         self.selected_section = section;
         self.sync_mcp_selection();
         self.sync_agent_selection();
@@ -1209,6 +1242,40 @@ impl ConfigState {
         self.sync_plugin_selection();
         self.footer_selected = false;
         self.selected_field = self.first_field_for_section(section);
+    }
+
+    pub(crate) fn visible_sections(&self) -> &'static [ConfigSection] {
+        ConfigSection::visible_flow(self.show_advanced)
+    }
+
+    pub(crate) fn toggle_advanced_surface(&mut self) {
+        self.show_advanced = !self.show_advanced;
+        if !self.show_advanced && !self.selected_section.is_default_surface() {
+            self.set_section(ConfigSection::Provider);
+        }
+    }
+
+    pub(crate) fn set_next_visible_section(&mut self) {
+        let sections = self.visible_sections();
+        let index = sections
+            .iter()
+            .position(|section| *section == self.selected_section)
+            .unwrap_or(0);
+        self.set_section(sections[(index + 1) % sections.len()]);
+    }
+
+    pub(crate) fn set_previous_visible_section(&mut self) {
+        let sections = self.visible_sections();
+        let index = sections
+            .iter()
+            .position(|section| *section == self.selected_section)
+            .unwrap_or(0);
+        let next_index = if index == 0 {
+            sections.len().saturating_sub(1)
+        } else {
+            index - 1
+        };
+        self.set_section(sections[next_index]);
     }
 
     fn first_field_for_section(&self, section: ConfigSection) -> Option<ConfigField> {

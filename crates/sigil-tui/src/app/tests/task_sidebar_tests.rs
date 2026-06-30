@@ -103,6 +103,7 @@ fn task_sidebar_projects_completed_task_with_verification_actions() {
         VerificationVerdict::Missing,
     );
     let lines = task_sidebar_lines(&blocked_entries);
+    assert!(lines.iter().any(|line| line == "run: completed"));
     assert!(lines.iter().any(|line| line == "verification: missing"));
     assert!(
         lines

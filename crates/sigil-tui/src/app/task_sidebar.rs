@@ -1,6 +1,6 @@
 use sigil_kernel::{
     ChildVerificationReceiptLinked, EvidenceScope, MergeDecision, MergeReviewState,
-    ReadinessEvaluatedEntry, RequiredAction, SessionLogEntry, TaskChildSessionEntry,
+    ReadinessEvaluatedEntry, RequiredAction, RunStatus, SessionLogEntry, TaskChildSessionEntry,
     TaskPlanProjection, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId,
     TaskStepSpec, TaskStepStatus, TerminalTaskProjection, VerificationCheckRunEntry,
     VerificationCheckRunStatus, VerificationStateProjection, VerificationVerdict,
@@ -125,6 +125,10 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     if let Some((scope, readiness)) =
         task_sidebar_focus_readiness_with_scope(task, &verification_projection)
     {
+        lines.push(format!(
+            "run: {}",
+            readiness_run_status_label(readiness.evaluation.run_status)
+        ));
         lines.push(format!(
             "verification: {}",
             verification_verdict_label(readiness.evaluation.verification_verdict)
@@ -623,6 +627,18 @@ pub(super) fn task_run_status_label(status: TaskRunStatus) -> &'static str {
         TaskRunStatus::Failed => "failed",
         TaskRunStatus::Cancelled => "cancelled",
         TaskRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn readiness_run_status_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Running => "running",
+        RunStatus::Completed => "completed",
+        RunStatus::Paused => "paused",
+        RunStatus::Blocked => "blocked",
+        RunStatus::Failed => "failed",
+        RunStatus::Cancelled => "cancelled",
+        RunStatus::Interrupted => "interrupted",
     }
 }
 

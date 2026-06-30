@@ -67,6 +67,16 @@ fn test_config() -> RootConfig {
     }
 }
 
+fn open_config_panel_for_test(app: &mut AppState) -> anyhow::Result<()> {
+    app.composer.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    Ok(())
+}
+
+fn select_config_section_for_test(app: &mut AppState, section: ConfigSection) {
+    app.select_config_section_for_test(section);
+}
+
 fn write_plugin_with_many_capabilities(workspace_root: &Path) -> anyhow::Result<()> {
     let plugin_root = workspace_root.join(".sigil/plugins/command-pack");
     fs::create_dir_all(&plugin_root)?;
@@ -323,9 +333,8 @@ fn render_config_storage_paths_use_wider_main_panel_on_wide_terminals() -> anyho
     config.storage.cache_root =
         sigil_kernel::StorageRoot::Path("/Users/example/Library/Caches/sigil".to_owned());
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Storage);
     let backend = TestBackend::new(220, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -444,11 +453,8 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
 #[test]
 fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    for _ in 0..7 {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    }
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Appearance);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(120, 28);
     let mut terminal = Terminal::new(backend)?;
@@ -529,11 +535,8 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
     colors.insert("text_primary".to_owned(), "#F0F1F2".to_owned());
     config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    for _ in 0..7 {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    }
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Appearance);
     assert_eq!(
         app.config_selected_section(),
         Some(ConfigSection::Appearance)
@@ -564,8 +567,8 @@ fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
             (0, "Provider 1/12", "▸ Model"),
-            (3, "Memory 4/12", "▸ Memory"),
-            (4, "Compaction 5/12", "▸ Auto compact"),
+            (2, "Memory 4/12", "▸ Memory"),
+            (3, "Compaction 5/12", "▸ Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.composer.input = "/config".to_owned();
@@ -603,11 +606,8 @@ fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
 #[test]
 fn render_config_step_tabs_keep_selected_section_visible_on_narrow_width() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    for _ in 0..10 {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    }
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Plugins);
     let backend = TestBackend::new(80, 28);
     let mut terminal = Terminal::new(backend)?;
 
@@ -763,7 +763,7 @@ fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Resul
 
     assert!(status_x > close_x + 32);
     assert!(footer_row.trim_end().ends_with("✓ saved"));
-    assert!(chip_bg_cells > 30);
+    assert!(chip_bg_cells > 20);
     Ok(())
 }
 
@@ -850,7 +850,7 @@ fn render_config_form_rows_align_value_column() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rows = rendered_rows(&terminal);
-    let value_columns = ["Model", "API key", "Endpoint", "FIM model"]
+    let value_columns = ["Model", "API key", "Provider"]
         .into_iter()
         .map(|label| {
             rows.iter()
@@ -893,21 +893,20 @@ fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     terminal.draw(|frame| render(frame, &app))?;
     let rows = rendered_rows(&terminal);
-    let endpoint_action_x = rows
+    let api_key_action_x = rows
         .iter()
-        .find(|row| row.contains("Endpoint") && row.contains("[input]"))
+        .find(|row| row.contains("API key") && row.contains("[input]"))
         .and_then(|row| char_index_of(row, "[input]"))
-        .expect("endpoint action chip should render");
+        .expect("api key action chip should render");
     assert!(
         !rows.iter().any(|row| row.contains("[Enter input]")),
         "main config form should keep shortcut text out of action chips"
     );
 
     assert_eq!(
-        model_action_x, endpoint_action_x,
+        model_action_x, api_key_action_x,
         "config action chips should share a stable action column"
     );
     Ok(())
@@ -916,11 +915,8 @@ fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()
 #[test]
 fn render_config_readonly_rows_align_value_column() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Memory);
     let backend = TestBackend::new(132, 36);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1107,9 +1103,7 @@ fn render_config_screen_panel_height_tracks_content() -> anyhow::Result<()> {
 #[test]
 fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    open_config_panel_for_test(&mut app)?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
@@ -1118,19 +1112,17 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Endpoint"));
-    assert!(rendered.contains("Provider API base URL"));
-    assert!(rendered.contains("key base_url"));
-    assert!(rendered.contains("value: https://api.deepseek.com"));
+    assert!(rendered.contains("API Key"));
+    assert!(rendered.contains("key: api_key"));
+    assert!(rendered.contains("SIGIL_API_KEY can override"));
+    assert!(rendered.contains("api_key: |"));
     Ok(())
 }
 
 #[test]
 fn render_config_text_modal_uses_focus_input_row_and_command_tokens() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    open_config_panel_for_test(&mut app)?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let backend = TestBackend::new(160, 36);
@@ -1141,7 +1133,7 @@ fn render_config_text_modal_uses_focus_input_row_and_command_tokens() -> anyhow:
     let rows = rendered_rows(&terminal);
     let input_row = rows
         .iter()
-        .position(|row| row.contains("value: https://api.deepseek.com|"))
+        .position(|row| row.contains("api_key: |"))
         .expect("text modal input row should render");
     let commands_row = rows
         .iter()
@@ -1167,7 +1159,7 @@ fn render_config_text_modal_uses_focus_input_row_and_command_tokens() -> anyhow:
         })
         .count();
 
-    assert!(input_bg_cells > 20);
+    assert!(input_bg_cells > 5);
     assert_eq!(command_token_cells, "EnterF2F3Esc".chars().count());
     Ok(())
 }
@@ -1351,11 +1343,8 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     let mut config = test_config();
     config.workspace.root = workspace.display().to_string();
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    for _ in 0..10 {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    }
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Plugins);
     let backend = TestBackend::new(96, 80);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1377,11 +1366,8 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
 #[test]
 fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    for _ in 0..4 {
-        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    }
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Compaction);
     for _ in 0..4 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     }
@@ -1429,7 +1415,6 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("△ unsaved - save before close"));
     assert!(rendered.contains("[save]"));
-    assert!(rendered.contains("[save+close]"));
     assert!(rendered.contains("[close]"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
@@ -1456,7 +1441,6 @@ fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("> save <"));
-    assert!(rendered.contains("[save+close]"));
     assert!(rendered.contains("[close]"));
     assert!(rendered.contains("..."));
     assert!(rendered.contains("✕ confirm"));
@@ -1466,11 +1450,8 @@ fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
 #[test]
 fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "/config".to_owned();
-    let _ = app.submit_input()?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Memory);
     let backend = TestBackend::new(132, 30);
     let mut terminal = Terminal::new(backend)?;
 

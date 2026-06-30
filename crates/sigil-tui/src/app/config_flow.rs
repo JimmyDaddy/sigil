@@ -43,6 +43,16 @@ use super::{
     },
 };
 
+mod agents;
+mod appearance;
+mod mcp;
+mod permissions;
+mod plugins;
+mod provider;
+mod skills;
+mod storage;
+mod verification;
+
 impl AppState {
     pub fn config_section_title(&self) -> Option<&'static str> {
         self.config_state
@@ -54,6 +64,13 @@ impl AppState {
         self.config_state
             .as_ref()
             .map(|state| state.selected_section)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_config_section_for_test(&mut self, section: ConfigSection) {
+        if let Some(state) = self.config_state.as_mut() {
+            state.set_section(section);
+        }
     }
 
     pub fn config_selected_field_label(&self) -> Option<&'static str> {
@@ -85,7 +102,7 @@ impl AppState {
 
     pub(crate) fn config_preview_appearance(&self) -> Option<AppearanceConfig> {
         let config_state = self.config_state.as_ref()?;
-        Some(draft_appearance_config(config_state))
+        Some(appearance::draft_appearance_config(config_state))
     }
 
     pub fn config_selected_footer_action_label(&self) -> Option<&'static str> {
@@ -151,11 +168,19 @@ impl AppState {
             return Vec::new();
         };
 
-        let mut lines = vec!["Config".to_owned(), String::new()];
-        for section in ConfigSection::FLOW {
+        let mut lines = vec![
+            if state.show_advanced {
+                "Config · advanced"
+            } else {
+                "Config · simple"
+            }
+            .to_owned(),
+            String::new(),
+        ];
+        for section in state.visible_sections() {
             lines.push(format!(
                 "{} {}",
-                if section == state.selected_section {
+                if *section == state.selected_section {
                     ">"
                 } else {
                     " "
@@ -167,7 +192,7 @@ impl AppState {
         lines.push(CONFIG_SECTION_NAV_HINT.to_owned());
         lines.push(CONFIG_FIELD_NAV_HINT.to_owned());
         lines.push(CONFIG_EDIT_OR_TOGGLE_HINT.to_owned());
-        lines.push(format!("{CONFIG_SAVE_HINT}  Esc close"));
+        lines.push(format!("{CONFIG_SAVE_HINT}  Ctrl-A advanced  Esc close"));
         if state.selected_section == ConfigSection::Storage {
             lines.push("Storage: footer clean artifacts".to_owned());
         } else if state.selected_section == ConfigSection::Mcp {
@@ -187,7 +212,7 @@ impl AppState {
             lines.push("Plugins: PgUp/PgDn wrap".to_owned());
             lines.push("Plugins: footer approve/deny".to_owned());
         } else if state.selected_section == ConfigSection::Permissions {
-            lines.push("Permissions: Enter cycle mode/checks".to_owned());
+            lines.push("Permissions: Enter cycle mode".to_owned());
             lines.push("Permissions: task checks run from task status".to_owned());
         } else if state.selected_section == ConfigSection::Appearance {
             lines.push("Appearance: Enter cycle".to_owned());
@@ -205,13 +230,14 @@ impl AppState {
             return Vec::new();
         };
         let section = config_state.selected_section;
-        let step_label = ConfigSection::FLOW
+        let visible_sections = config_state.visible_sections();
+        let step_label = visible_sections
             .iter()
             .map(|candidate| {
                 if *candidate == section {
-                    format!("[{}]", candidate.nav_label())
+                    format!("[{}]", candidate.step_token())
                 } else {
-                    candidate.nav_label().to_owned()
+                    candidate.step_token().to_owned()
                 }
             })
             .collect::<Vec<_>>()
@@ -231,122 +257,13 @@ impl AppState {
 
         match section {
             ConfigSection::Provider => {
-                lines.push("[runtime]".to_owned());
-                lines.push(render_config_value_row(
-                    config_state,
-                    ConfigField::ProviderName,
-                ));
-                lines.push(String::new());
-                lines.push("[model]".to_owned());
-                lines.push(render_config_value_row(
-                    config_state,
-                    ConfigField::ProviderModel,
-                ));
-                lines.push(String::new());
-                lines.push("[authentication]".to_owned());
-                lines.push(render_config_value_row(
-                    config_state,
-                    ConfigField::ProviderApiKey,
-                ));
-                lines.push(String::new());
-                lines.push("[endpoint]".to_owned());
-                lines.push(render_config_value_row(
-                    config_state,
-                    ConfigField::ProviderBaseUrl,
-                ));
-                lines.push(String::new());
-                lines.push("[advanced]".to_owned());
-                lines.push(render_config_value_row(
-                    config_state,
-                    ConfigField::ProviderFimModel,
-                ));
-                lines.extend(render_config_selection_details(config_state));
-                lines.push(String::new());
-                lines.push("[capabilities]".to_owned());
-                lines.extend(render_provider_capability_summary(config_state));
+                provider::render_section(&mut lines, config_state);
             }
             ConfigSection::Storage => {
-                let paths = &self.sigil_paths;
-                lines.push("[roots]".to_owned());
-                lines.push(render_config_readonly_row(
-                    "State root",
-                    &paths.state_root.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Cache root",
-                    &paths.cache_root.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Workspace state",
-                    &paths.workspace_state_root.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Workspace cache",
-                    &paths.workspace_cache_root.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Project assets",
-                    &paths.project_assets_root.display().to_string(),
-                ));
-                lines.push(String::new());
-                lines.push("[files]".to_owned());
-                lines.push(render_config_readonly_row(
-                    "Session logs",
-                    &paths.session_log_dir.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Input history",
-                    &paths.input_history_file.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Artifacts",
-                    &paths.artifacts_root.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Changesets",
-                    &paths.changesets_root.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Terminal tasks",
-                    &paths.terminal_tasks_root.display().to_string(),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Scratch",
-                    &paths.scratch_root.display().to_string(),
-                ));
-                lines.push(String::new());
-                lines.push("[artifact retention]".to_owned());
-                lines.extend(render_mutation_artifact_retention_summary(
-                    config_state,
-                    &self.runtime.mutation_artifact_retention_preview,
-                ));
-                lines.push(String::new());
-                lines.push("[details]".to_owned());
-                lines.push(render_config_hint_row(
-                    "read-only; set [storage] roots or SIGIL_STATE_HOME/SIGIL_CACHE_HOME to override",
-                ));
-                lines.push(render_config_hint_row(
-                    "footer clean records lifecycle events; artifact details are audit/debug",
-                ));
+                storage::render_section(self, &mut lines, config_state);
             }
             ConfigSection::Permissions => {
-                lines.push("[permissions]".to_owned());
-                lines.push(render_config_value_row(
-                    config_state,
-                    ConfigField::PermissionsDefaultMode,
-                ));
-                lines.push(render_config_value_row(
-                    config_state,
-                    ConfigField::VerificationAutoRun,
-                ));
-                lines.push(String::new());
-                lines.push("[workspace]".to_owned());
-                lines.extend(self.render_verification_trust_summary(config_state));
-                lines.push(String::new());
-                lines.push("[advanced]".to_owned());
-                lines.extend(render_permission_rule_summary(config_state));
-                lines.extend(render_verification_scope_summary(config_state));
-                lines.extend(render_config_selection_details(config_state));
+                permissions::render_section(self, &mut lines, config_state);
             }
             ConfigSection::Memory => {
                 lines.push("[workspace memory]".to_owned());
@@ -478,7 +395,7 @@ impl AppState {
                 ));
                 lines.push(render_config_readonly_row(
                     "Syntax source",
-                    &render_syntax_theme_source(config_state),
+                    &appearance::render_syntax_theme_source(config_state),
                 ));
                 lines.push(render_config_value_row(
                     config_state,
@@ -486,7 +403,7 @@ impl AppState {
                 ));
                 lines.push(render_config_readonly_row(
                     "Cost source",
-                    &render_usage_cost_currency_source(config_state),
+                    &appearance::render_usage_cost_currency_source(config_state),
                 ));
                 let available = ThemeId::all()
                     .iter()
@@ -506,10 +423,10 @@ impl AppState {
                 ));
                 lines.push(String::new());
                 lines.push("[diagnostics]".to_owned());
-                lines.extend(render_appearance_diagnostic_lines(config_state));
+                lines.extend(appearance::render_appearance_diagnostic_lines(config_state));
                 lines.push(String::new());
                 lines.push("[preview]".to_owned());
-                lines.extend(render_appearance_preview_lines(config_state));
+                lines.extend(appearance::render_appearance_preview_lines(config_state));
                 lines.push(String::new());
                 lines.push("[scope]".to_owned());
                 lines.push(render_config_hint_row(
@@ -521,216 +438,16 @@ impl AppState {
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Agents => {
-                let (_skill_count, skill_agent_count) = skill_config_counts(config_state);
-                let agent_count = config_state.agent_profiles.len();
-                lines.push("[discovery]".to_owned());
-                lines.push(render_config_readonly_row(
-                    "Enabled",
-                    bool_summary(config_state.draft.base_root_config.skills.enabled),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Configured",
-                    &format!("{} {}", agent_count, pluralize("agent", agent_count)),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Compatibility",
-                    &format!(
-                        "{} {}",
-                        skill_agent_count,
-                        pluralize("agent", skill_agent_count)
-                    ),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Warnings",
-                    &format!("{} warnings", config_state.agent_warnings.len()),
-                ));
-                if agent_count == 0 {
-                    lines.push(render_config_hint_row("No agents discovered"));
-                    lines.push(render_config_hint_row(
-                        "Agents are discovered from built-ins, workspace profiles, plugins, and compatibility sources",
-                    ));
-                } else {
-                    lines.push(render_config_readonly_row(
-                        "Selected",
-                        &selected_agent_summary(config_state),
-                    ));
-                    lines.push(String::new());
-                    lines.push("[agents]".to_owned());
-                    lines.extend(render_agent_index_lines(config_state));
-                    if let Some(agent) = config_state.selected_agent() {
-                        lines.push(String::new());
-                        lines.push("[agent]".to_owned());
-                        lines.push(render_config_readonly_row(
-                            "Agent",
-                            agent.profile.id.as_str(),
-                        ));
-                        lines.extend(render_agent_detail_lines(agent));
-                    }
-                }
-                if !config_state.agent_warnings.is_empty() {
-                    lines.push(String::new());
-                    lines.push("[warnings]".to_owned());
-                    for warning in config_state.agent_warnings.iter().take(4) {
-                        lines.push(render_config_hint_row(warning));
-                    }
-                    if config_state.agent_warnings.len() > 4 {
-                        lines.push(format!(
-                            "... {} more warnings",
-                            config_state.agent_warnings.len() - 4
-                        ));
-                    }
-                }
-                lines.push(String::new());
-                lines.push("Up/Down agent  PgUp/PgDn wrap  footer trust/disable".to_owned());
-                lines.extend(render_config_selection_details(config_state));
+                agents::render_section(&mut lines, config_state);
             }
             ConfigSection::Skills => {
-                let (skill_count, agent_count) = skill_config_counts(config_state);
-                lines.push("[discovery]".to_owned());
-                lines.push(render_config_readonly_row(
-                    "Enabled",
-                    bool_summary(config_state.draft.base_root_config.skills.enabled),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Configured",
-                    &format!("{} {}", skill_count, pluralize("skill", skill_count)),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Agents",
-                    &format!("{} {}", agent_count, pluralize("agent", agent_count)),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Warnings",
-                    &format!("{} warnings", config_state.skill_warnings.len()),
-                ));
-                if skill_count == 0 {
-                    lines.push(render_config_hint_row("No skills discovered"));
-                    lines.push(render_config_hint_row(
-                        "Reusable inline skills are discovered from configured skills directories",
-                    ));
-                } else {
-                    lines.push(render_config_readonly_row(
-                        "Selected",
-                        &selected_skill_summary(config_state),
-                    ));
-                    lines.push(String::new());
-                    lines.push("[skills]".to_owned());
-                    lines.extend(render_skill_index_lines(config_state, false));
-                    if let Some(skill) = config_state.selected_skill() {
-                        lines.push(String::new());
-                        lines.push("[skill]".to_owned());
-                        lines.push(render_config_readonly_row("Skill", &skill.id));
-                        lines.extend(render_skill_detail_lines(skill));
-                    }
-                }
-                if !config_state.skill_warnings.is_empty() {
-                    lines.push(String::new());
-                    lines.push("[warnings]".to_owned());
-                    for warning in config_state.skill_warnings.iter().take(4) {
-                        lines.push(render_config_hint_row(warning));
-                    }
-                    if config_state.skill_warnings.len() > 4 {
-                        lines.push(format!(
-                            "... {} more warnings",
-                            config_state.skill_warnings.len() - 4
-                        ));
-                    }
-                }
-                lines.push(String::new());
-                lines.push("Up/Down skill  PgUp/PgDn wrap  footer use".to_owned());
-                lines.extend(render_config_selection_details(config_state));
+                skills::render_section(&mut lines, config_state);
             }
             ConfigSection::Plugins => {
-                lines.push("[discovery]".to_owned());
-                lines.push(render_config_readonly_row(
-                    "Configured",
-                    &format!("{} plugins", config_state.plugin_manifests.len()),
-                ));
-                lines.push(render_config_readonly_row(
-                    "Warnings",
-                    &format!("{} warnings", config_state.plugin_warnings.len()),
-                ));
-                if config_state.plugin_manifests.is_empty() {
-                    lines.push(render_config_hint_row("No plugin manifests discovered"));
-                    lines.push(render_config_hint_row(
-                        "Workspace plugins live under .sigil/plugins/<id>/plugin.toml",
-                    ));
-                } else {
-                    lines.push(render_config_readonly_row(
-                        "Selected",
-                        &format!(
-                            "{} of {}",
-                            config_state.selected_plugin_index + 1,
-                            config_state.plugin_manifests.len()
-                        ),
-                    ));
-                    lines.push(String::new());
-                    lines.push("[plugins]".to_owned());
-                    lines.extend(render_plugin_index_lines(config_state));
-                    if let Some(plugin) = config_state.selected_plugin() {
-                        lines.push(String::new());
-                        lines.push("[plugin]".to_owned());
-                        lines.push(render_config_readonly_row("Plugin", &plugin.plugin_id));
-                        lines.extend(render_plugin_detail_lines(plugin));
-                    }
-                }
-                if !config_state.plugin_warnings.is_empty() {
-                    lines.push(String::new());
-                    lines.push("[warnings]".to_owned());
-                    for warning in config_state.plugin_warnings.iter().take(4) {
-                        lines.push(render_config_hint_row(warning));
-                    }
-                    if config_state.plugin_warnings.len() > 4 {
-                        lines.push(format!(
-                            "... {} more warnings",
-                            config_state.plugin_warnings.len() - 4
-                        ));
-                    }
-                }
-                lines.push(String::new());
-                lines.push("Up/Down plugin  PgUp/PgDn wrap  footer approve/deny".to_owned());
-                lines.extend(render_config_selection_details(config_state));
+                plugins::render_section(&mut lines, config_state);
             }
             ConfigSection::Mcp => {
-                lines.push("[servers]".to_owned());
-                lines.push(render_config_readonly_row(
-                    "Configured",
-                    &format!("{} servers", config_state.draft.mcp_servers.len()),
-                ));
-                if config_state.draft.mcp_servers.is_empty() {
-                    lines.push(render_config_hint_row("No MCP servers configured"));
-                    lines.push(render_config_hint_row(
-                        "Add MCP servers in ~/.sigil/sigil.toml or your explicit config file",
-                    ));
-                } else {
-                    lines.push(render_config_readonly_row(
-                        "Selected",
-                        &format!(
-                            "{} of {}",
-                            config_state.selected_mcp_server_index + 1,
-                            config_state.draft.mcp_servers.len()
-                        ),
-                    ));
-                    if config_state.selected_mcp_server().is_some() {
-                        lines.push(String::new());
-                        lines.push("[server]".to_owned());
-                        if let Some(server) = config_state.selected_mcp_server() {
-                            lines.push(render_config_readonly_row("Name", &server.name));
-                        }
-                        lines.push(String::new());
-                        lines.push("[lifecycle]".to_owned());
-                        lines.extend(render_mcp_lifecycle_summary(
-                            config_state,
-                            &self.selected_mcp_runtime_status_label(config_state),
-                        ));
-                    }
-                }
-                lines.push(String::new());
-                lines.push("PgUp/PgDn server  footer activate/refresh".to_owned());
-                lines.push(render_config_hint_row(
-                    "MCP command, args, and timeout are edited in the config file",
-                ));
-                lines.extend(render_config_selection_details(config_state));
+                mcp::render_section(self, &mut lines, config_state);
             }
         }
 
@@ -839,6 +556,16 @@ impl AppState {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.save_config_draft();
             }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(config_state) = self.config_state.as_mut() {
+                    config_state.toggle_advanced_surface();
+                    self.last_notice = Some(if config_state.show_advanced {
+                        "config advanced surface".to_owned()
+                    } else {
+                        "config simple surface".to_owned()
+                    });
+                }
+            }
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(config_state) = self.config_state.as_mut() {
                     if config_state.selected_section == ConfigSection::Mcp {
@@ -869,7 +596,7 @@ impl AppState {
             }
             KeyCode::Tab => {
                 if let Some(config_state) = self.config_state.as_mut() {
-                    config_state.set_section(config_state.selected_section.next_flow());
+                    config_state.set_next_visible_section();
                     self.last_notice = Some(format!(
                         "step {}",
                         config_state.selected_section.title().to_lowercase()
@@ -878,7 +605,7 @@ impl AppState {
             }
             KeyCode::BackTab => {
                 if let Some(config_state) = self.config_state.as_mut() {
-                    config_state.set_section(config_state.selected_section.previous_flow());
+                    config_state.set_previous_visible_section();
                     self.last_notice = Some(format!(
                         "step {}",
                         config_state.selected_section.title().to_lowercase()
@@ -892,7 +619,7 @@ impl AppState {
                         && config_state.selected_field.is_none()
                         && config_state.selected_footer_action == ConfigFooterAction::Save
                     {
-                        config_state.set_section(config_state.selected_section.previous_flow());
+                        config_state.set_previous_visible_section();
                         self.last_notice = Some(format!(
                             "step {}",
                             config_state.selected_section.title().to_lowercase()
@@ -904,7 +631,7 @@ impl AppState {
                             config_state.selected_footer_action.field_label()
                         ));
                     } else {
-                        config_state.set_section(config_state.selected_section.previous_flow());
+                        config_state.set_previous_visible_section();
                         self.last_notice = Some(format!(
                             "step {}",
                             config_state.selected_section.title().to_lowercase()
@@ -919,7 +646,7 @@ impl AppState {
                         && config_state.selected_field.is_none()
                         && config_state.selected_footer_action == ConfigFooterAction::Close
                     {
-                        config_state.set_section(config_state.selected_section.next_flow());
+                        config_state.set_next_visible_section();
                         self.last_notice = Some(format!(
                             "step {}",
                             config_state.selected_section.title().to_lowercase()
@@ -931,7 +658,7 @@ impl AppState {
                             config_state.selected_footer_action.field_label()
                         ));
                     } else {
-                        config_state.set_section(config_state.selected_section.next_flow());
+                        config_state.set_next_visible_section();
                         self.last_notice = Some(format!(
                             "step {}",
                             config_state.selected_section.title().to_lowercase()
@@ -1117,6 +844,7 @@ impl AppState {
                 {
                     return match config_state.selected_footer_action {
                         ConfigFooterAction::Save => self.save_config_draft(),
+                        #[cfg(test)]
                         ConfigFooterAction::SaveAndClose => self.save_config_draft_and_close(),
                         ConfigFooterAction::CleanMutationArtifacts => {
                             self.clean_selected_mutation_artifacts()
@@ -2301,103 +2029,6 @@ impl AppState {
     }
 }
 
-fn draft_appearance_config(config_state: &ConfigState) -> AppearanceConfig {
-    let mut appearance = config_state.draft.base_root_config.appearance.clone();
-    appearance.theme = config_state.draft.appearance_theme;
-    appearance.syntax_theme = config_state.draft.appearance_syntax_theme;
-    appearance.usage_cost_currency = config_state.draft.appearance_usage_cost_currency;
-    appearance
-}
-
-fn render_syntax_theme_source(config_state: &ConfigState) -> String {
-    let configured = config_state.draft.appearance_syntax_theme;
-    let resolved = config_state.draft.resolved_appearance_syntax_theme();
-    if configured == SyntaxThemeId::Auto {
-        format!("auto -> {}", resolved.display_label())
-    } else {
-        format!("manual -> {}", resolved.display_label())
-    }
-}
-
-fn render_usage_cost_currency_source(config_state: &ConfigState) -> String {
-    match config_state.draft.appearance_usage_cost_currency {
-        sigil_kernel::UsageCostCurrency::Auto => "auto -> provider balance currency".to_owned(),
-        currency => format!("manual -> {}", currency.display_label()),
-    }
-}
-
-fn render_appearance_diagnostic_lines(config_state: &ConfigState) -> Vec<String> {
-    let appearance = draft_appearance_config(config_state);
-    let checks = appearance_doctor_checks(&appearance);
-    let warnings = checks
-        .iter()
-        .filter(|check| check.status != DoctorStatus::Ok)
-        .collect::<Vec<_>>();
-    if warnings.is_empty() {
-        return vec![render_config_readonly_row("Status", "ok")];
-    }
-
-    let mut lines = vec![render_config_readonly_row(
-        "Status",
-        &format!("{} warnings", warnings.len()),
-    )];
-    for check in warnings.iter().take(3) {
-        lines.push(render_config_readonly_row(
-            check.name.trim_start_matches("appearance:"),
-            &format!("{}: {}", check.status.as_str(), check.message),
-        ));
-        if let Some(remediation) = &check.remediation {
-            lines.push(render_config_hint_row(remediation));
-        }
-    }
-    if warnings.len() > 3 {
-        lines.push(format!("... {} more warnings", warnings.len() - 3));
-    }
-    lines
-}
-
-fn render_appearance_preview_lines(config_state: &ConfigState) -> Vec<String> {
-    let saved = config_state.draft.base_root_config.appearance.theme;
-    let draft = config_state.draft.appearance_theme;
-    let state = if saved == draft {
-        "saved"
-    } else {
-        "unsaved draft"
-    };
-    vec![
-        format!(
-            "preview compare: current {} -> draft {} ({state})",
-            saved.as_str(),
-            draft.as_str()
-        ),
-        format!(
-            "preview syntax: {} -> {}",
-            config_state.draft.appearance_syntax_theme.as_str(),
-            config_state
-                .draft
-                .resolved_appearance_syntax_theme()
-                .display_label()
-        ),
-        "preview page: rail timeline composer tool modal".to_owned(),
-        "preview shell: rail live composer footer".to_owned(),
-        "preview composer: Build · agent: main · deepseek-v4-flash".to_owned(),
-        "preview tool: read_file ✓ ok · doc excerpt · 2 hidden".to_owned(),
-        "preview modal: Review Tool Call allow deny selected".to_owned(),
-        format!(
-            "preview token: {} {}",
-            config_state.draft.selected_appearance_color_token(),
-            config_state
-                .draft
-                .selected_appearance_color_override()
-                .unwrap_or("inherited")
-        ),
-        "preview text: primary secondary muted".to_owned(),
-        "preview status: success warning error pending".to_owned(),
-        "preview diff: +added -removed @@ hunk".to_owned(),
-        "preview markdown: heading link code".to_owned(),
-    ]
-}
-
 pub(super) fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
     match mode {
         ApprovalMode::Allow => ApprovalMode::Ask,
@@ -3415,36 +3046,6 @@ fn path_pattern_summary(patterns: &[String]) -> String {
     }
 }
 
-fn render_provider_capability_summary(config_state: &ConfigState) -> Vec<String> {
-    let provider_name = config_state.draft.provider_name.as_str();
-    let Some(capabilities) = provider_capabilities_for_name(provider_name) else {
-        return vec![render_config_hint_row("Unknown provider capabilities")];
-    };
-    let view = provider_capability_view(provider_name, &capabilities);
-    let supported = view
-        .rows
-        .iter()
-        .filter(|row| row.status.as_str() == "supported")
-        .count();
-    let advanced = view
-        .rows
-        .iter()
-        .filter(|row| row.status.as_str() == "advanced")
-        .count();
-    vec![
-        render_config_readonly_row(
-            "Provider matrix",
-            &format!(
-                "{} supported · {} advanced · {} total",
-                supported,
-                advanced,
-                view.rows.len()
-            ),
-        ),
-        render_config_hint_row("Full capability summary is available in /doctor"),
-    ]
-}
-
 fn render_permission_rule_summary(config_state: &ConfigState) -> Vec<String> {
     let rules = &config_state.draft.base_root_config.permission.rules;
     let rule_count = if rules.is_empty() {
@@ -3471,75 +3072,6 @@ fn render_permission_rule_summary(config_state: &ConfigState) -> Vec<String> {
     }
 
     lines
-}
-
-fn render_verification_scope_summary(config_state: &ConfigState) -> Vec<String> {
-    let verification = &config_state.draft.base_root_config.verification;
-    let scope = verification.scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
-    vec![
-        render_config_readonly_row(
-            "Profile",
-            &format!(
-                "{} ({})",
-                verification.scope_profile.as_str(),
-                verification.scope_profile.summary()
-            ),
-        ),
-        render_config_readonly_row("Key excludes", &summarize_scope_excludes(&scope.exclude)),
-        render_config_readonly_row(
-            "Generated roots",
-            &summarize_generated_roots(&scope.generated_roots),
-        ),
-        render_config_readonly_row(
-            "Advanced overrides",
-            &format!(
-                "{} excludes, {} generated roots",
-                verification.extra_scope_excludes.len(),
-                verification.generated_roots.len()
-            ),
-        ),
-    ]
-}
-
-fn summarize_scope_excludes(excludes: &[String]) -> String {
-    let key_patterns = [
-        "target/**",
-        "node_modules/**",
-        "dist/**",
-        "coverage/**",
-        ".pytest_cache/**",
-    ];
-    let mut visible = key_patterns
-        .iter()
-        .filter(|pattern| excludes.iter().any(|exclude| exclude == **pattern))
-        .map(|pattern| (*pattern).to_owned())
-        .collect::<Vec<_>>();
-    if visible.is_empty() {
-        visible = excludes.iter().take(5).cloned().collect();
-    }
-    let hidden_count = excludes.len().saturating_sub(visible.len());
-    if hidden_count == 0 {
-        visible.join(", ")
-    } else {
-        format!("{} +{} more", visible.join(", "), hidden_count)
-    }
-}
-
-fn summarize_generated_roots(roots: &[PathBuf]) -> String {
-    if roots.is_empty() {
-        return "none".to_owned();
-    }
-    let visible = roots
-        .iter()
-        .take(4)
-        .map(|root| root.display().to_string())
-        .collect::<Vec<_>>();
-    let hidden_count = roots.len().saturating_sub(visible.len());
-    if hidden_count == 0 {
-        visible.join(", ")
-    } else {
-        format!("{} +{} more", visible.join(", "), hidden_count)
-    }
 }
 
 fn render_mutation_artifact_retention_summary(

@@ -2184,10 +2184,14 @@ fn render_config_step_line_with_palette(
     let Some(selected_section) = selected_config_step_section(line) else {
         return render_config_step_words_with_palette(line, accent, palette);
     };
-    let Some(selected_index) = selected_section.flow_index() else {
+    let sections = config_step_sections(line);
+    let Some(selected_index) = sections
+        .iter()
+        .position(|section| *section == selected_section)
+    else {
         return render_config_step_words_with_palette(line, accent, palette);
     };
-    let (start, end) = config_step_window(selected_index, content_width);
+    let (start, end) = config_step_window(&sections, selected_index, content_width);
     let mut spans = Vec::new();
     if start > 0 {
         push_config_step_item(
@@ -2196,7 +2200,7 @@ fn render_config_step_line_with_palette(
         );
     }
     for index in start..end {
-        let section = ConfigSection::FLOW[index];
+        let section = sections[index];
         let label = section.title().to_ascii_lowercase();
         let selected = index == selected_index;
         let span = if selected {
@@ -2212,7 +2216,7 @@ fn render_config_step_line_with_palette(
         };
         push_config_step_item(&mut spans, span);
     }
-    if end < ConfigSection::FLOW.len() {
+    if end < sections.len() {
         push_config_step_item(
             &mut spans,
             Span::styled("...", Style::default().fg(palette.text_muted)),
@@ -2222,20 +2226,40 @@ fn render_config_step_line_with_palette(
 }
 
 fn selected_config_step_section(line: &str) -> Option<ConfigSection> {
-    let (_, rest) = line.split_once('[')?;
-    let (selected, _) = rest.split_once(']')?;
+    let selected = line.split_whitespace().find_map(|token| {
+        token
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+    })?;
     ConfigSection::FLOW
         .iter()
         .copied()
-        .find(|section| section.title().eq_ignore_ascii_case(selected))
+        .find(|section| section.step_token().eq_ignore_ascii_case(selected))
 }
 
-fn config_step_window(selected_index: usize, max_width: usize) -> (usize, usize) {
+fn config_step_sections(line: &str) -> Vec<ConfigSection> {
+    line.split_whitespace()
+        .filter_map(|token| {
+            let token = token
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .unwrap_or(token);
+            ConfigSection::FLOW
+                .iter()
+                .copied()
+                .find(|section| section.step_token().eq_ignore_ascii_case(token))
+        })
+        .collect()
+}
+
+fn config_step_window(
+    sections: &[ConfigSection],
+    selected_index: usize,
+    max_width: usize,
+) -> (usize, usize) {
     let mut start = selected_index;
-    let mut end = selected_index
-        .saturating_add(1)
-        .min(ConfigSection::FLOW.len());
-    let mut prefer_left = selected_index >= ConfigSection::FLOW.len() / 2;
+    let mut end = selected_index.saturating_add(1).min(sections.len());
+    let mut prefer_left = selected_index >= sections.len() / 2;
     loop {
         let mut changed = false;
         for try_left in [prefer_left, !prefer_left] {
@@ -2244,17 +2268,21 @@ fn config_step_window(selected_index: usize, max_width: usize) -> (usize, usize)
                     continue;
                 }
                 let candidate_start = start - 1;
-                if config_step_window_width(candidate_start, end, selected_index) <= max_width {
+                if config_step_window_width(sections, candidate_start, end, selected_index)
+                    <= max_width
+                {
                     start = candidate_start;
                     changed = true;
                     break;
                 }
             } else {
-                if end >= ConfigSection::FLOW.len() {
+                if end >= sections.len() {
                     continue;
                 }
                 let candidate_end = end + 1;
-                if config_step_window_width(start, candidate_end, selected_index) <= max_width {
+                if config_step_window_width(sections, start, candidate_end, selected_index)
+                    <= max_width
+                {
                     end = candidate_end;
                     changed = true;
                     break;
@@ -2269,7 +2297,12 @@ fn config_step_window(selected_index: usize, max_width: usize) -> (usize, usize)
     (start, end)
 }
 
-fn config_step_window_width(start: usize, end: usize, selected_index: usize) -> usize {
+fn config_step_window_width(
+    sections: &[ConfigSection],
+    start: usize,
+    end: usize,
+    selected_index: usize,
+) -> usize {
     let mut item_count = 0usize;
     let mut width = 0usize;
     if start > 0 {
@@ -2277,18 +2310,22 @@ fn config_step_window_width(start: usize, end: usize, selected_index: usize) -> 
         item_count += 1;
     }
     for index in start..end {
-        width += config_step_section_width(index, selected_index);
+        width += config_step_section_width(sections, index, selected_index);
         item_count += 1;
     }
-    if end < ConfigSection::FLOW.len() {
+    if end < sections.len() {
         width += "...".chars().count();
         item_count += 1;
     }
     width + item_count.saturating_sub(1) * 2
 }
 
-fn config_step_section_width(index: usize, selected_index: usize) -> usize {
-    let label_width = ConfigSection::FLOW[index].title().chars().count();
+fn config_step_section_width(
+    sections: &[ConfigSection],
+    index: usize,
+    selected_index: usize,
+) -> usize {
+    let label_width = sections[index].title().chars().count();
     if index == selected_index {
         label_width + 2
     } else {

@@ -104,7 +104,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     assert!(!config_hits.sections.is_empty());
     assert!(config_hits.sections.len() <= ConfigSection::FLOW.len());
     assert!(!config_hits.fields.is_empty());
-    assert_eq!(config_hits.footer_actions.len(), 3);
+    assert_eq!(config_hits.footer_actions.len(), 2);
     let provider_section = config_hits
         .sections
         .iter()
@@ -128,12 +128,12 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     let close_action = config_hits
         .footer_actions
         .iter()
-        .find(|area| area.index == 2)
+        .find(|area| area.index == 1)
         .expect("close action should be clickable")
         .area;
     assert_eq!(
         config.hit_target(close_action.x, close_action.y),
-        HitTarget::ConfigFooterAction { index: 2 }
+        HitTarget::ConfigFooterAction { index: 1 }
     );
 
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -450,9 +450,9 @@ fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<(
     let hits = wide
         .config_hit_areas
         .expect("wide config layout should expose hit areas");
-    assert_eq!(hits.sections.len(), ConfigSection::FLOW.len());
+    assert_eq!(hits.sections.len(), ConfigSection::DEFAULT_FLOW.len());
     assert!(!hits.fields.is_empty());
-    assert_eq!(hits.footer_actions.len(), 3);
+    assert_eq!(hits.footer_actions.len(), 2);
     Ok(())
 }
 
