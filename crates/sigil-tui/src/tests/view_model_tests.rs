@@ -492,6 +492,87 @@ fn context_provenance_summary_recommends_budget_adjustment_for_budget_only_exclu
 }
 
 #[test]
+fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let payload = json!({
+        "schema": "sigil_context_v0",
+        "placement": "dynamic_suffix",
+        "budget": {
+            "max_tokens": 64,
+            "used_tokens": 11,
+        },
+        "included": [
+            context_item(
+                "task-memory",
+                ContextSource::TaskDigest,
+                7,
+                ContextInclusionReason::RetrievalHit,
+            ),
+            context_item(
+                "archive",
+                ContextSource::SessionArchive,
+                4,
+                ContextInclusionReason::RetrievalHit,
+            ),
+        ],
+        "excluded": [
+            context_item(
+                "secret",
+                ContextSource::RepositoryFile,
+                5,
+                ContextInclusionReason::ExcludedSecret,
+            ),
+        ],
+    });
+    let messages = json!([
+        {
+            "role": "system",
+            "content": format!("{RUNTIME_CONTEXT_V0_HEADER}{payload}"),
+            "tool_calls": [],
+        }
+    ])
+    .to_string();
+    let entries = vec![SessionLogEntry::Control(
+        ControlEntry::PrefixSnapshotCaptured(sigil_kernel::PrefixSnapshot {
+            materialized_text: format!("{messages}\n[]"),
+            sha256: "sha-context".to_owned(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            memory_fingerprint: "memory".to_owned(),
+            tool_schema_fingerprint: "tools".to_owned(),
+            skill_index_fingerprint: "skills".to_owned(),
+        }),
+    )];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let compact = UiViewModel::from_app(&app);
+    assert!(
+        compact
+            .info_rail
+            .usage_lines
+            .iter()
+            .all(|line| !line.starts_with("source:"))
+    );
+
+    app.toggle_info_rail_detail();
+    let detail = UiViewModel::from_app(&app);
+    let usage = detail.info_rail.usage_lines.join("\n");
+    assert!(usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
+    assert!(usage.contains("source: task digest · 1 item(s) · 7 tokens"));
+    assert!(usage.contains("source: session archive · 1 item(s) · 4 tokens"));
+    assert!(usage.contains("excluded: secret · 1 item(s)"));
+    assert!(usage.contains("action: review egress"));
+    Ok(())
+}
+
+#[test]
 fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     let task_id = TaskId::new("task_1")?;
