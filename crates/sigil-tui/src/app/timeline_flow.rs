@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use super::{
     AgentView, AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase, ThinkingBlockMode,
     TimelineEntry, TimelineRole, TimelineTextSelection,
+    agent_flow::agent_thread_sidebar_detail,
     formatting::{
         hash_timeline_line, line_has_visible_content, plain_line_text, sidebar_width_for_terminal,
         truncate_session_view_text,
@@ -695,6 +696,9 @@ impl AppState {
         };
         let child = self.active_agent_child_entry();
         let agent_thread = self.active_agent_thread_projection();
+        let continuation_projection = sigil_kernel::AgentResultContinuationProjection::from_entries(
+            &self.session_browser.current_entries,
+        );
         let active_label = self.active_agent_label();
         let theme = self.timeline_render_options().theme;
         let mut header = vec![Line::from(vec![
@@ -703,24 +707,33 @@ impl AppState {
             Span::raw(" · child session"),
         ])];
         if let Some(thread) = agent_thread.as_ref().filter(|thread| !thread.legacy_task) {
-            let profile = thread
-                .profile_id
-                .as_ref()
-                .map(|profile_id| profile_id.as_str())
-                .unwrap_or("agent");
+            let session_view_cache = self.session_view_cache();
+            let latest_task = session_view_cache.task_projection.latest_task();
+            let continuation_unresolved = continuation_projection
+                .statuses
+                .get(&thread.thread_id)
+                .is_some_and(|status| status.is_unresolved());
             header.push(Line::from(format!(
-                "status: {} · {} · {}",
-                agent_thread_status_label(thread.status),
-                profile,
-                agent_thread_source_label(thread.invocation_source)
+                "status: {}",
+                agent_thread_sidebar_detail(thread, latest_task, continuation_unresolved)
             )));
         } else if let Some(child) = child.as_ref() {
+            let result_label = if task_child_session_is_terminal(child.status) {
+                if child.summary_hash.is_some() {
+                    "result ready"
+                } else {
+                    "result missing"
+                }
+            } else {
+                "result pending"
+            };
             header.push(Line::from(format!(
-                "status: {} · {} · v{}:{}",
+                "status: {} · {} · v{}:{} · {}",
                 task_child_session_status_label(child.status),
                 child.role.as_str(),
                 child.plan_version,
-                child.step_id.as_str()
+                child.step_id.as_str(),
+                result_label
             )));
         }
         header.push(Line::from(format!(
@@ -1135,6 +1148,7 @@ fn agent_thread_status_label(status: sigil_kernel::AgentThreadStatus) -> &'stati
     }
 }
 
+#[cfg(test)]
 fn agent_thread_source_label(source: Option<sigil_kernel::AgentInvocationSource>) -> &'static str {
     match source {
         Some(sigil_kernel::AgentInvocationSource::Chat) => "chat",

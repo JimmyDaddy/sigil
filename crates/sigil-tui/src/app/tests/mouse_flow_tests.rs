@@ -1593,7 +1593,9 @@ fn mouse_click_info_rail_agent_row_switches_visible_agent() -> Result<()> {
     assert_eq!(app.active_agent_label(), "仓库审查");
     assert_eq!(
         app.last_notice(),
-        Some("agent focus: agent 仓库审查 · completed · subagent_read · v1:step_1")
+        Some(
+            "agent focus: agent 仓库审查 · completed · subagent_read · v1:step_1 · result missing"
+        )
     );
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 32), &app);

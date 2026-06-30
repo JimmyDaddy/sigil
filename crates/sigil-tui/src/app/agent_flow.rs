@@ -1011,28 +1011,12 @@ fn agent_sidebar_item_from_thread(
     continuation_unresolved: bool,
 ) -> AgentSidebarItem {
     let legacy_child = latest_task.and_then(|task| legacy_child_for_thread(task, thread));
-    let status = agent_thread_effective_status(thread, continuation_unresolved);
     let label = if let (Some(task), Some(child)) = (latest_task, legacy_child.as_ref()) {
         task_child_agent_display_name(task, child, ordinal)
     } else {
         agent_thread_display_name(thread, ordinal)
     };
-    let detail = if let Some(child) = legacy_child.as_ref() {
-        format!(
-            "{} · {} · v{}:{}",
-            agent_thread_status_label(status),
-            child.role.as_str(),
-            child.plan_version,
-            child.step_id.as_str()
-        )
-    } else {
-        format!(
-            "{} · {} · {}",
-            agent_thread_status_label(status),
-            agent_thread_profile_label(thread),
-            agent_thread_source_label(thread)
-        )
-    };
+    let detail = agent_thread_sidebar_detail(thread, latest_task, continuation_unresolved);
     let session_ref = thread.thread_session_ref.clone();
     let command_value = legacy_child
         .as_ref()
@@ -1047,6 +1031,20 @@ fn agent_sidebar_item_from_thread(
         }),
         thread_id: Some(thread.thread_id.clone()),
         muted: thread.thread_session_ref.is_none(),
+    }
+}
+
+pub(super) fn agent_thread_sidebar_detail(
+    thread: &AgentThreadProjection,
+    latest_task: Option<&TaskRunProjection>,
+    continuation_unresolved: bool,
+) -> String {
+    let legacy_child = latest_task.and_then(|task| legacy_child_for_thread(task, thread));
+    let status = agent_thread_effective_status(thread, continuation_unresolved);
+    if let Some(child) = legacy_child {
+        legacy_child_agent_detail(thread, child, status, continuation_unresolved)
+    } else {
+        agent_thread_detail(thread, status, continuation_unresolved)
     }
 }
 
@@ -1105,6 +1103,95 @@ fn agent_thread_source_label(thread: &AgentThreadProjection) -> &'static str {
         Some(sigil_kernel::AgentInvocationSource::Plugin) => "plugin",
         Some(sigil_kernel::AgentInvocationSource::System) => "system",
         Some(sigil_kernel::AgentInvocationSource::Unknown) | None => "unknown",
+    }
+}
+
+fn agent_thread_detail(
+    thread: &AgentThreadProjection,
+    status: AgentThreadStatus,
+    continuation_unresolved: bool,
+) -> String {
+    let mut parts = vec![
+        agent_thread_status_label(status).to_owned(),
+        agent_thread_profile_label(thread),
+        agent_thread_mode_source_label(thread),
+    ];
+    if let Some(context) = &thread.run_context {
+        if !context.model.trim().is_empty() {
+            parts.push(context.model.clone());
+        }
+        if !context.effective_tool_scope_hash.trim().is_empty() {
+            parts.push("tools scoped".to_owned());
+        }
+        if !context.workspace_root.as_str().trim().is_empty() {
+            parts.push("workspace inherited".to_owned());
+        }
+    }
+    if let Some(heartbeat) = agent_thread_heartbeat_label(thread) {
+        parts.push(heartbeat.to_owned());
+    }
+    parts.push(agent_thread_result_label(thread, status, continuation_unresolved).to_owned());
+    parts.join(" · ")
+}
+
+fn legacy_child_agent_detail(
+    thread: &AgentThreadProjection,
+    child: &TaskChildSessionEntry,
+    status: AgentThreadStatus,
+    continuation_unresolved: bool,
+) -> String {
+    let mut parts = vec![
+        agent_thread_status_label(status).to_owned(),
+        child.role.as_str().to_owned(),
+        format!("v{}:{}", child.plan_version, child.step_id.as_str()),
+    ];
+    let result_label = if continuation_unresolved || !status.is_terminal() {
+        "result pending"
+    } else if child.summary_hash.is_some() || thread.result.is_some() {
+        "result ready"
+    } else {
+        "result missing"
+    };
+    parts.push(result_label.to_owned());
+    parts.join(" · ")
+}
+
+fn agent_thread_mode_source_label(thread: &AgentThreadProjection) -> String {
+    let source = agent_thread_source_label(thread);
+    match thread.invocation_mode {
+        Some(sigil_kernel::AgentInvocationMode::Foreground) => format!("foreground {source}"),
+        Some(sigil_kernel::AgentInvocationMode::Background) => format!("background {source}"),
+        Some(sigil_kernel::AgentInvocationMode::JoinBeforeFinal) => {
+            format!("join-before-final {source}")
+        }
+        Some(sigil_kernel::AgentInvocationMode::Unknown) | None => source.to_owned(),
+    }
+}
+
+fn agent_thread_result_label(
+    thread: &AgentThreadProjection,
+    status: AgentThreadStatus,
+    continuation_unresolved: bool,
+) -> &'static str {
+    if continuation_unresolved || !status.is_terminal() {
+        return "result pending";
+    }
+    if thread.result.is_some() {
+        "result ready"
+    } else {
+        "result missing"
+    }
+}
+
+fn agent_thread_heartbeat_label(thread: &AgentThreadProjection) -> Option<&'static str> {
+    if thread
+        .attempts
+        .values()
+        .any(|attempt| attempt.last_heartbeat_ms.is_some())
+    {
+        Some("heartbeat seen")
+    } else {
+        None
     }
 }
 
@@ -1355,17 +1442,26 @@ mod tests {
         let objective = test_thread("thread_objective", "Review kernel", Some("reader"))?;
         let from_objective = agent_sidebar_item_from_thread(&objective, None, 1, false);
         assert_eq!(from_objective.label, "agent Review kernel");
-        assert_eq!(from_objective.detail, "started · reader · unknown");
+        assert_eq!(
+            from_objective.detail,
+            "started · reader · unknown · result pending"
+        );
 
         let profile = test_thread("thread_profile", "   ", Some("reader-agent"))?;
         let from_profile = agent_sidebar_item_from_thread(&profile, None, 2, false);
         assert_eq!(from_profile.label, "agent reader agent");
-        assert_eq!(from_profile.detail, "started · reader-agent · unknown");
+        assert_eq!(
+            from_profile.detail,
+            "started · reader-agent · unknown · result pending"
+        );
 
         let ordinal = test_thread("thread_ordinal", "   ", None)?;
         let from_ordinal = agent_sidebar_item_from_thread(&ordinal, None, 3, false);
         assert_eq!(from_ordinal.label, "agent agent 3");
-        assert_eq!(from_ordinal.detail, "started · agent · unknown");
+        assert_eq!(
+            from_ordinal.detail,
+            "started · agent · unknown · result pending"
+        );
         Ok(())
     }
 

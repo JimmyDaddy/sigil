@@ -147,6 +147,10 @@ pub(crate) fn compact_agent_detail(detail: &str) -> String {
         }
         _ => {}
     }
+    let parts = trimmed.split(" · ").collect::<Vec<_>>();
+    if parts.len() > 5 && parts.last().is_some_and(|part| part.starts_with("result ")) {
+        return [parts[1], parts[2], parts[parts.len() - 1]].join(" · ");
+    }
     trimmed
         .split_once(" · ")
         .map(|(_, rest)| rest.to_owned())

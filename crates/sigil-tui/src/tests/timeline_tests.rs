@@ -90,6 +90,13 @@ fn sidebar_agent_rows_compact_common_status_labels() {
         active: false,
         muted: false,
     };
+    let detailed_child = SidebarAgentRow {
+        label: "agent child_4".to_owned(),
+        detail: "running · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · heartbeat seen · result pending".to_owned(),
+        selected: false,
+        active: false,
+        muted: false,
+    };
 
     assert_eq!(main.focus_symbol(true), "◉");
     assert_eq!(main.status_symbol(), "○");
@@ -103,6 +110,10 @@ fn sidebar_agent_rows_compact_common_status_labels() {
     assert_eq!(running_child.compact_detail(), "executor · v2:step_2");
     assert_eq!(failed_child.status_symbol(), "✕");
     assert_eq!(failed_child.compact_detail(), "subagent_write · v3:step_3");
+    assert_eq!(
+        detailed_child.compact_detail(),
+        "explore · foreground chat · result pending"
+    );
 }
 
 #[test]

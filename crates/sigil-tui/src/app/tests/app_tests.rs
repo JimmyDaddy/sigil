@@ -486,7 +486,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
 
     assert!(rows.iter().any(|row| {
         row.label == "agent 仓库审查"
-            && row.detail == "started · subagent_read · v1:step_1"
+            && row.detail == "started · subagent_read · v1:step_1 · result pending"
             && !row.muted
     }));
     app.active_pane = PaneFocus::Activity;
@@ -511,7 +511,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     assert!(
         focus_lines
             .iter()
-            .any(|line| line == "status: started · subagent_read · v1:step_1")
+            .any(|line| line == "status: started · subagent_read · v1:step_1 · result pending")
     );
     assert!(
         focus_lines
@@ -583,7 +583,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
 
     assert!(rows.iter().any(|row| {
         row.label == "agent 仓库审查"
-            && row.detail == "completed · subagent_read · v1:step_1"
+            && row.detail == "completed · subagent_read · v1:step_1 · result missing"
             && !row.muted
     }));
     Ok(())
@@ -664,6 +664,23 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
                 updated_at_ms: None,
             },
         )),
+        SessionLogEntry::Control(ControlEntry::AgentRunAttemptStarted(
+            sigil_kernel::AgentRunAttemptStartedEntry {
+                thread_id: thread_id.clone(),
+                attempt_id: sigil_kernel::AgentRunAttemptId::new("attempt_1")?,
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-pro".to_owned(),
+                background: false,
+                provider_background_handle_ref: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentRunHeartbeat(
+            sigil_kernel::AgentRunHeartbeatEntry {
+                thread_id: thread_id.clone(),
+                attempt_id: sigil_kernel::AgentRunAttemptId::new("attempt_1")?,
+                updated_at_ms: 120,
+            },
+        )),
     ]);
 
     let rows = app.agent_sidebar_rows();
@@ -672,7 +689,10 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         Some("graph: 1 agents · 1 active")
     );
     assert!(rows.iter().any(|row| {
-        row.label == "agent kernel map" && row.detail == "running · explore · chat" && !row.muted
+        row.label == "agent kernel map"
+            && row.detail
+                == "running · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · heartbeat seen · result pending"
+            && !row.muted
     }));
     let base_entries = app.session_browser.current_entries.clone();
     let mut recovering_entries = app.session_browser.current_entries.clone();
@@ -695,7 +715,10 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     app.sync_current_session_state(recovering_entries.clone());
     let recovering_rows = app.agent_sidebar_rows();
     assert!(recovering_rows.iter().any(|row| {
-        row.label == "agent kernel map" && row.detail == "running · explore · chat" && !row.muted
+        row.label == "agent kernel map"
+            && row.detail
+                == "running · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · heartbeat seen · result pending"
+            && !row.muted
     }));
     assert_eq!(
         app.agent_graph_summary_line().as_deref(),
@@ -720,7 +743,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     assert!(
         focus_lines
             .iter()
-            .any(|line| line == "status: running · explore · chat")
+            .any(|line| line == "status: running · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · heartbeat seen · result pending")
     );
     assert!(
         focus_lines
@@ -1046,7 +1069,10 @@ fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Re
         .iter()
         .find(|row| row.label == "agent kernel map")
         .expect("agent row");
-    assert_eq!(row.detail, "completed · explore · chat");
+    assert_eq!(
+        row.detail,
+        "completed · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · result ready"
+    );
     assert_eq!(row.status_symbol(), "✓");
     assert!(!row.detail.contains("failed"));
     Ok(())
@@ -1103,7 +1129,7 @@ fn alt_a_cycles_agent_view_without_activity_focus() -> Result<()> {
     assert!(app.is_composer_agent_panel_focused());
     assert_eq!(
         app.last_notice(),
-        Some("agent focus: agent 仓库审查 · started · subagent_read · v1:step_1")
+        Some("agent focus: agent 仓库审查 · started · subagent_read · v1:step_1 · result pending")
     );
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT))?;
