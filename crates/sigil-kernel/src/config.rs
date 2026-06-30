@@ -118,6 +118,8 @@ pub const DEFAULT_TERMINAL_SCROLL_SENSITIVITY: u16 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TerminalConfig {
+    #[serde(default = "default_terminal_keyboard_enhancement")]
+    pub keyboard_enhancement: bool,
     #[serde(default = "default_terminal_mouse_capture")]
     pub mouse_capture: bool,
     #[serde(default = "default_terminal_osc52_clipboard")]
@@ -129,6 +131,7 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
+            keyboard_enhancement: default_terminal_keyboard_enhancement(),
             mouse_capture: default_terminal_mouse_capture(),
             osc52_clipboard: default_terminal_osc52_clipboard(),
             scroll_sensitivity: default_terminal_scroll_sensitivity(),
@@ -1233,7 +1236,11 @@ fn default_code_intel_discovery_report_missing() -> bool {
 }
 
 fn default_terminal_mouse_capture() -> bool {
-    true
+    false
+}
+
+fn default_terminal_keyboard_enhancement() -> bool {
+    false
 }
 
 fn default_terminal_osc52_clipboard() -> bool {

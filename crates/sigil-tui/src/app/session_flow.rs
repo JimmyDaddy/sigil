@@ -236,6 +236,7 @@ impl AppState {
         self.latest_compaction_record = latest_compaction_record(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.current_session_entries = entries;
+        self.mark_current_session_entries_changed();
         self.refresh_conversation_queue_selection();
         self.refresh_active_agent_view_after_parent_sync();
         self.refresh_usage_sidebar_cache();
@@ -248,6 +249,7 @@ impl AppState {
         self.latest_compaction_record = latest_compaction_record(&self.current_session_entries);
         self.tool_preview_snapshots =
             restored_tool_preview_snapshot_index(&self.current_session_entries);
+        self.mark_current_session_entries_changed();
         self.refresh_conversation_queue_selection();
         self.refresh_active_agent_view_after_parent_sync();
         self.refresh_usage_sidebar_cache();
@@ -513,7 +515,7 @@ impl AppState {
                                 &self.secret_redactor,
                             ),
                         );
-                        self.push_event("control:restore", format!("{execution:?}"));
+                        self.push_event("control:restore", render_tool_execution_line(&execution));
                     }
                     ControlEntry::TerminalTask(task) => {
                         self.push_timeline(
@@ -558,7 +560,7 @@ impl AppState {
                         );
                     }
                     other => {
-                        self.push_event("control:restore", format!("{other:?}"));
+                        self.push_event("control:restore", render_control_entry_line(&other));
                     }
                 },
             }
@@ -937,413 +939,418 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
         SessionLogEntry::User(message)
         | SessionLogEntry::Assistant(message)
         | SessionLogEntry::ToolResult(message) => render_model_message_line(message),
-        SessionLogEntry::Control(control) => match control {
-            ControlEntry::SessionIdentity {
-                provider_name,
-                model_name,
-            } => format!("[ctl] session {provider_name}/{model_name}"),
-            ControlEntry::ContinuationStateSaved(state) => format!(
-                "[ctl] cont {} msg={}",
-                state.state_kind,
-                state.message_id.as_deref().unwrap_or("-")
-            ),
-            ControlEntry::ResponseHandleTracked(handle) => format!(
-                "[ctl] response {}",
-                truncate_session_view_text(&handle.response_id, 48)
-            ),
-            ControlEntry::BackgroundTaskTracked(handle) => format!("[ctl] task {}", handle.task_id),
-            ControlEntry::PrefixSnapshotCaptured(snapshot) => format!(
-                "[ctl] prefix sha={} mem={}",
-                truncate_session_view_text(&snapshot.sha256, 16),
-                truncate_session_view_text(&snapshot.memory_fingerprint, 16)
-            ),
-            ControlEntry::MemorySnapshotCaptured(snapshot) => format!(
-                "[ctl] memory docs={} fp={}",
-                snapshot.report.document_count,
-                truncate_session_view_text(&snapshot.report.fingerprint, 16)
-            ),
-            ControlEntry::UsageSnapshot(usage) => format!(
-                "[ctl] usage p={} c={} hit={} miss={}",
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.cache_hit_tokens,
-                usage.cache_miss_tokens
-            ),
-            ControlEntry::ToolApproval(approval) => format!(
-                "[ctl] approval {} {} action={} mode={}",
-                approval.call_id,
-                approval.tool_name,
-                tool_approval_action_label(approval.action),
-                approval.policy_decision.as_str()
-            ),
-            ControlEntry::ToolExecution(execution) => format!(
-                "[ctl] execution {} {} status={}",
-                execution.call_id,
-                execution.tool_name,
-                tool_execution_status_label(execution.status)
-            ),
-            ControlEntry::ToolEgress(egress) => render_tool_egress_line(egress),
-            ControlEntry::McpElicitation(elicitation) => format!(
-                "[ctl] mcp elicitation {} action={} fields={}",
-                truncate_session_view_text(&elicitation.server_name, 48),
-                mcp_elicitation_decision_label(elicitation.action),
-                elicitation.requested_field_names.len()
-            ),
-            ControlEntry::ToolPreviewCaptured(snapshot) => format!(
-                "[ctl] preview {} {} files={} +{} -{}",
-                snapshot.call_id,
-                snapshot.tool_name,
-                snapshot.file_diffs.len(),
-                snapshot.original_stats.added,
-                snapshot.original_stats.removed
-            ),
-            ControlEntry::SkillIndexCaptured(snapshot) => format!(
-                "[ctl] skills index count={} fp={}",
-                snapshot.descriptors.len(),
-                truncate_session_view_text(&snapshot.fingerprint, 16)
-            ),
-            ControlEntry::SkillLoaded(entry) => format!(
-                "[ctl] skill {} loaded bytes={} lines={}",
-                truncate_session_view_text(&entry.skill_id, 48),
-                entry.byte_count,
-                entry.line_count
-            ),
-            ControlEntry::PluginManifestCaptured(snapshot) => format!(
-                "[ctl] plugin {} version={} caps={} trust={}",
-                truncate_session_view_text(&snapshot.plugin_id, 48),
-                truncate_session_view_text(&snapshot.version, 24),
-                snapshot.capabilities.len(),
-                snapshot.trust.as_str()
-            ),
-            ControlEntry::PluginTrustDecision(entry) => format!(
-                "[ctl] plugin {} trust={} hash={}",
-                truncate_session_view_text(&entry.plugin_id, 48),
-                entry.decision.as_str(),
-                truncate_session_view_text(&entry.manifest_hash, 16)
-            ),
-            ControlEntry::ChangeSetProposed(change_set) => format!(
-                "[ctl] changeset {} proposed risk={} files={} {}",
-                change_set.id.as_str(),
-                change_set.risk.as_str(),
-                change_set.files.len(),
-                truncate_session_view_text(&change_set.title, 48)
-            ),
-            ControlEntry::ChangeSetApplied(result) => format!(
-                "[ctl] changeset {} status={} files={}",
-                result.id.as_str(),
-                result.status.as_str(),
-                result.file_results.len()
-            ),
-            ControlEntry::WriteLeaseAcquired(entry) => format!(
-                "[ctl] write lease {} acquired isolation={} scope={} owner={}",
-                truncate_session_view_text(entry.lease_id.as_str(), 48),
-                entry.isolation_mode.as_str(),
-                write_lease_scope_label(&entry.scope),
-                truncate_session_view_text(&entry.owner_agent_id, 48)
-            ),
-            ControlEntry::WriteLeaseReleased(entry) => format!(
-                "[ctl] write lease {} released status={}",
-                truncate_session_view_text(entry.lease_id.as_str(), 48),
-                entry.status.as_str()
-            ),
-            ControlEntry::IsolatedWorkspaceCreated(entry) => format!(
-                "[ctl] isolated workspace {} backend={} mode={} base={}",
-                truncate_session_view_text(&entry.isolated_workspace_id, 48),
-                entry.backend.as_str(),
-                entry.isolation_mode.as_str(),
-                truncate_session_view_text(&entry.base_snapshot_id, 16)
-            ),
-            ControlEntry::IsolatedChangeSetProduced(entry) => format!(
-                "[ctl] isolated changeset {} mode={} subjects={} artifact={}",
-                entry.changeset_id.as_str(),
-                entry.source_isolation.as_str(),
-                entry.touched_subjects.len(),
-                truncate_session_view_text(entry.artifact_ref.as_deref().unwrap_or("-"), 48)
-            ),
-            ControlEntry::MergeReviewRequested(entry) => format!(
-                "[ctl] merge review {} changeset={} snapshot={}",
-                truncate_session_view_text(entry.review_id.as_str(), 48),
-                entry.changeset_id.as_str(),
-                truncate_session_view_text(&entry.parent_workspace_snapshot_id, 16)
-            ),
-            ControlEntry::MergeReviewResolved(entry) => format!(
-                "[ctl] merge review {} decision={} reason={}",
-                truncate_session_view_text(entry.review_id.as_str(), 48),
-                entry.decision.as_str(),
-                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
-            ),
-            ControlEntry::TerminalTask(task) => format!(
-                "[ctl] terminal {} status={} log={}",
-                task.handle.task_id.as_str(),
-                task.status.as_str(),
-                truncate_session_view_text(&task.handle.log_path.display().to_string(), 48)
-            ),
-            ControlEntry::CompactionApplied(record) => format!(
-                "[ctl] compacted={} tail={}",
-                record.compacted_message_count, record.retained_tail_message_count
-            ),
-            ControlEntry::PlanApproved(entry) => format!(
-                "[ctl] plan approved v{} permission={} expires={} hash={}",
-                entry.plan_version,
-                plan_approval_permission_label(entry.permission),
-                plan_approval_expiry_label(&entry.expires),
-                truncate_session_view_text(&entry.plan_hash, 16)
-            ),
-            ControlEntry::TaskRun(run) => format!(
-                "[ctl] task {} status={}",
-                run.task_id.as_str(),
-                task_run_status_label(run.status)
-            ),
-            ControlEntry::TaskPlan(plan) => format!(
-                "[ctl] plan {} v{} status={} steps={}",
-                plan.task_id.as_str(),
-                plan.plan_version,
-                task_plan_status_label(plan.status),
-                plan.steps.len()
-            ),
-            ControlEntry::TaskStep(step) => format!(
-                "[ctl] step {} v{}:{} status={}",
-                step.task_id.as_str(),
-                step.plan_version,
-                step.step_id.as_str(),
-                task_step_status_label(step.status)
-            ),
-            ControlEntry::TaskChildSession(child) => format!(
-                "[ctl] child {} v{}:{} status={}",
-                child.task_id.as_str(),
-                child.plan_version,
-                child.step_id.as_str(),
-                task_child_session_status_label(child.status)
-            ),
-            ControlEntry::TaskChildSessionDisplayName(rename) => format!(
-                "[ctl] child name {} v{}:{} {}",
-                rename.child_task_id.as_str(),
-                rename.plan_version,
-                rename.step_id.as_str(),
-                truncate_session_view_text(&rename.display_name, 48)
-            ),
-            ControlEntry::TaskSubagentApprovalRoute(route) => format!(
-                "[ctl] subagent approval {} call={} status={}",
-                route.route_id.as_str(),
-                route.call_id,
-                task_route_status_label(route.status)
-            ),
-            ControlEntry::TaskSubagentElicitationRoute(route) => format!(
-                "[ctl] subagent elicitation {} server={} status={}",
-                route.route_id.as_str(),
-                route.server_name,
-                task_route_status_label(route.status)
-            ),
-            ControlEntry::JobIntentRecorded(entry) => format!(
-                "[ctl] job intent {} effect={} policy={}",
-                truncate_session_view_text(&entry.job_id, 32),
-                entry.expected_effect.as_str(),
-                truncate_session_view_text(&entry.tool_policy_hash, 16)
-            ),
-            ControlEntry::StepLeaseRecorded(entry) => format!(
-                "[ctl] step lease {} job={} status={} owner={}",
-                truncate_session_view_text(&entry.lease_id, 24),
-                truncate_session_view_text(&entry.job_id, 24),
-                step_lease_status_label(entry.status),
-                truncate_session_view_text(&entry.owner_process_id, 24)
-            ),
-            ControlEntry::StepLeaseHeartbeatRecorded(entry) => format!(
-                "[ctl] step lease heartbeat {} job={} at={} deadline={}",
-                truncate_session_view_text(&entry.lease_id, 24),
-                truncate_session_view_text(&entry.job_id, 24),
-                entry.observed_at_ms,
-                entry.next_deadline_ms
-            ),
-            ControlEntry::CheckSpecRecorded(entry) => format!(
-                "[ctl] check spec {} source={} promotion={}",
-                truncate_session_view_text(&entry.trusted_check.check_spec.check_spec_id, 48),
-                check_discovery_source_label(entry.trusted_check.source),
-                check_promotion_label(&entry.trusted_check.promoted_by)
-            ),
-            ControlEntry::VerificationPolicyChanged(entry) => format!(
-                "[ctl] verification policy {} checks={} hash={}",
-                evidence_scope_label(&entry.scope),
-                entry.policy.required_checks.len(),
-                truncate_session_view_text(&entry.policy_hash, 16)
-            ),
-            ControlEntry::VerificationCheckRun(entry) => format!(
-                "[ctl] verification check run {} check={} status={} timeout={} receipt={} reason={}",
-                truncate_session_view_text(&entry.run_id, 48),
-                truncate_session_view_text(&entry.check_spec_id, 48),
-                verification_check_run_status_label(entry.status),
-                entry
-                    .timeout_ms
-                    .map(|value| format!("{value}ms"))
-                    .unwrap_or_else(|| "-".to_owned()),
-                truncate_session_view_text(entry.receipt_id.as_deref().unwrap_or("-"), 48),
-                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
-            ),
-            ControlEntry::VerificationRecorded(entry) => format!(
-                "[ctl] verification receipt {} check={} status={} snapshot={} policy={} trust={}",
-                truncate_session_view_text(&entry.receipt.receipt.receipt_id, 48),
-                truncate_session_view_text(&entry.receipt.check_spec_id, 48),
-                receipt_status_label(entry.receipt.check_status),
-                truncate_session_view_text(&entry.receipt.binding.workspace_snapshot_id, 16),
-                truncate_session_view_text(
-                    entry.receipt.receipt.policy_hash.as_deref().unwrap_or("-"),
-                    16
-                ),
-                truncate_session_view_text(&entry.receipt.binding.workspace_trust_snapshot_id, 16)
-            ),
-            ControlEntry::ReadinessEvaluated(entry) => format!(
-                "[ctl] readiness {} run={} verification={} policy={} snapshot={} actions={} reasons={}",
-                evidence_scope_label(&entry.scope),
-                run_status_label(entry.evaluation.run_status),
-                verification_verdict_label(entry.evaluation.verification_verdict),
-                truncate_session_view_text(entry.policy_hash.as_deref().unwrap_or("-"), 16),
-                truncate_session_view_text(
-                    entry.workspace_snapshot_id.as_deref().unwrap_or("-"),
-                    16
-                ),
-                readiness_required_actions_label(&entry.evaluation.required_actions),
-                readiness_reasons_label(&entry.evaluation.reasons)
-            ),
-            ControlEntry::ChildVerificationReceiptLinked(entry) => format!(
-                "[ctl] child verification receipt {} child={} status={} parent_recheck={} snapshot={}",
-                truncate_session_view_text(&entry.child_receipt_id, 48),
-                truncate_session_view_text(&entry.child_session_id, 48),
-                child_verification_link_status_label(entry),
-                child_verification_parent_recheck_label(entry),
-                truncate_session_view_text(&entry.child_workspace_snapshot_id, 16)
-            ),
-            ControlEntry::WorkspaceTrustDecision(entry) => format!(
-                "[ctl] workspace trust {} trust={} snapshot={} by={} reason={}",
-                truncate_session_view_text(&entry.workspace_id, 48),
-                workspace_trust_label(entry.trust),
-                truncate_session_view_text(&entry.workspace_trust_snapshot_id, 16),
-                truncate_session_view_text(entry.decided_by_event_id.as_deref().unwrap_or("-"), 48),
-                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
-            ),
-            ControlEntry::AgentProfileCaptured(entry) => format!(
-                "[ctl] agent profile {} trust={}",
-                entry.snapshot.profile_id.as_str(),
-                agent_trust_state_label(entry.snapshot.trust_state)
-            ),
-            ControlEntry::AgentProfileTrustDecision(entry) => format!(
-                "[ctl] agent profile {} trust={} hash={}",
-                entry.profile_id.as_str(),
-                agent_trust_state_label(entry.decision),
-                truncate_session_view_text(&entry.profile_hash, 16)
-            ),
-            ControlEntry::AgentProfilePolicyDecision(entry) => format!(
-                "[ctl] agent profile {} policy enabled={} user={} model={} hash={}",
-                entry.profile_id.as_str(),
-                optional_bool_label(entry.enabled),
-                optional_bool_label(entry.user_invocable),
-                optional_bool_label(entry.model_invocable),
-                truncate_session_view_text(&entry.profile_hash, 16)
-            ),
-            ControlEntry::AgentThreadStarted(entry) => format!(
-                "[ctl] agent {} started profile={} mode={}",
-                entry.thread_id.as_str(),
-                entry.profile_id.as_str(),
-                agent_invocation_mode_label(entry.invocation_mode)
-            ),
-            ControlEntry::AgentThreadStatusChanged(entry) => format!(
-                "[ctl] agent {} status={}",
-                entry.thread_id.as_str(),
-                agent_thread_status_label(entry.status)
-            ),
-            ControlEntry::AgentThreadMessageRouted(entry) => format!(
-                "[ctl] agent message {} status={}",
-                entry.route_id.as_str(),
-                agent_route_status_label(entry.status)
-            ),
-            ControlEntry::AgentMailboxMessage(entry) => format!(
-                "[ctl] agent mailbox {} status={}",
-                entry.route_id.as_str(),
-                agent_mailbox_status_label(entry.status)
-            ),
-            ControlEntry::AgentThreadResultRecorded(entry) => format!(
-                "[ctl] agent result {} status={}",
-                entry.result.thread_id.as_str(),
-                agent_terminal_status_label(entry.result.status)
-            ),
-            ControlEntry::AgentResultContinuation(entry) => format!(
-                "[ctl] agent continuation {} status={:?}",
-                entry.thread_id.as_str(),
-                entry.status
-            ),
-            ControlEntry::AgentThreadDisplayName(entry) => format!(
-                "[ctl] agent name {} {}",
-                entry.thread_id.as_str(),
-                truncate_session_view_text(&entry.display_name, 48)
-            ),
-            ControlEntry::AgentApprovalRoute(route) => format!(
-                "[ctl] agent approval {} call={} status={}",
-                route.route_id.as_str(),
-                route.call_id,
-                agent_route_status_label(route.status)
-            ),
-            ControlEntry::AgentElicitationRoute(route) => format!(
-                "[ctl] agent elicitation {} server={} status={}",
-                route.route_id.as_str(),
-                route.server_name,
-                agent_route_status_label(route.status)
-            ),
-            ControlEntry::AgentRunAttemptStarted(entry) => format!(
-                "[ctl] agent attempt {} thread={} model={}",
-                entry.attempt_id.as_str(),
-                entry.thread_id.as_str(),
-                truncate_session_view_text(&entry.model, 32)
-            ),
-            ControlEntry::AgentRunHeartbeat(entry) => format!(
-                "[ctl] agent heartbeat {} thread={} at={}",
-                entry.attempt_id.as_str(),
-                entry.thread_id.as_str(),
-                entry.updated_at_ms
-            ),
-            ControlEntry::AgentRunInterrupted(entry) => format!(
-                "[ctl] agent interrupted {} thread={}",
-                entry.attempt_id.as_str(),
-                entry.thread_id.as_str()
-            ),
-            ControlEntry::AgentRouteClosed(entry) => {
-                format!("[ctl] agent route {} closed", entry.route_id.as_str())
-            }
-            ControlEntry::AgentMergeSafePoint(entry) => format!(
-                "[ctl] agent merge {} parent={}",
-                entry.thread_id.as_str(),
-                entry.parent_thread_id.as_str()
-            ),
-            ControlEntry::AgentThreadClosed(entry) => {
-                format!("[ctl] agent {} closed", entry.thread_id.as_str())
-            }
-            ControlEntry::ConversationInputQueued(entry) => format!(
-                "[ctl] queue {} kind={:?} prompt={}",
-                entry.queue_id.as_str(),
-                entry.kind,
-                truncate_session_view_text(&entry.prompt, 48)
-            ),
-            ControlEntry::ConversationInputQueueControl(entry) => {
-                format!("[ctl] queue control {:?}", entry.action)
-            }
-            ControlEntry::ConversationInputEdited(entry) => format!(
-                "[ctl] queue {} edited prompt={}",
-                entry.queue_id.as_str(),
-                truncate_session_view_text(&entry.prompt, 48)
-            ),
-            ControlEntry::ConversationInputReordered(entry) => format!(
-                "[ctl] queue {} moved after {}",
-                entry.queue_id.as_str(),
-                entry
-                    .after_queue_id
-                    .as_ref()
-                    .map_or("front", sigil_kernel::ConversationInputQueueId::as_str)
-            ),
-            ControlEntry::ConversationInputStatusChanged(entry) => format!(
-                "[ctl] queue {} status={:?}",
-                entry.queue_id.as_str(),
-                entry.status
-            ),
-            ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
-        },
+        SessionLogEntry::Control(control) => render_control_entry_line(control),
     }
+}
+
+pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
+    match control {
+        ControlEntry::SessionIdentity {
+            provider_name,
+            model_name,
+        } => format!("[ctl] session {provider_name}/{model_name}"),
+        ControlEntry::ContinuationStateSaved(state) => format!(
+            "[ctl] cont {} msg={}",
+            state.state_kind,
+            state.message_id.as_deref().unwrap_or("-")
+        ),
+        ControlEntry::ResponseHandleTracked(handle) => format!(
+            "[ctl] response {}",
+            truncate_session_view_text(&handle.response_id, 48)
+        ),
+        ControlEntry::BackgroundTaskTracked(handle) => format!("[ctl] task {}", handle.task_id),
+        ControlEntry::PrefixSnapshotCaptured(snapshot) => format!(
+            "[ctl] prefix sha={} mem={}",
+            truncate_session_view_text(&snapshot.sha256, 16),
+            truncate_session_view_text(&snapshot.memory_fingerprint, 16)
+        ),
+        ControlEntry::MemorySnapshotCaptured(snapshot) => format!(
+            "[ctl] memory docs={} fp={}",
+            snapshot.report.document_count,
+            truncate_session_view_text(&snapshot.report.fingerprint, 16)
+        ),
+        ControlEntry::UsageSnapshot(usage) => format!(
+            "[ctl] usage p={} c={} hit={} miss={}",
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.cache_hit_tokens,
+            usage.cache_miss_tokens
+        ),
+        ControlEntry::ToolApproval(approval) => format!(
+            "[ctl] approval {} {} action={} mode={}",
+            approval.call_id,
+            approval.tool_name,
+            tool_approval_action_label(approval.action),
+            approval.policy_decision.as_str()
+        ),
+        ControlEntry::ToolExecution(execution) => render_tool_execution_line(execution),
+        ControlEntry::ToolEgress(egress) => render_tool_egress_line(egress),
+        ControlEntry::McpElicitation(elicitation) => format!(
+            "[ctl] mcp elicitation {} action={} fields={}",
+            truncate_session_view_text(&elicitation.server_name, 48),
+            mcp_elicitation_decision_label(elicitation.action),
+            elicitation.requested_field_names.len()
+        ),
+        ControlEntry::ToolPreviewCaptured(snapshot) => format!(
+            "[ctl] preview {} {} files={} +{} -{}",
+            snapshot.call_id,
+            snapshot.tool_name,
+            snapshot.file_diffs.len(),
+            snapshot.original_stats.added,
+            snapshot.original_stats.removed
+        ),
+        ControlEntry::SkillIndexCaptured(snapshot) => format!(
+            "[ctl] skills index count={} fp={}",
+            snapshot.descriptors.len(),
+            truncate_session_view_text(&snapshot.fingerprint, 16)
+        ),
+        ControlEntry::SkillLoaded(entry) => format!(
+            "[ctl] skill {} loaded bytes={} lines={}",
+            truncate_session_view_text(&entry.skill_id, 48),
+            entry.byte_count,
+            entry.line_count
+        ),
+        ControlEntry::PluginManifestCaptured(snapshot) => format!(
+            "[ctl] plugin {} version={} caps={} trust={}",
+            truncate_session_view_text(&snapshot.plugin_id, 48),
+            truncate_session_view_text(&snapshot.version, 24),
+            snapshot.capabilities.len(),
+            snapshot.trust.as_str()
+        ),
+        ControlEntry::PluginTrustDecision(entry) => format!(
+            "[ctl] plugin {} trust={} hash={}",
+            truncate_session_view_text(&entry.plugin_id, 48),
+            entry.decision.as_str(),
+            truncate_session_view_text(&entry.manifest_hash, 16)
+        ),
+        ControlEntry::ChangeSetProposed(change_set) => format!(
+            "[ctl] changeset {} proposed risk={} files={} {}",
+            change_set.id.as_str(),
+            change_set.risk.as_str(),
+            change_set.files.len(),
+            truncate_session_view_text(&change_set.title, 48)
+        ),
+        ControlEntry::ChangeSetApplied(result) => format!(
+            "[ctl] changeset {} status={} files={}",
+            result.id.as_str(),
+            result.status.as_str(),
+            result.file_results.len()
+        ),
+        ControlEntry::WriteLeaseAcquired(entry) => format!(
+            "[ctl] write lease {} acquired isolation={} scope={} owner={}",
+            truncate_session_view_text(entry.lease_id.as_str(), 48),
+            entry.isolation_mode.as_str(),
+            write_lease_scope_label(&entry.scope),
+            truncate_session_view_text(&entry.owner_agent_id, 48)
+        ),
+        ControlEntry::WriteLeaseReleased(entry) => format!(
+            "[ctl] write lease {} released status={}",
+            truncate_session_view_text(entry.lease_id.as_str(), 48),
+            entry.status.as_str()
+        ),
+        ControlEntry::IsolatedWorkspaceCreated(entry) => format!(
+            "[ctl] isolated workspace {} backend={} mode={} base={}",
+            truncate_session_view_text(&entry.isolated_workspace_id, 48),
+            entry.backend.as_str(),
+            entry.isolation_mode.as_str(),
+            truncate_session_view_text(&entry.base_snapshot_id, 16)
+        ),
+        ControlEntry::IsolatedChangeSetProduced(entry) => format!(
+            "[ctl] isolated changeset {} mode={} subjects={} artifact={}",
+            entry.changeset_id.as_str(),
+            entry.source_isolation.as_str(),
+            entry.touched_subjects.len(),
+            truncate_session_view_text(entry.artifact_ref.as_deref().unwrap_or("-"), 48)
+        ),
+        ControlEntry::MergeReviewRequested(entry) => format!(
+            "[ctl] merge review {} changeset={} snapshot={}",
+            truncate_session_view_text(entry.review_id.as_str(), 48),
+            entry.changeset_id.as_str(),
+            truncate_session_view_text(&entry.parent_workspace_snapshot_id, 16)
+        ),
+        ControlEntry::MergeReviewResolved(entry) => format!(
+            "[ctl] merge review {} decision={} reason={}",
+            truncate_session_view_text(entry.review_id.as_str(), 48),
+            entry.decision.as_str(),
+            truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
+        ),
+        ControlEntry::TerminalTask(task) => format!(
+            "[ctl] terminal {} status={} log={}",
+            task.handle.task_id.as_str(),
+            task.status.as_str(),
+            truncate_session_view_text(&task.handle.log_path.display().to_string(), 48)
+        ),
+        ControlEntry::CompactionApplied(record) => format!(
+            "[ctl] compacted={} tail={}",
+            record.compacted_message_count, record.retained_tail_message_count
+        ),
+        ControlEntry::PlanApproved(entry) => format!(
+            "[ctl] plan approved v{} permission={} expires={} hash={}",
+            entry.plan_version,
+            plan_approval_permission_label(entry.permission),
+            plan_approval_expiry_label(&entry.expires),
+            truncate_session_view_text(&entry.plan_hash, 16)
+        ),
+        ControlEntry::TaskRun(run) => format!(
+            "[ctl] task {} status={}",
+            run.task_id.as_str(),
+            task_run_status_label(run.status)
+        ),
+        ControlEntry::TaskPlan(plan) => format!(
+            "[ctl] plan {} v{} status={} steps={}",
+            plan.task_id.as_str(),
+            plan.plan_version,
+            task_plan_status_label(plan.status),
+            plan.steps.len()
+        ),
+        ControlEntry::TaskStep(step) => format!(
+            "[ctl] step {} v{}:{} status={}",
+            step.task_id.as_str(),
+            step.plan_version,
+            step.step_id.as_str(),
+            task_step_status_label(step.status)
+        ),
+        ControlEntry::TaskChildSession(child) => format!(
+            "[ctl] child {} v{}:{} status={}",
+            child.task_id.as_str(),
+            child.plan_version,
+            child.step_id.as_str(),
+            task_child_session_status_label(child.status)
+        ),
+        ControlEntry::TaskChildSessionDisplayName(rename) => format!(
+            "[ctl] child name {} v{}:{} {}",
+            rename.child_task_id.as_str(),
+            rename.plan_version,
+            rename.step_id.as_str(),
+            truncate_session_view_text(&rename.display_name, 48)
+        ),
+        ControlEntry::TaskSubagentApprovalRoute(route) => format!(
+            "[ctl] subagent approval {} call={} status={}",
+            route.route_id.as_str(),
+            route.call_id,
+            task_route_status_label(route.status)
+        ),
+        ControlEntry::TaskSubagentElicitationRoute(route) => format!(
+            "[ctl] subagent elicitation {} server={} status={}",
+            route.route_id.as_str(),
+            route.server_name,
+            task_route_status_label(route.status)
+        ),
+        ControlEntry::JobIntentRecorded(entry) => format!(
+            "[ctl] job intent {} effect={} policy={}",
+            truncate_session_view_text(&entry.job_id, 32),
+            entry.expected_effect.as_str(),
+            truncate_session_view_text(&entry.tool_policy_hash, 16)
+        ),
+        ControlEntry::StepLeaseRecorded(entry) => format!(
+            "[ctl] step lease {} job={} status={} owner={}",
+            truncate_session_view_text(&entry.lease_id, 24),
+            truncate_session_view_text(&entry.job_id, 24),
+            step_lease_status_label(entry.status),
+            truncate_session_view_text(&entry.owner_process_id, 24)
+        ),
+        ControlEntry::StepLeaseHeartbeatRecorded(entry) => format!(
+            "[ctl] step lease heartbeat {} job={} at={} deadline={}",
+            truncate_session_view_text(&entry.lease_id, 24),
+            truncate_session_view_text(&entry.job_id, 24),
+            entry.observed_at_ms,
+            entry.next_deadline_ms
+        ),
+        ControlEntry::CheckSpecRecorded(entry) => format!(
+            "[ctl] check spec {} source={} promotion={}",
+            truncate_session_view_text(&entry.trusted_check.check_spec.check_spec_id, 48),
+            check_discovery_source_label(entry.trusted_check.source),
+            check_promotion_label(&entry.trusted_check.promoted_by)
+        ),
+        ControlEntry::VerificationPolicyChanged(entry) => format!(
+            "[ctl] verification policy {} checks={} hash={}",
+            evidence_scope_label(&entry.scope),
+            entry.policy.required_checks.len(),
+            truncate_session_view_text(&entry.policy_hash, 16)
+        ),
+        ControlEntry::VerificationCheckRun(entry) => format!(
+            "[ctl] verification check run {} check={} status={} timeout={} receipt={} reason={}",
+            truncate_session_view_text(&entry.run_id, 48),
+            truncate_session_view_text(&entry.check_spec_id, 48),
+            verification_check_run_status_label(entry.status),
+            entry
+                .timeout_ms
+                .map(|value| format!("{value}ms"))
+                .unwrap_or_else(|| "-".to_owned()),
+            truncate_session_view_text(entry.receipt_id.as_deref().unwrap_or("-"), 48),
+            truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
+        ),
+        ControlEntry::VerificationRecorded(entry) => format!(
+            "[ctl] verification receipt {} check={} status={} snapshot={} policy={} trust={}",
+            truncate_session_view_text(&entry.receipt.receipt.receipt_id, 48),
+            truncate_session_view_text(&entry.receipt.check_spec_id, 48),
+            receipt_status_label(entry.receipt.check_status),
+            truncate_session_view_text(&entry.receipt.binding.workspace_snapshot_id, 16),
+            truncate_session_view_text(
+                entry.receipt.receipt.policy_hash.as_deref().unwrap_or("-"),
+                16
+            ),
+            truncate_session_view_text(&entry.receipt.binding.workspace_trust_snapshot_id, 16)
+        ),
+        ControlEntry::ReadinessEvaluated(entry) => format!(
+            "[ctl] readiness {} run={} verification={} policy={} snapshot={} actions={} reasons={}",
+            evidence_scope_label(&entry.scope),
+            run_status_label(entry.evaluation.run_status),
+            verification_verdict_label(entry.evaluation.verification_verdict),
+            truncate_session_view_text(entry.policy_hash.as_deref().unwrap_or("-"), 16),
+            truncate_session_view_text(entry.workspace_snapshot_id.as_deref().unwrap_or("-"), 16),
+            readiness_required_actions_label(&entry.evaluation.required_actions),
+            readiness_reasons_label(&entry.evaluation.reasons)
+        ),
+        ControlEntry::ChildVerificationReceiptLinked(entry) => format!(
+            "[ctl] child verification receipt {} child={} status={} parent_recheck={} snapshot={}",
+            truncate_session_view_text(&entry.child_receipt_id, 48),
+            truncate_session_view_text(&entry.child_session_id, 48),
+            child_verification_link_status_label(entry),
+            child_verification_parent_recheck_label(entry),
+            truncate_session_view_text(&entry.child_workspace_snapshot_id, 16)
+        ),
+        ControlEntry::WorkspaceTrustDecision(entry) => format!(
+            "[ctl] workspace trust {} trust={} snapshot={} by={} reason={}",
+            truncate_session_view_text(&entry.workspace_id, 48),
+            workspace_trust_label(entry.trust),
+            truncate_session_view_text(&entry.workspace_trust_snapshot_id, 16),
+            truncate_session_view_text(entry.decided_by_event_id.as_deref().unwrap_or("-"), 48),
+            truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
+        ),
+        ControlEntry::AgentProfileCaptured(entry) => format!(
+            "[ctl] agent profile {} trust={}",
+            entry.snapshot.profile_id.as_str(),
+            agent_trust_state_label(entry.snapshot.trust_state)
+        ),
+        ControlEntry::AgentProfileTrustDecision(entry) => format!(
+            "[ctl] agent profile {} trust={} hash={}",
+            entry.profile_id.as_str(),
+            agent_trust_state_label(entry.decision),
+            truncate_session_view_text(&entry.profile_hash, 16)
+        ),
+        ControlEntry::AgentProfilePolicyDecision(entry) => format!(
+            "[ctl] agent profile {} policy enabled={} user={} model={} hash={}",
+            entry.profile_id.as_str(),
+            optional_bool_label(entry.enabled),
+            optional_bool_label(entry.user_invocable),
+            optional_bool_label(entry.model_invocable),
+            truncate_session_view_text(&entry.profile_hash, 16)
+        ),
+        ControlEntry::AgentThreadStarted(entry) => format!(
+            "[ctl] agent {} started profile={} mode={}",
+            entry.thread_id.as_str(),
+            entry.profile_id.as_str(),
+            agent_invocation_mode_label(entry.invocation_mode)
+        ),
+        ControlEntry::AgentThreadStatusChanged(entry) => format!(
+            "[ctl] agent {} status={}",
+            entry.thread_id.as_str(),
+            agent_thread_status_label(entry.status)
+        ),
+        ControlEntry::AgentThreadMessageRouted(entry) => format!(
+            "[ctl] agent message {} status={}",
+            entry.route_id.as_str(),
+            agent_route_status_label(entry.status)
+        ),
+        ControlEntry::AgentMailboxMessage(entry) => format!(
+            "[ctl] agent mailbox {} status={}",
+            entry.route_id.as_str(),
+            agent_mailbox_status_label(entry.status)
+        ),
+        ControlEntry::AgentThreadResultRecorded(entry) => format!(
+            "[ctl] agent result {} status={}",
+            entry.result.thread_id.as_str(),
+            agent_terminal_status_label(entry.result.status)
+        ),
+        ControlEntry::AgentResultContinuation(entry) => format!(
+            "[ctl] agent continuation {} status={:?}",
+            entry.thread_id.as_str(),
+            entry.status
+        ),
+        ControlEntry::AgentThreadDisplayName(entry) => format!(
+            "[ctl] agent name {} {}",
+            entry.thread_id.as_str(),
+            truncate_session_view_text(&entry.display_name, 48)
+        ),
+        ControlEntry::AgentApprovalRoute(route) => format!(
+            "[ctl] agent approval {} call={} status={}",
+            route.route_id.as_str(),
+            route.call_id,
+            agent_route_status_label(route.status)
+        ),
+        ControlEntry::AgentElicitationRoute(route) => format!(
+            "[ctl] agent elicitation {} server={} status={}",
+            route.route_id.as_str(),
+            route.server_name,
+            agent_route_status_label(route.status)
+        ),
+        ControlEntry::AgentRunAttemptStarted(entry) => format!(
+            "[ctl] agent attempt {} thread={} model={}",
+            entry.attempt_id.as_str(),
+            entry.thread_id.as_str(),
+            truncate_session_view_text(&entry.model, 32)
+        ),
+        ControlEntry::AgentRunHeartbeat(entry) => format!(
+            "[ctl] agent heartbeat {} thread={} at={}",
+            entry.attempt_id.as_str(),
+            entry.thread_id.as_str(),
+            entry.updated_at_ms
+        ),
+        ControlEntry::AgentRunInterrupted(entry) => format!(
+            "[ctl] agent interrupted {} thread={}",
+            entry.attempt_id.as_str(),
+            entry.thread_id.as_str()
+        ),
+        ControlEntry::AgentRouteClosed(entry) => {
+            format!("[ctl] agent route {} closed", entry.route_id.as_str())
+        }
+        ControlEntry::AgentMergeSafePoint(entry) => format!(
+            "[ctl] agent merge {} parent={}",
+            entry.thread_id.as_str(),
+            entry.parent_thread_id.as_str()
+        ),
+        ControlEntry::AgentThreadClosed(entry) => {
+            format!("[ctl] agent {} closed", entry.thread_id.as_str())
+        }
+        ControlEntry::ConversationInputQueued(entry) => format!(
+            "[ctl] queue {} kind={:?} prompt={}",
+            entry.queue_id.as_str(),
+            entry.kind,
+            truncate_session_view_text(&entry.prompt, 48)
+        ),
+        ControlEntry::ConversationInputQueueControl(entry) => {
+            format!("[ctl] queue control {:?}", entry.action)
+        }
+        ControlEntry::ConversationInputEdited(entry) => format!(
+            "[ctl] queue {} edited prompt={}",
+            entry.queue_id.as_str(),
+            truncate_session_view_text(&entry.prompt, 48)
+        ),
+        ControlEntry::ConversationInputReordered(entry) => format!(
+            "[ctl] queue {} moved after {}",
+            entry.queue_id.as_str(),
+            entry
+                .after_queue_id
+                .as_ref()
+                .map_or("front", sigil_kernel::ConversationInputQueueId::as_str)
+        ),
+        ControlEntry::ConversationInputStatusChanged(entry) => format!(
+            "[ctl] queue {} status={:?}",
+            entry.queue_id.as_str(),
+            entry.status
+        ),
+        ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
+    }
+}
+
+fn render_tool_execution_line(execution: &ToolExecutionEntry) -> String {
+    format!(
+        "[ctl] execution {} {} status={}",
+        execution.call_id,
+        execution.tool_name,
+        tool_execution_status_label(execution.status)
+    )
 }
 
 fn render_tool_egress_line(egress: &ToolEgressEntry) -> String {

@@ -11,6 +11,7 @@ This page collects the user-facing commands, keys, paths, and environment variab
 | Open help | `F1` |
 | Open slash command selector | `/` |
 | Submit prompt or selected slash command | `Enter` |
+| Toggle right info rail compact/detail | `F2` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
 | Insert composer newline | `Shift-Enter`, `Alt-Enter`, `Ctrl-J` |

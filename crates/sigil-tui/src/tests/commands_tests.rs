@@ -23,6 +23,14 @@ fn maps_tool_card_key_events_to_commands() {
         Some(UiCommand::CheckChangedFilesDiagnostics)
     );
     assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::ALT)),
+        Some(UiCommand::ToggleInfoRailDetail)
+    );
+    assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+        Some(UiCommand::ToggleInfoRailDetail)
+    );
+    assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT)),
         Some(UiCommand::CycleAgentView)
     );
@@ -53,6 +61,7 @@ fn command_metadata_generates_help_and_control_hints() {
     let global = global_control_hints(false);
     assert!(global.iter().any(|hint| hint == "F1: keyboard help"));
     assert!(global.iter().any(|hint| hint == "Ctrl-C: quit"));
+    assert!(global.iter().any(|hint| hint == "F2: info rail"));
     assert!(global.iter().any(|hint| hint == "Alt-A: agent"));
     assert!(
         global
@@ -119,6 +128,9 @@ fn command_metadata_generates_help_and_control_hints() {
         help.iter()
             .any(|line| line == "Alt-D: Run code diagnostics for changed source files.")
     );
+    assert!(help.iter().any(|line| {
+        line == "F2: Toggle the right rail between compact and detailed information."
+    }));
     assert!(help.iter().any(|line| {
         line == "Alt-A: Switch the visible main chat between parent and child agents; /agent can rename child agents."
     }));

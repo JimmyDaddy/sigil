@@ -22,13 +22,14 @@ scripts/tui-mouse-smoke.sh
 
 1. 确认 `/doctor` 输出 `terminal`、`terminal:config`、`terminal:mouse` 和 `terminal:clipboard`。
 2. 打开 `/config`，查看 `Terminal` 区块。
-3. 除非终端或 multiplexer 不能正确处理 mouse mode，否则保持 `mouse_capture = true`。
-4. 除非复制序列被拦截或被可见打印出来，否则保持 `osc52_clipboard = true`。
-5. 除非 transcript 和 approval diff 的滚轮速度过快或过慢，否则保持 `scroll_sensitivity = 3`。
+3. 除非确认当前终端 profile 能正确处理 crossterm 键盘增强协议，否则保持 `keyboard_enhancement = false`。
+4. 除非你需要鼠标支持且终端或 multiplexer 能稳定处理 mouse mode，否则保持 `mouse_capture = false`。
+5. 除非复制序列被拦截或被可见打印出来，否则保持 `osc52_clipboard = true`。
+6. 除非 transcript 和 approval diff 的滚轮速度过快或过慢，否则保持 `scroll_sensitivity = 3`。
 
 ## 鼠标 Smoke
 
-在 iTerm2、Terminal.app、WezTerm、kitty 和你需要支持的终端 profile 里分别检查：
+先在 `sigil.toml` 中临时设置 `[terminal].mouse_capture = true` 并重启 TUI，再在 iTerm2、Terminal.app、WezTerm、kitty 和你需要支持的终端 profile 里分别检查：
 
 1. 点击 composer，输入一个短 prompt。
 2. 打开 `/`，点击一个 slash command 候选，然后按 `Esc`。
@@ -56,10 +57,11 @@ scripts/tui-mouse-smoke.sh
 1. 在对应层里运行 `/doctor`，查看 `terminal:mouse` / `terminal:clipboard`。
 2. 在对应层里重复鼠标 smoke。
 3. 重复复制检查，并粘贴到该层外部。
-4. 如果鼠标事件不正常，设置 `[terminal].mouse_capture = false`，并重启 TUI。
-5. 如果复制被拦截或控制序列可见，设置 `[terminal].osc52_clipboard = false`。
+4. 如果启动后键盘输入像是卡住，设置 `[terminal].keyboard_enhancement = false`，并重启 TUI。
+5. 如果鼠标事件不正常或滚动很重，设置 `[terminal].mouse_capture = false`，并重启 TUI。
+6. 如果复制被拦截或控制序列可见，设置 `[terminal].osc52_clipboard = false`。
 
-`mouse_capture` 下一次启动生效。`osc52_clipboard` 每次复制时都会读取当前配置。`scroll_sensitivity` 在保存配置并重新加载后生效。
+`keyboard_enhancement` 和 `mouse_capture` 下一次启动生效。`osc52_clipboard` 每次复制时都会读取当前配置。`scroll_sensitivity` 在保存配置并重新加载后生效。
 
 ## 结果模板
 
@@ -67,6 +69,7 @@ scripts/tui-mouse-smoke.sh
 Terminal:
 TERM:
 Layers: none / tmux / screen / SSH / WSL
+keyboard_enhancement:
 mouse_capture:
 osc52_clipboard:
 scroll_sensitivity:

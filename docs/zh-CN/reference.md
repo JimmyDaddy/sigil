@@ -11,6 +11,7 @@
 | 打开帮助 | `F1` |
 | 打开 slash command selector | `/` |
 | 提交 prompt 或已选 slash command | `Enter` |
+| 切换右侧 info rail 精简/详情 | `F2` |
 | 滚动 transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | 切换默认 permission mode | `Shift-Tab` |
 | 插入 composer 换行 | `Shift-Enter`、`Alt-Enter`、`Ctrl-J` |

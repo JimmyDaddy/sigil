@@ -150,12 +150,13 @@ Sigil 会把文件工具限制在 workspace root 内，并拒绝：
 
 ```toml
 [terminal]
+keyboard_enhancement = false
 mouse_capture = false
 osc52_clipboard = false
 scroll_sensitivity = 3
 ```
 
-`mouse_capture` 下次启动生效。`osc52_clipboard` 每次复制时检查。`scroll_sensitivity` 在保存配置并重新加载后生效。
+`keyboard_enhancement` 和 `mouse_capture` 下次启动生效。`osc52_clipboard` 每次复制时检查。`scroll_sensitivity` 在保存配置并重新加载后生效。
 
 tmux、screen、SSH、WSL 和手工 smoke check 见 [terminal-compatibility.md](terminal-compatibility.md)。
 

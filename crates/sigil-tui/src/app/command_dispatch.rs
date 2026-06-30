@@ -84,6 +84,10 @@ impl AppState {
             self.open_keyboard_help();
             return true;
         }
+        if command == UiCommand::ToggleInfoRailDetail {
+            self.toggle_info_rail_detail();
+            return true;
+        }
         if command == UiCommand::CycleAgentView {
             if self.pending_approval.is_some() {
                 self.last_notice =
@@ -117,6 +121,7 @@ impl AppState {
             | UiCommand::CancelOrQuit
             | UiCommand::ToggleWriteMode
             | UiCommand::ToggleThinking
+            | UiCommand::ToggleInfoRailDetail
             | UiCommand::OpenKeyboardHelp
             | UiCommand::OpenConfig
             | UiCommand::OpenDoctor

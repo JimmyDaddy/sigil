@@ -38,6 +38,7 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 | --- | --- |
 | Open help | `F1` |
 | Open slash command selector | `/` |
+| Toggle right info rail compact/detail | `F2` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
 | Edit composer text | `Ctrl-A/E`, `Ctrl-B/F`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
@@ -53,9 +54,9 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 
 When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. `Shift-Enter`, `Alt-Enter`, and `Ctrl-J` insert a newline. `Ctrl-Z` restores the last non-empty draft cleared with `Esc`; it is a single draft restore, not a general undo stack.
 
-Mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header or hidden-preview expand/collapse when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
+When `[terminal].mouse_capture = true`, mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header or hidden-preview expand/collapse. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
 
-Use the `Terminal` section in `/config` to adjust mouse capture, OSC52 copy, and scroll sensitivity.
+Use the `Terminal` section in `/config` to review keyboard enhancement, mouse capture, OSC52 copy, and scroll sensitivity. Edit `sigil.toml` for compatibility overrides.
 
 For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatibility.md](terminal-compatibility.md).
 
@@ -178,7 +179,7 @@ For temporary use or CI, prefer an environment variable such as `SIGIL_API_KEY`.
 
 ### What if my terminal has broken mouse or clipboard support?
 
-Use the `Terminal` section in `/config`, or set `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` / `[terminal].scroll_sensitivity = 3` in `sigil.toml`. Mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action; scroll sensitivity controls mouse wheel row steps in transcript and approval diff views.
+Review the `Terminal` section in `/config`, or set `[terminal].keyboard_enhancement = false` / `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` / `[terminal].scroll_sensitivity = 3` in `sigil.toml`. Keyboard enhancement and mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action; scroll sensitivity controls mouse wheel row steps in transcript and approval diff views.
 
 Run `/doctor` to see the detected terminal profile, multiplexer or remote layers, and clipboard bridge warnings.
 

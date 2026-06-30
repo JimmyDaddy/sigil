@@ -48,8 +48,11 @@ use unicode_width::UnicodeWidthStr;
 const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
-// Seed restored scrollback in one pass so startup does not visibly redraw chunk by chunk.
-const SCROLLBACK_SEED_CHUNK_LINES: usize = usize::MAX;
+#[cfg(not(test))]
+const EVENT_BATCH_LIMIT: usize = 64;
+// Keep restored scrollback seeding small enough that startup reaches the first
+// interactive frame quickly even when the previous session has a long timeline.
+const SCROLLBACK_SEED_CHUNK_LINES: usize = 256;
 #[cfg(not(test))]
 const MAX_SCROLLBACK_INSERT_ROWS: usize = u16::MAX as usize;
 #[cfg(not(test))]
@@ -73,7 +76,11 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     cleanup.raw_mode_enabled = true;
     let panic_hook = TuiPanicHookGuard::install();
 
-    let keyboard_enhancement_enabled = enable_keyboard_enhancement(&mut stdout)?;
+    let keyboard_enhancement_enabled = if app.terminal_keyboard_enhancement_enabled() {
+        enable_keyboard_enhancement(&mut stdout)?
+    } else {
+        false
+    };
     cleanup.keyboard_enhancement_enabled = keyboard_enhancement_enabled;
     let bracketed_paste_enabled = enable_bracketed_paste(&mut stdout)?;
     cleanup.bracketed_paste_enabled = bracketed_paste_enabled;
@@ -316,30 +323,71 @@ fn run_app(
         }
 
         if event::poll(poll_interval(app, &scrollback))? {
-            match event::read()? {
-                CrosstermEvent::Resize(_, _) => {
-                    terminal.autoresize()?;
-                    needs_render = true;
+            let mut processed_events = 0;
+            loop {
+                let crossterm_event = event::read()?;
+                let break_batch = process_terminal_event(
+                    terminal,
+                    app,
+                    worker,
+                    &mut needs_render,
+                    latest_frame_area,
+                    size.into(),
+                    crossterm_event,
+                    spawn_worker,
+                )?;
+                processed_events += 1;
+                if break_batch
+                    || processed_events >= EVENT_BATCH_LIMIT
+                    || !event::poll(Duration::ZERO)?
+                {
+                    break;
                 }
-                CrosstermEvent::Mouse(mouse) => {
-                    let layout = mouse_layout_snapshot(latest_frame_area, size.into(), app);
-                    let outcome = app.handle_mouse_event(mouse.into(), &layout)?;
-                    needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
-                }
-                CrosstermEvent::Paste(text) => {
-                    app.handle_paste_text(&text);
-                    needs_render = true;
-                }
-                CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    let action = app.handle_key_event(key)?;
-                    needs_render |= apply_key_action(app, worker, action, spawn_worker)?;
-                }
-                _ => {}
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(not(test))]
+fn process_terminal_event<F>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    needs_render: &mut bool,
+    latest_frame_area: Rect,
+    terminal_size: Rect,
+    crossterm_event: CrosstermEvent,
+    spawn_worker: F,
+) -> Result<bool>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    match crossterm_event {
+        CrosstermEvent::Resize(_, _) => {
+            terminal.autoresize()?;
+            *needs_render = true;
+            Ok(true)
+        }
+        CrosstermEvent::Mouse(mouse) => {
+            let layout = mouse_layout_snapshot(latest_frame_area, terminal_size, app);
+            let outcome = app.handle_mouse_event(mouse.into(), &layout)?;
+            *needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
+            Ok(false)
+        }
+        CrosstermEvent::Paste(text) => {
+            app.handle_paste_text(&text);
+            *needs_render = true;
+            Ok(false)
+        }
+        CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            let action = app.handle_key_event(key)?;
+            *needs_render |= apply_key_action(app, worker, action, spawn_worker)?;
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) -> LayoutSnapshot {
@@ -839,13 +887,7 @@ fn plan_scrollback_sync_with_chunk_size(
 
     let session_changed = sync_state.session_id.as_deref() != Some(session_id);
     if session_changed {
-        let to_index = chunk_size.min(next_line_count);
-        return ScrollbackSyncPlan::Seed {
-            insert_separator: sync_state.session_id.is_some() && sync_state.line_count > 0,
-            from_index: 0,
-            to_index,
-            total_line_count: next_line_count,
-        };
+        return ScrollbackSyncPlan::Noop;
     }
     if next_line_count > sync_state.line_count && shared_hash == sync_state.sequence_hash {
         return ScrollbackSyncPlan::Append {

@@ -17,6 +17,8 @@ use super::{
     task_sidebar::task_child_session_status_label,
 };
 
+const EVENT_DETAIL_MAX_CHARS: usize = 240;
+
 impl AppState {
     pub(super) fn live_panel_height(&self) -> u16 {
         self.terminal_height
@@ -144,7 +146,7 @@ impl AppState {
     pub(super) fn push_event(&mut self, label: impl Into<String>, detail: impl Into<String>) {
         self.events.push(EventEntry {
             label: label.into(),
-            detail: detail.into(),
+            detail: bounded_event_detail(detail.into()),
         });
         if self.events.len() > 400 {
             self.events.remove(0);
@@ -1098,6 +1100,10 @@ impl AppState {
             ),
         })
     }
+}
+
+fn bounded_event_detail(detail: String) -> String {
+    truncate_session_view_text(&detail, EVENT_DETAIL_MAX_CHARS)
 }
 
 fn task_child_session_is_terminal(status: sigil_kernel::TaskChildSessionStatus) -> bool {

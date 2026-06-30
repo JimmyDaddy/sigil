@@ -15,9 +15,9 @@ use crate::{
 use anyhow::Context;
 use sigil_kernel::{
     AgentResultContinuationProjection, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadProjection, AgentThreadStatus, ControlEntry, JsonlSessionStore, SessionLogEntry,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskRunProjection,
-    normalize_task_agent_display_name,
+    AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus, ControlEntry,
+    JsonlSessionStore, SessionLogEntry, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskRunProjection, TaskStateProjection, normalize_task_agent_display_name,
 };
 
 use super::{
@@ -64,17 +64,7 @@ impl AppState {
     }
 
     pub(crate) fn agent_graph_summary_line(&self) -> Option<String> {
-        match sigil_runtime::agent_graph_product_summary_from_session_log(&self.session_log_path) {
-            Ok(Some(summary)) => Some(summary.display_line()),
-            Ok(None) => sigil_runtime::agent_graph_product_summary_from_entries(
-                &self.current_session_entries,
-            )
-            .map(|summary| summary.display_line()),
-            Err(_) => sigil_runtime::agent_graph_product_summary_from_entries(
-                &self.current_session_entries,
-            )
-            .map(|summary| summary.with_projection_degraded().display_line()),
-        }
+        self.session_view_cache().agent_graph_summary_line.clone()
     }
 
     pub(crate) fn composer_agent_rows(&self) -> Vec<SidebarAgentRow> {
@@ -491,7 +481,8 @@ impl AppState {
         else {
             return None;
         };
-        sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
+        self.session_view_cache()
+            .task_projection
             .latest_task()
             .and_then(|task| {
                 task.child_sessions.values().find(|child| {
@@ -551,36 +542,7 @@ impl AppState {
             thread_id: None,
             muted: false,
         }];
-        let task_projection =
-            sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries);
-        let agent_projection =
-            sigil_kernel::AgentThreadStateProjection::from_entries(&self.current_session_entries);
-        let continuation_projection =
-            AgentResultContinuationProjection::from_entries(&self.current_session_entries);
-        let latest_task = task_projection.latest_task();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut child_ordinal = 0usize;
-        for thread_id in &agent_projection.thread_replay_order {
-            if !seen.insert(thread_id.clone()) {
-                continue;
-            }
-            if let Some(thread) = agent_projection.threads.get(thread_id) {
-                if thread.closed || thread.status == AgentThreadStatus::Closed {
-                    continue;
-                }
-                child_ordinal += 1;
-                let continuation_unresolved = continuation_projection
-                    .statuses
-                    .get(thread_id)
-                    .is_some_and(|status| status.is_unresolved());
-                items.push(agent_sidebar_item_from_thread(
-                    thread,
-                    latest_task,
-                    child_ordinal,
-                    continuation_unresolved,
-                ));
-            }
-        }
+        items.extend(self.session_view_cache().agent_child_items.clone());
         items
     }
 
@@ -679,7 +641,8 @@ impl AppState {
         else {
             return None;
         };
-        sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
+        self.session_view_cache()
+            .task_projection
             .latest_task()
             .and_then(|task| {
                 task.child_sessions.values().find(|child| {
@@ -702,9 +665,11 @@ impl AppState {
         &self,
         thread_id: &AgentThreadId,
     ) -> Option<AgentThreadProjection> {
-        let projection =
-            sigil_kernel::AgentThreadStateProjection::from_entries(&self.current_session_entries);
-        projection.threads.get(thread_id).cloned()
+        self.session_view_cache()
+            .agent_projection
+            .threads
+            .get(thread_id)
+            .cloned()
     }
 
     pub(crate) fn active_agent_thread_projection(&self) -> Option<AgentThreadProjection> {
@@ -1004,6 +969,39 @@ fn bounded_composer_agent_rows(rows: Vec<SidebarAgentRow>) -> Vec<SidebarAgentRo
         .enumerate()
         .filter_map(|(index, row)| selected_indexes.contains(&index).then_some(row))
         .collect()
+}
+
+pub(super) fn agent_sidebar_child_items_from_projections(
+    task_projection: &TaskStateProjection,
+    agent_projection: &AgentThreadStateProjection,
+    continuation_projection: &AgentResultContinuationProjection,
+) -> Vec<AgentSidebarItem> {
+    let latest_task = task_projection.latest_task();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut child_ordinal = 0usize;
+    let mut items = Vec::new();
+    for thread_id in &agent_projection.thread_replay_order {
+        if !seen.insert(thread_id.clone()) {
+            continue;
+        }
+        if let Some(thread) = agent_projection.threads.get(thread_id) {
+            if thread.closed || thread.status == AgentThreadStatus::Closed {
+                continue;
+            }
+            child_ordinal += 1;
+            let continuation_unresolved = continuation_projection
+                .statuses
+                .get(thread_id)
+                .is_some_and(|status| status.is_unresolved());
+            items.push(agent_sidebar_item_from_thread(
+                thread,
+                latest_task,
+                child_ordinal,
+                continuation_unresolved,
+            ));
+        }
+    }
+    items
 }
 
 fn agent_sidebar_item_from_thread(

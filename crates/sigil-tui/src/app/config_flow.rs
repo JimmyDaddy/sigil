@@ -437,6 +437,10 @@ impl AppState {
             ConfigSection::Terminal => {
                 lines.push("[interaction]".to_owned());
                 lines.push(render_config_readonly_row(
+                    "Keyboard enhancement",
+                    bool_summary(config_state.draft.terminal_keyboard_enhancement),
+                ));
+                lines.push(render_config_readonly_row(
                     "Mouse capture",
                     bool_summary(config_state.draft.terminal_mouse_capture),
                 ));
@@ -2185,6 +2189,7 @@ impl AppState {
         self.permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
         self.memory_config = root_config.memory.clone();
         self.compaction_config = root_config.compaction.clone();
+        self.refresh_session_view_cache();
         self.code_intelligence_status =
             code_intelligence_config_status(&root_config.code_intelligence);
         self.code_intelligence_server_lines.clear();

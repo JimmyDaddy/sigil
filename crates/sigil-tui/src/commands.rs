@@ -8,6 +8,7 @@ pub(crate) enum UiCommand {
     CancelOrQuit,
     ToggleWriteMode,
     ToggleThinking,
+    ToggleInfoRailDetail,
     OpenKeyboardHelp,
     OpenConfig,
     OpenDoctor,
@@ -85,6 +86,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: None,
         label: "Thinking view",
         help: "Expand or collapse thinking blocks when no activity is focused.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
+        command: UiCommand::ToggleInfoRailDetail,
+        keys: &[KeyBinding { label: "F2" }],
+        slash: None,
+        label: "Info rail",
+        help: "Toggle the right rail between compact and detailed information.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -214,6 +223,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
 pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
     match key.code {
         KeyCode::F(1) => Some(UiCommand::OpenKeyboardHelp),
+        KeyCode::F(2) => Some(UiCommand::ToggleInfoRailDetail),
         KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers == KeyModifiers::CONTROL => {
             Some(UiCommand::FocusLatestToolCard)
         }
@@ -228,6 +238,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         }
         KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::CheckChangedFilesDiagnostics)
+        }
+        KeyCode::Char('i') | KeyCode::Char('I') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::ToggleInfoRailDetail)
         }
         KeyCode::Char('a') | KeyCode::Char('A') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::CycleAgentView)
@@ -249,6 +262,7 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
         control_hint(UiCommand::OpenKeyboardHelp).expect("keyboard help metadata exists"),
         "/ or 、: command palette".to_owned(),
         control_hint(UiCommand::ToggleWriteMode).expect("write mode metadata exists"),
+        control_hint(UiCommand::ToggleInfoRailDetail).expect("info rail metadata exists"),
         if is_busy {
             "Esc: interrupt".to_owned()
         } else {

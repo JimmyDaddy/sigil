@@ -1242,7 +1242,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     assert!(detail.contains("Terminal 7/12 · terminal integration"));
     assert!(detail.contains("[interaction]"));
-    assert!(detail.contains("- Mouse capture: yes"));
+    assert!(detail.contains("- Mouse capture: no"));
     assert!(detail.contains("- OSC52 clipboard: yes"));
     assert!(detail.contains("- Scroll sensitivity: 3 rows"));
     assert!(detail.contains("[compatibility]"));
@@ -3847,7 +3847,7 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(
-        app.config_state
+        !app.config_state
             .as_ref()
             .expect("config state should exist")
             .draft

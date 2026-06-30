@@ -1,4 +1,5 @@
 use std::{
+    cell::{Ref, RefCell},
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
     path::{Path, PathBuf},
@@ -30,11 +31,12 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
-    AgentThreadId, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
-    ConversationInputKind, ConversationInputQueueId, ConversationInputTarget, MemoryConfig,
-    MutationArtifactCleanupTarget, MutationArtifactInventoryItem, MutationArtifactRetentionReport,
-    PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig,
-    SessionLogEntry, SessionStats, StorageConfig, ToolPreviewSnapshot, plan_text_hash,
+    AgentResultContinuationProjection, AgentThreadId, AgentThreadStateProjection, ApprovalMode,
+    CompactionConfig, CompactionRecord, CompactionThresholdStatus, ConversationInputKind,
+    ConversationInputQueueId, ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
+    MutationArtifactInventoryItem, MutationArtifactRetentionReport, PlanApprovalPermission,
+    ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig, SessionLogEntry,
+    SessionStats, StorageConfig, TaskStateProjection, ToolPreviewSnapshot, plan_text_hash,
     resolve_workspace_root,
 };
 use sigil_runtime::{
@@ -196,6 +198,19 @@ struct AgentSidebarItem {
     muted: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SessionViewCache {
+    entries_len: usize,
+    entries_revision: u64,
+    task_projection: TaskStateProjection,
+    agent_projection: AgentThreadStateProjection,
+    task_sidebar_lines: Vec<String>,
+    task_strip_view: Option<task_sidebar::TaskStripView>,
+    agent_child_items: Vec<AgentSidebarItem>,
+    agent_graph_summary_line: Option<String>,
+    compaction_preview_line: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingPlanApproval {
     pub(crate) plan_text: String,
@@ -257,6 +272,7 @@ pub struct AppState {
     pub timeline_scroll_back: usize,
     pub approval_scroll_back: usize,
     pub activity_scroll_back: usize,
+    info_rail_detail: bool,
     pub session_history: Vec<SessionHistoryEntry>,
     pub session_history_visible_limit: usize,
     pub session_history_selected: usize,
@@ -269,6 +285,8 @@ pub struct AppState {
     modal_state: Option<ModalState>,
     session_view_mode: SessionViewMode,
     current_session_entries: Vec<SessionLogEntry>,
+    current_session_entries_revision: u64,
+    session_view_cache: RefCell<SessionViewCache>,
     tool_preview_snapshots: HashMap<String, ToolPreviewSnapshot>,
     latest_compaction_record: Option<CompactionRecord>,
     compaction_config: CompactionConfig,
@@ -505,6 +523,7 @@ impl AppState {
             timeline_scroll_back: 0,
             approval_scroll_back: 0,
             activity_scroll_back: 0,
+            info_rail_detail: false,
             session_history: Vec::new(),
             session_history_visible_limit: 9,
             session_history_selected: 0,
@@ -517,6 +536,8 @@ impl AppState {
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
             current_session_entries: Vec::new(),
+            current_session_entries_revision: 0,
+            session_view_cache: RefCell::new(SessionViewCache::default()),
             tool_preview_snapshots: HashMap::new(),
             latest_compaction_record: None,
             compaction_config: root_config.compaction.clone(),
@@ -643,6 +664,7 @@ impl AppState {
             timeline_scroll_back: 0,
             approval_scroll_back: 0,
             activity_scroll_back: 0,
+            info_rail_detail: false,
             session_history: Vec::new(),
             session_history_visible_limit: 9,
             session_history_selected: 0,
@@ -655,6 +677,8 @@ impl AppState {
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
             current_session_entries: Vec::new(),
+            current_session_entries_revision: 0,
+            session_view_cache: RefCell::new(SessionViewCache::default()),
             tool_preview_snapshots: HashMap::new(),
             latest_compaction_record: None,
             compaction_config: CompactionConfig::default(),
@@ -858,6 +882,7 @@ impl AppState {
         self.approval_scroll_back = 0;
         self.activity_scroll_back = 0;
         self.current_session_entries.clear();
+        self.mark_current_session_entries_changed();
         self.tool_preview_snapshots.clear();
         self.latest_compaction_record = None;
         self.run_phase = RunPhase::Idle;
@@ -1464,7 +1489,13 @@ impl AppState {
     pub fn terminal_mouse_capture_enabled(&self) -> bool {
         self.config_snapshot
             .as_ref()
-            .is_none_or(|config| config.terminal.mouse_capture)
+            .is_some_and(|config| config.terminal.mouse_capture)
+    }
+
+    pub fn terminal_keyboard_enhancement_enabled(&self) -> bool {
+        self.config_snapshot
+            .as_ref()
+            .is_some_and(|config| config.terminal.keyboard_enhancement)
     }
 
     pub fn terminal_osc52_clipboard_enabled(&self) -> bool {
@@ -2033,11 +2064,87 @@ impl AppState {
     }
 
     pub(crate) fn task_sidebar_lines(&self) -> Vec<String> {
-        task_sidebar::task_sidebar_lines(&self.current_session_entries)
+        self.session_view_cache().task_sidebar_lines.clone()
     }
 
     pub(crate) fn task_strip_view(&self) -> Option<task_sidebar::TaskStripView> {
-        task_sidebar::task_strip_view(&self.current_session_entries)
+        self.session_view_cache().task_strip_view.clone()
+    }
+
+    fn session_view_cache(&self) -> Ref<'_, SessionViewCache> {
+        self.ensure_session_view_cache();
+        self.session_view_cache.borrow()
+    }
+
+    fn ensure_session_view_cache(&self) {
+        let needs_refresh = {
+            let cache = self.session_view_cache.borrow();
+            cache.entries_len != self.current_session_entries.len()
+                || cache.entries_revision != self.current_session_entries_revision
+        };
+        if needs_refresh {
+            let cache = self.build_session_view_cache();
+            *self.session_view_cache.borrow_mut() = cache;
+        }
+    }
+
+    fn mark_current_session_entries_changed(&mut self) {
+        self.current_session_entries_revision =
+            self.current_session_entries_revision.saturating_add(1);
+        self.refresh_session_view_cache();
+    }
+
+    fn refresh_session_view_cache(&mut self) {
+        let cache = self.build_session_view_cache();
+        *self.session_view_cache.borrow_mut() = cache;
+    }
+
+    fn build_session_view_cache(&self) -> SessionViewCache {
+        let entries = &self.current_session_entries;
+        let task_projection = TaskStateProjection::from_entries(entries);
+        let agent_projection = AgentThreadStateProjection::from_entries(entries);
+        let continuation_projection = AgentResultContinuationProjection::from_entries(entries);
+        let agent_child_items = agent_flow::agent_sidebar_child_items_from_projections(
+            &task_projection,
+            &agent_projection,
+            &continuation_projection,
+        );
+        let agent_graph_summary_line =
+            sigil_runtime::agent_graph_product_summary_from_entries(entries)
+                .map(|summary| summary.display_line());
+        SessionViewCache {
+            entries_len: entries.len(),
+            entries_revision: self.current_session_entries_revision,
+            task_projection,
+            agent_projection,
+            task_sidebar_lines: task_sidebar::task_sidebar_lines(entries),
+            task_strip_view: task_sidebar::task_strip_view(entries),
+            agent_child_items,
+            agent_graph_summary_line,
+            compaction_preview_line: self.compaction_preview_sidebar_line(entries),
+        }
+    }
+
+    fn compaction_preview_sidebar_line(&self, entries: &[SessionLogEntry]) -> Option<String> {
+        if entries.is_empty() {
+            return None;
+        }
+        let session = Session::from_entries(
+            self.provider_name.clone(),
+            self.model_name.clone(),
+            entries.to_vec(),
+        );
+        match session.compaction_preview(&self.compaction_config) {
+            Ok(Some(preview)) => Some(format!(
+                "compact: fold {} keep {}",
+                preview.record.compacted_message_count, preview.record.retained_tail_message_count
+            )),
+            Ok(None) => Some("compact: nothing to fold".to_owned()),
+            Err(error) => Some(format!(
+                "compact: {}",
+                truncate_session_view_text(&error.to_string(), 28)
+            )),
+        }
     }
 
     pub(crate) fn pending_plan_approval(&self) -> Option<&PendingPlanApproval> {
@@ -2068,6 +2175,21 @@ impl AppState {
 
     pub(crate) fn reasoning_effort_label(&self) -> &'static str {
         self.reasoning_effort.as_str()
+    }
+
+    pub(crate) fn info_rail_detail_enabled(&self) -> bool {
+        self.info_rail_detail
+    }
+
+    pub(crate) fn toggle_info_rail_detail(&mut self) {
+        self.info_rail_detail = !self.info_rail_detail;
+        let mode = if self.info_rail_detail {
+            "detail"
+        } else {
+            "compact"
+        };
+        self.last_notice = Some(format!("info rail: {mode}"));
+        self.push_event("info_rail", mode);
     }
 
     pub(crate) fn context_usage_line(&self) -> String {
@@ -2150,24 +2272,13 @@ impl AppState {
             format!("spent since opening: {delta_spent}"),
             balance_line,
         ];
-        if !self.is_busy && !self.current_session_entries.is_empty() {
-            let session = Session::from_entries(
-                self.provider_name.clone(),
-                self.model_name.clone(),
-                self.current_session_entries.clone(),
-            );
-            match session.compaction_preview(&self.compaction_config) {
-                Ok(Some(preview)) => lines.push(format!(
-                    "compact: fold {} keep {}",
-                    preview.record.compacted_message_count,
-                    preview.record.retained_tail_message_count
-                )),
-                Ok(None) => lines.push("compact: nothing to fold".to_owned()),
-                Err(error) => lines.push(format!(
-                    "compact: {}",
-                    truncate_session_view_text(&error.to_string(), 28)
-                )),
-            }
+        let compaction_preview_line = if self.is_busy {
+            None
+        } else {
+            self.session_view_cache().compaction_preview_line.clone()
+        };
+        if let Some(line) = compaction_preview_line {
+            lines.push(line);
         }
         self.usage_sidebar_cache = lines;
     }

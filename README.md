@@ -94,6 +94,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Start or switch sessions | `/new`, `/resume` |
 | Change common settings | `/config` |
 | Diagnose setup/auth/MCP/LSP | `/doctor` |
+| Toggle the right info rail between compact and detail | `F2` |
 | Cycle default permission mode | `Shift-Tab` |
 | Cancel a run or close an overlay | `Ctrl-C` or `Esc` |
 

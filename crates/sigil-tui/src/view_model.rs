@@ -14,6 +14,10 @@ use crate::{
     ui::StatusKind,
 };
 
+const INFO_RAIL_AGENT_ROW_LIMIT: usize = 3;
+const INFO_RAIL_TASK_LINE_LIMIT: usize = 4;
+const INFO_RAIL_CONTROL_LIMIT: usize = 3;
+
 #[derive(Debug, Clone)]
 pub(crate) struct UiViewModel {
     pub info_rail: InfoRailViewModel,
@@ -47,49 +51,237 @@ pub(crate) struct InfoRailViewModel {
 
 impl InfoRailViewModel {
     fn from_app(app: &AppState) -> Self {
-        let mut controls = global_control_hints(app.is_busy && app.pending_approval.is_none());
-        if app.has_tool_cards() {
-            controls.retain(|hint| !hint.starts_with("Ctrl-T: thinking"));
-            controls.extend(tool_card_control_hints());
-        }
+        let detail = app.info_rail_detail_enabled();
+        let controls = info_rail_controls(app, detail);
 
         Self {
             session_title: app.session_display_title(),
             workspace_label: display_path_label(&app.workspace_root),
-            session_lines: app
-                .session_sidebar_lines()
-                .into_iter()
-                .chain(std::iter::once(if app.memory_enabled {
-                    format!(
-                        "memory: {} docs · {}",
-                        app.memory_document_count, app.memory_last_status
-                    )
-                } else {
-                    "memory: off".to_owned()
-                }))
-                .chain(app.task_memory_sidebar_lines())
-                .collect(),
-            permission_lines: app.permission_card_lines(),
+            session_lines: if detail {
+                detail_info_rail_session_lines(app)
+            } else {
+                info_rail_session_lines(app)
+            },
+            permission_lines: if detail {
+                app.permission_card_lines()
+            } else {
+                info_rail_permission_lines(app)
+            },
             agent_lines: app
                 .agent_graph_summary_line()
                 .into_iter()
-                .chain(app.agent_sidebar_rows().into_iter().map(|row| {
-                    format!(
-                        "{} {}: {} {}",
-                        row.focus_symbol(true),
-                        row.label,
-                        row.status_symbol(),
-                        row.compact_detail()
-                    )
-                }))
+                .chain(
+                    displayed_info_rail_agent_rows(app, detail)
+                        .into_iter()
+                        .map(|row| {
+                            format!(
+                                "{} {}: {} {}",
+                                row.focus_symbol(true),
+                                row.label,
+                                row.status_symbol(),
+                                row.compact_detail()
+                            )
+                        }),
+                )
                 .collect(),
             mcp_lines: app.mcp_sidebar_lines(),
             code_lines: app.code_intelligence_sidebar_lines(),
-            task_lines: app.task_sidebar_lines(),
-            usage_lines: app.usage_sidebar_lines().to_vec(),
+            task_lines: if detail {
+                app.task_sidebar_lines()
+            } else {
+                compact_info_rail_task_lines(app)
+            },
+            usage_lines: if detail {
+                app.usage_sidebar_lines().to_vec()
+            } else {
+                compact_info_rail_usage_lines(app)
+            },
             controls,
         }
     }
+}
+
+fn displayed_info_rail_agent_rows(app: &AppState, detail: bool) -> Vec<SidebarAgentRow> {
+    if detail {
+        app.agent_sidebar_rows()
+    } else {
+        info_rail_agent_rows(app)
+    }
+}
+
+pub(crate) fn info_rail_agent_rows(app: &AppState) -> Vec<SidebarAgentRow> {
+    info_rail_agent_row_entries(app)
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect()
+}
+
+pub(crate) fn displayed_info_rail_agent_row_entries(
+    app: &AppState,
+) -> Vec<(usize, SidebarAgentRow)> {
+    if app.info_rail_detail_enabled() {
+        app.agent_sidebar_rows().into_iter().enumerate().collect()
+    } else {
+        info_rail_agent_row_entries(app)
+    }
+}
+
+pub(crate) fn info_rail_agent_row_entries(app: &AppState) -> Vec<(usize, SidebarAgentRow)> {
+    let rows = app.agent_sidebar_rows();
+    if rows.len() <= INFO_RAIL_AGENT_ROW_LIMIT {
+        return rows.into_iter().enumerate().collect();
+    }
+
+    let mut selected_indexes = std::collections::BTreeSet::new();
+    for (index, row) in rows.iter().enumerate() {
+        if row.active || row.selected {
+            selected_indexes.insert(index);
+        }
+    }
+    for (index, row) in rows.iter().enumerate() {
+        if selected_indexes.len() >= INFO_RAIL_AGENT_ROW_LIMIT {
+            break;
+        }
+        if !row.muted {
+            selected_indexes.insert(index);
+        }
+    }
+    for index in (0..rows.len()).rev() {
+        if selected_indexes.len() >= INFO_RAIL_AGENT_ROW_LIMIT {
+            break;
+        }
+        selected_indexes.insert(index);
+    }
+
+    rows.into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| selected_indexes.contains(&index).then_some((index, row)))
+        .collect()
+}
+
+pub(crate) fn info_rail_session_lines(app: &AppState) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "model: {} · {}",
+            app.model_name,
+            app.reasoning_effort_label()
+        ),
+        format!(
+            "state: {} · {}",
+            app.run_phase_label(),
+            short_session_label(&app.session_id)
+        ),
+    ];
+    if app.memory_enabled {
+        lines.push(format!(
+            "memory: {} docs · {}",
+            app.memory_document_count, app.memory_last_status
+        ));
+    } else {
+        lines.push("memory: off".to_owned());
+    }
+    let task_memory = app.task_memory_sidebar_lines();
+    if task_memory
+        .first()
+        .is_some_and(|line| line != "task memory: none yet")
+    {
+        lines.extend(task_memory);
+    }
+    lines
+}
+
+fn detail_info_rail_session_lines(app: &AppState) -> Vec<String> {
+    app.session_sidebar_lines()
+        .into_iter()
+        .chain(std::iter::once(if app.memory_enabled {
+            format!(
+                "memory: {} docs · {}",
+                app.memory_document_count, app.memory_last_status
+            )
+        } else {
+            "memory: off".to_owned()
+        }))
+        .chain(app.task_memory_sidebar_lines())
+        .collect()
+}
+
+pub(crate) fn info_rail_permission_lines(app: &AppState) -> Vec<String> {
+    let scope = if app.is_busy {
+        "locked during run"
+    } else {
+        "saved default"
+    };
+    vec![format!("mode: {} · {scope}", app.permission_default_mode)]
+}
+
+fn compact_info_rail_task_lines(app: &AppState) -> Vec<String> {
+    let lines = app.task_sidebar_lines();
+    if lines.len() <= INFO_RAIL_TASK_LINE_LIMIT {
+        return lines;
+    }
+    let preferred = ["task:", "status:", "progress:", "current:", "last:"];
+    let mut compact = Vec::new();
+    for prefix in preferred {
+        if let Some(line) = lines.iter().find(|line| line.starts_with(prefix)) {
+            compact.push(line.clone());
+        }
+    }
+    if compact.is_empty() {
+        compact.extend(lines.into_iter().take(INFO_RAIL_TASK_LINE_LIMIT));
+    }
+    compact.truncate(INFO_RAIL_TASK_LINE_LIMIT);
+    compact
+}
+
+fn compact_info_rail_usage_lines(app: &AppState) -> Vec<String> {
+    let lines = app.usage_sidebar_lines();
+    let preferred = ["ctx:", "compact:", "spent since opening:", "balance:"];
+    preferred
+        .iter()
+        .filter_map(|prefix| lines.iter().find(|line| line.starts_with(prefix)).cloned())
+        .collect()
+}
+
+fn info_rail_controls(app: &AppState, detail: bool) -> Vec<String> {
+    let mut controls = global_control_hints(app.is_busy && app.pending_approval.is_none());
+    if app.has_tool_cards() {
+        controls.retain(|hint| !hint.starts_with("Ctrl-T: thinking"));
+        controls.extend(tool_card_control_hints());
+    }
+    if detail {
+        return controls;
+    }
+
+    let preferred: &[&str] = if app.has_tool_cards() {
+        &["F2:", "Ctrl-T:", "Ctrl-G:"]
+    } else {
+        &["F1:", "F2:", "Ctrl-C:", "Esc:", "/ or `:"]
+    };
+    let mut compact = Vec::new();
+    for prefix in preferred {
+        if let Some(line) = controls.iter().find(|line| line.starts_with(prefix)) {
+            compact.push(line.clone());
+        }
+        if compact.len() >= INFO_RAIL_CONTROL_LIMIT {
+            break;
+        }
+    }
+    if compact.len() < INFO_RAIL_CONTROL_LIMIT {
+        for line in controls {
+            if compact.iter().any(|existing| existing == &line) {
+                continue;
+            }
+            compact.push(line);
+            if compact.len() >= INFO_RAIL_CONTROL_LIMIT {
+                break;
+            }
+        }
+    }
+    compact
+}
+
+fn short_session_label(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
 }
 
 #[derive(Debug, Clone)]

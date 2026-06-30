@@ -679,6 +679,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) code_intelligence_startup: CodeIntelStartup,
     pub(crate) code_intelligence_discovery_enabled: bool,
     pub(crate) code_intelligence_discovery_report_missing: bool,
+    pub(crate) terminal_keyboard_enhancement: bool,
     pub(crate) terminal_mouse_capture: bool,
     pub(crate) terminal_osc52_clipboard: bool,
     pub(crate) terminal_scroll_sensitivity: String,
@@ -764,6 +765,7 @@ impl ConfigDraft {
                 .code_intelligence
                 .discovery
                 .report_missing,
+            terminal_keyboard_enhancement: root_config.terminal.keyboard_enhancement,
             terminal_mouse_capture: root_config.terminal.mouse_capture,
             terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
             terminal_scroll_sensitivity: root_config.terminal.scroll_sensitivity.to_string(),

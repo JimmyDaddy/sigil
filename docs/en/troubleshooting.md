@@ -150,12 +150,13 @@ Common mitigations:
 
 ```toml
 [terminal]
+keyboard_enhancement = false
 mouse_capture = false
 osc52_clipboard = false
 scroll_sensitivity = 3
 ```
 
-`mouse_capture` applies on the next launch. `osc52_clipboard` is checked for each copy action. `scroll_sensitivity` applies after the saved config is reloaded.
+`keyboard_enhancement` and `mouse_capture` apply on the next launch. `osc52_clipboard` is checked for each copy action. `scroll_sensitivity` applies after the saved config is reloaded.
 
 See [terminal-compatibility.md](terminal-compatibility.md) for tmux, screen, SSH, WSL, and manual smoke checks.
 

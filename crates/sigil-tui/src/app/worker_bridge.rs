@@ -11,6 +11,7 @@ use super::{
         format_agent_thread_started_block, format_agent_thread_status_block,
         format_terminal_task_block_redacted, format_tool_result_block_redacted, summarize_error,
     },
+    session_flow::render_control_entry_line,
 };
 use crate::config_panel::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
 use crate::runner::{
@@ -1434,7 +1435,7 @@ impl EventHandler for AppState {
                         self.push_phase_marker(format!("tool|{}", execution.tool_name));
                     }
                     let control = ControlEntry::ToolExecution(execution);
-                    self.push_event("control", format!("{control:?}"));
+                    self.push_event("control", render_control_entry_line(&control));
                     self.append_current_session_control(control);
                 }
                 ControlEntry::AgentThreadStarted(entry) => {
@@ -1452,7 +1453,7 @@ impl EventHandler for AppState {
                         );
                         self.push_event("agent:start", entry.objective.clone());
                     } else {
-                        self.push_event("control", format!("{control:?}"));
+                        self.push_event("control", render_control_entry_line(&control));
                     }
                     self.append_current_session_control(control);
                 }
@@ -1470,7 +1471,7 @@ impl EventHandler for AppState {
                     ));
                 }
                 other => {
-                    self.push_event("control", format!("{other:?}"));
+                    self.push_event("control", render_control_entry_line(&other));
                     self.append_current_session_control(other);
                 }
             },

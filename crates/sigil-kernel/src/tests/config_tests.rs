@@ -656,6 +656,7 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [terminal]
+keyboard_enhancement = true
 mouse_capture = false
 osc52_clipboard = false
 scroll_sensitivity = 5
@@ -663,6 +664,7 @@ scroll_sensitivity = 5
     )
     .expect("terminal config should parse");
 
+    assert!(config.terminal.keyboard_enhancement);
     assert!(!config.terminal.mouse_capture);
     assert!(!config.terminal.osc52_clipboard);
     assert_eq!(config.terminal.scroll_sensitivity, 5);

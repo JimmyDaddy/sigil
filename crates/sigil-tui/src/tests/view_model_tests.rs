@@ -187,14 +187,14 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .info_rail
             .session_lines
             .iter()
-            .any(|line| line == "provider: deepseek")
+            .any(|line| line == "model: deepseek-v4-flash · max")
     );
     assert!(
         view_model
             .info_rail
             .session_lines
             .iter()
-            .any(|line| line == "task memory: none yet")
+            .any(|line| line.starts_with("state: ready · "))
     );
     assert!(
         view_model
@@ -217,6 +217,50 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .iter()
             .any(|line| line == "Ctrl-C: quit")
     );
+}
+
+#[test]
+fn info_rail_detail_toggle_restores_full_sidebar_lines() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let compact = UiViewModel::from_app(&app);
+
+    assert!(!app.info_rail_detail_enabled());
+    assert!(
+        !compact
+            .info_rail
+            .session_lines
+            .iter()
+            .any(|line| line == "provider: deepseek")
+    );
+    assert!(
+        compact
+            .info_rail
+            .controls
+            .iter()
+            .any(|line| line == "F2: info rail")
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    let detail = UiViewModel::from_app(&app);
+
+    assert!(app.info_rail_detail_enabled());
+    assert!(
+        detail
+            .info_rail
+            .session_lines
+            .iter()
+            .any(|line| line == "provider: deepseek")
+    );
+    assert!(
+        detail
+            .info_rail
+            .permission_lines
+            .iter()
+            .any(|line| line == "scope: saved default")
+    );
+    assert!(detail.info_rail.usage_lines.len() > compact.info_rail.usage_lines.len());
+    assert_eq!(app.last_notice(), Some("info rail: detail"));
+    Ok(())
 }
 
 #[test]
@@ -518,12 +562,6 @@ fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()
         view_model
             .info_rail
             .task_lines
-            .contains(&"plan: v1".to_owned())
-    );
-    assert!(
-        view_model
-            .info_rail
-            .task_lines
             .contains(&"progress: 0/1 done".to_owned())
     );
     assert!(
@@ -531,12 +569,6 @@ fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()
             .info_rail
             .task_lines
             .contains(&"current: v1:step_1 running".to_owned())
-    );
-    assert!(
-        view_model
-            .info_rail
-            .task_lines
-            .contains(&"◐ 1. running step_1 · implement".to_owned())
     );
     Ok(())
 }
@@ -1001,10 +1033,20 @@ fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
             .info_rail
             .controls
             .iter()
+            .all(|hint| hint != "Alt-J: next activity")
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))?;
+    let detail_view_model = UiViewModel::from_app(&app);
+    assert!(
+        detail_view_model
+            .info_rail
+            .controls
+            .iter()
             .any(|hint| hint == "Alt-J: next activity")
     );
     assert!(
-        !view_model
+        !detail_view_model
             .info_rail
             .controls
             .iter()

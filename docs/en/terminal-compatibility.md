@@ -22,13 +22,14 @@ scripts/tui-mouse-smoke.sh
 
 1. Confirm `/doctor` reports `terminal`, `terminal:config`, `terminal:mouse`, and `terminal:clipboard`.
 2. Open `/config` and review the `Terminal` section.
-3. Keep `mouse_capture = true` unless the terminal or multiplexer mishandles mouse mode.
-4. Keep `osc52_clipboard = true` unless copy sequences are blocked or printed visibly.
-5. Keep `scroll_sensitivity = 3` unless the mouse wheel feels too fast or too slow in transcript and approval diff views.
+3. Keep `keyboard_enhancement = false` unless the terminal profile is known to handle crossterm keyboard enhancement correctly.
+4. Keep `mouse_capture = false` unless you need mouse support and the terminal or multiplexer handles mouse mode well.
+5. Keep `osc52_clipboard = true` unless copy sequences are blocked or printed visibly.
+6. Keep `scroll_sensitivity = 3` unless the mouse wheel feels too fast or too slow in transcript and approval diff views.
 
 ## Mouse Smoke
 
-Run these checks in iTerm2, Terminal.app, WezTerm, kitty, and any terminal profile you support:
+Temporarily set `[terminal].mouse_capture = true` in `sigil.toml`, restart the TUI, then run these checks in iTerm2, Terminal.app, WezTerm, kitty, and any terminal profile you support:
 
 1. Click the composer and type a short prompt.
 2. Open `/`, click a slash command candidate, then press `Esc`.
@@ -56,10 +57,11 @@ These layers commonly require explicit clipboard or mouse pass-through:
 1. Run `/doctor` inside the layer and read `terminal:mouse` / `terminal:clipboard`.
 2. Repeat the mouse smoke checks inside the layer.
 3. Repeat the copy check, then paste outside the layer.
-4. If mouse events are broken, set `[terminal].mouse_capture = false` and restart the TUI.
-5. If copy is blocked or control sequences are visible, set `[terminal].osc52_clipboard = false`.
+4. If keyboard input appears stuck after launch, set `[terminal].keyboard_enhancement = false` and restart the TUI.
+5. If mouse events are broken or scrolling feels heavy, set `[terminal].mouse_capture = false` and restart the TUI.
+6. If copy is blocked or control sequences are visible, set `[terminal].osc52_clipboard = false`.
 
-`mouse_capture` applies on the next launch. `osc52_clipboard` is checked on each copy action. `scroll_sensitivity` applies after the saved config is reloaded.
+`keyboard_enhancement` and `mouse_capture` apply on the next launch. `osc52_clipboard` is checked on each copy action. `scroll_sensitivity` applies after the saved config is reloaded.
 
 ## Result Template
 
@@ -67,6 +69,7 @@ These layers commonly require explicit clipboard or mouse pass-through:
 Terminal:
 TERM:
 Layers: none / tmux / screen / SSH / WSL
+keyboard_enhancement:
 mouse_capture:
 osc52_clipboard:
 scroll_sensitivity:

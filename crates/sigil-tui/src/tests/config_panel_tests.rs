@@ -1486,10 +1486,7 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
         state.display_value(ConfigField::CompactionContextWindowTokens),
         "64000 tokens"
     );
-    assert_eq!(
-        state.display_value(ConfigField::TerminalMouseCapture),
-        "yes"
-    );
+    assert_eq!(state.display_value(ConfigField::TerminalMouseCapture), "no");
     assert_eq!(
         state.display_value(ConfigField::TerminalOsc52Clipboard),
         "yes"

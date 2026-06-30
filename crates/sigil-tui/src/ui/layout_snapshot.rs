@@ -4,6 +4,9 @@ use crate::{
     app::{AppState, ApprovalAction, ApprovalModalView},
     config_panel::{ConfigField, ConfigSection},
     mouse::HitTarget,
+    view_model::{
+        displayed_info_rail_agent_row_entries, info_rail_permission_lines, info_rail_session_lines,
+    },
 };
 
 use super::{
@@ -764,24 +767,35 @@ fn info_rail_agent_row_hit_areas(info_rail: Rect, app: &AppState) -> Vec<InfoRai
         return Vec::new();
     }
 
-    let session_line_count = app.session_sidebar_lines().len().saturating_add(1);
-    let permission_line_count = app.permission_card_lines().len();
+    let session_line_count = if app.info_rail_detail_enabled() {
+        app.session_sidebar_lines()
+            .len()
+            .saturating_add(1)
+            .saturating_add(app.task_memory_sidebar_lines().len())
+    } else {
+        info_rail_session_lines(app).len()
+    };
+    let permission_line_count = if app.info_rail_detail_enabled() {
+        app.permission_card_lines().len()
+    } else {
+        info_rail_permission_lines(app).len()
+    };
     let agent_row_start = 3usize
         .saturating_add(info_section_row_count(session_line_count))
         .saturating_add(info_section_row_count(permission_line_count))
         .saturating_add(1);
 
-    app.agent_sidebar_rows()
+    displayed_info_rail_agent_row_entries(app)
         .into_iter()
         .enumerate()
-        .filter_map(|(index, _)| {
-            let relative_row = agent_row_start.saturating_add(index);
+        .filter_map(|(display_index, (agent_index, _))| {
+            let relative_row = agent_row_start.saturating_add(display_index);
             if relative_row >= inner.height as usize {
                 return None;
             }
             let y_offset = u16::try_from(relative_row).ok()?;
             Some(InfoRailAgentRowHitArea {
-                index,
+                index: agent_index,
                 area: Rect::new(inner.x, inner.y.saturating_add(y_offset), inner.width, 1),
             })
         })

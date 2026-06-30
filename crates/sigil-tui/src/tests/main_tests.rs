@@ -128,54 +128,30 @@ fn mouse_layout_snapshot_falls_back_to_terminal_size_before_first_frame() {
 }
 
 #[test]
-fn initial_sync_seeds_without_replaying_history() {
+fn initial_sync_skips_replaying_history() {
     let state = ScrollbackSyncState::default();
 
     let plan = plan_scrollback_sync(&state, "session-a", 2, 0);
 
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: false,
-            from_index: 0,
-            to_index: 2,
-            total_line_count: 2,
-        }
-    );
+    assert_eq!(plan, ScrollbackSyncPlan::Noop);
 }
 
 #[test]
-fn initial_sync_seeds_only_first_chunk_for_large_history() {
+fn initial_sync_skips_large_history_replay() {
     let state = ScrollbackSyncState::default();
 
     let plan = plan_scrollback_sync_with_chunk_size(&state, "session-a", 5, 0, 2);
 
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: false,
-            from_index: 0,
-            to_index: 2,
-            total_line_count: 5,
-        }
-    );
+    assert_eq!(plan, ScrollbackSyncPlan::Noop);
 }
 
 #[test]
-fn default_initial_sync_seeds_large_history_in_one_pass() {
+fn default_initial_sync_skips_large_history_replay() {
     let state = ScrollbackSyncState::default();
 
     let plan = plan_scrollback_sync(&state, "session-a", 5_000, 0);
 
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: false,
-            from_index: 0,
-            to_index: 5_000,
-            total_line_count: 5_000,
-        }
-    );
+    assert_eq!(plan, ScrollbackSyncPlan::Noop);
 }
 
 #[test]
@@ -205,24 +181,16 @@ fn pending_seed_continues_from_previous_chunk() {
 }
 
 #[test]
-fn zero_chunk_size_still_seeds_one_line() {
+fn zero_chunk_size_still_skips_initial_history_replay() {
     let state = ScrollbackSyncState::default();
 
     let plan = plan_scrollback_sync_with_chunk_size(&state, "session-a", 3, 0, 0);
 
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: false,
-            from_index: 0,
-            to_index: 1,
-            total_line_count: 3,
-        }
-    );
+    assert_eq!(plan, ScrollbackSyncPlan::Noop);
 }
 
 #[test]
-fn stale_pending_seed_restarts_seed_for_current_session() {
+fn stale_pending_seed_from_previous_session_does_not_replay_history() {
     let state = ScrollbackSyncState {
         session_id: Some("session-a".to_owned()),
         revision: 1,
@@ -236,15 +204,7 @@ fn stale_pending_seed_restarts_seed_for_current_session() {
 
     let plan = plan_scrollback_sync_with_chunk_size(&state, "session-b", 4, 0, 2);
 
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: true,
-            from_index: 0,
-            to_index: 2,
-            total_line_count: 4,
-        }
-    );
+    assert_eq!(plan, ScrollbackSyncPlan::Noop);
 }
 
 #[test]
@@ -281,7 +241,7 @@ fn growing_history_appends_only_new_lines() {
 }
 
 #[test]
-fn switching_sessions_without_existing_scrollback_skips_separator() {
+fn switching_sessions_without_existing_scrollback_skips_history_replay() {
     let state = ScrollbackSyncState {
         session_id: Some("session-a".to_owned()),
         revision: 2,
@@ -292,19 +252,11 @@ fn switching_sessions_without_existing_scrollback_skips_separator() {
 
     let plan = plan_scrollback_sync_with_chunk_size(&state, "session-b", 3, 0, 2);
 
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: false,
-            from_index: 0,
-            to_index: 2,
-            total_line_count: 3,
-        }
-    );
+    assert_eq!(plan, ScrollbackSyncPlan::Noop);
 }
 
 #[test]
-fn restored_or_switched_session_reseeds_without_replaying_old_lines() {
+fn restored_or_switched_session_skips_history_replay() {
     let state = ScrollbackSyncState {
         session_id: Some("session-a".to_owned()),
         revision: 2,
@@ -315,15 +267,7 @@ fn restored_or_switched_session_reseeds_without_replaying_old_lines() {
 
     let plan = plan_scrollback_sync(&state, "session-b", 2, 3);
 
-    assert_eq!(
-        plan,
-        ScrollbackSyncPlan::Seed {
-            insert_separator: true,
-            from_index: 0,
-            to_index: 2,
-            total_line_count: 2,
-        }
-    );
+    assert_eq!(plan, ScrollbackSyncPlan::Noop);
 }
 
 #[test]
@@ -880,12 +824,12 @@ fn prepare_scrollback_sync_returns_none_when_scrollback_is_disabled_or_unchanged
 }
 
 #[test]
-fn prepare_scrollback_sync_reseeds_and_appends_expected_batches() {
+fn prepare_scrollback_sync_skips_reseed_and_appends_expected_batches() {
     let app = app_with_scrollback();
     let line_count = app.scrollback_line_count();
     assert!(line_count > 0);
 
-    let reseed = prepare_scrollback_sync(
+    let skipped_reseed = prepare_scrollback_sync(
         &app,
         &ScrollbackSyncState {
             session_id: Some("previous-session".to_owned()),
@@ -895,13 +839,14 @@ fn prepare_scrollback_sync_reseeds_and_appends_expected_batches() {
             pending_seed: None,
         },
     )
-    .expect("expected reseed");
-    assert!(!reseed.line_batches.is_empty());
+    .expect("expected state sync");
+    assert!(skipped_reseed.line_batches.is_empty());
     assert_eq!(
-        scrollback_plain_line(&reseed.line_batches[0][0]),
-        scrollback_plain_line(&scrollback_separator(&app))
+        skipped_reseed.next_state.session_id,
+        Some(app.session_id.clone())
     );
-    assert_eq!(reseed.next_state.session_id, Some(app.session_id.clone()));
+    assert_eq!(skipped_reseed.next_state.line_count, line_count);
+    assert_eq!(skipped_reseed.next_state.pending_seed, None);
 
     let append = prepare_scrollback_sync(
         &app,
@@ -920,23 +865,17 @@ fn prepare_scrollback_sync_reseeds_and_appends_expected_batches() {
 }
 
 #[test]
-fn prepare_scrollback_sync_tracks_pending_seed_for_chunked_initial_seed() {
+fn prepare_scrollback_sync_tracks_current_session_without_initial_seed() {
     let app = app_with_scrollback();
     assert!(app.scrollback_line_count() > 1);
 
     let prepared =
         prepare_scrollback_sync_with_chunk_size(&app, &ScrollbackSyncState::default(), 1)
-            .expect("expected chunked seed");
+            .expect("expected state sync");
 
-    assert_eq!(prepared.next_state.line_count, 1);
-    assert_eq!(
-        prepared.next_state.pending_seed,
-        Some(ScrollbackSeedProgress {
-            session_id: app.session_id.clone(),
-            next_line_index: 1,
-        })
-    );
-    assert_eq!(prepared.line_batches.len(), 1);
+    assert_eq!(prepared.next_state.line_count, app.scrollback_line_count());
+    assert_eq!(prepared.next_state.pending_seed, None);
+    assert!(prepared.line_batches.is_empty());
 }
 
 #[test]
