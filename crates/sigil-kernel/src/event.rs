@@ -98,6 +98,8 @@ pub enum DurableEventType {
     ContextSourceCaptured,
     EgressDecisionRecorded,
     ExtensionTrustDecision,
+    PluginHookExecutionStarted,
+    PluginHookExecutionFinished,
     SandboxDecisionRecorded,
     LogTailRecovered,
     Legacy,
@@ -152,6 +154,8 @@ impl DurableEventType {
             Self::ContextSourceCaptured => "context_source_captured",
             Self::EgressDecisionRecorded => "egress_decision_recorded",
             Self::ExtensionTrustDecision => "extension_trust_decision",
+            Self::PluginHookExecutionStarted => "plugin_hook_execution_started",
+            Self::PluginHookExecutionFinished => "plugin_hook_execution_finished",
             Self::SandboxDecisionRecorded => "sandbox_decision_recorded",
             Self::LogTailRecovered => "log_tail_recovered",
             Self::Legacy => "legacy",
@@ -206,6 +210,8 @@ impl DurableEventType {
             "context_source_captured" => Self::ContextSourceCaptured,
             "egress_decision_recorded" => Self::EgressDecisionRecorded,
             "extension_trust_decision" => Self::ExtensionTrustDecision,
+            "plugin_hook_execution_started" => Self::PluginHookExecutionStarted,
+            "plugin_hook_execution_finished" => Self::PluginHookExecutionFinished,
             "sandbox_decision_recorded" => Self::SandboxDecisionRecorded,
             "log_tail_recovered" => Self::LogTailRecovered,
             "legacy" => Self::Legacy,
@@ -297,6 +303,8 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::ContextSourceCaptured,
     DurableEventType::EgressDecisionRecorded,
     DurableEventType::ExtensionTrustDecision,
+    DurableEventType::PluginHookExecutionStarted,
+    DurableEventType::PluginHookExecutionFinished,
     DurableEventType::SandboxDecisionRecorded,
     DurableEventType::LogTailRecovered,
     DurableEventType::Legacy,
@@ -543,6 +551,8 @@ pub enum DurableDomainEvent {
     ContextSourceCaptured(DomainPayload),
     EgressDecisionRecorded(DomainPayload),
     ExtensionTrustDecision(DomainPayload),
+    PluginHookExecutionStarted(DomainPayload),
+    PluginHookExecutionFinished(DomainPayload),
     SandboxDecisionRecorded(DomainPayload),
     LogTailRecovered(DomainPayload),
     Legacy(LegacyEvent),
@@ -605,6 +615,8 @@ impl DurableDomainEvent {
             Self::ContextSourceCaptured(_) => DurableEventType::ContextSourceCaptured,
             Self::EgressDecisionRecorded(_) => DurableEventType::EgressDecisionRecorded,
             Self::ExtensionTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
+            Self::PluginHookExecutionStarted(_) => DurableEventType::PluginHookExecutionStarted,
+            Self::PluginHookExecutionFinished(_) => DurableEventType::PluginHookExecutionFinished,
             Self::SandboxDecisionRecorded(_) => DurableEventType::SandboxDecisionRecorded,
             Self::LogTailRecovered(_) => DurableEventType::LogTailRecovered,
             Self::Legacy(_) => DurableEventType::Legacy,
@@ -659,6 +671,8 @@ impl DurableDomainEvent {
             | Self::ContextSourceCaptured(payload)
             | Self::EgressDecisionRecorded(payload)
             | Self::ExtensionTrustDecision(payload)
+            | Self::PluginHookExecutionStarted(payload)
+            | Self::PluginHookExecutionFinished(payload)
             | Self::SandboxDecisionRecorded(payload)
             | Self::LogTailRecovered(payload) => Some(payload),
             Self::Legacy(_) => None,
@@ -1014,6 +1028,12 @@ fn domain_event_from_payload(
         }
         DurableEventType::ExtensionTrustDecision => {
             DurableDomainEvent::ExtensionTrustDecision(payload)
+        }
+        DurableEventType::PluginHookExecutionStarted => {
+            DurableDomainEvent::PluginHookExecutionStarted(payload)
+        }
+        DurableEventType::PluginHookExecutionFinished => {
+            DurableDomainEvent::PluginHookExecutionFinished(payload)
         }
         DurableEventType::SandboxDecisionRecorded => {
             DurableDomainEvent::SandboxDecisionRecorded(payload)
@@ -1462,6 +1482,8 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::SkillLoaded(_) => "skill_loaded",
         ControlEntry::PluginManifestCaptured(_) => "plugin_manifest_captured",
         ControlEntry::PluginTrustDecision(_) => "plugin_trust_decision",
+        ControlEntry::PluginHookExecutionStarted(_) => "plugin_hook_execution_started",
+        ControlEntry::PluginHookExecutionFinished(_) => "plugin_hook_execution_finished",
         ControlEntry::ChangeSetProposed(_) => "change_set_proposed",
         ControlEntry::ChangeSetApplied(_) => "change_set_applied",
         ControlEntry::TerminalTask(_) => "terminal_task",

@@ -12,7 +12,10 @@ use crate::{
     EvidenceReceipt, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
     ExecutionBackendKind, ExecutionFuture, ExecutionNetworkPolicy, ExecutionNetworkReceipt,
     ExecutionReceipt, ExecutionRequest, FileMetadataPlatform, FileType, JsonlSessionStore,
-    MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, ReadinessInput, ReadinessProjectionMode, ReadinessReason,
+    MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, PluginHookExecutionFinishedEntry,
+    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
+    PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream,
+    PluginVerificationHookReceiptRequest, ReadinessInput, ReadinessProjectionMode, ReadinessReason,
     ReceiptStatus, RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session,
     SessionLogEntry, SessionStreamRecord, SnapshotEntryState, ToolEffect,
     VerificationAutoRunPolicy, VerificationBinding, VerificationCheckConfig,
@@ -24,7 +27,7 @@ use crate::{
     WorkspaceSnapshotEntry, WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
     build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
-    run_verification_check, session::ControlEntry,
+    record_plugin_verification_hook_receipt, run_verification_check, session::ControlEntry,
 };
 
 #[derive(Debug, Default)]
@@ -843,6 +846,256 @@ fn verification_check_runner_binds_receipt_to_actual_sandbox_backend() -> Result
     assert_ne!(
         recorded.receipt.binding.sandbox_profile_hash,
         super::sandbox_profile_hash(SandboxProfileRequirement::Sandboxed)
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_verification_hook_receipt_binds_snapshot_backend_and_check_spec() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "stable\n")?;
+    let store_path = temp.path().join("state/session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let trusted_check = trusted_plugin_check("plugin-verification", ToolEffect::ReadOnly)?;
+    let mut policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
+    policy.sandbox_profile = SandboxProfileRequirement::Sandboxed;
+    let started = plugin_verification_hook_started(ToolEffect::ReadOnly);
+    let finished =
+        plugin_verification_hook_finished(&started, PluginHookExecutionStatus::Succeeded);
+    let mut output = plugin_verification_hook_output(&started);
+    output.artifact_refs.push(PluginHookOutputArtifactRef {
+        artifact_id: "artifact-hook-log".to_owned(),
+        label: "hook log".to_owned(),
+        media_type: Some("text/plain".to_owned()),
+        size_bytes: Some(42),
+        redaction_state: RedactionState::Redacted,
+    });
+    output.redaction_state = RedactionState::Redacted;
+
+    let recorded = record_plugin_verification_hook_receipt(
+        &mut session,
+        PluginVerificationHookReceiptRequest {
+            workspace_root: workspace,
+            scope: EvidenceScope::Step("task_1:step_1".to_owned()),
+            trusted_check: trusted_check.clone(),
+            policy: policy.clone(),
+            policy_hash: Some("policy-hash".to_owned()),
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "user-config".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            started: started.clone(),
+            finished: finished.clone(),
+            output,
+            workspace_mutation_event_id: None,
+        },
+    )?;
+
+    assert_eq!(recorded.receipt.check_status, ReceiptStatus::Succeeded);
+    assert!(!recorded.receipt.mutates_verification_scope);
+    assert_eq!(
+        recorded.receipt.receipt.producer_tool_call.as_deref(),
+        Some(started.execution_id.as_str())
+    );
+    assert_eq!(
+        recorded.receipt.receipt.artifact_refs,
+        vec!["artifact-hook-log".to_owned()]
+    );
+    assert_eq!(
+        recorded.receipt.receipt.redaction_state,
+        RedactionState::Redacted
+    );
+    assert_eq!(
+        recorded.receipt.binding.execution_backend,
+        Some(finished.backend)
+    );
+    assert_eq!(
+        recorded.receipt.binding.execution_network.policy,
+        ExecutionNetworkPolicy::Denied
+    );
+    assert_eq!(
+        recorded.receipt.binding.check_spec_hash,
+        trusted_check.check_spec.check_spec_hash
+    );
+    assert!(recorded.receipt.is_applicable_to(
+        &trusted_check.check_spec,
+        &recorded.receipt.binding.workspace_snapshot_id,
+        &policy.verification_scope,
+        policy.workspace_trust_requirement,
+        WorkspaceTrust::Unknown,
+        policy.sandbox_profile,
+    ));
+    assert!(!recorded.receipt.is_applicable_to(
+        &trusted_check.check_spec,
+        &"snapshot-different".to_owned(),
+        &policy.verification_scope,
+        policy.workspace_trust_requirement,
+        WorkspaceTrust::Unknown,
+        policy.sandbox_profile,
+    ));
+
+    let stored_events = JsonlSessionStore::read_event_records(&store_path)?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::CheckFinished.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stored_events.len(), 1);
+    assert_eq!(stored_events[0].payload["source"], "plugin_hook");
+    assert_eq!(stored_events[0].payload["plugin_id"], started.plugin_id);
+    assert_eq!(
+        stored_events[0].payload["hook_execution_id"],
+        started.execution_id
+    );
+    assert_eq!(
+        stored_events[0].payload["execution_backend"],
+        serde_json::json!("macos_seatbelt")
+    );
+    Ok(())
+}
+
+#[test]
+fn mutating_plugin_verification_hook_receipt_is_inconclusive_and_not_applicable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "stable\n")?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let trusted_check = trusted_plugin_check("plugin-verification", ToolEffect::ReadOnly)?;
+    let policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
+    let started = plugin_verification_hook_started(ToolEffect::WorkspaceWrite);
+    let finished =
+        plugin_verification_hook_finished(&started, PluginHookExecutionStatus::Succeeded);
+    let output = plugin_verification_hook_output(&started);
+
+    let recorded = record_plugin_verification_hook_receipt(
+        &mut session,
+        PluginVerificationHookReceiptRequest {
+            workspace_root: workspace,
+            scope: EvidenceScope::Step("task_1:step_1".to_owned()),
+            trusted_check: trusted_check.clone(),
+            policy: policy.clone(),
+            policy_hash: None,
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "user-config".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            started,
+            finished,
+            output,
+            workspace_mutation_event_id: Some("event-workspace-mutation".to_owned()),
+        },
+    )?;
+
+    assert_eq!(recorded.receipt.check_status, ReceiptStatus::Inconclusive);
+    assert!(recorded.receipt.mutates_verification_scope);
+    assert!(!recorded.receipt.is_applicable_to(
+        &trusted_check.check_spec,
+        &recorded.receipt.binding.workspace_snapshot_id,
+        &policy.verification_scope,
+        policy.workspace_trust_requirement,
+        WorkspaceTrust::Unknown,
+        policy.sandbox_profile,
+    ));
+
+    let mut input = ReadinessInput::new_run(RunStatus::Completed, policy);
+    input.current_workspace_snapshot_id =
+        Some(recorded.receipt.binding.workspace_snapshot_id.clone());
+    input.verification_receipts.push(recorded.receipt);
+    let evaluation = evaluate_readiness(&input);
+
+    assert_eq!(
+        evaluation.verification_verdict,
+        VerificationVerdict::Inconclusive
+    );
+    assert_eq!(
+        evaluation.visible_state,
+        VisibleCompletionState::CompletedUnverified
+    );
+    assert!(
+        evaluation
+            .required_actions
+            .iter()
+            .any(|action| matches!(action, RequiredAction::RunCheck { .. }))
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_verification_hook_receipt_rejects_non_verification_or_mismatched_evidence() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "stable\n")?;
+    let trusted_check = trusted_plugin_check("plugin-verification", ToolEffect::ReadOnly)?;
+    let policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
+
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let started = PluginHookExecutionStartedEntry {
+        hook_kind: PluginHookKind::Context,
+        ..plugin_verification_hook_started(ToolEffect::ReadOnly)
+    };
+    let finished =
+        plugin_verification_hook_finished(&started, PluginHookExecutionStatus::Succeeded);
+    let output = plugin_verification_hook_output(&started);
+    let error = record_plugin_verification_hook_receipt(
+        &mut session,
+        PluginVerificationHookReceiptRequest {
+            workspace_root: workspace.clone(),
+            scope: EvidenceScope::Step("task_1:step_1".to_owned()),
+            trusted_check: trusted_check.clone(),
+            policy: policy.clone(),
+            policy_hash: None,
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "user-config".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            started,
+            finished,
+            output,
+            workspace_mutation_event_id: None,
+        },
+    )
+    .expect_err("non-verification hooks must be rejected");
+    assert!(error.to_string().contains("not verification"));
+
+    let started = plugin_verification_hook_started(ToolEffect::ReadOnly);
+    let finished =
+        plugin_verification_hook_finished(&started, PluginHookExecutionStatus::Succeeded);
+    let mut output = plugin_verification_hook_output(&started);
+    output.execution_id = "different-execution".to_owned();
+    let error = record_plugin_verification_hook_receipt(
+        &mut session,
+        PluginVerificationHookReceiptRequest {
+            workspace_root: workspace,
+            scope: EvidenceScope::Step("task_1:step_1".to_owned()),
+            trusted_check,
+            policy,
+            policy_hash: None,
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "user-config".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+            started,
+            finished,
+            output,
+            workspace_mutation_event_id: None,
+        },
+    )
+    .expect_err("mismatched hook output must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("plugin verification hook output evidence mismatch")
     );
     Ok(())
 }
@@ -3676,6 +3929,113 @@ fn check_spec(id: &str) -> CheckSpec {
         ToolEffect::ReadOnly,
         "scope-main",
     )
+}
+
+fn trusted_plugin_check(id: &str, effect: ToolEffect) -> Result<crate::TrustedCheckSpec> {
+    CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "plugin-hook".to_owned(),
+            args: vec![id.to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-plugin-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        id,
+        "scope-main",
+        effect,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-plugin-config".to_owned(),
+        },
+    )
+}
+
+fn plugin_verification_hook_started(effect: ToolEffect) -> PluginHookExecutionStartedEntry {
+    let capabilities = ExecutionBackendCapabilities {
+        filesystem_isolation: true,
+        network_isolation: true,
+        process_isolation: true,
+        resource_limits: false,
+        persistent_pty: false,
+        workspace_snapshot: false,
+    };
+    PluginHookExecutionStartedEntry {
+        execution_id: "plugin-hook-exec-1".to_owned(),
+        plugin_id: "repo-review".to_owned(),
+        manifest_hash: "sha256:manifest".to_owned(),
+        capability_digest: "sha256:capability".to_owned(),
+        hook_id: "verify-repo".to_owned(),
+        hook_kind: PluginHookKind::Verification,
+        command: vec!["plugin-hook".to_owned(), "verify-repo".to_owned()],
+        declared_effect: effect,
+        timeout_ms: 30_000,
+        backend: ExecutionBackendKind::MacosSeatbelt,
+        backend_capabilities: capabilities,
+    }
+}
+
+fn plugin_verification_hook_finished(
+    started: &PluginHookExecutionStartedEntry,
+    status: PluginHookExecutionStatus,
+) -> PluginHookExecutionFinishedEntry {
+    PluginHookExecutionFinishedEntry {
+        execution_id: started.execution_id.clone(),
+        plugin_id: started.plugin_id.clone(),
+        manifest_hash: started.manifest_hash.clone(),
+        capability_digest: started.capability_digest.clone(),
+        hook_id: started.hook_id.clone(),
+        hook_kind: started.hook_kind,
+        status,
+        exit_code: match status {
+            PluginHookExecutionStatus::Succeeded => Some(0),
+            PluginHookExecutionStatus::Failed => Some(1),
+            PluginHookExecutionStatus::TimedOut => None,
+        },
+        stdout_bytes: 18,
+        stderr_bytes: 0,
+        timed_out: status == PluginHookExecutionStatus::TimedOut,
+        backend: started.backend,
+        backend_capabilities: started.backend_capabilities,
+        network: ExecutionNetworkReceipt::denied("plugin hook sandbox denied network"),
+        resources: Default::default(),
+    }
+}
+
+fn plugin_verification_hook_output(
+    started: &PluginHookExecutionStartedEntry,
+) -> PluginHookOutputEnvelope {
+    PluginHookOutputEnvelope {
+        execution_id: started.execution_id.clone(),
+        plugin_id: started.plugin_id.clone(),
+        hook_id: started.hook_id.clone(),
+        stdout: PluginHookOutputStream {
+            content: "all checks passed\n".to_owned(),
+            total_bytes: 18,
+            returned_bytes: 18,
+            omitted_bytes: 0,
+            total_lines: 1,
+            returned_lines: 1,
+            truncated: false,
+            redaction_state: RedactionState::None,
+        },
+        stderr: PluginHookOutputStream {
+            content: String::new(),
+            total_bytes: 0,
+            returned_bytes: 0,
+            omitted_bytes: 0,
+            total_lines: 0,
+            returned_lines: 0,
+            truncated: false,
+            redaction_state: RedactionState::None,
+        },
+        artifact_refs: Vec::new(),
+        artifact_refs_truncated: false,
+        redaction_state: RedactionState::None,
+        parse_error: None,
+        model_visible_summary: "plugin verification hook completed".to_owned(),
+    }
 }
 
 fn workspace_mutation(event_id: &str, sequence: u64) -> WorkspaceMutationEvidence {

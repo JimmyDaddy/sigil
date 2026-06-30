@@ -393,10 +393,8 @@ fn agent_command_selector_lists_main_child_and_navigation() -> Result<()> {
         rows.iter()
             .any(|(label, description)| label == "main" && description == "◉ current session")
     );
-    assert!(
-        rows.iter().any(|(label, description)| label == "仓库审查"
-            && description == "◐ subagent_read · v1:step_1")
-    );
+    assert!(rows.iter().any(|(label, description)| label == "仓库审查"
+        && description == "◐ subagent_read · v1:step_1 · result pending"));
     assert!(!rows.iter().any(|(label, _)| label == "next"));
     assert!(!rows.iter().any(|(label, _)| label == "prev"));
     assert_eq!(app.slash_selector_title(), Some("Agent"));

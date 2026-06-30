@@ -2199,8 +2199,7 @@ fn render_config_step_line_with_palette(
             Span::styled("...", Style::default().fg(palette.text_muted)),
         );
     }
-    for index in start..end {
-        let section = sections[index];
+    for (index, section) in sections.iter().enumerate().take(end).skip(start) {
         let label = section.title().to_ascii_lowercase();
         let selected = index == selected_index;
         let span = if selected {

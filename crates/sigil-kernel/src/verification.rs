@@ -20,7 +20,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     DurableEventType, EventClass, EventId, ExecutionBackend, ExecutionBackendCapabilities,
     ExecutionBackendKind, ExecutionNetworkReceipt, ExecutionRequest, ExecutionResourceReceipt,
-    Session, SessionId, StoredEvent, WorkspaceMutationDetected,
+    PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
+    PluginHookKind, PluginHookOutputEnvelope, Session, SessionId, StoredEvent,
+    WorkspaceMutationDetected,
     session::{ControlEntry, SessionLogEntry},
     stable_event_uuid,
 };
@@ -2307,6 +2309,24 @@ pub struct VerificationCheckRunRequest {
     pub workspace_trust_sandbox_decision_id: Option<EventId>,
 }
 
+/// Request for binding a trusted plugin verification hook result to normal verification evidence.
+#[derive(Debug, Clone)]
+pub struct PluginVerificationHookReceiptRequest {
+    pub workspace_root: PathBuf,
+    pub scope: EvidenceScope,
+    pub trusted_check: TrustedCheckSpec,
+    pub policy: VerificationPolicy,
+    pub policy_hash: Option<PolicyHash>,
+    pub workspace_trust: WorkspaceTrust,
+    pub workspace_trust_snapshot_id: WorkspaceTrustSnapshotId,
+    pub workspace_trust_approval_event_id: Option<EventId>,
+    pub workspace_trust_sandbox_decision_id: Option<EventId>,
+    pub started: PluginHookExecutionStartedEntry,
+    pub finished: PluginHookExecutionFinishedEntry,
+    pub output: PluginHookOutputEnvelope,
+    pub workspace_mutation_event_id: Option<EventId>,
+}
+
 /// Executes a trusted verification check and returns the durable verification projection entry.
 ///
 /// The command result is never treated as proof by itself. The returned receipt is bound to a
@@ -2468,6 +2488,203 @@ pub async fn run_verification_check(
     Ok(VerificationRecordedEntry {
         receipt: verification_receipt,
     })
+}
+
+/// Converts a trusted plugin verification hook execution into normal verification evidence.
+///
+/// The hook stdout is treated as data, not as a verdict authority. The returned receipt is bound to
+/// the current verification-scope workspace snapshot, the check spec hash, and the execution
+/// backend/capability receipt emitted by the hook process.
+///
+/// # Errors
+///
+/// Returns an error when the hook evidence is inconsistent, the hook is not a verification hook,
+/// workspace trust policy is unsatisfied, or the workspace snapshot cannot be built.
+pub fn record_plugin_verification_hook_receipt(
+    session: &mut Session,
+    request: PluginVerificationHookReceiptRequest,
+) -> Result<VerificationRecordedEntry> {
+    validate_plugin_verification_hook_evidence(
+        &request.started,
+        &request.finished,
+        &request.output,
+    )?;
+    let workspace_root = fs::canonicalize(&request.workspace_root).with_context(|| {
+        format!(
+            "failed to canonicalize plugin verification workspace {}",
+            request.workspace_root.display()
+        )
+    })?;
+    let workspace_id = stable_workspace_id(&workspace_root)?;
+    let check = &request.trusted_check.check_spec;
+    let approval_event_id = request
+        .workspace_trust_approval_event_id
+        .clone()
+        .or_else(|| request.trusted_check.approval_event_id.clone());
+    let sandbox_decision_id = request
+        .workspace_trust_sandbox_decision_id
+        .clone()
+        .or_else(|| request.trusted_check.sandbox_decision_id.clone());
+    if !request.policy.workspace_trust_requirement.is_satisfied(
+        request.workspace_trust,
+        approval_event_id.as_ref(),
+        sandbox_decision_id.as_ref(),
+    ) {
+        bail!(
+            "plugin verification hook {} cannot record receipt until workspace trust requirement is satisfied",
+            request.started.hook_id
+        );
+    }
+    let snapshot = build_workspace_snapshot(
+        &workspace_root,
+        workspace_id.clone(),
+        &request.policy.verification_scope,
+        0,
+    )?;
+    let mutates_verification_scope = request.started.declared_effect.may_mutate_workspace()
+        || request.workspace_mutation_event_id.is_some()
+        || snapshot.workspace_knowledge.is_unknown_dirty();
+    let check_status =
+        plugin_hook_receipt_status(request.finished.status, mutates_verification_scope);
+    let failure_reason = plugin_hook_failure_reason(&request.finished);
+    let check_event = append_plugin_check_finished_event(
+        session,
+        check,
+        &request,
+        &snapshot,
+        check_status,
+        mutates_verification_scope,
+    )?;
+    let (source_session_id, source_event_id, recorded_at_stream_sequence) =
+        check_event_identity(session, check, &request.scope, check_event.as_ref());
+    let current_snapshot_id = snapshot.workspace_snapshot_id.clone().unwrap_or_else(|| {
+        stable_event_uuid(
+            "sigil-plugin-verification-incomplete-snapshot",
+            &format!(
+                "{}:{}:{}",
+                source_session_id, source_event_id, recorded_at_stream_sequence
+            ),
+        )
+    });
+    let receipt_id = stable_event_uuid(
+        "sigil-plugin-verification-receipt",
+        &format!(
+            "{}:{}:{}:{}:{}",
+            source_session_id,
+            source_event_id,
+            request.started.plugin_id,
+            request.started.hook_id,
+            current_snapshot_id
+        ),
+    );
+    let artifact_refs = request
+        .output
+        .artifact_refs
+        .iter()
+        .map(|artifact| artifact.artifact_id.clone())
+        .collect::<Vec<_>>();
+    let verification_receipt = VerificationReceipt {
+        receipt: EvidenceReceipt {
+            receipt_id,
+            source_session_id,
+            source_event_id,
+            source_event_type: DurableEventType::CheckFinished.as_str().to_owned(),
+            scope: request.scope,
+            producer_tool_call: Some(request.started.execution_id.clone()),
+            workspace_revision: Some(0),
+            workspace_snapshot_id: Some(current_snapshot_id.clone()),
+            policy_hash: request.policy_hash,
+            changeset_id: None,
+            status: check_status,
+            artifact_refs,
+            redaction_state: request.output.redaction_state,
+            recorded_at_stream_sequence,
+        },
+        binding: VerificationBinding {
+            workspace_id,
+            workspace_snapshot_id: current_snapshot_id,
+            verification_scope_hash: request.policy.verification_scope.scope_hash,
+            check_spec_hash: check.check_spec_hash.clone(),
+            environment_fingerprint: environment_fingerprint(check),
+            sandbox_profile_hash: sandbox_profile_hash_for_execution(
+                request.policy.sandbox_profile,
+                request.finished.backend,
+                request.finished.backend_capabilities,
+                &request.finished.network,
+            ),
+            execution_backend: Some(request.finished.backend),
+            execution_backend_capabilities: Some(request.finished.backend_capabilities),
+            execution_network: request.finished.network.clone(),
+            workspace_trust_snapshot_id: request.workspace_trust_snapshot_id,
+            approval_event_id,
+            sandbox_decision_id,
+        },
+        check_spec_id: check.check_spec_id.clone(),
+        check_status,
+        failure_reason,
+        mutates_verification_scope,
+    };
+    Ok(VerificationRecordedEntry {
+        receipt: verification_receipt,
+    })
+}
+
+fn validate_plugin_verification_hook_evidence(
+    started: &PluginHookExecutionStartedEntry,
+    finished: &PluginHookExecutionFinishedEntry,
+    output: &PluginHookOutputEnvelope,
+) -> Result<()> {
+    if started.hook_kind != PluginHookKind::Verification {
+        bail!(
+            "plugin hook {} is {:?}, not verification",
+            started.hook_id,
+            started.hook_kind
+        );
+    }
+    if started.execution_id != finished.execution_id
+        || started.plugin_id != finished.plugin_id
+        || started.manifest_hash != finished.manifest_hash
+        || started.capability_digest != finished.capability_digest
+        || started.hook_id != finished.hook_id
+        || started.hook_kind != finished.hook_kind
+    {
+        bail!("plugin verification hook started/finished evidence mismatch");
+    }
+    if output.execution_id != finished.execution_id
+        || output.plugin_id != finished.plugin_id
+        || output.hook_id != finished.hook_id
+    {
+        bail!("plugin verification hook output evidence mismatch");
+    }
+    Ok(())
+}
+
+fn plugin_hook_receipt_status(
+    status: PluginHookExecutionStatus,
+    mutates_verification_scope: bool,
+) -> ReceiptStatus {
+    match status {
+        PluginHookExecutionStatus::Succeeded if mutates_verification_scope => {
+            ReceiptStatus::Inconclusive
+        }
+        PluginHookExecutionStatus::Succeeded => ReceiptStatus::Succeeded,
+        PluginHookExecutionStatus::Failed | PluginHookExecutionStatus::TimedOut => {
+            ReceiptStatus::Failed
+        }
+    }
+}
+
+fn plugin_hook_failure_reason(finished: &PluginHookExecutionFinishedEntry) -> Option<String> {
+    match finished.status {
+        PluginHookExecutionStatus::Succeeded => None,
+        PluginHookExecutionStatus::Failed => Some(match finished.exit_code {
+            Some(code) => format!("plugin verification hook exited with code {code}"),
+            None => "plugin verification hook terminated without exit code".to_owned(),
+        }),
+        PluginHookExecutionStatus::TimedOut => {
+            Some("plugin verification hook timed out".to_owned())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2669,6 +2886,48 @@ fn append_check_finished_event(
             "status": status,
             "mutates_verification_scope": mutates_verification_scope,
             "workspace_mutation_detected_event_id": mutation_event.map(|event| event.event_id.as_str()),
+        }),
+    )
+}
+
+fn append_plugin_check_finished_event(
+    session: &mut Session,
+    check: &CheckSpec,
+    request: &PluginVerificationHookReceiptRequest,
+    snapshot: &WorkspaceSnapshotBuild,
+    status: ReceiptStatus,
+    mutates_verification_scope: bool,
+) -> Result<Option<StoredEvent>> {
+    session.append_durable_event(
+        DurableEventType::CheckFinished,
+        EventClass::Critical,
+        serde_json::json!({
+            "scope": request.scope,
+            "check_spec_id": check.check_spec_id,
+            "check_spec_hash": check.check_spec_hash,
+            "source": "plugin_hook",
+            "plugin_id": request.started.plugin_id,
+            "hook_id": request.started.hook_id,
+            "hook_kind": request.started.hook_kind,
+            "hook_execution_id": request.started.execution_id,
+            "hook_status": request.finished.status,
+            "declared_effect": request.started.declared_effect,
+            "workspace_snapshot_id": snapshot.workspace_snapshot_id,
+            "workspace_knowledge": snapshot.workspace_knowledge,
+            "status": status,
+            "mutates_verification_scope": mutates_verification_scope,
+            "workspace_mutation_detected_event_id": request.workspace_mutation_event_id,
+            "execution_backend": request.finished.backend,
+            "execution_backend_capabilities": request.finished.backend_capabilities,
+            "execution_network": request.finished.network,
+            "execution_resources": request.finished.resources,
+            "output_redaction_state": request.output.redaction_state,
+            "artifact_refs": request
+                .output
+                .artifact_refs
+                .iter()
+                .map(|artifact| artifact.artifact_id.as_str())
+                .collect::<Vec<_>>(),
         }),
     )
 }

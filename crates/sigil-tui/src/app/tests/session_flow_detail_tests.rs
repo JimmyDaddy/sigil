@@ -7,12 +7,15 @@ use serde_json::json;
 use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfilePolicyEntry, AgentProfileSnapshot,
     AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
-    ApprovalMode, CompactionConfig, CompactionRecord, DurableEventType, JsonlSessionStore,
+    ApprovalMode, CompactionConfig, CompactionRecord, DurableEventType,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt, JsonlSessionStore,
     McpElicitationDecision, McpElicitationEntry, MemoryConfig, PlanApprovalExpiry,
-    PlanApprovalPermission, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
-    PluginTrustEntry, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillRunMode, SkillSource, SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolApprovalUserDecision, ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
+    PlanApprovalPermission, PluginCapability, PluginHookExecutionFinishedEntry,
+    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SessionStreamRecord,
+    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
+    SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
+    ToolEffect, ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
 };
 
 #[test]
@@ -1903,6 +1906,50 @@ fn render_session_control_entries_cover_remaining_labels() {
     assert_eq!(
         plugin_trust,
         "[ctl] plugin repo-review trust=trusted hash=sha256:manifest"
+    );
+
+    let plugin_hook_started = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::PluginHookExecutionStarted(PluginHookExecutionStartedEntry {
+            execution_id: "hook-exec-1".to_owned(),
+            plugin_id: "repo-review".to_owned(),
+            manifest_hash: "sha256:manifest".to_owned(),
+            capability_digest: "sha256:capability".to_owned(),
+            hook_id: "verify-repo".to_owned(),
+            hook_kind: PluginHookKind::Verification,
+            command: vec!["scripts/verify.sh".to_owned()],
+            declared_effect: ToolEffect::WorkspaceWrite,
+            timeout_ms: 30_000,
+            backend: ExecutionBackendKind::Local,
+            backend_capabilities: ExecutionBackendCapabilities::default(),
+        }),
+    ));
+    assert_eq!(
+        plugin_hook_started,
+        "[ctl] plugin hook repo-review:verify-repo started kind=verification effect=workspace_write backend=local"
+    );
+
+    let plugin_hook_finished = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::PluginHookExecutionFinished(PluginHookExecutionFinishedEntry {
+            execution_id: "hook-exec-1".to_owned(),
+            plugin_id: "repo-review".to_owned(),
+            manifest_hash: "sha256:manifest".to_owned(),
+            capability_digest: "sha256:capability".to_owned(),
+            hook_id: "verify-repo".to_owned(),
+            hook_kind: PluginHookKind::Verification,
+            status: PluginHookExecutionStatus::Succeeded,
+            exit_code: Some(0),
+            stdout_bytes: 12,
+            stderr_bytes: 0,
+            timed_out: false,
+            backend: ExecutionBackendKind::Local,
+            backend_capabilities: ExecutionBackendCapabilities::default(),
+            network: ExecutionNetworkReceipt::unknown("local backend"),
+            resources: Default::default(),
+        }),
+    ));
+    assert_eq!(
+        plugin_hook_finished,
+        "[ctl] plugin hook repo-review:verify-repo finished status=succeeded exit=0 stdout=12 stderr=0"
     );
 
     let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1").expect("valid queue id");

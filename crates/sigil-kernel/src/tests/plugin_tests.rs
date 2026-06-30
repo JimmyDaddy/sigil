@@ -1,10 +1,14 @@
 use anyhow::Result;
 
 use crate::{
-    ApprovalMode, ControlEntry, ExecutionCoverageLabel, McpServerConfig, McpServerStartup,
-    PluginAgentRef, PluginCapability, PluginHookKind, PluginHookRef, PluginManifest,
-    PluginManifestSnapshot, PluginSkillRef, PluginStateProjection, PluginTrustDecision,
-    PluginTrustEntry, SessionLogEntry, ToolEffect, plugin_manifest_digests_match,
+    ApprovalMode, ContextPackOptions, ContextSensitivity, ContextSource, ContextTrustLevel,
+    ControlEntry, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel,
+    ExecutionNetworkReceipt, McpServerConfig, McpServerStartup, PluginAgentRef, PluginCapability,
+    PluginHookContextOptions, PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry,
+    PluginHookExecutionStatus, PluginHookKind, PluginHookOutputEnvelope, PluginHookOutputStream,
+    PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef, PluginStateProjection,
+    PluginTrustDecision, PluginTrustEntry, RedactionState, SessionLogEntry, ToolEffect,
+    pack_context_items, plugin_hook_output_context_items, plugin_manifest_digests_match,
     validate_plugin_id, validate_plugin_manifest_digest, validate_plugin_version,
 };
 
@@ -68,6 +72,39 @@ fn sample_snapshot() -> PluginManifestSnapshot {
 fn sample_trust(decision: PluginTrustDecision) -> PluginTrustEntry {
     PluginTrustEntry::for_snapshot(&sample_snapshot(), decision, 42)
         .expect("sample trust should build")
+}
+
+fn sample_hook_output(content: &str) -> PluginHookOutputEnvelope {
+    PluginHookOutputEnvelope {
+        execution_id: "hook-exec-1".to_owned(),
+        plugin_id: "repo-review".to_owned(),
+        hook_id: "context-rules".to_owned(),
+        stdout: PluginHookOutputStream {
+            content: content.to_owned(),
+            total_bytes: content.len() as u64,
+            returned_bytes: content.len() as u64,
+            omitted_bytes: 0,
+            total_lines: content.lines().count() as u64,
+            returned_lines: content.lines().count() as u64,
+            truncated: false,
+            redaction_state: RedactionState::None,
+        },
+        stderr: PluginHookOutputStream {
+            content: String::new(),
+            total_bytes: 0,
+            returned_bytes: 0,
+            omitted_bytes: 0,
+            total_lines: 0,
+            returned_lines: 0,
+            truncated: false,
+            redaction_state: RedactionState::None,
+        },
+        artifact_refs: Vec::new(),
+        artifact_refs_truncated: false,
+        redaction_state: RedactionState::None,
+        parse_error: None,
+        model_visible_summary: "plugin hook context-rules finished succeeded".to_owned(),
+    }
 }
 
 #[test]
@@ -194,6 +231,125 @@ fn plugin_capabilities_map_to_normal_tool_secret_egress_policy() {
     assert!(mcp.egress_logging);
     assert!(!mcp.allow_secrets);
     assert_eq!(mcp.mutation_effect, crate::ToolEffect::Unknown);
+}
+
+#[test]
+fn plugin_hook_execution_control_entries_round_trip() {
+    let started = PluginHookExecutionStartedEntry {
+        execution_id: "plugin_hook_1".to_owned(),
+        plugin_id: "repo-review".to_owned(),
+        manifest_hash: VALID_PLUGIN_DIGEST.to_owned(),
+        capability_digest: VALID_PLUGIN_DIGEST.to_owned(),
+        hook_id: "context-pack".to_owned(),
+        hook_kind: PluginHookKind::Context,
+        command: vec!["hook-runner".to_owned(), "--json".to_owned()],
+        declared_effect: ToolEffect::ReadOnly,
+        timeout_ms: 30_000,
+        backend: ExecutionBackendKind::Local,
+        backend_capabilities: ExecutionBackendCapabilities::default(),
+    };
+    let finished = PluginHookExecutionFinishedEntry {
+        execution_id: started.execution_id.clone(),
+        plugin_id: started.plugin_id.clone(),
+        manifest_hash: started.manifest_hash.clone(),
+        capability_digest: started.capability_digest.clone(),
+        hook_id: started.hook_id.clone(),
+        hook_kind: started.hook_kind,
+        status: PluginHookExecutionStatus::Succeeded,
+        exit_code: Some(0),
+        stdout_bytes: 2,
+        stderr_bytes: 0,
+        timed_out: false,
+        backend: ExecutionBackendKind::Local,
+        backend_capabilities: ExecutionBackendCapabilities::default(),
+        network: ExecutionNetworkReceipt::default(),
+        resources: Default::default(),
+    };
+
+    let started_json = serde_json::to_string(&SessionLogEntry::Control(
+        ControlEntry::PluginHookExecutionStarted(started.clone()),
+    ))
+    .expect("started entry should encode");
+    let finished_json = serde_json::to_string(&SessionLogEntry::Control(
+        ControlEntry::PluginHookExecutionFinished(finished.clone()),
+    ))
+    .expect("finished entry should encode");
+
+    match serde_json::from_str::<SessionLogEntry>(&started_json)
+        .expect("started entry should decode")
+    {
+        SessionLogEntry::Control(ControlEntry::PluginHookExecutionStarted(restored)) => {
+            assert_eq!(restored, started);
+        }
+        other => panic!("unexpected started entry: {other:?}"),
+    }
+    match serde_json::from_str::<SessionLogEntry>(&finished_json)
+        .expect("finished entry should decode")
+    {
+        SessionLogEntry::Control(ControlEntry::PluginHookExecutionFinished(restored)) => {
+            assert_eq!(restored, finished);
+        }
+        other => panic!("unexpected finished entry: {other:?}"),
+    }
+}
+
+#[test]
+fn plugin_hook_output_context_items_preserve_extension_provenance() -> Result<()> {
+    let output =
+        sample_hook_output("Use `cargo test -p sigil-runtime context` for context checks.");
+    let context = plugin_hook_output_context_items(
+        &output,
+        PluginHookContextOptions::new("event-plugin-hook-finished"),
+    )?;
+
+    assert_eq!(context.items.len(), 1);
+    let item = &context.items[0];
+    assert_eq!(
+        item.id,
+        "plugin-hook:repo-review:context-rules:hook-exec-1:stdout"
+    );
+    assert_eq!(item.source, ContextSource::ExtensionProvided);
+    assert_eq!(
+        item.source_event_id.as_deref(),
+        Some("event-plugin-hook-finished")
+    );
+    assert_eq!(item.trust_level, ContextTrustLevel::ExtensionProvided);
+    assert_eq!(item.sensitivity, ContextSensitivity::Repository);
+    assert!(item.egress_decision.is_none());
+    assert_eq!(
+        context.snippets.get(&item.id).map(String::as_str),
+        Some("Use `cargo test -p sigil-runtime context` for context checks.")
+    );
+
+    let packed = pack_context_items(context.items, ContextPackOptions::new(128))?;
+    assert_eq!(packed.dynamic_suffix.len(), 1);
+    assert!(packed.stable_prefix.is_empty());
+    Ok(())
+}
+
+#[test]
+fn plugin_hook_output_context_items_keep_redacted_output_under_egress_policy() -> Result<()> {
+    let mut output = sample_hook_output("token=[redacted]");
+    output.stdout.redaction_state = RedactionState::Redacted;
+    output.redaction_state = RedactionState::Redacted;
+
+    let context = plugin_hook_output_context_items(
+        &output,
+        PluginHookContextOptions::new("event-plugin-hook-finished"),
+    )?;
+    assert_eq!(
+        context.items[0].sensitivity,
+        ContextSensitivity::PotentialSecret
+    );
+
+    let packed = pack_context_items(context.items, ContextPackOptions::new(128))?;
+    assert!(packed.dynamic_suffix.is_empty());
+    assert_eq!(packed.excluded.len(), 1);
+    assert_eq!(
+        packed.excluded[0].inclusion_reason,
+        crate::ContextInclusionReason::ExcludedSecret
+    );
+    Ok(())
 }
 
 #[test]

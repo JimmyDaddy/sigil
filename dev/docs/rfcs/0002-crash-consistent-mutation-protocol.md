@@ -227,6 +227,12 @@ Rules:
 - If a pre-execution snapshot exists and the scan can complete, recovery emits `WorkspaceMutationDetected` for the observed transition.
 - If the scan cannot complete or the started tool may have written outside the scan scope, recovery emits `WorkspaceMutationDetected` with `MutationSubject::Unknown` and marks the workspace `UnknownDirty`.
 - Recovery must not replay shell, MCP, plugin or persistent terminal commands to discover their effects.
+- Plugin hook command processes are covered by RFC-0015 E15.5: mutating or
+  unknown-effect hooks must receive a `MutationEventRecorder` before execution;
+  read-only hooks do not dirty the verification scope; changed pre/post scans
+  append `WorkspaceMutationDetected`; unavailable scan coverage records
+  unknown-dirty evidence. Plugin-declared long-lived MCP server processes remain
+  gated by the MCP/process sandbox handoff slices.
 
 ## 10. Workspace Snapshot Manifest
 

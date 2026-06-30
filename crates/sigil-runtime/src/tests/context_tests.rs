@@ -1,7 +1,10 @@
 use anyhow::Result;
-use sigil_kernel::{FileChangeRef, SourcedFact, TaskMemoryV1};
+use sigil_kernel::{
+    FileChangeRef, PluginHookContextOptions, PluginHookOutputEnvelope, PluginHookOutputStream,
+    RedactionState, SourcedFact, TaskMemoryV1,
+};
 
-use super::context_items_from_task_memory;
+use super::{context_items_from_plugin_hook_output, context_items_from_task_memory};
 
 fn runtime_task_memory() -> TaskMemoryV1 {
     TaskMemoryV1 {
@@ -46,5 +49,62 @@ fn context_retrieves_task_memory_items_with_provenance() -> Result<()> {
         item.id == "task-memory:runtime-memory:file:0"
             && item.source_event_id.as_deref() == Some("event-file")
     }));
+    Ok(())
+}
+
+#[test]
+fn context_retrieves_plugin_hook_output_with_extension_labels() -> Result<()> {
+    let output = PluginHookOutputEnvelope {
+        execution_id: "hook-exec-runtime".to_owned(),
+        plugin_id: "repo-review".to_owned(),
+        hook_id: "context-rules".to_owned(),
+        stdout: PluginHookOutputStream {
+            content: "Prefer the existing context V0 adapter.".to_owned(),
+            total_bytes: 39,
+            returned_bytes: 39,
+            omitted_bytes: 0,
+            total_lines: 1,
+            returned_lines: 1,
+            truncated: false,
+            redaction_state: RedactionState::None,
+        },
+        stderr: PluginHookOutputStream {
+            content: String::new(),
+            total_bytes: 0,
+            returned_bytes: 0,
+            omitted_bytes: 0,
+            total_lines: 0,
+            returned_lines: 0,
+            truncated: false,
+            redaction_state: RedactionState::None,
+        },
+        artifact_refs: Vec::new(),
+        artifact_refs_truncated: false,
+        redaction_state: RedactionState::None,
+        parse_error: None,
+        model_visible_summary: "plugin hook context-rules finished succeeded".to_owned(),
+    };
+
+    let context = context_items_from_plugin_hook_output(
+        &output,
+        PluginHookContextOptions::new("event-hook"),
+    )?;
+
+    assert_eq!(context.items.len(), 1);
+    assert_eq!(
+        context.items[0].source,
+        sigil_kernel::ContextSource::ExtensionProvided
+    );
+    assert_eq!(
+        context.items[0].source_event_id.as_deref(),
+        Some("event-hook")
+    );
+    assert_eq!(
+        context
+            .snippets
+            .get("plugin-hook:repo-review:context-rules:hook-exec-runtime:stdout")
+            .map(String::as_str),
+        Some("Prefer the existing context V0 adapter.")
+    );
     Ok(())
 }

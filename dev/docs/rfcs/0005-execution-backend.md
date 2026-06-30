@@ -156,6 +156,7 @@ pub trait ExecutionBackend {
 - E05.11 Network Policy Enforcement and Receipt：已完成 network allowed/denied/unsupported/unknown receipt、verification binding/hash 集成和 bash metadata 展示；macOS Seatbelt 仍不宣传网络隔离。
 - E05.12 Resource Limits and Process Cleanup：已完成 core semantics 和 Local non-interactive cleanup path；container/bwrap/Windows/PTY 等 backend-specific cleanup 继续由后续切片落地。
 - E05.13 Persistent Terminal Sandbox Backend：pre-lifecycle metadata contract 已实现；完整 PTY/long-lived process sandbox lifecycle 仍 gated，等待 backend 支持 persistent PTY 或 container exec lifecycle。
+- 2026-06-30 gate audit：E05.13 仍不能转为 implementation slice。当前 `ExecutionBackend` 是 non-interactive one-shot API；terminal backend kind 只有 `LocalProcess` / `LocalPty`；`LocalPty` 明确记录为 `local + unconfined`；macOS Seatbelt、Linux Bubblewrap 和 Docker backend 均声明 `persistent_pty=false`。解锁前必须先选择 Docker exec session、Bubblewrap PTY wrapper 或 backend-agnostic long-lived session trait 路线。
 - E05.14 MCP Stdio Sandbox Handoff：本地 stdio MCP server 通过 execution backend 或明确标记 outside local sandbox。
 - E05.15 Plugin Hook Process Sandbox Handoff：未来插件 hook command runtime 必须经过 execution backend 或显式 unconfined/unsupported。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。

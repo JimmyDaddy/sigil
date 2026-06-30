@@ -49,7 +49,10 @@ use crate::{
         ApprovalMode, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation,
     },
     plan::{PlanApprovalProjection, PlanApprovedEntry},
-    plugin::{PluginManifestSnapshot, PluginStateProjection, PluginTrustEntry},
+    plugin::{
+        PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginManifestSnapshot,
+        PluginStateProjection, PluginTrustEntry,
+    },
     provider::{
         CompletionRequest, MessageRole, ModelMessage, PrefixSnapshot, ProviderContinuationState,
         ResponseHandle, SessionStats, UsageStats,
@@ -274,6 +277,10 @@ pub enum ControlEntry {
     PluginManifestCaptured(PluginManifestSnapshot),
     #[serde(alias = "PluginTrustDecision")]
     PluginTrustDecision(PluginTrustEntry),
+    #[serde(alias = "PluginHookExecutionStarted")]
+    PluginHookExecutionStarted(PluginHookExecutionStartedEntry),
+    #[serde(alias = "PluginHookExecutionFinished")]
+    PluginHookExecutionFinished(PluginHookExecutionFinishedEntry),
     #[serde(alias = "ChangeSetProposed")]
     ChangeSetProposed(ChangeSet),
     #[serde(alias = "ChangeSetApplied")]
@@ -1032,6 +1039,10 @@ fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
         ControlEntry::ToolExecution(execution) => tool_execution_event_type(execution.status),
         ControlEntry::ToolEgress(_) => DurableEventType::EgressDecisionRecorded,
         ControlEntry::PluginTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
+        ControlEntry::PluginHookExecutionStarted(_) => DurableEventType::PluginHookExecutionStarted,
+        ControlEntry::PluginHookExecutionFinished(_) => {
+            DurableEventType::PluginHookExecutionFinished
+        }
         ControlEntry::AgentProfileTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
         ControlEntry::TaskRun(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,

@@ -2458,9 +2458,16 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(detail.contains("[skills]"));
     assert!(detail.contains("- Skill 1: skills/review/SKILL.md"));
     assert!(detail.contains("[hooks]"));
-    assert!(detail.contains("- Hook 1: pre_tool_use"));
-    assert!(detail.contains("- Hook 1 command: scripts/check-tool-policy.sh --policy strict"));
-    assert!(detail.contains("- Hook 1 policy: approval=ask egress=yes secrets=blocked"));
+    assert!(detail.contains("- Hook count: 1"));
+    assert!(detail.contains("- Hook kinds: context=0 compaction=0 verification=0 event=1"));
+    assert!(detail.contains(
+        "- Hook effects: read_only=0 workspace_write=0 external_write=0 network=0 unknown=1"
+    ));
+    assert!(detail.contains("- Runtime: trusted hooks run through execution backend"));
+    assert!(detail.contains("- Evidence: mutating hooks record workspace evidence"));
+    assert!(detail.contains("- Inspect: run /doctor for command and issue details"));
+    assert!(!detail.contains("- Hook 1 command:"));
+    assert!(!detail.contains("- Hook 1 policy:"));
     assert!(detail.contains("[mcp servers]"));
     assert!(detail.contains("- MCP 1: repo-tools"));
     assert!(detail.contains("- MCP 1 command: node server.js"));
@@ -2507,7 +2514,7 @@ fn config_plugins_step_renders_empty_discovery_and_warning_overflow() -> Result<
 }
 
 #[test]
-fn config_plugins_review_renders_complete_command_surface() -> Result<()> {
+fn config_plugins_review_renders_coarse_hook_surface_and_detailed_mcp_surface() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     let plugin_root = workspace.join(".sigil/plugins/command-pack");
@@ -2582,18 +2589,12 @@ required = true
     let detail = app.config_detail_lines().join("\n");
 
     for expected in [
-        "- Hook 1: pre_tool_use",
-        "- Hook 1 command: scripts/hook-1.sh --flag-1",
-        "- Hook 1 policy: approval=ask egress=yes secrets=blocked",
-        "- Hook 2: post_tool_use",
-        "- Hook 2 command: scripts/hook-2.sh --flag-2",
-        "- Hook 2 policy: approval=ask egress=yes secrets=blocked",
-        "- Hook 3: session_start",
-        "- Hook 3 command: scripts/hook-3.sh --flag-3",
-        "- Hook 3 policy: approval=deny egress=yes secrets=blocked",
-        "- Hook 4: session_stop",
-        r#"- Hook 4 command: scripts/hook-4.sh --flag-4 "two words""#,
-        "- Hook 4 policy: approval=allow egress=yes secrets=blocked",
+        "- Hook count: 4",
+        "- Hook kinds: context=0 compaction=0 verification=0 event=4",
+        "- Hook effects: read_only=0 workspace_write=0 external_write=0 network=0 unknown=4",
+        "- Runtime: trusted hooks run through execution backend",
+        "- Evidence: mutating hooks record workspace evidence",
+        "- Inspect: run /doctor for command and issue details",
         "- MCP 1: tools-1",
         "- MCP 1 command: node server-1.js",
         "- MCP 1 startup: lazy",
@@ -2613,6 +2614,9 @@ required = true
     ] {
         assert!(detail.contains(expected), "missing {expected}");
     }
+    assert!(!detail.contains("- Hook 1 command:"));
+    assert!(!detail.contains("- Hook 4 command:"));
+    assert!(!detail.contains("- Hook 1 policy:"));
     assert!(!detail.contains("- Hooks:"));
     assert!(!detail.contains("- MCP:"));
     Ok(())

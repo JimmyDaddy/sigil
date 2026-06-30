@@ -1,6 +1,6 @@
 # RFC-0009 Extension Trust Plane
 
-状态：draft / E09.1-E09.4 implemented / E09.5 gated
+状态：draft / E09.1-E09.5 implemented / productization remains
 
 创建日期：2026-06-28
 
@@ -140,10 +140,17 @@ Productization remains:
   they can emit real tool execution, egress and RFC-0002 mutation receipts.
 - Plugin-owned process unknown-dirty recording remains gated by the future
   plugin process runtime.
-- Context and compaction hooks remain gated until RFC-0015 trusted hook commands
-  execute through the unified `ExecutionBackend` and can emit egress and
-  mutation evidence.
-- 2026-06-29 审计确认：context/compaction hook runtime 尚未接入，E09.5 保持 gated；不能用 fake adapter 绕过 RFC-0006 provenance 或 RFC-0002/RFC-0003 side-effect accounting。
+- Context and compaction hook output can now enter RFC-0006 as
+  `ExtensionProvided` context through RFC-0015 E15.4 after trusted execution
+  and bounded output handling. Redacted output remains excluded unless an
+  egress decision is present, and hook output cannot create verification
+  evidence.
+- Plugin-owned process mutation accounting and verification hook receipt binding
+  remain gated by RFC-0015 E15.5/E15.6 and must not be replaced by fake
+  adapters.
+- 2026-06-30 审计确认：E09.5 的 context/compaction provenance boundary 已由
+  RFC-0015 E15.2-E15.4 满足；RFC-0002/RFC-0003 side-effect accounting 仍由后续
+  plugin mutation / verification slices 跟踪。
 
 ## 9. Acceptance Criteria
 

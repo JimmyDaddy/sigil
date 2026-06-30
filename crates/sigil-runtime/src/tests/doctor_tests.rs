@@ -9,7 +9,9 @@ use std::{
 };
 
 use anyhow::Result;
-use sigil_kernel::{DurableEventType, EventClass, JsonlSessionStore};
+use sigil_kernel::{
+    DurableEventType, EventClass, JsonlSessionStore, PluginTrustDecision, PluginTrustEntry,
+};
 use tempfile::tempdir;
 
 use super::*;
@@ -116,6 +118,7 @@ api_key = "test-secret-key"
                     remediation: Some("fix appearance".to_owned()),
                 }]
             }),
+            ..DoctorReportOptions::default()
         },
     );
 
@@ -252,6 +255,80 @@ allow_secrets = false
             .any(|check| check.name == "lsp:rust-analyzer"
                 && check.status == DoctorStatus::Ok
                 && check.message.contains("command=available"))
+    );
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_plugin_hook_runtime_summary_with_trust_and_effects() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let plugin_root = workspace.join(".sigil/plugins/repo-review");
+    fs::create_dir_all(&plugin_root)?;
+    fs::write(
+        plugin_root.join("plugin.toml"),
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "context-rules"
+event = "context_rules"
+kind = "context"
+command = "scripts/context.sh"
+declared_effect = "read_only"
+
+[[hooks]]
+id = "verify-repo"
+event = "verify_repo"
+kind = "verification"
+command = "scripts/verify.sh"
+declared_effect = "workspace_write"
+"#,
+    )?;
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+api_key = "test-secret-key"
+"#,
+    )?;
+    let pending = crate::discover_workspace_plugins(&workspace, &[])?;
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)?;
+
+    let report = build_doctor_report_with_options(
+        &config_path,
+        &workspace,
+        DoctorReportOptions {
+            plugin_trust_entries: Some(&[trust]),
+            ..DoctorReportOptions::default()
+        },
+    );
+
+    let hook_check = report
+        .checks
+        .iter()
+        .find(|check| check.name == "plugins:hooks")
+        .expect("plugin hook doctor check should be present");
+    assert_eq!(hook_check.status, DoctorStatus::Warn);
+    assert!(hook_check.message.contains("hooks=2"));
+    assert!(hook_check.message.contains("trusted=2"));
+    assert!(hook_check.message.contains("verification:1"));
+    assert!(hook_check.message.contains("workspace_write:1"));
+    assert_eq!(
+        hook_check.remediation.as_deref(),
+        Some(
+            "mutating, network or unknown-effect hooks require execution backend and mutation evidence"
+        )
     );
     Ok(())
 }
@@ -1336,7 +1413,10 @@ fn terminal_checks_report_disabled_config_and_smoke_checklist() {
 #[test]
 fn terminal_checks_warn_for_multiplexer_and_remote_clipboard_bridges() {
     let mut report = DoctorReport::default();
-    let config = TerminalConfig::default();
+    let config = TerminalConfig {
+        mouse_capture: true,
+        ..TerminalConfig::default()
+    };
     let environment = TerminalEnvironment {
         term: Some("screen-256color".to_owned()),
         tmux: true,
@@ -1378,7 +1458,10 @@ fn terminal_checks_warn_for_multiplexer_and_remote_clipboard_bridges() {
 #[test]
 fn terminal_checks_warn_when_iterm_profile_disables_mouse_reporting() {
     let mut report = DoctorReport::default();
-    let config = TerminalConfig::default();
+    let config = TerminalConfig {
+        mouse_capture: true,
+        ..TerminalConfig::default()
+    };
     let environment = TerminalEnvironment {
         term: Some("xterm-256color".to_owned()),
         term_program: Some("iTerm.app".to_owned()),
@@ -1453,7 +1536,10 @@ Array {
 #[test]
 fn terminal_checks_warn_when_term_is_unusable_with_enabled_config() {
     let mut report = DoctorReport::default();
-    let config = TerminalConfig::default();
+    let config = TerminalConfig {
+        mouse_capture: true,
+        ..TerminalConfig::default()
+    };
     let environment = TerminalEnvironment {
         term: Some("dumb".to_owned()),
         ..TerminalEnvironment::default()

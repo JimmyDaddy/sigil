@@ -1338,7 +1338,8 @@ fn render_config_narrow_screen_truncates_long_values() -> anyhow::Result<()> {
 }
 
 #[test]
-fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> anyhow::Result<()> {
+fn render_config_plugins_keeps_hook_summary_and_mcp_details_visible_on_narrow_screen()
+-> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     write_plugin_with_many_capabilities(&workspace)?;
@@ -1354,9 +1355,15 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Plugins 11/12"));
-    assert!(rendered.contains("Hook 4"));
-    assert!(rendered.contains("session_stop"));
-    assert!(rendered.contains("scripts/hook-4.sh --flag-4"));
+    assert!(rendered.contains("Hook count"));
+    assert!(rendered.contains(": 4"));
+    assert!(rendered.contains("Hook kinds"));
+    assert!(rendered.contains("event=4"));
+    assert!(rendered.contains("Hook effects"));
+    assert!(rendered.contains("unknown=4"));
+    assert!(rendered.contains("Inspect"));
+    assert!(rendered.contains("run /doctor for command and issue details"));
+    assert!(!rendered.contains("scripts/hook-4.sh --flag-4"));
     assert!(rendered.contains("MCP 4"));
     assert!(rendered.contains("tools-4"));
     assert!(rendered.contains("node server-4.js"));

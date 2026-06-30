@@ -9,11 +9,19 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     config::{McpServerConfig, McpServerStartup},
-    execution_backend::ExecutionCoverageSummary,
+    context_engine::{
+        ContextBodyRef, ContextEgressDecisionId, ContextInclusionReason, ContextItem,
+        ContextSensitivity, ContextSource, ContextTrustLevel, estimate_context_token_cost,
+    },
+    event::EventId,
+    execution_backend::{
+        ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageSummary,
+        ExecutionNetworkReceipt, ExecutionResourceReceipt,
+    },
     permission::ApprovalMode,
     session::{ControlEntry, SessionLogEntry},
     tool::{ToolAccess, ToolCategory},
-    verification::ToolEffect,
+    verification::{ArtifactId, RedactionState, ToolEffect},
 };
 
 fn default_plugin_egress_logging() -> bool {
@@ -36,6 +44,15 @@ pub const DEFAULT_PLUGIN_HOOK_TIMEOUT_MS: u64 = 30_000;
 
 /// Maximum hook timeout accepted in a plugin manifest.
 pub const MAX_PLUGIN_HOOK_TIMEOUT_MS: u64 = 600_000;
+
+/// Default bounded text budget for one plugin hook output stream.
+pub const DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES: usize = 16 * 1024;
+
+/// Maximum text budget accepted for one plugin hook output stream.
+pub const MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES: usize = 128 * 1024;
+
+/// Maximum artifact references accepted from one hook execution output envelope.
+pub const MAX_PLUGIN_HOOK_ARTIFACT_REFS: usize = 16;
 
 /// Provider-neutral manifest for one local capability package.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -448,6 +465,263 @@ pub struct PluginCapabilityPolicy {
     pub egress_logging: bool,
     pub allow_secrets: bool,
     pub mutation_effect: ToolEffect,
+}
+
+/// Durable evidence that one trusted plugin hook command was handed to an execution backend.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginHookExecutionStartedEntry {
+    pub execution_id: String,
+    pub plugin_id: String,
+    pub manifest_hash: String,
+    pub capability_digest: String,
+    pub hook_id: String,
+    pub hook_kind: PluginHookKind,
+    pub command: Vec<String>,
+    pub declared_effect: ToolEffect,
+    pub timeout_ms: u64,
+    pub backend: ExecutionBackendKind,
+    pub backend_capabilities: ExecutionBackendCapabilities,
+}
+
+/// Stable completion state for one plugin hook command process.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginHookExecutionStatus {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+/// Durable evidence that one plugin hook command finished under the selected backend.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginHookExecutionFinishedEntry {
+    pub execution_id: String,
+    pub plugin_id: String,
+    pub manifest_hash: String,
+    pub capability_digest: String,
+    pub hook_id: String,
+    pub hook_kind: PluginHookKind,
+    pub status: PluginHookExecutionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub timed_out: bool,
+    pub backend: ExecutionBackendKind,
+    pub backend_capabilities: ExecutionBackendCapabilities,
+    #[serde(default)]
+    pub network: ExecutionNetworkReceipt,
+    #[serde(default)]
+    pub resources: ExecutionResourceReceipt,
+}
+
+/// Bounded text stream captured from one hook process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginHookOutputStream {
+    pub content: String,
+    pub total_bytes: u64,
+    pub returned_bytes: u64,
+    pub omitted_bytes: u64,
+    pub total_lines: u64,
+    pub returned_lines: u64,
+    pub truncated: bool,
+    pub redaction_state: RedactionState,
+}
+
+/// Bounded reference to an output artifact produced by a hook process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginHookOutputArtifactRef {
+    pub artifact_id: ArtifactId,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    pub redaction_state: RedactionState,
+}
+
+/// Bounded, redacted hook output envelope. This is untrusted data until a later integration layer
+/// assigns context, compaction or verification semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginHookOutputEnvelope {
+    pub execution_id: String,
+    pub plugin_id: String,
+    pub hook_id: String,
+    pub stdout: PluginHookOutputStream,
+    pub stderr: PluginHookOutputStream,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<PluginHookOutputArtifactRef>,
+    pub artifact_refs_truncated: bool,
+    pub redaction_state: RedactionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_error: Option<String>,
+    pub model_visible_summary: String,
+}
+
+/// Policy labels used when a plugin hook output envelope becomes context data.
+///
+/// Hook output is never elevated to trusted instructions. Callers may lower the trust level or
+/// increase sensitivity when workspace trust or egress policy requires it, but this adapter rejects
+/// instruction-level trust labels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginHookContextOptions {
+    pub source_event_id: EventId,
+    #[serde(default = "default_plugin_hook_context_trust_level")]
+    pub trust_level: ContextTrustLevel,
+    #[serde(default = "default_plugin_hook_context_sensitivity")]
+    pub sensitivity: ContextSensitivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_decision: Option<ContextEgressDecisionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+}
+
+impl PluginHookContextOptions {
+    #[must_use]
+    pub fn new(source_event_id: impl Into<EventId>) -> Self {
+        Self {
+            source_event_id: source_event_id.into(),
+            trust_level: default_plugin_hook_context_trust_level(),
+            sensitivity: default_plugin_hook_context_sensitivity(),
+            egress_decision: None,
+            repo_revision: None,
+            score: Some(0.65),
+        }
+    }
+
+    /// Validates that plugin output cannot be promoted into higher-priority prompt material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source id is empty or when the trust label would make extension
+    /// output look like system/user/workspace instructions.
+    pub fn validate(&self) -> Result<()> {
+        if self.source_event_id.trim().is_empty() {
+            bail!("plugin hook context source event id is empty");
+        }
+        if matches!(
+            self.trust_level,
+            ContextTrustLevel::System
+                | ContextTrustLevel::UserProvided
+                | ContextTrustLevel::WorkspaceInstruction
+        ) {
+            bail!("plugin hook output cannot use instruction-level context trust");
+        }
+        Ok(())
+    }
+}
+
+fn default_plugin_hook_context_trust_level() -> ContextTrustLevel {
+    ContextTrustLevel::ExtensionProvided
+}
+
+fn default_plugin_hook_context_sensitivity() -> ContextSensitivity {
+    ContextSensitivity::Repository
+}
+
+/// Context candidates derived from a plugin hook output envelope.
+///
+/// The snippets carry bounded/redacted hook stdout for prompt assembly. Artifact references stay as
+/// metadata in the envelope and are not expanded into context by this adapter.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginHookContextItems {
+    pub items: Vec<ContextItem>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub snippets: BTreeMap<String, String>,
+}
+
+/// Converts bounded plugin hook stdout into RFC-0006 context data.
+///
+/// This function only creates context candidates. It does not attach task memory, verification
+/// receipts, or mutation evidence. If output redaction happened, sensitivity is raised to at least
+/// `PotentialSecret`, which causes normal context packing to require an egress decision.
+///
+/// # Errors
+///
+/// Returns an error when options or generated context labels are invalid.
+pub fn plugin_hook_output_context_items(
+    output: &PluginHookOutputEnvelope,
+    options: PluginHookContextOptions,
+) -> Result<PluginHookContextItems> {
+    options.validate()?;
+    let mut items = Vec::new();
+    let mut snippets = BTreeMap::new();
+    let content = if output.parse_error.is_some() {
+        output.model_visible_summary.clone()
+    } else {
+        output.stdout.content.clone()
+    };
+    if content.trim().is_empty() {
+        return Ok(PluginHookContextItems { items, snippets });
+    }
+
+    let id = format!(
+        "plugin-hook:{}:{}:{}:stdout",
+        output.plugin_id, output.hook_id, output.execution_id
+    );
+    let sensitivity = plugin_hook_context_sensitivity(output, options.sensitivity);
+    let inclusion_reason =
+        plugin_hook_context_inclusion_reason(output, sensitivity, options.egress_decision.as_ref());
+    let item = ContextItem {
+        id: id.clone(),
+        source: ContextSource::ExtensionProvided,
+        source_event_id: Some(options.source_event_id),
+        trust_level: options.trust_level,
+        sensitivity,
+        egress_decision: options.egress_decision,
+        repo_revision: options.repo_revision,
+        token_cost: estimate_context_token_cost(&content),
+        score: options.score,
+        inclusion_reason,
+        body_ref: ContextBodyRef::inline(&content),
+    };
+    item.validate()?;
+    snippets.insert(id, content);
+    items.push(item);
+    Ok(PluginHookContextItems { items, snippets })
+}
+
+fn plugin_hook_context_sensitivity(
+    output: &PluginHookOutputEnvelope,
+    requested: ContextSensitivity,
+) -> ContextSensitivity {
+    if output.redaction_state != RedactionState::None
+        && requested < ContextSensitivity::PotentialSecret
+    {
+        ContextSensitivity::PotentialSecret
+    } else {
+        requested
+    }
+}
+
+fn plugin_hook_context_inclusion_reason(
+    output: &PluginHookOutputEnvelope,
+    sensitivity: ContextSensitivity,
+    egress_decision: Option<&ContextEgressDecisionId>,
+) -> ContextInclusionReason {
+    if output.parse_error.is_some() {
+        return ContextInclusionReason::ExcludedUnsupported;
+    }
+    if matches!(
+        sensitivity,
+        ContextSensitivity::PotentialSecret | ContextSensitivity::Secret
+    ) && egress_decision.is_none()
+    {
+        return ContextInclusionReason::ExcludedSecret;
+    }
+    if sensitivity == ContextSensitivity::External && egress_decision.is_none() {
+        return ContextInclusionReason::ExcludedEgressDenied;
+    }
+    ContextInclusionReason::RetrievalHit
 }
 
 /// Trust state for one plugin manifest hash.

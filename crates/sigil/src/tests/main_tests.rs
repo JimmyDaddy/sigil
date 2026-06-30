@@ -556,6 +556,7 @@ text_primary = "#101010"
 
     assert!(output.contains("[warn] appearance:contrast:text-base"));
     assert!(output.contains("text_primary on surface_base"));
+    assert!(output.contains("summary: warn"));
     Ok(())
 }
 

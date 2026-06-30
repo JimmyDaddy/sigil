@@ -576,12 +576,12 @@ Required deterministic tests:
 - 已完成 child verification / worktree merge 的最小产品链路展示：task sidebar / strip 会在 child merge 导致 parent verification stale 时显示 child task/status 和 `run parent check` 引导；session audit 中 child receipt link 会显示 linked/merged 状态和 parent re-check requirement，避免把 snapshot id / merge event id 当成普通用户动作。
 - E03.4 已完成：E14.7 的 merge review product surface 展示 pending/accepted/conflict/rejected/cancelled states，kernel `verification_child` reducer test 证明 child worktree `Passed` receipt 不会继承为 parent `Passed`，parent merge 后仍需 parent workspace evidence。
 - 已补齐新增 projected state 的 Session 级 durable replay adoption：session-list、agent-graph 和 dispatch-trace projection 可通过 `Session` 的 durable mixed-stream replay adapter 重建；dispatch trace projection 继续保持 egress payload redaction，腐败 stream/sequence gap 由读取层 fail closed。
-- 已确认当前 plugin integration 仅产生静态 manifest review/projection data；尚无 plugin hook command execution runtime，plugin-declared MCP server 也未自动进入 active startup/refresh path。未来启用这些 plugin-owned external process 时必须先产生 RFC-0002 unknown-dirty mutation evidence，verification reducer 才能消费。
+- 已完成 plugin verification hook receipt binding：可信 hook command 的 started/finished evidence 与 bounded output envelope 一致时，系统可生成绑定 workspace snapshot、check spec hash、execution backend/capabilities、network receipt 和 sandbox profile hash 的 `VerificationReceipt`；hook stdout/stderr 只作为 output provenance，不能决定系统 verdict；mutating hook result 映射为 `Inconclusive`，不能满足 final passed evidence。plugin-declared MCP/server 长生命周期进程仍未自动进入 active startup/refresh path。
 
 Productization remains：
 
 - 完成 check runner 产品化：更完整的失败重试交互；runner lifecycle audit primitive、核心 trust gate、repo-local approval UI、backend execution plumbing、最小 queue/status UI、timeout visibility、terminal failure reason、retry affordance、配置化 auto-run policy 和 actual backend/capability binding 已落地。跨平台 sandbox backend、persistent terminal sandbox 和 MCP/plugin 进程隔离继续由 RFC-0005 / RFC-0009 后续切片提供。
-- 启用 plugin hook command runtime 或自动合并 plugin-declared MCP servers 时，必须复用 RFC-0002 external-process unknown-dirty recorder；当前代码尚不存在这些 plugin-owned process execution 面。
+- plugin hook command runtime 已通过 RFC-0015 E15.5/E15.6 接入 mutation recorder 与 verification receipt binding；后续自动合并 plugin-declared MCP servers 或其他长生命周期 plugin-owned process 时，仍必须复用 RFC-0002 external-process unknown-dirty recorder。
 - MCP lifecycle verification UX bridge 已落地：`WorkspaceMutationDetected(tool_name="mcp_server:<name>")` 会投影为用户可读的 `MCP server <name>` source reason 和 `refresh MCP or run check` recovery hint；task sidebar / strip / session detail 不再只显示内部 unknown-dirty token。
 - 扩展 verification scope profile 的后续工作只剩真实项目校准：默认/profile presets、配置文件 override 和 TUI 只读摘要已落地；更多语言专用生成目录或依赖缓存应按项目证据追加，避免把普通用户操作面做复杂。
 - 完成 workspace trust UX：首次进入 workspace gate、基础 audit provenance、`/config` trust/long-term policy 摘要、repo-local instruction 降级展示、task sidebar/strip 与 session audit 的 trust/approval 解释已落地。

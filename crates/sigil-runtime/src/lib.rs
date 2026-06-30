@@ -66,7 +66,7 @@ pub use agent_tools::{
     register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
-pub use context::context_items_from_task_memory;
+pub use context::{context_items_from_plugin_hook_output, context_items_from_task_memory};
 pub use context_window::{
     ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
     resolve_context_window_tokens,
@@ -80,6 +80,7 @@ pub use paths::{
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
+    PluginHookExecutionOutcome, PluginHookExecutionRequest, PluginHookExecutionRunner,
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
     discover_workspace_plugins, discover_workspace_plugins_with_project_assets_root,
     merge_plugin_mcp_servers, merge_plugin_skill_descriptors,

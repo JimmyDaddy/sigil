@@ -6,7 +6,8 @@ use std::{
 
 use sigil_kernel::{
     AppearanceConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
-    RootConfig, SessionStreamRecord, config::TerminalConfig, resolve_workspace_root,
+    PluginCapability, PluginHookKind, PluginTrustDecision, PluginTrustEntry, RootConfig,
+    SessionStreamRecord, ToolEffect, config::TerminalConfig, resolve_workspace_root,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -112,6 +113,7 @@ pub type AppearanceDoctorChecks = dyn Fn(&AppearanceConfig) -> Vec<DoctorCheck>;
 #[derive(Clone, Copy, Default)]
 pub struct DoctorReportOptions<'a> {
     pub appearance_checks: Option<&'a AppearanceDoctorChecks>,
+    pub plugin_trust_entries: Option<&'a [PluginTrustEntry]>,
 }
 
 /// Builds a local diagnostics report without starting providers or MCP servers.
@@ -178,6 +180,11 @@ pub fn build_doctor_report_with_options(
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
     check_provider(&mut report, &root_config);
     check_mcp_servers(&mut report, &root_config.mcp_servers, &workspace_root);
+    check_plugin_hooks(
+        &mut report,
+        canonical_workspace.as_deref().unwrap_or(&workspace_root),
+        options.plugin_trust_entries.unwrap_or_default(),
+    );
     check_code_intelligence(
         &mut report,
         &root_config,
@@ -833,6 +840,141 @@ fn check_mcp_servers(
             remediation,
         );
     }
+}
+
+#[derive(Debug, Default)]
+struct PluginHookDoctorSummary {
+    hooks: usize,
+    trusted: usize,
+    needs_review: usize,
+    disabled: usize,
+    context: usize,
+    compaction: usize,
+    verification: usize,
+    event: usize,
+    read_only: usize,
+    workspace_write: usize,
+    external_write: usize,
+    network: usize,
+    unknown: usize,
+}
+
+impl PluginHookDoctorSummary {
+    fn record(&mut self, trust: PluginTrustDecision, capability: &PluginCapability) {
+        let PluginCapability::Hook {
+            hook_kind,
+            declared_effect,
+            ..
+        } = capability
+        else {
+            return;
+        };
+        self.hooks += 1;
+        match trust {
+            PluginTrustDecision::Trusted => self.trusted += 1,
+            PluginTrustDecision::NeedsReview => self.needs_review += 1,
+            PluginTrustDecision::Disabled => self.disabled += 1,
+        }
+        match hook_kind {
+            PluginHookKind::Context => self.context += 1,
+            PluginHookKind::Compaction => self.compaction += 1,
+            PluginHookKind::Verification => self.verification += 1,
+            PluginHookKind::Event => self.event += 1,
+        }
+        match declared_effect {
+            ToolEffect::ReadOnly => self.read_only += 1,
+            ToolEffect::WorkspaceWrite => self.workspace_write += 1,
+            ToolEffect::ExternalWrite => self.external_write += 1,
+            ToolEffect::Network => self.network += 1,
+            ToolEffect::Unknown => self.unknown += 1,
+        }
+    }
+
+    fn risky_effects(&self) -> usize {
+        self.workspace_write + self.external_write + self.network + self.unknown
+    }
+
+    fn message(&self) -> String {
+        format!(
+            "hooks={} trusted={} review={} disabled={} kinds=context:{} compaction:{} verification:{} event:{} effects=read_only:{} workspace_write:{} external_write:{} network:{} unknown:{}",
+            self.hooks,
+            self.trusted,
+            self.needs_review,
+            self.disabled,
+            self.context,
+            self.compaction,
+            self.verification,
+            self.event,
+            self.read_only,
+            self.workspace_write,
+            self.external_write,
+            self.network,
+            self.unknown
+        )
+    }
+}
+
+fn check_plugin_hooks(
+    report: &mut DoctorReport,
+    workspace_root: &Path,
+    plugin_trust_entries: &[PluginTrustEntry],
+) {
+    let discovery = match crate::discover_workspace_plugins(workspace_root, plugin_trust_entries) {
+        Ok(discovery) => discovery,
+        Err(error) => {
+            report.push_with_remediation(
+                DoctorStatus::Warn,
+                "plugins:hooks",
+                format!("plugin discovery failed: {error}"),
+                Some("check .sigil/plugins manifests before trusting or running plugin hooks"),
+            );
+            return;
+        }
+    };
+    if let Some(warning) = discovery.warnings.first() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "plugins:discovery",
+            format!(
+                "{} warnings; first={:?} {}",
+                discovery.warnings.len(),
+                warning.kind,
+                warning.path.display()
+            ),
+            Some("open /config Plugins to review manifest warnings before trusting plugins"),
+        );
+    }
+
+    let mut summary = PluginHookDoctorSummary::default();
+    for manifest in &discovery.manifests {
+        for capability in &manifest.capabilities {
+            summary.record(manifest.trust, capability);
+        }
+    }
+    if summary.hooks == 0 {
+        report.push(
+            DoctorStatus::Ok,
+            "plugins:hooks",
+            "no hook commands discovered",
+        );
+        return;
+    }
+
+    let status = if summary.needs_review > 0 || summary.risky_effects() > 0 {
+        DoctorStatus::Warn
+    } else {
+        DoctorStatus::Ok
+    };
+    let remediation = if summary.needs_review > 0 {
+        Some("review plugin manifests in /config before hook commands can run")
+    } else if summary.risky_effects() > 0 {
+        Some(
+            "mutating, network or unknown-effect hooks require execution backend and mutation evidence",
+        )
+    } else {
+        None
+    };
+    report.push_with_remediation(status, "plugins:hooks", summary.message(), remediation);
 }
 
 fn check_code_intelligence(

@@ -1,4 +1,8 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -6,17 +10,21 @@ use std::os::unix::fs::symlink;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentConfig, ApprovalMode, CodeIntelligenceConfig, CompactionConfig, McpServerStartup,
-    MemoryConfig, PermissionConfig, PluginCapability, PluginHookKind, PluginSkillRef,
+    AgentConfig, ApprovalMode, CodeIntelligenceConfig, CompactionConfig, ExecutionBackend,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture, ExecutionNetworkReceipt,
+    ExecutionReceipt, ExecutionRequest, JsonlSessionStore, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
+    McpServerStartup, MemoryConfig, MutationEventRecorder, PermissionConfig, PluginCapability,
+    PluginHookExecutionStatus, PluginHookKind, PluginHookOutputArtifactRef, PluginSkillRef,
     PluginTrustDecision, PluginTrustEntry, ProviderCapabilities, ReasoningStreamSupport,
-    RootConfig, SessionConfig, SkillConfig, SkillIndexSnapshot, SkillSource, TaskConfig,
-    ToolAccess, ToolCategory, ToolEffect, WorkspaceConfig,
+    RedactionState, RootConfig, SecretRedactor, SessionConfig, SessionStreamRecord, SkillConfig,
+    SkillIndexSnapshot, SkillSource, TaskConfig, ToolAccess, ToolCategory, ToolEffect,
+    WorkspaceConfig, WorkspaceMutationDetected,
 };
 
 use super::{
-    PluginDiscoveryWarningKind, discover_workspace_plugins,
-    discover_workspace_plugins_with_project_assets_root, merge_plugin_mcp_servers,
-    merge_plugin_skill_descriptors,
+    PluginDiscoveryWarningKind, PluginHookExecutionRequest, PluginHookExecutionRunner,
+    discover_workspace_plugins, discover_workspace_plugins_with_project_assets_root,
+    merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
 };
 use crate::build_tool_registry_without_eager_mcp;
 use crate::skills::discover_plugin_skill_descriptors;
@@ -508,11 +516,26 @@ required = false
     );
     assert!(skill.allowed_tools.names.contains("read_file"));
     assert_eq!(report.registrations.hooks.len(), 1);
-    assert_eq!(report.registrations.hooks[0].plugin_id, "repo-review");
+    let hook = &report.registrations.hooks[0];
+    assert_eq!(hook.plugin_id, "repo-review");
     assert_eq!(
-        report.registrations.hooks[0].hook.approval,
-        ApprovalMode::Ask
+        hook.plugin_root,
+        workspace.path().join(".sigil/plugins/repo-review")
     );
+    assert_eq!(
+        hook.manifest_path,
+        Path::new(".sigil/plugins/repo-review/plugin.toml")
+    );
+    assert_eq!(hook.manifest_hash, expected_manifest_digest(&manifest_path));
+    assert_eq!(hook.manifest_version, "0.1.0");
+    assert_eq!(
+        hook.capability_digest,
+        report.manifests[0]
+            .capability_digest()
+            .expect("capability digest should compute")
+    );
+    assert_eq!(hook.trust, PluginTrustDecision::Trusted);
+    assert_eq!(hook.hook.approval, ApprovalMode::Ask);
     assert_eq!(report.registrations.mcp_servers.len(), 1);
     let mcp = &report.registrations.mcp_servers[0];
     assert_eq!(mcp.plugin_id, "repo-review");
@@ -550,6 +573,11 @@ version = "0.1.0"
 
 [[skills]]
 path = "skills/review/SKILL.md"
+
+[[hooks]]
+event = "context"
+kind = "context"
+command = "scripts/context.sh"
 "#,
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
@@ -566,6 +594,11 @@ version = "0.2.0"
 
 [[skills]]
 path = "skills/review/SKILL.md"
+
+[[hooks]]
+event = "context"
+kind = "context"
+command = "scripts/context.sh"
 "#,
     );
 
@@ -575,6 +608,388 @@ path = "skills/review/SKILL.md"
     assert_eq!(changed.manifests[0].version, "0.2.0");
     assert_eq!(changed.manifests[0].trust, PluginTrustDecision::NeedsReview);
     assert!(changed.registrations.is_empty());
+}
+
+#[tokio::test]
+async fn trusted_plugin_hook_runner_uses_execution_backend_and_emits_evidence() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let manifest_path = write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "context-pack"
+event = "context"
+kind = "context"
+command = "hook-runner"
+args = ["--json"]
+declared_effect = "read_only"
+timeout_ms = 45000
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+    let registration = report.registrations.hooks[0].clone();
+    let backend = RecordingExecutionBackend::default();
+    let requests = backend.requests.clone();
+    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+
+    let outcome = runner
+        .execute(PluginHookExecutionRequest::new(
+            registration,
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect("hook execution should succeed");
+
+    let requests = requests.lock().expect("requests should lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].program, "hook-runner");
+    assert_eq!(requests[0].args, vec!["--json"]);
+    assert_eq!(
+        requests[0].cwd,
+        workspace
+            .path()
+            .join(".sigil/plugins/repo-review")
+            .canonicalize()
+            .expect("plugin root should canonicalize")
+    );
+    assert_eq!(
+        requests[0].env.get("SIGIL_WORKSPACE_ROOT"),
+        Some(&workspace.path().to_string_lossy().into_owned())
+    );
+    assert_eq!(
+        requests[0].env.get("SIGIL_PLUGIN_HOOK_ID"),
+        Some(&"context-pack".to_owned())
+    );
+    assert_eq!(requests[0].timeout_ms, Some(45_000));
+    assert_eq!(requests[0].timeout_secs, 0);
+    drop(requests);
+
+    assert_eq!(outcome.started.plugin_id, "repo-review");
+    assert_eq!(outcome.started.hook_id, "context-pack");
+    assert_eq!(outcome.started.command, vec!["hook-runner", "--json"]);
+    assert_eq!(outcome.started.backend, ExecutionBackendKind::Local);
+    assert_eq!(
+        outcome.started.capability_digest,
+        report.manifests[0]
+            .capability_digest()
+            .expect("capability digest should compute")
+    );
+    assert_eq!(
+        outcome.started.manifest_hash,
+        expected_manifest_digest(&manifest_path)
+    );
+    assert_eq!(outcome.finished.execution_id, outcome.started.execution_id);
+    assert_eq!(
+        outcome.finished.status,
+        PluginHookExecutionStatus::Succeeded
+    );
+    assert_eq!(outcome.finished.stdout_bytes, 2);
+    assert_eq!(outcome.finished.stderr_bytes, 0);
+    assert_eq!(outcome.receipt.stdout, b"ok");
+}
+
+#[tokio::test]
+async fn plugin_hook_runner_rejects_untrusted_registration() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+event = "context"
+kind = "context"
+command = "hook-runner"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+    let mut registration = report.registrations.hooks[0].clone();
+    registration.trust = PluginTrustDecision::NeedsReview;
+    let runner = PluginHookExecutionRunner::new(Arc::new(RecordingExecutionBackend::default()));
+
+    let error = runner
+        .execute(PluginHookExecutionRequest::new(
+            registration,
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect_err("untrusted hook should be rejected");
+
+    assert!(error.to_string().contains("is not trusted"));
+}
+
+#[tokio::test]
+async fn plugin_hook_output_envelope_bounds_redacts_and_caps_artifacts() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "context-pack"
+event = "context"
+kind = "context"
+command = "hook-runner"
+declared_effect = "read_only"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+    let backend = RecordingExecutionBackend {
+        stdout: format!("head-{}-tail", "x".repeat(200)).into_bytes(),
+        stderr: b"token=super-secret".to_vec(),
+        ..RecordingExecutionBackend::default()
+    };
+    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+    let mut request = PluginHookExecutionRequest::new(
+        report.registrations.hooks[0].clone(),
+        workspace.path().to_path_buf(),
+    );
+    request.output_limit_bytes = 32;
+    request.redactor = SecretRedactor::from_values(["super-secret"]);
+    request.artifact_refs = (0..(MAX_PLUGIN_HOOK_ARTIFACT_REFS + 4))
+        .map(|index| PluginHookOutputArtifactRef {
+            artifact_id: format!("artifact-{index}"),
+            label: format!("artifact {index}"),
+            media_type: Some("text/plain".to_owned()),
+            size_bytes: Some(index as u64),
+            redaction_state: RedactionState::None,
+        })
+        .collect();
+
+    let outcome = runner
+        .execute(request)
+        .await
+        .expect("hook execution should succeed");
+
+    assert!(outcome.output.stdout.truncated);
+    assert!(
+        outcome
+            .output
+            .stdout
+            .content
+            .contains("hook output truncated")
+    );
+    assert!(!outcome.output.stdout.content.contains(&"x".repeat(200)));
+    assert_eq!(
+        outcome.output.stderr.redaction_state,
+        RedactionState::Redacted
+    );
+    assert!(!outcome.output.stderr.content.contains("super-secret"));
+    assert_eq!(outcome.output.redaction_state, RedactionState::Redacted);
+    assert_eq!(
+        outcome.output.artifact_refs.len(),
+        MAX_PLUGIN_HOOK_ARTIFACT_REFS
+    );
+    assert!(outcome.output.artifact_refs_truncated);
+    assert!(
+        !outcome
+            .output
+            .model_visible_summary
+            .contains("super-secret")
+    );
+    assert!(
+        !outcome
+            .output
+            .model_visible_summary
+            .contains(&"x".repeat(16))
+    );
+    assert_eq!(outcome.output.parse_error, None);
+}
+
+#[tokio::test]
+async fn plugin_hook_runner_records_workspace_mutation_for_writing_hook() -> Result<()> {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let state = tempfile::tempdir().expect("state should create");
+    fs::write(workspace.path().join("note.txt"), "old").expect("note should write");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "write-note"
+event = "context"
+kind = "context"
+command = "hook-runner"
+declared_effect = "workspace_write"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+    let store = JsonlSessionStore::new(state.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(
+        store.clone(),
+        state.path().join("mutation-artifacts"),
+    );
+    let backend = RecordingExecutionBackend {
+        workspace_write: Some(("note.txt".to_owned(), "new".to_owned())),
+        ..RecordingExecutionBackend::default()
+    };
+    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+
+    let outcome = runner
+        .execute(
+            PluginHookExecutionRequest::new(
+                report.registrations.hooks[0].clone(),
+                workspace.path().to_path_buf(),
+            )
+            .with_mutation_recorder(recorder),
+        )
+        .await
+        .expect("hook execution should succeed");
+
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("note.txt")).expect("note should read"),
+        "new"
+    );
+    let mutation_event_id = outcome
+        .mutation_event_id
+        .as_deref()
+        .expect("workspace mutation should be recorded");
+    let detection = workspace_mutation_detected(store.path(), mutation_event_id)?;
+    assert_eq!(detection.tool_name, "plugin_hook:repo-review:write-note");
+    assert_eq!(detection.tool_effect, ToolEffect::WorkspaceWrite);
+    assert_eq!(
+        detection.tool_call_id.as_deref(),
+        Some(outcome.started.execution_id.as_str())
+    );
+    assert!(!detection.unknown_dirty);
+    assert_ne!(
+        detection.from_workspace_snapshot_id,
+        detection.to_workspace_snapshot_id
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mutating_plugin_hook_requires_mutation_recorder_before_execution() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "write-note"
+event = "context"
+kind = "context"
+command = "hook-runner"
+declared_effect = "workspace_write"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+    let backend = RecordingExecutionBackend::default();
+    let requests = backend.requests.clone();
+    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
+
+    let error = runner
+        .execute(PluginHookExecutionRequest::new(
+            report.registrations.hooks[0].clone(),
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect_err("mutating hook without recorder should fail closed");
+
+    assert!(error.to_string().contains("requires mutation recorder"));
+    assert!(
+        requests.lock().expect("requests should lock").is_empty(),
+        "mutating hook should not execute before mutation evidence can be recorded"
+    );
+}
+
+#[tokio::test]
+async fn read_only_plugin_hook_does_not_dirty_verification_scope() -> Result<()> {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let state = tempfile::tempdir().expect("state should create");
+    fs::write(workspace.path().join("note.txt"), "same").expect("note should write");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "inspect-note"
+event = "context"
+kind = "context"
+command = "hook-runner"
+declared_effect = "read_only"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+    let store = JsonlSessionStore::new(state.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(
+        store.clone(),
+        state.path().join("mutation-artifacts"),
+    );
+    let runner = PluginHookExecutionRunner::new(Arc::new(RecordingExecutionBackend::default()));
+
+    let outcome = runner
+        .execute(
+            PluginHookExecutionRequest::new(
+                report.registrations.hooks[0].clone(),
+                workspace.path().to_path_buf(),
+            )
+            .with_mutation_recorder(recorder),
+        )
+        .await
+        .expect("hook execution should succeed");
+
+    assert_eq!(outcome.mutation_event_id, None);
+    assert!(
+        workspace_mutation_events(store.path())?.is_empty(),
+        "read-only hook should not append workspace mutation evidence"
+    );
+    Ok(())
 }
 
 #[test]
@@ -1182,6 +1597,95 @@ id: same
     )
     .expect_err("duplicate fallback ids should fail");
     assert!(duplicate.to_string().contains("duplicate skill"));
+}
+
+#[derive(Clone)]
+struct RecordingExecutionBackend {
+    requests: Arc<Mutex<Vec<ExecutionRequest>>>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    workspace_write: Option<(String, String)>,
+}
+
+impl Default for RecordingExecutionBackend {
+    fn default() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            stdout: b"ok".to_vec(),
+            stderr: Vec::new(),
+            workspace_write: None,
+        }
+    }
+}
+
+impl ExecutionBackend for RecordingExecutionBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Local
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities::default()
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        let requests = self.requests.clone();
+        let stdout = self.stdout.clone();
+        let stderr = self.stderr.clone();
+        let workspace_write = self.workspace_write.clone();
+        Box::pin(async move {
+            if let Some((relative_path, content)) = workspace_write {
+                let workspace_root = request
+                    .env
+                    .get("SIGIL_WORKSPACE_ROOT")
+                    .expect("workspace root env should be provided");
+                let path = Path::new(workspace_root).join(relative_path);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).expect("workspace write parent should create");
+                }
+                fs::write(path, content).expect("workspace write should succeed");
+            }
+            requests.lock().expect("requests should lock").push(request);
+            Ok(ExecutionReceipt {
+                backend: ExecutionBackendKind::Local,
+                capabilities: ExecutionBackendCapabilities::default(),
+                network: ExecutionNetworkReceipt::default(),
+                resources: Default::default(),
+                exit_code: Some(0),
+                stdout,
+                stderr,
+                timed_out: false,
+            })
+        })
+    }
+}
+
+fn workspace_mutation_detected(
+    session_path: &Path,
+    event_id: &str,
+) -> Result<WorkspaceMutationDetected> {
+    let events = workspace_mutation_events(session_path)?;
+    events
+        .into_iter()
+        .find(|(id, _)| id == event_id)
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| anyhow::anyhow!("workspace mutation event {event_id} not found"))
+}
+
+fn workspace_mutation_events(
+    session_path: &Path,
+) -> Result<Vec<(String, WorkspaceMutationDetected)>> {
+    let mut events = Vec::new();
+    for record in JsonlSessionStore::read_event_records(session_path)? {
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
+        if event.event_type != "workspace_mutation_detected" {
+            continue;
+        }
+        let payload = serde_json::from_value::<WorkspaceMutationDetected>(event.payload)?;
+        events.push((event.event_id, payload));
+    }
+    Ok(events)
 }
 
 fn write_plugin_manifest(workspace: &Path, plugin_id: &str, manifest: &str) -> std::path::PathBuf {

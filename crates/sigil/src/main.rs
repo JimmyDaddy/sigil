@@ -173,6 +173,7 @@ fn build_cli_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
         launch_cwd,
         DoctorReportOptions {
             appearance_checks: Some(&sigil_tui::appearance_diagnostics::appearance_doctor_checks),
+            ..DoctorReportOptions::default()
         },
     )
 }

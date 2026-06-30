@@ -1045,6 +1045,26 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             entry.decision.as_str(),
             truncate_session_view_text(&entry.manifest_hash, 16)
         ),
+        ControlEntry::PluginHookExecutionStarted(entry) => format!(
+            "[ctl] plugin hook {}:{} started kind={} effect={} backend={}",
+            truncate_session_view_text(&entry.plugin_id, 32),
+            truncate_session_view_text(&entry.hook_id, 32),
+            format!("{:?}", entry.hook_kind).to_ascii_lowercase(),
+            entry.declared_effect.as_str(),
+            entry.backend.as_str()
+        ),
+        ControlEntry::PluginHookExecutionFinished(entry) => format!(
+            "[ctl] plugin hook {}:{} finished status={} exit={} stdout={} stderr={}",
+            truncate_session_view_text(&entry.plugin_id, 32),
+            truncate_session_view_text(&entry.hook_id, 32),
+            plugin_hook_execution_status_label(entry.status),
+            entry
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+            entry.stdout_bytes,
+            entry.stderr_bytes
+        ),
         ControlEntry::ChangeSetProposed(change_set) => format!(
             "[ctl] changeset {} proposed risk={} files={} {}",
             change_set.id.as_str(),
@@ -1886,6 +1906,16 @@ fn agent_mailbox_status_label(status: sigil_kernel::AgentMailboxStatus) -> &'sta
         sigil_kernel::AgentMailboxStatus::Rejected => "rejected",
         sigil_kernel::AgentMailboxStatus::Interrupted => "interrupted",
         sigil_kernel::AgentMailboxStatus::Unknown => "unknown",
+    }
+}
+
+fn plugin_hook_execution_status_label(
+    status: sigil_kernel::PluginHookExecutionStatus,
+) -> &'static str {
+    match status {
+        sigil_kernel::PluginHookExecutionStatus::Succeeded => "succeeded",
+        sigil_kernel::PluginHookExecutionStatus::Failed => "failed",
+        sigil_kernel::PluginHookExecutionStatus::TimedOut => "timed_out",
     }
 }
 

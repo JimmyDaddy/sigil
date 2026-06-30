@@ -22,8 +22,9 @@ use sigil_kernel::{
     JsonlSessionStore, McpServerConfig, McpServerStartup, MutationEventRecorder, PluginCapability,
     PluginManifestSnapshot, PluginStateProjection, PluginTrustDecision, PluginTrustEntry,
     RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState,
-    SyntaxThemeId, ThemeId, ToolRegistryScope, VerificationStateProjection, WorkspaceTrust,
-    default_user_config_dir, discover_candidate_checks_with_user_config, stable_workspace_id,
+    SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope, VerificationStateProjection,
+    WorkspaceTrust, default_user_config_dir, discover_candidate_checks_with_user_config,
+    stable_workspace_id,
 };
 use sigil_runtime::{
     AgentProfileRegistry, ContextWindowSource, ResolvedAgentProfile,
@@ -2721,32 +2722,10 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
         .iter()
         .filter_map(|capability| match capability {
             PluginCapability::Hook {
-                id,
-                event,
                 hook_kind,
-                command,
-                args,
                 declared_effect,
-                timeout_ms,
-                input_schema_digest,
-                output_schema_digest,
-                approval,
-                egress_logging,
-                allow_secrets,
-            } => Some((
-                id,
-                event,
-                hook_kind,
-                command,
-                args,
-                declared_effect,
-                timeout_ms,
-                input_schema_digest,
-                output_schema_digest,
-                approval,
-                egress_logging,
-                allow_secrets,
-            )),
+                ..
+            } => Some((*hook_kind, *declared_effect)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2755,53 +2734,67 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
         lines.push(render_config_readonly_row("Hook count", "0"));
         return lines;
     }
-    for (
-        index,
-        (
-            id,
-            event,
-            hook_kind,
-            command,
-            args,
-            declared_effect,
-            timeout_ms,
-            input_schema_digest,
-            output_schema_digest,
-            approval,
-            egress_logging,
-            allow_secrets,
-        ),
-    ) in hooks.iter().enumerate()
-    {
-        let label = format!("Hook {}", index + 1);
-        lines.push(render_config_readonly_row(&label, event.as_str()));
-        lines.push(render_config_readonly_row(
-            &format!("{label} contract"),
-            &format!(
-                "{} · {} · {} ms · {}",
-                id.as_str(),
-                format!("{hook_kind:?}").to_ascii_lowercase(),
-                timeout_ms,
-                declared_effect.as_str()
-            ),
-        ));
-        push_wrapped_readonly_rows(
-            &mut lines,
-            &format!("{label} command"),
-            &command_with_args(command, args),
-        );
-        if let Some(digest) = input_schema_digest {
-            push_wrapped_readonly_rows(&mut lines, &format!("{label} input schema"), digest);
-        }
-        if let Some(digest) = output_schema_digest {
-            push_wrapped_readonly_rows(&mut lines, &format!("{label} output schema"), digest);
-        }
-        lines.push(render_config_readonly_row(
-            &format!("{label} policy"),
-            &plugin_capability_policy_summary(approval, **egress_logging, **allow_secrets),
-        ));
-    }
+    lines.push(render_config_readonly_row(
+        "Hook count",
+        &hooks.len().to_string(),
+    ));
+    lines.push(render_config_readonly_row(
+        "Hook kinds",
+        &plugin_hook_kind_summary(&hooks),
+    ));
+    lines.push(render_config_readonly_row(
+        "Hook effects",
+        &plugin_hook_effect_summary(&hooks),
+    ));
+    lines.push(render_config_readonly_row(
+        "Runtime",
+        "trusted hooks run through execution backend",
+    ));
+    lines.push(render_config_readonly_row(
+        "Evidence",
+        "mutating hooks record workspace evidence",
+    ));
+    lines.push(render_config_readonly_row(
+        "Inspect",
+        "run /doctor for command and issue details",
+    ));
     lines
+}
+
+fn plugin_hook_kind_summary(hooks: &[(sigil_kernel::PluginHookKind, ToolEffect)]) -> String {
+    let mut context = 0;
+    let mut compaction = 0;
+    let mut verification = 0;
+    let mut event = 0;
+    for (kind, _) in hooks {
+        match kind {
+            sigil_kernel::PluginHookKind::Context => context += 1,
+            sigil_kernel::PluginHookKind::Compaction => compaction += 1,
+            sigil_kernel::PluginHookKind::Verification => verification += 1,
+            sigil_kernel::PluginHookKind::Event => event += 1,
+        }
+    }
+    format!("context={context} compaction={compaction} verification={verification} event={event}")
+}
+
+fn plugin_hook_effect_summary(hooks: &[(sigil_kernel::PluginHookKind, ToolEffect)]) -> String {
+    let mut read_only = 0;
+    let mut workspace_write = 0;
+    let mut external_write = 0;
+    let mut network = 0;
+    let mut unknown = 0;
+    for (_, effect) in hooks {
+        match effect {
+            ToolEffect::ReadOnly => read_only += 1,
+            ToolEffect::WorkspaceWrite => workspace_write += 1,
+            ToolEffect::ExternalWrite => external_write += 1,
+            ToolEffect::Network => network += 1,
+            ToolEffect::Unknown => unknown += 1,
+        }
+    }
+    format!(
+        "read_only={read_only} workspace_write={workspace_write} external_write={external_write} network={network} unknown={unknown}"
+    )
 }
 
 fn render_plugin_mcp_lines(capabilities: &[PluginCapability]) -> Vec<String> {

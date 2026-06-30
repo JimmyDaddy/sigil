@@ -7,11 +7,20 @@ use crate::appearance_diagnostics::appearance_doctor_checks;
 
 impl AppState {
     pub(super) fn show_doctor_report(&mut self) {
+        let plugin_projection = sigil_kernel::PluginStateProjection::from_entries(
+            &self.session_browser.current_entries,
+        );
+        let plugin_trust_entries = plugin_projection
+            .trust_entries
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         let report = build_doctor_report_with_options(
             &self.config_path,
             &self.workspace_root,
             DoctorReportOptions {
                 appearance_checks: Some(&appearance_doctor_checks),
+                plugin_trust_entries: Some(&plugin_trust_entries),
             },
         );
         let status = report.overall_status().as_str();
