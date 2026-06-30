@@ -1487,6 +1487,11 @@ fn agent_tool_display_summary(summary: &ToolCardRender) -> Option<String> {
     {
         return Some("summary truncated · read_agent_result available".to_owned());
     }
+    if tool_name_matches(&summary.tool_name, "spawn_agent")
+        && !agent_payload_bool(summary, "result_available").unwrap_or(false)
+    {
+        return Some("result pending".to_owned());
+    }
     None
 }
 

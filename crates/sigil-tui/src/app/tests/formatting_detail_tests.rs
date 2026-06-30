@@ -310,5 +310,35 @@ fn agent_result_tools_use_agent_preview_sources() -> anyhow::Result<()> {
 
     assert_eq!(spawn_display["preview_kind"], "markdown");
     assert_eq!(spawn_display["preview_lines"][0], "## Summary");
+
+    let running_payload = serde_json::json!({
+        "thread_id": "agent_chat_1",
+        "display_name": "mailbox audit",
+        "status": "running",
+        "terminal": false,
+        "result_available": false,
+        "coalescing_key": "wait_agent:agent_chat_1",
+        "retry_after_ms": 5000,
+        "next_action": "continue independent parent work"
+    });
+    let running_result = ToolResult::ok(
+        "call-wait-agent",
+        "wait_agent",
+        running_payload.to_string(),
+        ToolResultMeta::default(),
+    );
+    let running_display: serde_json::Value = serde_json::from_str(
+        &format_tool_result_block_redacted(&running_result, None, &SecretRedactor::empty()),
+    )?;
+
+    assert_eq!(running_display["preview_kind"], "text");
+    assert_eq!(
+        running_display["preview_lines"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        running_display["preview_value"]["coalescing_key"],
+        "wait_agent:agent_chat_1"
+    );
     Ok(())
 }

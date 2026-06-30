@@ -799,7 +799,9 @@ fn agent_tool_preview_source(
             .get("summary")
             .and_then(serde_json::Value::as_str)
             .filter(|summary| !summary.trim().is_empty())
-            .map(|summary| ("markdown", summary.to_owned())),
+            .map(|summary| ("markdown", summary.to_owned()))
+            .or_else(|| Some(("text", String::new()))),
+        "wait_agent" | "message_agent" | "close_agent" => Some(("text", String::new())),
         _ => None,
     }
 }

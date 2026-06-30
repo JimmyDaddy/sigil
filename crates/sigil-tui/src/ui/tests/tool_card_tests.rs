@@ -435,6 +435,10 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
         "Started agent mailbox audit"
     );
     assert_eq!(running_spawn_display.status.label, "RUNNING");
+    assert_eq!(
+        running_spawn_display.summary.as_deref(),
+        Some("result pending")
+    );
     assert!(running_spawn_text.contains("running · mailbox audit"));
     assert!(running_spawn_text.contains("agent tool spawned child session"));
     assert!(running_spawn_text.contains("action continue independent parent work"));
