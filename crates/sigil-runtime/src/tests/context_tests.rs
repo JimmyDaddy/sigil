@@ -158,7 +158,7 @@ fn context_repo_candidates_keep_explicit_path_prompts_precise() -> Result<()> {
     )?;
 
     let context =
-        context_candidates_from_repo_query(temp.path(), "总结 guides/setup.zh-CN.md 的流程")?;
+        context_candidates_from_repo_query(temp.path(), "总结：guides/setup.zh-CN.md 的流程")?;
 
     let ids = context
         .items

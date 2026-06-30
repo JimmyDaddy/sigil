@@ -203,34 +203,28 @@ fn lexical_file_score(path: &Path, relative: &Path, terms: &BTreeSet<String>) ->
 
 fn explicit_query_paths(query: &str) -> impl Iterator<Item = PathBuf> + '_ {
     query
-        .split_whitespace()
-        .map(|token| {
-            token.trim_matches(|ch: char| {
-                matches!(
-                    ch,
-                    '"' | '\''
-                        | '`'
-                        | ','
-                        | ';'
-                        | ':'
-                        | '，'
-                        | '。'
-                        | '：'
-                        | '；'
-                        | '（'
-                        | '）'
-                        | '('
-                        | ')'
-                        | '['
-                        | ']'
-                        | '{'
-                        | '}'
-                )
-            })
-        })
+        .split(|ch: char| !is_query_path_char(ch))
+        .flat_map(explicit_path_token_variants)
         .filter(|token| token.contains('/') || token.contains('.'))
         .filter(|token| !token.starts_with("http://") && !token.starts_with("https://"))
         .map(PathBuf::from)
+}
+
+fn is_query_path_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-')
+}
+
+fn explicit_path_token_variants(token: &str) -> Vec<&str> {
+    let token = token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`'));
+    if token.is_empty() {
+        return Vec::new();
+    }
+    let trimmed_sentence_dot = token.trim_end_matches('.');
+    if trimmed_sentence_dot != token && !trimmed_sentence_dot.is_empty() {
+        vec![token, trimmed_sentence_dot]
+    } else {
+        vec![token]
+    }
 }
 
 fn lexical_query_terms(query: &str) -> BTreeSet<String> {
