@@ -100,15 +100,19 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(help.iter().any(|line| line.contains("F1:")));
     assert!(help.iter().any(|line| line.starts_with("/new:")));
     assert!(help.iter().any(|line| line.starts_with("/compact:")));
+    assert!(
+        help.iter()
+            .any(|line| line == "Ctrl-J: Insert a newline in the composer.")
+    );
     assert!(help.iter().any(|line| {
-        line == "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer."
+        line == "Shift-Enter or Alt-Enter: Insert a newline when terminal keyboard enhancement is active and reports modifiers."
     }));
     assert!(help.iter().any(|line| {
         line == "Paste: Insert pasted text without submitting; large pastes are folded in the composer display."
     }));
     assert!(
         help.iter()
-            .any(|line| line == "Enter while busy: Queue a follow-up for the next safe turn.")
+            .any(|line| line == "Enter while busy: Add a visible follow-up for the next safe turn.")
     );
     assert!(help.iter().any(|line| {
         line == "@agent or trusted /agent-name: Invoke an enabled trusted agent profile with a prompt."

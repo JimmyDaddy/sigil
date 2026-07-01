@@ -1,11 +1,13 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, env, path::Path, sync::Mutex, time::Duration};
 
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, ConfigPlatform, McpServerConfig,
-    McpServerStartup, McpTrustClass, RootConfig, SyntaxThemeId, ThemeId, UsageCostCurrency,
-    default_user_config_dir, default_user_config_path, legacy_user_config_dir_from_env,
-    preferred_config_path, preferred_config_path_for_known_paths, preferred_implicit_config_path,
-    resolve_workspace_root, user_home_dir_from_env,
+    McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
+    SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
+    SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement, ThemeId,
+    UsageCostCurrency, default_user_config_dir, default_user_config_path,
+    legacy_user_config_dir_from_env, preferred_config_path, preferred_config_path_for_known_paths,
+    preferred_implicit_config_path, resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind,
@@ -13,6 +15,57 @@ use crate::{
     ExecutionSandboxProfile, SkillConfig, StorageConfig, StorageRoot, TaskConfig, TaskMode,
     WorkspaceConfig,
 };
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvScope {
+    previous: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvScope {
+    fn set_many(values: &[(&'static str, &'static str)]) -> Self {
+        let previous = values
+            .iter()
+            .map(|(name, _)| (*name, env::var(name).ok()))
+            .collect::<Vec<_>>();
+        for (name, value) in values {
+            // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
+            unsafe { env::set_var(name, value) };
+        }
+        Self { previous }
+    }
+
+    fn clear_model_request() -> Self {
+        let names = [
+            SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV,
+            SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
+            SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV,
+        ];
+        let previous = names
+            .iter()
+            .map(|name| (*name, env::var(name).ok()))
+            .collect::<Vec<_>>();
+        for name in names {
+            // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
+            unsafe { env::remove_var(name) };
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for EnvScope {
+    fn drop(&mut self) {
+        for (name, value) in &self.previous {
+            if let Some(value) = value {
+                // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
+                unsafe { env::set_var(name, value) };
+            } else {
+                // SAFETY: tests that mutate process environment take ENV_LOCK for their full scope.
+                unsafe { env::remove_var(name) };
+            }
+        }
+    }
+}
 
 #[test]
 fn compaction_threshold_status_follows_configured_window() {
@@ -83,6 +136,127 @@ compatibility_sources = ["opencode"]
     assert!(!config.skills.user_skills);
     assert!(!config.skills.user_agents);
     assert_eq!(config.skills.compatibility_sources, vec!["opencode"]);
+}
+
+#[test]
+fn model_request_config_has_user_visible_defaults() {
+    let config = ModelRequestConfig::default();
+    let timeouts = config.to_timeouts().expect("defaults should resolve");
+
+    assert_eq!(config.request_timeout_secs, 120);
+    assert_eq!(config.stream_idle_timeout_secs, 180);
+    assert_eq!(config.stream_total_timeout_secs, None);
+    assert_eq!(timeouts.request_timeout, Duration::from_secs(120));
+    assert_eq!(timeouts.stream_idle_timeout, Duration::from_secs(180));
+    assert_eq!(timeouts.stream_total_timeout, None);
+}
+
+#[test]
+fn root_config_loads_model_request_from_toml() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[model_request]
+request_timeout_secs = 7
+stream_idle_timeout_secs = 11
+stream_total_timeout_secs = 17
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("model request config should parse");
+    let timeouts = config
+        .model_request
+        .to_timeouts()
+        .expect("model request config should resolve");
+
+    assert_eq!(config.model_request.request_timeout_secs, 7);
+    assert_eq!(config.model_request.stream_idle_timeout_secs, 11);
+    assert_eq!(config.model_request.stream_total_timeout_secs, Some(17));
+    assert_eq!(timeouts.request_timeout, Duration::from_secs(7));
+    assert_eq!(timeouts.stream_idle_timeout, Duration::from_secs(11));
+    assert_eq!(timeouts.stream_total_timeout, Some(Duration::from_secs(17)));
+}
+
+#[test]
+fn model_request_config_rejects_zero_values_when_resolved() {
+    for config in [
+        ModelRequestConfig {
+            request_timeout_secs: 0,
+            ..ModelRequestConfig::default()
+        },
+        ModelRequestConfig {
+            stream_idle_timeout_secs: 0,
+            ..ModelRequestConfig::default()
+        },
+        ModelRequestConfig {
+            stream_total_timeout_secs: Some(0),
+            ..ModelRequestConfig::default()
+        },
+    ] {
+        let error = config
+            .to_timeouts()
+            .expect_err("zero timeout should fail resolution");
+        assert!(error.to_string().contains("must be greater than 0"));
+    }
+}
+
+#[test]
+fn root_config_load_applies_provider_neutral_model_request_env_overrides() {
+    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
+    let _clear = EnvScope::clear_model_request();
+    let _scope = EnvScope::set_many(&[
+        (SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, "13"),
+        (SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, "29"),
+        (SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, "31"),
+    ]);
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[model_request]
+request_timeout_secs = 7
+stream_idle_timeout_secs = 11
+"#,
+    )
+    .expect("config should write");
+
+    let config = RootConfig::load(&path).expect("config should load");
+
+    assert_eq!(config.model_request.request_timeout_secs, 13);
+    assert_eq!(config.model_request.stream_idle_timeout_secs, 29);
+    assert_eq!(config.model_request.stream_total_timeout_secs, Some(31));
+}
+
+#[test]
+fn root_config_load_rejects_invalid_model_request_env_override() {
+    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
+    let _clear = EnvScope::clear_model_request();
+    let _scope = EnvScope::set_many(&[(SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, "0")]);
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &path,
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+"#,
+    )
+    .expect("config should write");
+
+    let error = RootConfig::load(&path).expect_err("invalid override should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS must be greater than 0")
+    );
 }
 
 #[test]
@@ -194,6 +368,7 @@ fn root_config_save_roundtrips() {
             max_turns: Some(32),
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
@@ -229,6 +404,7 @@ fn root_config_save_handles_paths_without_parent() {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
@@ -552,6 +728,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
@@ -656,7 +833,7 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [terminal]
-keyboard_enhancement = true
+keyboard_enhancement = "on"
 mouse_capture = false
 osc52_clipboard = false
 scroll_sensitivity = 5
@@ -664,10 +841,65 @@ scroll_sensitivity = 5
     )
     .expect("terminal config should parse");
 
-    assert!(config.terminal.keyboard_enhancement);
+    assert_eq!(
+        config.terminal.keyboard_enhancement,
+        TerminalKeyboardEnhancement::On
+    );
     assert!(!config.terminal.mouse_capture);
     assert!(!config.terminal.osc52_clipboard);
     assert_eq!(config.terminal.scroll_sensitivity, 5);
+}
+
+#[test]
+fn root_config_defaults_terminal_keyboard_enhancement_to_auto() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )
+    .expect("minimal config should parse");
+
+    assert_eq!(
+        config.terminal.keyboard_enhancement,
+        TerminalKeyboardEnhancement::Auto
+    );
+}
+
+#[test]
+fn root_config_loads_legacy_bool_terminal_keyboard_enhancement() {
+    let enabled: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[terminal]
+keyboard_enhancement = true
+"#,
+    )
+    .expect("legacy true keyboard enhancement should parse");
+    assert_eq!(
+        enabled.terminal.keyboard_enhancement,
+        TerminalKeyboardEnhancement::On
+    );
+
+    let disabled: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[terminal]
+keyboard_enhancement = false
+"#,
+    )
+    .expect("legacy false keyboard enhancement should parse");
+    assert_eq!(
+        disabled.terminal.keyboard_enhancement,
+        TerminalKeyboardEnhancement::Off
+    );
 }
 
 #[test]
@@ -1355,6 +1587,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
             max_turns: Some(32),
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),

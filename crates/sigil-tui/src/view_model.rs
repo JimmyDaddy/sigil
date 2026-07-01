@@ -894,7 +894,7 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · Y allow · N deny · V diff");
     }
     if app.is_composer_queue_panel_focused() {
-        return format!("{agent} · Queue ↑↓ item · Tab action · Enter run · Esc input");
+        return format!("{agent} · Follow-ups ↑↓ item · Tab action · Enter selected · Esc input");
     }
     if app.runtime.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
         let queue = queue
@@ -902,7 +902,7 @@ fn footer_hints(app: &AppState) -> String {
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
         return format!(
-            "{agent} · {queue}Enter queue next turn · Ctrl-B background · Esc interrupt · Ctrl-T details"
+            "{agent} · {queue}Enter add follow-up · Ctrl-B background · Esc interrupt · Ctrl-T details"
         );
     }
     if app.runtime.is_busy {
@@ -910,7 +910,7 @@ fn footer_hints(app: &AppState) -> String {
             .as_deref()
             .map(|summary| format!("{summary} · "))
             .unwrap_or_default();
-        return format!("{agent} · {queue}Enter queue next turn · Esc interrupt · Ctrl-T details");
+        return format!("{agent} · {queue}Enter add follow-up · Esc interrupt · Ctrl-T details");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
         if app.has_agent_mention_selector() {
@@ -922,9 +922,14 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · ↑↓ agent · Enter switch · C close · M message · Esc input");
     }
     if let Some(queue) = queue {
-        return format!("{agent} · {queue} · /queue focus");
+        return format!("{agent} · {queue} · Down follow-ups");
     }
-    format!("{agent} · Enter send · Shift-Enter newline · Alt-A agent · / commands")
+    let newline_hint = if app.terminal_keyboard_enhancement_enabled() {
+        "Shift-Enter newline"
+    } else {
+        "Ctrl-J newline"
+    };
+    format!("{agent} · Enter send · {newline_hint} · Alt-A agent · / commands")
 }
 
 #[derive(Debug, Clone)]

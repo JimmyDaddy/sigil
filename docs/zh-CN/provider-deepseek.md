@@ -21,6 +21,10 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
+[model_request]
+request_timeout_secs = 120
+stream_idle_timeout_secs = 180
+
 [providers.deepseek]
 base_url = "https://api.deepseek.com"
 beta_base_url = "https://api.deepseek.com/beta"
@@ -31,7 +35,6 @@ fim_model = "deepseek-v4-pro"
 # api_key = "sk-..."
 user_id_strategy = "stable_per_end_user"
 strict_tools_mode = "auto"
-request_timeout_secs = 120
 ```
 
 更短的模板见 [deepseek-basic.toml](../examples/config/deepseek-basic.toml)。
@@ -57,7 +60,6 @@ Sigil 按这个顺序解析 DeepSeek 认证：
 | `anthropic_base_url` | 构建使用 DeepSeek Anthropic-compatible route 时的 endpoint。 |
 | `strict_tools_mode` | DeepSeek 专项 tool strictness 行为。除非明确需要覆盖，否则使用 `auto`。 |
 | `user_id_strategy` | Sigil 向 provider 提供稳定 user identifier 的方式。 |
-| `request_timeout_secs` | Provider 请求超时。只在慢网络或长响应场景下提高。 |
 
 TUI `/config` 只暴露高频字段，例如 `model`、`api_key`、`base_url` 和 `fim_model`。低频 DeepSeek 字段保留给配置文件或环境变量。
 
@@ -78,5 +80,5 @@ sigil doctor
 | Sigil 又进入 setup | 确认配置查找顺序找到了预期 `sigil.toml`。 |
 | 认证失败 | 确认 `SIGIL_API_KEY` 设置在启动 `sigil` 的同一个 shell 中。 |
 | 使用了错误 model | 同时检查 `[agent].model` 和 `[providers.deepseek].model`。 |
-| 响应慢或中断 | 检查网络，并考虑 `request_timeout_secs`。 |
+| 响应慢或中断 | 检查网络，并考虑 `[model_request].stream_idle_timeout_secs`。 |
 | FIM 行为不可用 | 确认 `fim_model` 已配置且 endpoint 支持。 |

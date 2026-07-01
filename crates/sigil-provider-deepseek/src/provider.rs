@@ -2,13 +2,17 @@ use std::{collections::VecDeque, pin::Pin};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, stream};
+use futures::{Stream, stream};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, warn};
 
-use sigil_kernel::{CompletionRequest, Provider, ProviderCapabilities, ProviderChunk};
+use sigil_kernel::{
+    CompletionRequest, ModelRequestTimeouts, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
+    timeout_provider_request, timeout_provider_stream_next,
+};
 
 use crate::{
     capabilities::deepseek_capabilities,
@@ -33,6 +37,7 @@ use crate::{
 pub struct DeepSeekProvider {
     profile: DeepSeekProviderProfile,
     config: DeepSeekProviderConfig,
+    timeouts: ModelRequestTimeouts,
     capabilities: ProviderCapabilities,
     client: reqwest::Client,
 }
@@ -44,12 +49,13 @@ impl DeepSeekProvider {
     ///
     /// Returns an error when the HTTP client or other transport prerequisites cannot be
     /// initialized from the provided config.
-    pub fn new(config: DeepSeekProviderConfig) -> Result<Self> {
+    pub fn new(config: DeepSeekProviderConfig, timeouts: ModelRequestTimeouts) -> Result<Self> {
         let config = config.resolved()?;
         let profile = config.profile();
         Ok(Self {
             profile,
-            client: build_http_client(config.request_timeout_secs)?,
+            timeouts,
+            client: build_http_client()?,
             capabilities: deepseek_capabilities(),
             config,
         })
@@ -177,9 +183,11 @@ impl DeepSeekProvider {
         loop {
             attempts += 1;
             let url = format!("{}{}", self.base_url_for_endpoint(endpoint), path);
-            let response = self
-                .post_json(&url, body)
+            let response = timeout_provider_request(self.post_json(&url, body), self.timeouts)
                 .await
+                .map_err(|phase| {
+                    provider_timeout_error(phase, self.timeouts, self.name(), model_name)
+                })?
                 .context("deepseek request failed")?;
             let status = response.status();
 
@@ -204,7 +212,11 @@ impl DeepSeekProvider {
                 return Err(classified.into());
             }
 
-            return Ok(chat_response_stream(response, model_name.to_owned()));
+            return Ok(chat_response_stream(
+                response,
+                model_name.to_owned(),
+                self.timeouts,
+            ));
         }
     }
 
@@ -216,16 +228,20 @@ impl DeepSeekProvider {
         body: &T,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let url = format!("{}{}", self.base_url_for_endpoint(endpoint), path);
-        let response = self
-            .post_json(&url, body)
+        let response = timeout_provider_request(self.post_json(&url, body), self.timeouts)
             .await
+            .map_err(|phase| provider_timeout_error(phase, self.timeouts, self.name(), model_name))?
             .context("deepseek completion request failed")?;
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
             return Err(classify_status(status.as_u16(), &error_body).into());
         }
-        Ok(completion_response_stream(response, model_name.to_owned()))
+        Ok(completion_response_stream(
+            response,
+            model_name.to_owned(),
+            self.timeouts,
+        ))
     }
 
     async fn post_json<T: Serialize>(&self, url: &str, body: &T) -> Result<reqwest::Response> {
@@ -258,17 +274,56 @@ fn truncate_event_payload(payload: &str) -> String {
     }
 }
 
+fn provider_timeout_error(
+    phase: ProviderTimeoutPhase,
+    timeouts: ModelRequestTimeouts,
+    provider: &str,
+    model: &str,
+) -> anyhow::Error {
+    let metadata =
+        ProviderTimeoutMetadata::new(phase, timeout_for_phase(phase, timeouts), provider, model);
+    anyhow::anyhow!(
+        "provider timeout: phase={} provider={} model={} timeout_ms={}",
+        metadata.phase,
+        metadata.provider,
+        metadata.model,
+        metadata.timeout_ms
+    )
+}
+
+fn timeout_for_phase(phase: ProviderTimeoutPhase, timeouts: ModelRequestTimeouts) -> Duration {
+    match phase {
+        ProviderTimeoutPhase::RequestStart => timeouts.request_timeout,
+        ProviderTimeoutPhase::StreamIdle => timeouts.stream_idle_timeout,
+        ProviderTimeoutPhase::StreamTotal => timeouts
+            .stream_total_timeout
+            .unwrap_or(timeouts.stream_idle_timeout),
+    }
+}
+
 fn chat_response_stream(
     response: reqwest::Response,
     model_name: String,
+    timeouts: ModelRequestTimeouts,
 ) -> Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
     let byte_stream = response.bytes_stream();
     let decoder = DeepSeekSseDecoder::default();
-    let mapper = StreamMapper::new(model_name);
+    let mapper = StreamMapper::new(model_name.clone());
     let pending = VecDeque::<ProviderChunk>::new();
     let finished = false;
     let saw_done = false;
-    let state = (byte_stream, decoder, mapper, pending, finished, saw_done);
+    let timeout_state = ProviderStreamTimeoutState::new(timeouts);
+    let state = (
+        byte_stream,
+        decoder,
+        mapper,
+        pending,
+        finished,
+        saw_done,
+        timeout_state,
+        timeouts,
+        model_name,
+    );
 
     Box::pin(stream::unfold(state, |mut state| async move {
         loop {
@@ -279,8 +334,8 @@ fn chat_response_stream(
                 return None;
             }
 
-            match state.0.next().await {
-                Some(Ok(bytes)) => {
+            match timeout_provider_stream_next(&mut state.0, state.7, &mut state.6).await {
+                Ok(Some(Ok(bytes))) => {
                     let raw = match String::from_utf8(bytes.to_vec()) {
                         Ok(raw) => raw,
                         Err(error) => {
@@ -301,11 +356,18 @@ fn chat_response_stream(
                         }
                     }
                 }
-                Some(Err(error)) => {
+                Ok(Some(Err(error))) => {
                     state.4 = true;
                     return Some((Err(error).context("failed to read response chunk"), state));
                 }
-                None => {
+                Err(phase) => {
+                    state.4 = true;
+                    return Some((
+                        Err(provider_timeout_error(phase, state.7, "deepseek", &state.8)),
+                        state,
+                    ));
+                }
+                Ok(None) => {
                     match enqueue_finished_chat_frames(&mut state.1, &mut state.2, &mut state.3) {
                         Ok(done_seen) => {
                             state.5 |= done_seen;
@@ -329,12 +391,14 @@ fn chat_response_stream(
 fn completion_response_stream(
     response: reqwest::Response,
     model_name: String,
+    timeouts: ModelRequestTimeouts,
 ) -> Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
     let byte_stream = response.bytes_stream();
     let decoder = DeepSeekSseDecoder::default();
     let pending = VecDeque::<ProviderChunk>::new();
     let finished = false;
     let saw_done = false;
+    let timeout_state = ProviderStreamTimeoutState::new(timeouts);
     let state = (
         byte_stream,
         decoder,
@@ -342,6 +406,8 @@ fn completion_response_stream(
         finished,
         saw_done,
         model_name,
+        timeout_state,
+        timeouts,
     );
 
     Box::pin(stream::unfold(state, |mut state| async move {
@@ -353,8 +419,8 @@ fn completion_response_stream(
                 return None;
             }
 
-            match state.0.next().await {
-                Some(Ok(bytes)) => {
+            match timeout_provider_stream_next(&mut state.0, state.7, &mut state.6).await {
+                Ok(Some(Ok(bytes))) => {
                     let raw = match String::from_utf8(bytes.to_vec()) {
                         Ok(raw) => raw,
                         Err(error) => {
@@ -378,11 +444,18 @@ fn completion_response_stream(
                         }
                     }
                 }
-                Some(Err(error)) => {
+                Ok(Some(Err(error))) => {
                     state.3 = true;
                     return Some((Err(error).context("failed to read completion chunk"), state));
                 }
-                None => {
+                Err(phase) => {
+                    state.3 = true;
+                    return Some((
+                        Err(provider_timeout_error(phase, state.7, "deepseek", &state.5)),
+                        state,
+                    ));
+                }
+                Ok(None) => {
                     match enqueue_finished_completion_frames(&mut state.1, &mut state.2, &state.5) {
                         Ok(done_seen) => {
                             state.4 |= done_seen;

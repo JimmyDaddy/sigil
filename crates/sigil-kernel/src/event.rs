@@ -1506,6 +1506,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::BackgroundTaskTracked(_) => "background_task_tracked",
         ControlEntry::PrefixSnapshotCaptured(_) => "prefix_snapshot_captured",
         ControlEntry::MemorySnapshotCaptured(_) => "memory_snapshot_captured",
+        ControlEntry::ContextAssemblySkipped(_) => "context_assembly_skipped",
         ControlEntry::UsageSnapshot(_) => "usage_snapshot",
         ControlEntry::ToolApproval(_) => "tool_approval",
         ControlEntry::ToolExecution(_) => "tool_execution",

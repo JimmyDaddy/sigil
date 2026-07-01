@@ -1161,6 +1161,14 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                 },
             },
         )),
+        SessionLogEntry::Control(ControlEntry::ContextAssemblySkipped(
+            sigil_kernel::ContextAssemblySkippedEntry {
+                reason: "context item runtime:bad snippet token cost exceeds declared token cost"
+                    .to_owned(),
+                candidate_count: 2,
+                item_ids: vec!["runtime:bad".to_owned()],
+            },
+        )),
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
             prompt_tokens: 10,
             completion_tokens: 5,
@@ -1270,6 +1278,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
     assert!(rendered.contains("[ctl] task task-1"));
     assert!(rendered.contains("[ctl] prefix sha=abcdef1234567890"));
     assert!(rendered.contains("[ctl] memory docs=2 fp=memory-fingerpri"));
+    assert!(rendered.contains("[ctl] context skipped candidates=2 items=1 reason=context item"));
     assert!(rendered.contains("[ctl] usage p=10 c=5 hit=3 miss=7"));
     assert!(rendered.contains("[ctl] approval call-write-1 write_file action=requested"));
     assert!(rendered.contains("[ctl] execution call-write-1 write_file status=completed"));

@@ -2773,6 +2773,7 @@ fn root_config() -> RootConfig {
             tool_timeout_secs: 30,
         },
         permission: PermissionConfig::default(),
+        model_request: Default::default(),
         memory: MemoryConfig { enabled: false },
         skills: Default::default(),
         compaction: CompactionConfig::default(),

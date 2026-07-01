@@ -21,6 +21,10 @@ provider = "openai_compat"
 model = "gpt-4.1"
 tool_timeout_secs = 30
 
+[model_request]
+request_timeout_secs = 120
+stream_idle_timeout_secs = 180
+
 [providers.openai_compat]
 base_url = "https://api.openai.com/v1"
 model = "gpt-4.1"
@@ -28,7 +32,6 @@ model = "gpt-4.1"
 # api_key = "sk-..."
 organization = "org_..."
 project = "proj_..."
-request_timeout_secs = 120
 ```
 
 完整起点模板见 [openai-compatible.toml](../examples/config/openai-compatible.toml)。
@@ -49,7 +52,6 @@ Sigil 按这个顺序解析 OpenAI-compatible 认证：
 | --- | --- |
 | `SIGIL_OPENAI_COMPATIBLE_MODEL` | `[providers.openai_compat].model` |
 | `SIGIL_OPENAI_COMPATIBLE_BASE_URL` | `[providers.openai_compat].base_url` |
-| `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS` | `[providers.openai_compat].request_timeout_secs` |
 
 这些覆盖适合 CI 和本地实验，不需要修改 `sigil.toml`。
 

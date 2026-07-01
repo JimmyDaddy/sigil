@@ -28,9 +28,10 @@ use crate::{
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     context_engine::{
-        ContextItem, ContextPackOptions, ContextSensitivity, ContextSource, ContextTrustLevel,
-        PackedContext, RuntimeContextCandidates, SessionArchive, SessionArchiveEntry,
-        pack_context_items,
+        ContextItem, ContextItemId, ContextPackOptions, ContextSensitivity, ContextSource,
+        ContextTrustLevel, DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES, PackedContext,
+        RuntimeContextCandidates, SessionArchive, SessionArchiveEntry, pack_context_items,
+        validate_context_render_snippet,
     },
     conversation_queue::{
         ConversationInputEditedEntry, ConversationInputQueueControlEntry,
@@ -91,6 +92,7 @@ const SESSION_LOG_SHARED_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 const REQUEST_CONTEXT_V0_MAX_TOKENS: usize = 512;
 const REQUEST_CONTEXT_V0_SESSION_ARCHIVE_LIMIT: usize = 4;
 const REQUEST_CONTEXT_V0_ENTRY_MAX_BYTES: usize = 2048;
+const REQUEST_CONTEXT_V0_ENTRY_OVERLAP_BYTES: usize = 256;
 
 /// Append-only session log entry stored in the durable JSONL session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +245,16 @@ pub struct MemorySnapshot {
     pub report: MemoryLoadReport,
 }
 
+/// Audit entry recorded when Context V0 candidates are recalled but cannot be rendered safely.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextAssemblySkippedEntry {
+    pub reason: String,
+    pub candidate_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_ids: Vec<ContextItemId>,
+}
+
 /// Control-plane state that must survive resume and remain outside model-facing chat history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // Boxing variants would churn append-only control projection matches.
@@ -263,6 +275,8 @@ pub enum ControlEntry {
     PrefixSnapshotCaptured(PrefixSnapshot),
     #[serde(alias = "MemorySnapshotCaptured")]
     MemorySnapshotCaptured(MemorySnapshot),
+    #[serde(alias = "ContextAssemblySkipped")]
+    ContextAssemblySkipped(ContextAssemblySkippedEntry),
     #[serde(alias = "UsageSnapshot")]
     UsageSnapshot(UsageStats),
     #[serde(alias = "ToolApproval")]
@@ -1085,6 +1099,7 @@ fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
         ControlEntry::MergeReviewResolved(_) => DurableEventType::MergeReviewResolved,
         ControlEntry::PrefixSnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::MemorySnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
+        ControlEntry::ContextAssemblySkipped(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::SkillIndexCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::SkillLoaded(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::PluginManifestCaptured(_) => DurableEventType::ContextSourceCaptured,
@@ -2092,8 +2107,9 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns an error when memory loading, prefix materialization, context packing, or durable
-    /// control writes fail.
+    /// Returns an error when memory loading, prefix materialization, or durable control writes fail.
+    /// Context assembly failures are recorded as `ContextAssemblySkipped` and degrade to a request
+    /// without Context V0.
     #[allow(clippy::too_many_arguments)]
     pub fn build_request_with_transient_messages_and_context(
         &mut self,
@@ -2110,7 +2126,7 @@ impl Session {
         let projected_messages = self.projected_messages();
         let mut request_messages = memory.messages.clone();
         if let Some(context_message) =
-            self.runtime_context_v0_message(&projected_messages, runtime_context)
+            self.runtime_context_v0_message(&projected_messages, runtime_context)?
         {
             request_messages.push(context_message);
         }
@@ -2152,13 +2168,30 @@ impl Session {
     }
 
     fn runtime_context_v0_message(
-        &self,
+        &mut self,
         projected_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
-    ) -> Option<ModelMessage> {
-        self.build_runtime_context_v0_message(projected_messages, runtime_context)
-            .ok()
-            .flatten()
+    ) -> Result<Option<ModelMessage>> {
+        let runtime_candidate_count = runtime_context.items.len();
+        let runtime_item_ids = runtime_context
+            .items
+            .iter()
+            .take(12)
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        match self.build_runtime_context_v0_message(projected_messages, runtime_context) {
+            Ok(message) => Ok(message),
+            Err(error) => {
+                self.append_control(ControlEntry::ContextAssemblySkipped(
+                    ContextAssemblySkippedEntry {
+                        reason: format!("{error:#}"),
+                        candidate_count: runtime_candidate_count,
+                        item_ids: runtime_item_ids,
+                    },
+                ))?;
+                Ok(None)
+            }
+        }
     }
 
     fn build_runtime_context_v0_message(
@@ -2452,22 +2485,24 @@ fn session_archive_from_projected_messages(
         .iter()
         .take(latest_user_index)
         .enumerate()
-        .filter_map(|(index, message)| session_archive_entry_from_message(index, message))
+        .flat_map(|(index, message)| session_archive_entries_from_message(index, message))
         .fold(SessionArchive::new(), |archive, entry| {
             archive.with_entry(entry)
         })
 }
 
-fn session_archive_entry_from_message(
+fn session_archive_entries_from_message(
     index: usize,
     message: &ModelMessage,
-) -> Option<SessionArchiveEntry> {
-    let content = message.content.as_deref()?.trim();
+) -> Vec<SessionArchiveEntry> {
+    let Some(content) = message.content.as_deref().map(str::trim) else {
+        return Vec::new();
+    };
     if content.is_empty() || matches!(message.role, MessageRole::System) {
-        return None;
+        return Vec::new();
     }
     let (role, source, trust_level, sensitivity) = match message.role {
-        MessageRole::System => return None,
+        MessageRole::System => return Vec::new(),
         MessageRole::User => (
             "user",
             ContextSource::UserMessage,
@@ -2487,18 +2522,64 @@ fn session_archive_entry_from_message(
             ContextSensitivity::Repository,
         ),
     };
-    let body = format!(
-        "{role}: {}",
-        truncate_runtime_context_body(content, REQUEST_CONTEXT_V0_ENTRY_MAX_BYTES)
+    let chunks = chunk_runtime_context_body(
+        content,
+        REQUEST_CONTEXT_V0_ENTRY_MAX_BYTES,
+        REQUEST_CONTEXT_V0_ENTRY_OVERLAP_BYTES,
     );
-    let digest = Sha256::digest(body.as_bytes());
-    Some(SessionArchiveEntry::new(
-        format!("message:{index}:{digest:x}"),
-        source,
-        body,
-        trust_level,
-        sensitivity,
-    ))
+    let chunk_count = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
+            let body = if chunk_count == 1 {
+                format!("{role}: {chunk}")
+            } else {
+                format!("{role} chunk {}/{}: {chunk}", chunk_index + 1, chunk_count)
+            };
+            let digest = Sha256::digest(body.as_bytes());
+            SessionArchiveEntry::new(
+                format!("message:{index}:{chunk_index}:{digest:x}"),
+                source.clone(),
+                body,
+                trust_level,
+                sensitivity,
+            )
+        })
+        .collect()
+}
+
+fn chunk_runtime_context_body(value: &str, max_bytes: usize, overlap_bytes: usize) -> Vec<String> {
+    if value.len() <= max_bytes {
+        return vec![value.to_owned()];
+    }
+
+    let max_bytes = max_bytes.max(1);
+    let overlap_bytes = overlap_bytes.min(max_bytes.saturating_sub(1));
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < value.len() {
+        let mut end = start.saturating_add(max_bytes).min(value.len());
+        while end > start && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            break;
+        }
+        chunks.push(value[start..end].to_owned());
+        if end == value.len() {
+            break;
+        }
+        let mut next_start = end.saturating_sub(overlap_bytes);
+        while next_start > start && !value.is_char_boundary(next_start) {
+            next_start -= 1;
+        }
+        if next_start <= start {
+            next_start = end;
+        }
+        start = next_start;
+    }
+    chunks
 }
 
 fn truncate_runtime_context_body(value: &str, max_bytes: usize) -> String {
@@ -2556,12 +2637,12 @@ fn render_runtime_context_v0_message(
         .iter()
         .chain(packed.dynamic_suffix.iter())
         .map(|item| runtime_context_item_json(item, snippets))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let excluded = packed
         .excluded
         .iter()
         .map(|item| runtime_context_item_json(item, snippets))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let payload = serde_json::json!({
         "schema": "sigil_context_v0",
         "placement": "dynamic_suffix",
@@ -2591,8 +2672,8 @@ fn render_runtime_context_v0_message(
 fn runtime_context_item_json(
     item: &ContextItem,
     snippets: &BTreeMap<String, String>,
-) -> serde_json::Value {
-    serde_json::json!({
+) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
         "id": &item.id,
         "source": &item.source,
         "source_event_id": &item.source_event_id,
@@ -2604,16 +2685,16 @@ fn runtime_context_item_json(
         "score": item.score,
         "inclusion_reason": &item.inclusion_reason,
         "body_ref": &item.body_ref,
-        "snippet": renderable_runtime_context_snippet(item, snippets),
-    })
+        "snippet": renderable_runtime_context_snippet(item, snippets)?,
+    }))
 }
 
 fn renderable_runtime_context_snippet<'a>(
     item: &ContextItem,
     snippets: &'a BTreeMap<String, String>,
-) -> Option<&'a str> {
+) -> Result<Option<&'a str>> {
     if !item.inclusion_reason.is_included() {
-        return None;
+        return Ok(None);
     }
     if matches!(
         item.sensitivity,
@@ -2622,9 +2703,13 @@ fn renderable_runtime_context_snippet<'a>(
             | ContextSensitivity::External
     ) && item.egress_decision.is_none()
     {
-        return None;
+        return Ok(None);
     }
-    snippets.get(&item.id).map(String::as_str)
+    let Some(snippet) = snippets.get(&item.id) else {
+        return Ok(None);
+    };
+    validate_context_render_snippet(item, snippet, DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES)?;
+    Ok(Some(snippet.as_str()))
 }
 
 fn stable_runtime_context_v0_message_id(content: &str) -> String {

@@ -4,10 +4,14 @@ use std::{
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, Visitor},
+};
 use serde_json::Value;
 
 use crate::{
@@ -18,6 +22,10 @@ use crate::{
     task::AgentRole,
     verification::VerificationConfig,
 };
+
+pub const SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_REQUEST_TIMEOUT_SECS";
+pub const SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS";
+pub const SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS";
 
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +38,8 @@ pub struct RootConfig {
     #[serde(default)]
     pub session: SessionConfig,
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub model_request: ModelRequestConfig,
     #[serde(default)]
     pub permission: PermissionConfig,
     #[serde(default)]
@@ -54,6 +64,79 @@ pub struct RootConfig {
     pub providers: BTreeMap<String, Value>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// Provider-neutral timeout settings for model requests.
+///
+/// This config controls how long Sigil waits for model transport phases. It is intentionally
+/// separate from provider blocks so users do not need to configure the same timeout per provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelRequestConfig {
+    #[serde(default = "default_model_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    #[serde(default = "default_model_request_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_total_timeout_secs: Option<u64>,
+}
+
+impl Default for ModelRequestConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_secs: default_model_request_timeout_secs(),
+            stream_idle_timeout_secs: default_model_request_stream_idle_timeout_secs(),
+            stream_total_timeout_secs: None,
+        }
+    }
+}
+
+impl ModelRequestConfig {
+    /// Resolves this user config into runtime durations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any configured timeout is zero.
+    pub fn to_timeouts(&self) -> Result<ModelRequestTimeouts> {
+        if self.request_timeout_secs == 0 {
+            anyhow::bail!("model_request.request_timeout_secs must be greater than 0");
+        }
+        if self.stream_idle_timeout_secs == 0 {
+            anyhow::bail!("model_request.stream_idle_timeout_secs must be greater than 0");
+        }
+        if self.stream_total_timeout_secs == Some(0) {
+            anyhow::bail!("model_request.stream_total_timeout_secs must be greater than 0");
+        }
+        Ok(ModelRequestTimeouts {
+            request_timeout: Duration::from_secs(self.request_timeout_secs),
+            stream_idle_timeout: Duration::from_secs(self.stream_idle_timeout_secs),
+            stream_total_timeout: self.stream_total_timeout_secs.map(Duration::from_secs),
+        })
+    }
+}
+
+fn default_model_request_timeout_secs() -> u64 {
+    120
+}
+
+fn default_model_request_stream_idle_timeout_secs() -> u64 {
+    180
+}
+
+/// Runtime timeout policy applied to provider requests and streamed response bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelRequestTimeouts {
+    pub request_timeout: Duration,
+    pub stream_idle_timeout: Duration,
+    pub stream_total_timeout: Option<Duration>,
+}
+
+impl Default for ModelRequestTimeouts {
+    fn default() -> Self {
+        ModelRequestConfig::default()
+            .to_timeouts()
+            .expect("default model request timeout config is valid")
+    }
 }
 
 /// Local code intelligence configuration.
@@ -119,7 +202,7 @@ pub const DEFAULT_TERMINAL_SCROLL_SENSITIVITY: u16 = 3;
 #[serde(rename_all = "snake_case")]
 pub struct TerminalConfig {
     #[serde(default = "default_terminal_keyboard_enhancement")]
-    pub keyboard_enhancement: bool,
+    pub keyboard_enhancement: TerminalKeyboardEnhancement,
     #[serde(default = "default_terminal_mouse_capture")]
     pub mouse_capture: bool,
     #[serde(default = "default_terminal_osc52_clipboard")]
@@ -136,6 +219,71 @@ impl Default for TerminalConfig {
             osc52_clipboard: default_terminal_osc52_clipboard(),
             scroll_sensitivity: default_terminal_scroll_sensitivity(),
         }
+    }
+}
+
+/// Policy for terminal keyboard enhancement in interactive entrypoints.
+///
+/// `auto` probes the current terminal before requesting enhanced key reporting,
+/// `on` forces the request, and `off` keeps the baseline keyboard protocol.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKeyboardEnhancement {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl TerminalKeyboardEnhancement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TerminalKeyboardEnhancement {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct KeyboardEnhancementVisitor;
+
+        impl Visitor<'_> for KeyboardEnhancementVisitor {
+            type Value = TerminalKeyboardEnhancement;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("auto, on, off, or a legacy boolean")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(if value {
+                    TerminalKeyboardEnhancement::On
+                } else {
+                    TerminalKeyboardEnhancement::Off
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "auto" => Ok(TerminalKeyboardEnhancement::Auto),
+                    "on" => Ok(TerminalKeyboardEnhancement::On),
+                    "off" => Ok(TerminalKeyboardEnhancement::Off),
+                    _ => Err(E::unknown_variant(value, &["auto", "on", "off"])),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(KeyboardEnhancementVisitor)
     }
 }
 
@@ -442,7 +590,10 @@ impl RootConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+        let mut config: Self =
+            toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+        config.apply_model_request_env_overrides()?;
+        Ok(config)
     }
 
     /// Serializes the config to TOML and writes it to `path`, creating parent directories first.
@@ -456,6 +607,41 @@ impl RootConfig {
         fs::write(path, rendered)
             .with_context(|| format!("failed to write config at {}", path.display()))
     }
+
+    /// Applies provider-neutral model request timeout environment overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured override is not a positive integer.
+    pub fn apply_model_request_env_overrides(&mut self) -> Result<()> {
+        if let Some(value) = read_positive_env_u64(SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV)? {
+            self.model_request.request_timeout_secs = value;
+        }
+        if let Some(value) = read_positive_env_u64(SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV)? {
+            self.model_request.stream_idle_timeout_secs = value;
+        }
+        if let Some(value) = read_positive_env_u64(SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV)? {
+            self.model_request.stream_total_timeout_secs = Some(value);
+        }
+        Ok(())
+    }
+}
+
+fn read_positive_env_u64(name: &str) -> Result<Option<u64>> {
+    let Some(value) = env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<u64>()
+        .with_context(|| format!("invalid {name}: expected positive integer"))?;
+    if parsed == 0 {
+        anyhow::bail!("{name} must be greater than 0");
+    }
+    Ok(Some(parsed))
 }
 
 /// Returns the visible per-user config directory for sigil.
@@ -1239,8 +1425,8 @@ fn default_terminal_mouse_capture() -> bool {
     false
 }
 
-fn default_terminal_keyboard_enhancement() -> bool {
-    false
+fn default_terminal_keyboard_enhancement() -> TerminalKeyboardEnhancement {
+    TerminalKeyboardEnhancement::Auto
 }
 
 fn default_terminal_osc52_clipboard() -> bool {

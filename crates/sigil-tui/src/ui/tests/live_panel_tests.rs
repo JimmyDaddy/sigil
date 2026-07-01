@@ -35,6 +35,7 @@ fn test_config() -> RootConfig {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         skills: Default::default(),
@@ -226,26 +227,26 @@ fn render_live_panel_shows_queue_strip_actions_above_status() -> anyhow::Result<
         queue_panel_focused: true,
         queue_action_buttons: vec![
             QueueActionButtonViewModel {
-                label: "Send now".to_owned(),
-                detail: "interrupt current turn".to_owned(),
+                label: "Run next".to_owned(),
+                detail: "run after the current turn".to_owned(),
                 selected: true,
                 destructive: false,
             },
             QueueActionButtonViewModel {
-                label: "Keep next".to_owned(),
-                detail: "run after current turn".to_owned(),
+                label: "Interrupt".to_owned(),
+                detail: "stop current turn and run this follow-up".to_owned(),
                 selected: false,
                 destructive: false,
             },
             QueueActionButtonViewModel {
                 label: "Edit".to_owned(),
-                detail: "edit queued input".to_owned(),
+                detail: "edit follow-up".to_owned(),
                 selected: false,
                 destructive: false,
             },
             QueueActionButtonViewModel {
                 label: "Delete".to_owned(),
-                detail: "remove queued input".to_owned(),
+                detail: "remove follow-up".to_owned(),
                 selected: false,
                 destructive: true,
             },
@@ -270,10 +271,10 @@ fn render_live_panel_shows_queue_strip_actions_above_status() -> anyhow::Result<
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Queue"));
+    assert!(rendered.contains("Follow-ups"));
     assert!(rendered.contains("queued prompt"));
-    assert!(rendered.contains("Send now"));
-    assert!(rendered.contains("Keep next"));
+    assert!(rendered.contains("Run next"));
+    assert!(rendered.contains("Interrupt"));
     assert!(rendered.contains("Edit"));
     assert!(rendered.contains("Delete"));
     assert!(rendered.contains("Thinking..."));
@@ -304,8 +305,8 @@ fn render_live_panel_queue_strip_covers_paused_and_unfocused_rows() -> anyhow::R
         queue_paused: true,
         queue_panel_focused: false,
         queue_action_buttons: vec![QueueActionButtonViewModel {
-            label: "Send now".to_owned(),
-            detail: "interrupt current turn".to_owned(),
+            label: "Interrupt".to_owned(),
+            detail: "stop current turn and run this follow-up".to_owned(),
             selected: false,
             destructive: false,
         }],
@@ -326,11 +327,11 @@ fn render_live_panel_queue_strip_covers_paused_and_unfocused_rows() -> anyhow::R
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Queue paused"));
-    assert!(rendered.contains("/queue focus"));
+    assert!(rendered.contains("Follow-ups paused"));
+    assert!(rendered.contains("/queue advanced"));
     assert!(rendered.contains("first queued prompt"));
     assert!(rendered.contains("second queued prompt"));
-    assert!(rendered.contains("Send now"));
+    assert!(rendered.contains("Interrupt"));
     Ok(())
 }
 

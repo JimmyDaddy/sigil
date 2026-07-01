@@ -13,12 +13,21 @@ use sha2::{Digest, Sha256};
 
 use crate::{ArtifactId, EventId, ReceiptId, VerificationVerdict};
 
+mod text;
+
+pub use text::estimate_context_token_cost;
+use text::{
+    bm25_score, context_snippet_around_terms, term_counts, tokenize_context_text,
+    truncate_context_body,
+};
+
 pub type ContextItemId = String;
 pub type ContextEgressDecisionId = String;
 pub type ContextRepoRevision = String;
 pub type SessionArchiveEntryId = String;
 
 pub const DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES: usize = 4096;
+pub const DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +128,67 @@ impl ContextBodyRef {
             byte_len: body.len(),
         }
     }
+}
+
+/// Validates a model-rendered snippet against the metadata carried by its context item.
+///
+/// Snippets are provided separately from [`ContextItem`] so runtime layers can keep repository/LSP
+/// discovery outside the kernel. This check is the kernel boundary that prevents a caller from
+/// declaring a cheap item while rendering a larger or different snippet into provider context.
+///
+/// # Errors
+///
+/// Returns an error when the snippet exceeds the render byte cap, exceeds the declared token cost,
+/// or contradicts an inline body reference.
+pub fn validate_context_render_snippet(
+    item: &ContextItem,
+    snippet: &str,
+    max_bytes: usize,
+) -> Result<()> {
+    if snippet.len() > max_bytes {
+        bail!(
+            "context item {} snippet exceeds render byte limit: {} > {}",
+            item.id,
+            snippet.len(),
+            max_bytes
+        );
+    }
+
+    let rendered_token_cost = estimate_context_token_cost(snippet);
+    if rendered_token_cost > item.token_cost {
+        bail!(
+            "context item {} snippet token cost {} exceeds declared token cost {}",
+            item.id,
+            rendered_token_cost,
+            item.token_cost
+        );
+    }
+
+    if let ContextBodyRef::Inline {
+        content_hash,
+        byte_len,
+    } = &item.body_ref
+    {
+        if snippet.len() > *byte_len {
+            bail!(
+                "context item {} snippet byte length {} exceeds inline body length {}",
+                item.id,
+                snippet.len(),
+                byte_len
+            );
+        }
+        if snippet.len() == *byte_len {
+            let rendered_hash = format!("{:x}", Sha256::digest(snippet.as_bytes()));
+            if rendered_hash != *content_hash {
+                bail!(
+                    "context item {} snippet hash does not match inline body ref",
+                    item.id
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -391,7 +461,7 @@ impl SessionArchive {
             };
             hits.push(SessionArchiveSearchHit {
                 item,
-                snippet: context_snippet(&indexed_body, 160),
+                snippet: context_snippet_around_terms(&indexed_body, &query_terms, 160),
                 truncation,
             });
         }
@@ -1115,92 +1185,6 @@ impl ContextDigestV0Builder {
             context_items: self.context_items,
         })
     }
-}
-
-pub fn estimate_context_token_cost(text: &str) -> usize {
-    text.split_whitespace().count().max(1)
-}
-
-fn tokenize_context_text(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch.to_ascii_lowercase());
-        } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
-}
-
-fn term_counts(tokens: &[String]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for token in tokens {
-        *counts.entry(token.clone()).or_default() += 1;
-    }
-    counts
-}
-
-fn bm25_score(
-    query_terms: &[String],
-    term_counts: &BTreeMap<String, usize>,
-    doc_len: usize,
-    average_doc_len: f32,
-    doc_count: f32,
-    document_frequency: &BTreeMap<String, usize>,
-) -> f32 {
-    const K1: f32 = 1.2;
-    const B: f32 = 0.75;
-
-    let doc_len = doc_len.max(1) as f32;
-    let average_doc_len = average_doc_len.max(1.0);
-    let mut score = 0.0;
-    for term in query_terms {
-        let Some(term_frequency) = term_counts.get(term).copied() else {
-            continue;
-        };
-        let document_frequency = document_frequency.get(term).copied().unwrap_or_default() as f32;
-        let idf = ((doc_count - document_frequency + 0.5) / (document_frequency + 0.5) + 1.0).ln();
-        let term_frequency = term_frequency as f32;
-        let denominator = term_frequency + K1 * (1.0 - B + B * (doc_len / average_doc_len));
-        score += idf * (term_frequency * (K1 + 1.0)) / denominator;
-    }
-    score
-}
-
-fn truncate_context_body(body: &str, max_bytes: usize) -> (String, ContextTruncation) {
-    if body.len() <= max_bytes {
-        return (body.to_owned(), ContextTruncation::none(body.len()));
-    }
-
-    let mut end = max_bytes.min(body.len());
-    while !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    let indexed_body = body[..end].to_owned();
-    (
-        indexed_body,
-        ContextTruncation {
-            original_byte_len: body.len(),
-            indexed_byte_len: end,
-            truncated: true,
-        },
-    )
-}
-
-fn context_snippet(body: &str, max_chars: usize) -> String {
-    let mut snippet = String::new();
-    for ch in body.chars().take(max_chars) {
-        snippet.push(ch);
-    }
-    if body.chars().count() > max_chars {
-        snippet.push_str("...");
-    }
-    snippet
 }
 
 #[cfg(test)]

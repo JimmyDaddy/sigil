@@ -303,9 +303,10 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         UiCommand::CompactNow,
     ]));
     lines.extend([
-        "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer.".to_owned(),
+        "Ctrl-J: Insert a newline in the composer.".to_owned(),
+        "Shift-Enter or Alt-Enter: Insert a newline when terminal keyboard enhancement is active and reports modifiers.".to_owned(),
         "Paste: Insert pasted text without submitting; large pastes are folded in the composer display.".to_owned(),
-        "Enter while busy: Queue a follow-up for the next safe turn.".to_owned(),
+        "Enter while busy: Add a visible follow-up for the next safe turn.".to_owned(),
         String::new(),
         "Review".to_owned(),
     ]);

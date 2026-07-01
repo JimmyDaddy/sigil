@@ -1858,6 +1858,7 @@ fn root_config() -> RootConfig {
             tool_timeout_secs: 45,
         },
         permission: PermissionConfig::default(),
+        model_request: Default::default(),
         memory: MemoryConfig::default(),
         skills: SkillConfig::default(),
         compaction: CompactionConfig::default(),

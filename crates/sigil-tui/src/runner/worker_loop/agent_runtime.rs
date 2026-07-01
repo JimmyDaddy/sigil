@@ -339,7 +339,7 @@ where
             message_tx,
             queued.queue_id,
             ConversationInputStatus::Rejected,
-            Some("queued target is not dispatchable by the main conversation worker".to_owned()),
+            Some("follow-up target is not dispatchable by the main conversation worker".to_owned()),
         );
         return None;
     }
@@ -352,9 +352,7 @@ where
                 message_tx,
                 queued.queue_id,
                 ConversationInputStatus::Rejected,
-                Some(
-                    "queued input kind is not supported by the main conversation worker".to_owned(),
-                ),
+                Some("follow-up kind is not supported by the main conversation worker".to_owned()),
             );
             return None;
         }
@@ -362,7 +360,7 @@ where
 
     let Some(run_session) = current_session.take() else {
         let _ = message_tx.send(WorkerMessage::RunFailed(
-            "session state is unavailable for queued input".to_owned(),
+            "session state is unavailable for follow-up".to_owned(),
         ));
         return None;
     };

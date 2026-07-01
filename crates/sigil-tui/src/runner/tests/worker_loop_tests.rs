@@ -537,6 +537,7 @@ fn root_config_with_checks(
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: false },
         skills: Default::default(),

@@ -9,9 +9,9 @@ pub const SIGIL_ANTHROPIC_MODEL_ENV: &str = "SIGIL_ANTHROPIC_MODEL";
 pub const SIGIL_ANTHROPIC_BASE_URL_ENV: &str = "SIGIL_ANTHROPIC_BASE_URL";
 pub const SIGIL_ANTHROPIC_VERSION_ENV: &str = "SIGIL_ANTHROPIC_VERSION";
 pub const SIGIL_ANTHROPIC_MAX_TOKENS_ENV: &str = "SIGIL_ANTHROPIC_MAX_TOKENS";
-pub const SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS_ENV: &str = "SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnthropicProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
@@ -25,8 +25,6 @@ pub struct AnthropicProviderConfig {
     pub max_tokens: u32,
     #[serde(default)]
     pub beta_headers: Vec<String>,
-    #[serde(default = "default_request_timeout_secs")]
-    pub request_timeout_secs: u64,
 }
 
 impl AnthropicProviderConfig {
@@ -52,9 +50,6 @@ impl AnthropicProviderConfig {
         if let Some(value) = read_env_u32(SIGIL_ANTHROPIC_MAX_TOKENS_ENV)? {
             resolved.max_tokens = value;
         }
-        if let Some(value) = read_env_u64(SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS_ENV)? {
-            resolved.request_timeout_secs = value;
-        }
         if let Some(value) = read_env_string(SIGIL_ANTHROPIC_API_KEY_ENV)
             .or_else(|| read_env_string(ANTHROPIC_API_KEY_ENV))
         {
@@ -74,7 +69,6 @@ impl Default for AnthropicProviderConfig {
             anthropic_version: default_anthropic_version(),
             max_tokens: default_max_tokens(),
             beta_headers: Vec::new(),
-            request_timeout_secs: default_request_timeout_secs(),
         }
     }
 }
@@ -95,10 +89,6 @@ fn default_max_tokens() -> u32 {
     4096
 }
 
-fn default_request_timeout_secs() -> u64 {
-    120
-}
-
 fn read_env_string(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -112,19 +102,6 @@ fn read_env_u32(name: &str) -> Result<Option<u32>> {
     };
     let parsed = value
         .parse::<u32>()
-        .map_err(|error| anyhow!("invalid {name}: {error}"))?;
-    if parsed == 0 {
-        return Err(anyhow!("{name} must be greater than 0"));
-    }
-    Ok(Some(parsed))
-}
-
-fn read_env_u64(name: &str) -> Result<Option<u64>> {
-    let Some(value) = read_env_string(name) else {
-        return Ok(None);
-    };
-    let parsed = value
-        .parse::<u64>()
         .map_err(|error| anyhow!("invalid {name}: {error}"))?;
     if parsed == 0 {
         return Err(anyhow!("{name} must be greater than 0"));

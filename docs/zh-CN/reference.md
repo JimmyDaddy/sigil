@@ -14,7 +14,7 @@
 | 切换右侧 info rail 精简/详情 | `F2` |
 | 滚动 transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | 切换默认 permission mode | `Shift-Tab` |
-| 插入 composer 换行 | `Shift-Enter`、`Alt-Enter`、`Ctrl-J` |
+| 插入 composer 换行 | `Ctrl-J`；terminal keyboard enhancement 已启用且能上报 modifier 时也支持 `Shift-Enter` / `Alt-Enter` |
 | 按行或字符移动 composer 光标 | `Ctrl-A/E`、`Ctrl-B/F`、`Left/Right` |
 | 按词移动 composer 光标 | `Alt-B/F`、`Ctrl-Left/Right` |
 | 删除 composer 文本 | `Backspace/Delete`、`Ctrl-H`、`Ctrl-W`、`Ctrl/Alt-Backspace`、`Ctrl/Alt-Delete` |
@@ -41,8 +41,8 @@
 | `/resume` | 选择并恢复历史 session |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
-| `/queue` | 聚焦 queued input |
-| `/queue next|now|edit|delete [item]` | 管理 queued input；`now` 会先 interrupt 当前 run 再 dispatch |
+| `/queue` | 高级 follow-up 控制 |
+| `/queue next|interrupt|edit|delete [item]` | 保留 follow-up 到下一轮、interrupt 并立即运行、编辑或取消 |
 | `/plan` / `/plan <prompt>` | 运行一次只读 planning prompt；接受 plan card 后创建并运行 durable task |
 | `/task <task>` | 创建 durable plan，并分步骤执行任务 |
 | `/task continue` | 不带额外 guidance 继续最新 planned task |
@@ -99,6 +99,12 @@ Sigil 按以下顺序解析 config：
 
 ## Provider 环境变量
 
+Model request:
+
+- `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
+
 DeepSeek:
 
 - `SIGIL_API_KEY`
@@ -108,7 +114,6 @@ DeepSeek:
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_FIM_MODEL`
 - `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_STRICT_TOOLS_MODE`
 - `DEEPSEEK_API_KEY` fallback
 
@@ -117,7 +122,6 @@ OpenAI-compatible:
 - `SIGIL_OPENAI_COMPATIBLE_API_KEY`
 - `SIGIL_OPENAI_COMPATIBLE_MODEL`
 - `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-- `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
 - `OPENAI_API_KEY` fallback
 
 Anthropic:
@@ -127,7 +131,6 @@ Anthropic:
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_ANTHROPIC_VERSION`
 - `SIGIL_ANTHROPIC_MAX_TOKENS`
-- `SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS`
 - `ANTHROPIC_API_KEY` fallback
 
 Gemini:
@@ -135,7 +138,6 @@ Gemini:
 - `SIGIL_GEMINI_API_KEY`
 - `SIGIL_GEMINI_MODEL`
 - `SIGIL_GEMINI_BASE_URL`
-- `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS`
 - `GEMINI_API_KEY` fallback
 - `GOOGLE_API_KEY` fallback
 

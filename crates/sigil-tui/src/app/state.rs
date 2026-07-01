@@ -76,7 +76,7 @@ impl Default for ComposerState {
             agent_panel_focused: false,
             queue_panel_focused: false,
             queue_selected: 0,
-            queue_action_selected: ComposerQueueAction::SendNow,
+            queue_action_selected: ComposerQueueAction::KeepNext,
             queue_edit_target: None,
             input_cursor: 0,
             input_paste_spans: Vec::new(),

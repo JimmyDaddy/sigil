@@ -33,6 +33,7 @@ fn test_config() -> RootConfig {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         skills: Default::default(),
@@ -181,6 +182,8 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     assert_eq!(view_model.composer.input_rows, 1);
     assert_eq!(view_model.footer.run_label, "ready");
     assert!(view_model.footer.hints.contains("Enter send"));
+    assert!(view_model.footer.hints.contains("Ctrl-J newline"));
+    assert!(!view_model.footer.hints.contains("Shift-Enter newline"));
     assert!(!view_model.info_rail.workspace_label.is_empty());
     assert!(
         view_model
@@ -217,6 +220,16 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .iter()
             .any(|line| line == "Ctrl-C: quit")
     );
+}
+
+#[test]
+fn footer_hints_show_shift_enter_when_keyboard_enhancement_is_enabled() {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    app.set_terminal_keyboard_enhancement_enabled(true);
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(view_model.footer.hints.contains("Shift-Enter newline"));
+    assert!(!view_model.footer.hints.contains("Ctrl-J newline"));
 }
 
 #[test]
@@ -1090,12 +1103,17 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
         unfocused_queue_view
             .footer
             .hints
-            .contains("queue 1 item · next main thread: queued prompt")
+            .contains("1 follow-up pending · next main: queued prompt")
     );
-    assert!(unfocused_queue_view.footer.hints.contains("/queue focus"));
+    assert!(
+        unfocused_queue_view
+            .footer
+            .hints
+            .contains("Down follow-ups")
+    );
     queue_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let queue_view = UiViewModel::from_app(&queue_app);
-    assert!(queue_view.footer.hints.contains("Queue"));
+    assert!(queue_view.footer.hints.contains("Follow-ups"));
     assert!(queue_view.footer.hints.contains("Tab action"));
     Ok(())
 }
@@ -1252,7 +1270,7 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Enter queue next turn · Esc interrupt · Ctrl-T details"
+        "agent: main · Enter add follow-up · Esc interrupt · Ctrl-T details"
     );
     assert_eq!(view_model.composer.phase, RunPhase::Thinking);
     assert_eq!(view_model.composer.reasoning_effort_label, "max");

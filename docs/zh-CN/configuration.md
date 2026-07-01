@@ -77,7 +77,7 @@ model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [terminal]
-keyboard_enhancement = false
+keyboard_enhancement = "auto"
 mouse_capture = false
 osc52_clipboard = true
 scroll_sensitivity = 3
@@ -388,13 +388,13 @@ trust_required = true
 
 ```toml
 [terminal]
-keyboard_enhancement = false
+keyboard_enhancement = "auto"
 mouse_capture = false
 osc52_clipboard = true
 scroll_sensitivity = 3
 ```
 
-`keyboard_enhancement` 控制 TUI 是否请求 crossterm 键盘增强协议。除非你确认当前终端 profile 能正确处理增强协议，否则建议保持关闭。
+`keyboard_enhancement` 控制 crossterm 键盘增强协议。默认 `auto` 会在 TUI 启动时探测当前终端，只在支持时请求 enhanced key reporting。需要强制请求时设为 `on`；如果终端、multiplexer、SSH 层或嵌入式 PTY 不能稳定处理增强协议，设为 `off`。旧布尔值仍兼容读取：`true = on`，`false = off`。
 
 `mouse_capture` 控制 TUI 是否向终端请求鼠标事件，用于点击、滚动、审批控件、setup/config/session 选择和 transcript 拖选。它默认关闭，优先保证不同 multiplexer 和嵌入式 PTY 下的键盘输入可靠；只有在你需要鼠标能力且终端能稳定处理 mouse mode 时再开启。键盘操作始终可用。
 
@@ -402,13 +402,22 @@ scroll_sensitivity = 3
 
 `scroll_sensitivity` 控制鼠标滚轮每 tick 在 transcript 和 approval diff 中移动的行数。默认值是 `3`；高分辨率滚轮可以调小，终端滚动事件偏慢时可以调大。
 
-TUI `/config` 面板有只读 `Terminal` 区块用于查看这些控制项。兼容性覆盖请直接编辑 `sigil.toml`。`keyboard_enhancement` 和 `mouse_capture` 下一次启动生效；`osc52_clipboard` 每次复制时都会读取当前配置；`scroll_sensitivity` 在配置保存并重新加载后应用到运行配置。
+TUI `/config` 面板有只读 `Terminal` 区块用于查看这些控制项。兼容性覆盖请直接编辑 `sigil.toml`。`keyboard_enhancement` 在下一次启动时解析；`mouse_capture` 下一次启动生效；`osc52_clipboard` 每次复制时都会读取当前配置；`scroll_sensitivity` 在配置保存并重新加载后应用到运行配置。
 
 `doctor` 会报告配置开关、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。跨 iTerm2、Terminal.app、WezTerm、kitty、tmux 和 SSH 的可重复人工 checklist 见 [terminal-compatibility.md](terminal-compatibility.md)。
 
 ## Provider 环境变量 Override
 
 当前支持：
+
+Model request：
+
+- `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
+
+这些变量覆盖所有 provider 共用的 `[model_request]`。当某个 shell 或 CI job
+需要不同的模型请求传输超时时，可以用环境变量覆盖，而不必修改 `sigil.toml`。
 
 DeepSeek：
 
@@ -419,7 +428,6 @@ DeepSeek：
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_FIM_MODEL`
 - `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_STRICT_TOOLS_MODE`
 
 `SIGIL_API_KEY` 优先级最高。`DEEPSEEK_API_KEY` 作为 DeepSeek provider 的备用来源继续兼容读取。如果只配置了 `[providers.deepseek].api_key`，Sigil 会把它视为明文配置认证，`doctor` 会输出 warning 和修复建议。
@@ -429,7 +437,6 @@ OpenAI-compatible：
 - `SIGIL_OPENAI_COMPATIBLE_MODEL`
 - `SIGIL_OPENAI_COMPATIBLE_API_KEY`
 - `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-- `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
 
 `OPENAI_API_KEY` 作为 OpenAI-compatible provider 的备用来源继续读取。
 
@@ -440,7 +447,6 @@ Anthropic：
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_ANTHROPIC_VERSION`
 - `SIGIL_ANTHROPIC_MAX_TOKENS`
-- `SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS`
 
 `ANTHROPIC_API_KEY` 作为 Anthropic provider 的备用来源继续读取。
 
@@ -449,7 +455,6 @@ Gemini：
 - `SIGIL_GEMINI_MODEL`
 - `SIGIL_GEMINI_API_KEY`
 - `SIGIL_GEMINI_BASE_URL`
-- `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS`
 
 `GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 作为 Gemini provider 的备用来源继续读取。
 

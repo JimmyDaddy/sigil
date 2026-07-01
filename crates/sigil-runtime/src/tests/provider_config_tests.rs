@@ -1,5 +1,5 @@
 use serde_json::json;
-use sigil_kernel::{AgentConfig, RootConfig};
+use sigil_kernel::{AgentConfig, ModelRequestConfig, RootConfig};
 
 use super::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DeepSeekProviderConfigFields,
@@ -21,6 +21,7 @@ fn test_root_config() -> RootConfig {
             tool_timeout_secs: 30,
         },
         permission: Default::default(),
+        model_request: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
         compaction: Default::default(),
@@ -71,21 +72,18 @@ fn provider_config_fields_read_defaults_and_update_provider_blocks() -> anyhow::
             "model": "claude-old",
             "api_key": "old-key",
             "anthropic_version": "2023-06-01",
-            "max_tokens": 2048,
-            "request_timeout_secs": 20
+            "max_tokens": 2048
         }),
     );
 
     let draft = provider_config_fields(&config, "claude", "fallback");
     assert_eq!(draft.model, "claude-old");
     assert_eq!(draft.api_key, "old-key");
-    assert_eq!(draft.request_timeout_secs, "20");
 
     let fields = ProviderConfigFields {
         model: " claude-new ".to_owned(),
         api_key: " new-key ".to_owned(),
         base_url: " https://anthropic-proxy.example.com ".to_owned(),
-        request_timeout_secs: "45".to_owned(),
     };
     set_provider_config_fields(&mut config, "claude", &fields, None)?;
 
@@ -99,7 +97,7 @@ fn provider_config_fields_read_defaults_and_update_provider_blocks() -> anyhow::
     assert_eq!(provider["base_url"], "https://anthropic-proxy.example.com");
     assert_eq!(provider["anthropic_version"], "2023-06-01");
     assert_eq!(provider["max_tokens"], 2048);
-    assert_eq!(provider["request_timeout_secs"], 45);
+    assert!(provider.get("request_timeout_secs").is_none());
     Ok(())
 }
 
@@ -110,7 +108,6 @@ fn deepseek_config_fields_update_provider_specific_surface() -> anyhow::Result<(
         model: "deepseek-v4-pro".to_owned(),
         api_key: String::new(),
         base_url: "https://deepseek-proxy.example.com".to_owned(),
-        request_timeout_secs: "60".to_owned(),
     };
     let deepseek_fields = DeepSeekProviderConfigFields {
         beta_base_url: "https://deepseek-proxy.example.com/beta".to_owned(),
@@ -148,23 +145,33 @@ fn deepseek_config_fields_update_provider_specific_surface() -> anyhow::Result<(
 #[test]
 fn provider_status_config_from_fields_validates_common_status_surface() {
     let defaults = default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, "deepseek-v4-flash");
-    let status = provider_status_config_from_fields(&ProviderConfigFields {
-        api_key: " secret ".to_owned(),
-        request_timeout_secs: "5".to_owned(),
-        ..defaults.clone()
-    })
+    let model_request = ModelRequestConfig {
+        request_timeout_secs: 5,
+        ..Default::default()
+    };
+    let status = provider_status_config_from_fields(
+        &ProviderConfigFields {
+            api_key: " secret ".to_owned(),
+            ..defaults.clone()
+        },
+        &model_request,
+    )
     .expect("status config should parse");
     assert_eq!(status.api_key.as_deref(), Some("secret"));
     assert_eq!(status.request_timeout_secs, 5);
     assert!(!status.base_url.is_empty());
 
-    let error = provider_status_config_from_fields(&ProviderConfigFields {
-        request_timeout_secs: "0".to_owned(),
-        ..defaults
-    })
+    let invalid_model_request = ModelRequestConfig {
+        request_timeout_secs: 0,
+        ..Default::default()
+    };
+    let error = provider_status_config_from_fields(
+        &ProviderConfigFields { ..defaults },
+        &invalid_model_request,
+    )
     .expect_err("zero timeout should fail");
     assert_eq!(
         error.to_string(),
-        "request_timeout_secs must be greater than 0"
+        "model_request.request_timeout_secs must be greater than 0"
     );
 }

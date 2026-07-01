@@ -21,12 +21,15 @@ provider = "gemini"
 model = "gemini-2.5-pro"
 tool_timeout_secs = 30
 
+[model_request]
+request_timeout_secs = 120
+stream_idle_timeout_secs = 180
+
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
 model = "gemini-2.5-pro"
 # Prefer SIGIL_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY.
 # api_key = "..."
-request_timeout_secs = 120
 ```
 
 A full starting template is available at [gemini.toml](../examples/config/gemini.toml).
@@ -48,7 +51,6 @@ Prefer `SIGIL_GEMINI_API_KEY` when you want Sigil-specific credentials without a
 | --- | --- |
 | `SIGIL_GEMINI_MODEL` | `[providers.gemini].model` |
 | `SIGIL_GEMINI_BASE_URL` | `[providers.gemini].base_url` |
-| `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS` | `[providers.gemini].request_timeout_secs` |
 
 ## Behavior Notes
 
@@ -64,7 +66,7 @@ Run:
 sigil doctor
 ```
 
-Check provider name, model, base URL, timeout, and API key source.
+Check provider name, model, base URL and API key source.
 
 ## Common Problems
 
@@ -73,4 +75,4 @@ Check provider name, model, base URL, timeout, and API key source.
 | Authentication fails | Confirm which of `SIGIL_GEMINI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` is visible to the `sigil` process. |
 | Model not found | Confirm the exact Gemini model name and endpoint version. |
 | Tool/function calls fail | Confirm the model and endpoint support function calling for your account. |
-| Requests time out | Check network access and consider `request_timeout_secs`. |
+| Requests time out | Check network access and consider `[model_request].stream_idle_timeout_secs`. |

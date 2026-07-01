@@ -18,7 +18,7 @@ fn provider_status_config_for_model_picker_prefers_config_setup_and_snapshot() {
         state.draft.provider_api_key = "config-secret".to_owned();
         state.draft.provider_model = "base-model".to_owned();
         state.draft.provider_fim_model = "base-fim".to_owned();
-        state.draft.provider_request_timeout_secs = "45".to_owned();
+        state.draft.model_request_timeout_secs = "45".to_owned();
     }
 
     let provider = app

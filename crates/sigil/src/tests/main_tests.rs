@@ -845,6 +845,9 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 tool_timeout_secs = 5
 
+[model_request]
+request_timeout_secs = 5
+
 [providers.deepseek]
 base_url = "{base_url}"
 beta_base_url = "{base_url}"
@@ -853,7 +856,6 @@ model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
 api_key = "test-key"
 strict_tools_mode = "auto"
-request_timeout_secs = 5
 "#,
         state_root.display(),
         cache_root.display()

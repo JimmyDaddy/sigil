@@ -5,8 +5,7 @@ use anyhow::Result;
 use super::{
     DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV,
     SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV,
-    SIGIL_MODEL_ENV, SIGIL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_STRICT_TOOLS_MODE_ENV,
-    SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
+    SIGIL_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV, SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
 };
 
 #[test]
@@ -25,7 +24,6 @@ fn default_config_deserializes_all_provider_defaults() -> Result<()> {
         config.user_id_strategy.as_deref(),
         Some("stable_per_end_user")
     );
-    assert_eq!(config.request_timeout_secs, 120);
     assert_eq!(config.strict_tools_mode, StrictToolsMode::Auto);
     Ok(())
 }
@@ -46,7 +44,6 @@ fn default_for_model_reuses_provider_defaults_with_model_override() {
         config.user_id_strategy.as_deref(),
         Some("stable_per_end_user")
     );
-    assert_eq!(config.request_timeout_secs, 120);
     assert_eq!(config.strict_tools_mode, StrictToolsMode::Auto);
 }
 
@@ -64,7 +61,6 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
         ),
         (SIGIL_USER_ID_STRATEGY_ENV, "stable_per_workspace"),
         (SIGIL_FIM_MODEL_ENV, "env-fim"),
-        (SIGIL_REQUEST_TIMEOUT_SECS_ENV, "9"),
         (SIGIL_STRICT_TOOLS_MODE_ENV, "always"),
     ]);
 
@@ -77,7 +73,6 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
         user_id_strategy: None,
         strict_tools_mode: StrictToolsMode::Auto,
         fim_model: "file-fim".to_owned(),
-        request_timeout_secs: 120,
     }
     .resolved()?;
 
@@ -94,7 +89,6 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
         Some("stable_per_workspace")
     );
     assert_eq!(resolved.fim_model, "env-fim");
-    assert_eq!(resolved.request_timeout_secs, 9);
     assert_eq!(resolved.strict_tools_mode, StrictToolsMode::Always);
     Ok(())
 }
@@ -126,31 +120,13 @@ fn resolved_api_key_env_overrides_file_value() -> Result<()> {
 }
 
 #[test]
-fn resolved_rejects_invalid_timeout_override() {
-    let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(SIGIL_REQUEST_TIMEOUT_SECS_ENV, "0")]);
+fn config_rejects_legacy_provider_timeout_field() {
+    let error = serde_json::from_value::<DeepSeekProviderConfig>(serde_json::json!({
+        "request_timeout_secs": 9
+    }))
+    .expect_err("provider timeout field should be rejected");
 
-    let error = file_config()
-        .resolved()
-        .expect_err("timeout=0 should be rejected");
-
-    assert!(error.to_string().contains(SIGIL_REQUEST_TIMEOUT_SECS_ENV));
-}
-
-#[test]
-fn resolved_rejects_non_numeric_timeout_override() {
-    let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(SIGIL_REQUEST_TIMEOUT_SECS_ENV, "soon")]);
-
-    let error = file_config()
-        .resolved()
-        .expect_err("non-numeric timeout should be rejected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("invalid SIGIL_REQUEST_TIMEOUT_SECS")
-    );
+    assert!(error.to_string().contains("request_timeout_secs"));
 }
 
 #[test]
@@ -222,7 +198,6 @@ fn file_config() -> DeepSeekProviderConfig {
         user_id_strategy: None,
         strict_tools_mode: StrictToolsMode::Auto,
         fim_model: "file-fim".to_owned(),
-        request_timeout_secs: 120,
     }
 }
 

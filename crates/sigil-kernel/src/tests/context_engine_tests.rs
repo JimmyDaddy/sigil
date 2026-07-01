@@ -8,7 +8,7 @@ use crate::{
     ContextItem, ContextPackOptions, ContextQualityFindingKind, ContextSensitivity, ContextSource,
     ContextTrustLevel, SessionArchive, SessionArchiveEntry, VerificationVerdict,
     build_context_quality_evidence_pack, estimate_context_token_cost, pack_context_items,
-    write_context_quality_evidence_artifacts,
+    validate_context_render_snippet, write_context_quality_evidence_artifacts,
 };
 
 fn context_item(
@@ -235,6 +235,44 @@ fn context_digest_accepts_valid_provenance_item_and_stable_token_cost() -> Resul
 }
 
 #[test]
+fn context_render_snippet_rejects_underreported_budget_and_hash_mismatch() {
+    let mut item = context_item(
+        "repo-file:README.md",
+        ContextSource::RepositoryFile,
+        ContextTrustLevel::UntrustedRepositoryData,
+        ContextSensitivity::Repository,
+        ContextInclusionReason::RetrievalHit,
+    );
+    item.token_cost = 1;
+    item.body_ref = ContextBodyRef::inline("one two three");
+
+    let error = validate_context_render_snippet(&item, "one two three", 1024)
+        .expect_err("snippet token cost must not exceed declared item budget");
+    assert!(
+        error
+            .to_string()
+            .contains("snippet token cost 3 exceeds declared token cost 1")
+    );
+
+    item.token_cost = 3;
+    item.body_ref = ContextBodyRef::Inline {
+        content_hash: "not-the-real-hash".to_owned(),
+        byte_len: "one two three".len(),
+    };
+    let error = validate_context_render_snippet(&item, "one two three", 1024)
+        .expect_err("inline body ref hash must match same-length snippet");
+    assert!(
+        error
+            .to_string()
+            .contains("snippet hash does not match inline body ref")
+    );
+
+    item.body_ref = ContextBodyRef::inline("one two three four");
+    validate_context_render_snippet(&item, "one two three", 1024)
+        .expect("shorter rendered snippets can reference a larger indexed inline body");
+}
+
+#[test]
 fn context_bm25_ranks_session_archive_hits_with_labels() {
     let archive = SessionArchive::new()
         .with_entry(
@@ -272,6 +310,52 @@ fn context_bm25_ranks_session_archive_hits_with_labels() {
     assert!(hit.snippet.contains("cargo test verification"));
     assert!(!hit.truncation.truncated);
     hit.item.validate().expect("retrieval hit is valid context");
+}
+
+#[test]
+fn context_bm25_retrieves_cjk_session_archive_hits() {
+    let archive = SessionArchive::new()
+        .with_entry(SessionArchiveEntry::new(
+            "zh-review-note",
+            ContextSource::ToolObservation,
+            "审查结论：解析器验证已经通过，剩余风险是长输出尾部召回。",
+            ContextTrustLevel::ToolObservation,
+            ContextSensitivity::Repository,
+        ))
+        .with_entry(SessionArchiveEntry::new(
+            "unrelated",
+            ContextSource::ToolObservation,
+            "English-only renderer update without parser notes.",
+            ContextTrustLevel::ToolObservation,
+            ContextSensitivity::Repository,
+        ));
+
+    let hits = archive.search_bm25("解析器验证结论", 3);
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item.id, "session-archive:zh-review-note");
+    assert!(hits[0].snippet.contains("解析器验证"));
+}
+
+#[test]
+fn context_bm25_snippet_centers_late_query_match() {
+    let body = format!(
+        "{} parser_tail_failure explains the late validation error",
+        "prefix noise ".repeat(120)
+    );
+    let archive = SessionArchive::new().with_entry(SessionArchiveEntry::new(
+        "late-match",
+        ContextSource::ToolObservation,
+        body,
+        ContextTrustLevel::ToolObservation,
+        ContextSensitivity::Repository,
+    ));
+
+    let hits = archive.search_bm25("parser_tail_failure", 1);
+
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].snippet.contains("parser_tail_failure"));
+    assert!(hits[0].snippet.starts_with("..."));
 }
 
 #[test]

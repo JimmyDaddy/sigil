@@ -13,10 +13,10 @@ pub const SIGIL_BETA_BASE_URL_ENV: &str = "SIGIL_BETA_BASE_URL";
 pub const SIGIL_ANTHROPIC_BASE_URL_ENV: &str = "SIGIL_ANTHROPIC_BASE_URL";
 pub const SIGIL_USER_ID_STRATEGY_ENV: &str = "SIGIL_USER_ID_STRATEGY";
 pub const SIGIL_FIM_MODEL_ENV: &str = "SIGIL_FIM_MODEL";
-pub const SIGIL_REQUEST_TIMEOUT_SECS_ENV: &str = "SIGIL_REQUEST_TIMEOUT_SECS";
 pub const SIGIL_STRICT_TOOLS_MODE_ENV: &str = "SIGIL_STRICT_TOOLS_MODE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeepSeekProviderConfig {
     #[serde(default = "default_primary_base_url")]
     pub base_url: String,
@@ -34,8 +34,6 @@ pub struct DeepSeekProviderConfig {
     pub strict_tools_mode: StrictToolsMode,
     #[serde(default = "default_fim_model")]
     pub fim_model: String,
-    #[serde(default = "default_request_timeout_secs")]
-    pub request_timeout_secs: u64,
 }
 
 impl DeepSeekProviderConfig {
@@ -66,9 +64,6 @@ impl DeepSeekProviderConfig {
         }
         if let Some(value) = read_env_string(SIGIL_FIM_MODEL_ENV) {
             resolved.fim_model = value;
-        }
-        if let Some(value) = read_env_u64(SIGIL_REQUEST_TIMEOUT_SECS_ENV)? {
-            resolved.request_timeout_secs = value;
         }
         if let Some(value) = read_env_strict_tools_mode(SIGIL_STRICT_TOOLS_MODE_ENV)? {
             resolved.strict_tools_mode = value;
@@ -107,7 +102,6 @@ impl Default for DeepSeekProviderConfig {
             user_id_strategy: default_user_id_strategy(),
             strict_tools_mode: StrictToolsMode::default(),
             fim_model: default_fim_model(),
-            request_timeout_secs: default_request_timeout_secs(),
         }
     }
 }
@@ -182,28 +176,11 @@ fn default_user_id_strategy() -> Option<String> {
     Some("stable_per_end_user".to_owned())
 }
 
-fn default_request_timeout_secs() -> u64 {
-    120
-}
-
 fn read_env_string(name: &str) -> Option<String> {
     env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-}
-
-fn read_env_u64(name: &str) -> Result<Option<u64>> {
-    let Some(value) = read_env_string(name) else {
-        return Ok(None);
-    };
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|error| anyhow!("invalid {name}: {error}"))?;
-    if parsed == 0 {
-        return Err(anyhow!("{name} must be greater than 0"));
-    }
-    Ok(Some(parsed))
 }
 
 fn read_env_strict_tools_mode(name: &str) -> Result<Option<StrictToolsMode>> {

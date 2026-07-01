@@ -5,13 +5,14 @@ use std::{
 };
 
 use futures::StreamExt;
-use sigil_kernel::{CompletionRequest, ModelMessage, Provider, ProviderChunk};
+use sigil_kernel::{
+    CompletionRequest, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+};
 
 use super::*;
 use crate::{
     ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV,
-    SIGIL_ANTHROPIC_MAX_TOKENS_ENV, SIGIL_ANTHROPIC_MODEL_ENV,
-    SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS_ENV, SIGIL_ANTHROPIC_VERSION_ENV,
+    SIGIL_ANTHROPIC_MAX_TOKENS_ENV, SIGIL_ANTHROPIC_MODEL_ENV, SIGIL_ANTHROPIC_VERSION_ENV,
 };
 
 struct EnvScope {
@@ -27,7 +28,6 @@ impl EnvScope {
             SIGIL_ANTHROPIC_BASE_URL_ENV,
             SIGIL_ANTHROPIC_VERSION_ENV,
             SIGIL_ANTHROPIC_MAX_TOKENS_ENV,
-            SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS_ENV,
         ];
         let previous = names
             .into_iter()
@@ -56,11 +56,15 @@ impl Drop for EnvScope {
     }
 }
 
+fn new_anthropic_provider(config: AnthropicProviderConfig) -> anyhow::Result<AnthropicProvider> {
+    AnthropicProvider::new(config, ModelRequestTimeouts::default())
+}
+
 #[test]
 fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::clear();
-    let provider = AnthropicProvider::new(AnthropicProviderConfig {
+    let provider = new_anthropic_provider(AnthropicProviderConfig {
         api_key: None,
         ..AnthropicProviderConfig::default()
     })?;
@@ -75,7 +79,7 @@ async fn provider_rejects_stream_without_api_key_before_network() -> anyhow::Res
     let provider = {
         let _guard = crate::test_env::lock();
         let _scope = EnvScope::clear();
-        AnthropicProvider::new(AnthropicProviderConfig {
+        new_anthropic_provider(AnthropicProviderConfig {
             api_key: None,
             ..AnthropicProviderConfig::default()
         })?
@@ -353,7 +357,7 @@ fn provider_private_helpers_cover_retry_and_beta_header_edges() -> anyhow::Resul
 fn anthropic_provider(config: AnthropicProviderConfig) -> anyhow::Result<AnthropicProvider> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::clear();
-    AnthropicProvider::new(config)
+    new_anthropic_provider(config)
 }
 
 fn test_request() -> CompletionRequest {

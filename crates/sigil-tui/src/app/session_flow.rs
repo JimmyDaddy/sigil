@@ -991,6 +991,12 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             snapshot.report.document_count,
             truncate_session_view_text(&snapshot.report.fingerprint, 16)
         ),
+        ControlEntry::ContextAssemblySkipped(skipped) => format!(
+            "[ctl] context skipped candidates={} items={} reason={}",
+            skipped.candidate_count,
+            skipped.item_ids.len(),
+            truncate_session_view_text(&skipped.reason, 96)
+        ),
         ControlEntry::UsageSnapshot(usage) => format!(
             "[ctl] usage p={} c={} hit={} miss={}",
             usage.prompt_tokens,

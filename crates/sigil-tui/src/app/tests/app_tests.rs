@@ -33,17 +33,11 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     app.runtime.is_busy = true;
     app.composer.input = "@review inspect".to_owned();
     let action = app.submit_input()?;
-    assert!(matches!(
-        action,
-        Some(AppAction::QueueConversationInput {
-            prompt,
-            kind: sigil_kernel::ConversationInputKind::Chat,
-            target: sigil_kernel::ConversationInputTarget::MainThread,
-        }) if prompt == "@review inspect"
-    ));
+    assert!(action.is_none());
+    assert_eq!(app.composer.input, "@review inspect");
     assert_eq!(
         app.timeline.last().map(|entry| entry.text.as_str()),
-        Some("queued for next turn")
+        Some("busy; @agent input kept for later")
     );
 
     app.composer.input = "/task implement".to_owned();
@@ -103,15 +97,25 @@ fn terminal_capability_helpers_use_safe_defaults_and_follow_config() {
         None,
     );
     assert!(!setup_app.terminal_keyboard_enhancement_enabled());
+    assert_eq!(
+        setup_app.terminal_keyboard_enhancement_policy(),
+        sigil_kernel::TerminalKeyboardEnhancement::Off
+    );
     assert!(!setup_app.terminal_mouse_capture_enabled());
     assert!(setup_app.terminal_osc52_clipboard_enabled());
 
     let mut config = test_config();
-    config.terminal.keyboard_enhancement = true;
+    config.terminal.keyboard_enhancement = sigil_kernel::TerminalKeyboardEnhancement::On;
     config.terminal.mouse_capture = true;
     config.terminal.osc52_clipboard = false;
-    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
+    assert_eq!(
+        app.terminal_keyboard_enhancement_policy(),
+        sigil_kernel::TerminalKeyboardEnhancement::On
+    );
+    assert!(!app.terminal_keyboard_enhancement_enabled());
+    app.set_terminal_keyboard_enhancement_enabled(true);
     assert!(app.terminal_keyboard_enhancement_enabled());
     assert!(app.terminal_mouse_capture_enabled());
     assert!(!app.terminal_osc52_clipboard_enabled());
@@ -2281,13 +2285,13 @@ fn model_command_updates_openai_compat_provider_block() -> Result<()> {
     let mut config = test_config();
     config.agent.provider = "openai_compat".to_owned();
     config.agent.model = "gpt-old".to_owned();
+    config.model_request.request_timeout_secs = 20;
     config.providers.insert(
         "openai_compat".to_owned(),
         json!({
             "base_url": "https://openai.example.com/v1",
             "model": "gpt-old",
-            "api_key": "openai-key",
-            "request_timeout_secs": 20
+            "api_key": "openai-key"
         }),
     );
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);

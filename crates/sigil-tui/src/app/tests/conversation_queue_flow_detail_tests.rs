@@ -76,7 +76,7 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
     ));
     assert_eq!(
         app.composer_queue_summary().as_deref(),
-        Some("queue 2 items · next main thread: first")
+        Some("2 follow-ups pending · next main: first")
     );
 
     let paused = queued_item(
@@ -86,7 +86,7 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
     );
     assert_eq!(
         queue_item_detail(&paused, true),
-        "paused · main thread · chat"
+        "paused · main · follow-up"
     );
     assert_eq!(
         queue_status_kind(sigil_kernel::ConversationInputStatus::Queued, true),
@@ -96,19 +96,19 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
     for (kind, label) in [
         (
             sigil_kernel::ConversationInputKind::PlanPrompt,
-            "queued · main thread · plan",
+            "pending · main · plan",
         ),
         (
             sigil_kernel::ConversationInputKind::AgentMention,
-            "queued · main thread · agent",
+            "pending · main · agent",
         ),
         (
             sigil_kernel::ConversationInputKind::AgentMessage,
-            "queued · main thread · message",
+            "pending · main · message",
         ),
         (
             sigil_kernel::ConversationInputKind::Unknown,
-            "queued · main thread · unknown",
+            "pending · main · unknown",
         ),
     ] {
         assert_eq!(
@@ -134,7 +134,7 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
     );
     assert_eq!(
         queue_item_detail(&agent_thread, false),
-        "queued · agent mailbox agent_chat_1 · message"
+        "pending · agent agent_chat_1 · message"
     );
     let mut agent_queue_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     agent_queue_app.sync_current_session_state(vec![sigil_kernel::SessionLogEntry::Control(
@@ -142,7 +142,7 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
     )]);
     assert_eq!(
         agent_queue_app.composer_queue_summary().as_deref(),
-        Some("queue 1 item · next agent mailbox agent_chat_1: queue_agent prompt")
+        Some("1 agent message pending · next agent agent_chat_1: queue_agent prompt")
     );
 
     for (status, label, kind) in [

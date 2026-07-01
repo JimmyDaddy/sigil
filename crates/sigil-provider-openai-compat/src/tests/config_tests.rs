@@ -2,8 +2,7 @@ use anyhow::Result;
 
 use crate::{
     OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_COMPATIBLE_BASE_URL_ENV,
-    OPENAI_COMPATIBLE_MODEL_ENV, OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS_ENV,
-    OpenAiCompatibleProviderConfig,
+    OPENAI_COMPATIBLE_MODEL_ENV, OpenAiCompatibleProviderConfig,
 };
 
 #[test]
@@ -12,7 +11,6 @@ fn default_config_uses_openai_v1_base_and_default_model() {
 
     assert_eq!(config.base_url, "https://api.openai.com/v1");
     assert_eq!(config.model, "gpt-4.1");
-    assert_eq!(config.request_timeout_secs, 120);
     assert_eq!(config.api_key, None);
 }
 
@@ -33,7 +31,6 @@ fn resolved_config_prefers_sigil_specific_env_over_openai_key() -> Result<()> {
             OPENAI_COMPATIBLE_BASE_URL_ENV,
             "https://proxy.example.test/v1",
         ),
-        (OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS_ENV, "30"),
         (OPENAI_COMPATIBLE_API_KEY_ENV, "sigil-key"),
         (OPENAI_API_KEY_ENV, "openai-key"),
     ]);
@@ -42,14 +39,12 @@ fn resolved_config_prefers_sigil_specific_env_over_openai_key() -> Result<()> {
         model: "config-model".to_owned(),
         base_url: "https://config.example.test/v1".to_owned(),
         api_key: Some("config-key".to_owned()),
-        request_timeout_secs: 10,
         ..OpenAiCompatibleProviderConfig::default()
     }
     .resolved()?;
 
     assert_eq!(resolved.model, "env-model");
     assert_eq!(resolved.base_url, "https://proxy.example.test/v1");
-    assert_eq!(resolved.request_timeout_secs, 30);
     assert_eq!(resolved.api_key.as_deref(), Some("sigil-key"));
     Ok(())
 }
@@ -71,19 +66,13 @@ fn resolved_config_uses_openai_api_key_fallback_and_skips_blank_env() -> Result<
 }
 
 #[test]
-fn resolved_config_rejects_invalid_timeout_env() {
-    let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS_ENV, "0")]);
+fn config_rejects_legacy_provider_timeout_field() {
+    let error = serde_json::from_value::<OpenAiCompatibleProviderConfig>(serde_json::json!({
+        "request_timeout_secs": 30
+    }))
+    .expect_err("provider timeout field should be rejected");
 
-    let error = OpenAiCompatibleProviderConfig::default()
-        .resolved()
-        .expect_err("zero timeout should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS must be greater than 0")
-    );
+    assert!(error.to_string().contains("request_timeout_secs"));
 }
 
 struct EnvScope {

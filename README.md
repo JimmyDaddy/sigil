@@ -84,8 +84,8 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Edit long composer drafts | `Ctrl-A/E`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
 | Plan before editing | `/plan` then type a prompt, or `/plan <prompt>`; accept the plan card to create and run a durable task |
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
-| Queue input while Sigil is busy | Submit ordinary chat, or `/plan <prompt>`, while a run is active; Sigil appends it to the visible queue for the next turn |
-| Manage queued input | `/queue show`, `/queue next`, `/queue now`, `/queue edit`, or `/queue delete`; from the composer, `Down` focuses the queue panel |
+| Add a follow-up while Sigil is busy | Submit ordinary chat while a run is active; Sigil shows it in the timeline and runs it at the next safe turn |
+| Review pending follow-ups | `Down` focuses the follow-up panel; `/queue show`, `/queue next`, `/queue interrupt`, `/queue edit`, and `/queue delete` are advanced controls |
 | Require a child agent from chat | Say so explicitly, for example "use a sub-agent for ..." |
 | Invoke a trusted agent profile directly | `@profile <prompt>` or a trusted profile slash name such as `/review-agent <prompt>` |
 | Move a foreground child agent to background | Press `Ctrl-B` while Sigil is waiting for that agent |

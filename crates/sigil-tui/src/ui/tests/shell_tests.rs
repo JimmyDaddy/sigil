@@ -52,6 +52,7 @@ fn test_config() -> RootConfig {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         skills: Default::default(),

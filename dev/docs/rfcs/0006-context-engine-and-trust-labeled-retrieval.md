@@ -99,11 +99,13 @@ Implementation progress:
 - 已验证 included secret-like 和 external context 必须携带 egress decision。
 - 已验证 digest 中的 `VerificationVerdict::Passed` 必须引用已有 receipt，不能由 digest 自己创造 evidence。
 - 已新增 session-local archive + BM25 retrieval，返回 trust/sensitivity-labeled hits、snippet、score、token cost 和 truncation metadata；secret archive hits without egress are represented as excluded context.
+- Session archive retrieval 已支持 CJK/non-ASCII query tokenization；长消息会按 bounded overlapping chunks 建索引，命中 snippet 会围绕 query term 取窗口，而不是只返回消息前缀。
 - 已新增 code-intel context adapter，将 symbols、diagnostics、references、repo file hits 和 current diff 转为 provenance-labeled context hits；secret hits without egress are represented as excluded context.
 - 已新增 deterministic token budget packer，输出 stable prefix、dynamic suffix 和 excluded context，保持 provider prefix cache 友好并记录 budget/secret exclusion reason。
 - 已新增 TUI provenance summary view model，展示 context budget、top included sources、excluded reason summary、untrusted/secret warning 和一个 recommended action。
 - 已完成 Context V0 runtime adoption：默认 agent request assembly 会在 stable memory prefix 之后注入动态 `Sigil Context V0` system message，来源包括 session archive BM25 hits 和 latest `TaskMemoryV1` context items；注入结果进入 `PrefixSnapshotCaptured.materialized_text`，可从 session audit 定位。
 - Runtime adoption 对 context engine failure 采用安全降级：无可用 source、空 BM25、无 task memory 或 task-memory adapter 失败时，不阻断普通 request。
+- Context V0 request rendering 会校验 snippet byte cap、declared token cost 和 inline body ref metadata；校验失败会记录 `ContextAssemblySkipped` control entry，并降级为不注入 Context V0，随后仍记录 `PrefixSnapshotCaptured`。
 - Context V0 request rendering 不会为被排除的 secret-like / external item 输出 snippet；未信任 workspace instruction 仍不能提升为 trusted workspace instruction。
 - 已完成 Context quality evidence pack：`ContextQualityEvidencePack` 记录 query、included/excluded context rows、token budget、source counts、exclusion reason counts、rank/score、trust/sensitivity/egress labels、truncation facts 和 recall/ranking/token-budget/safety findings。它用于判断 E06.6 是否真的需要打开，而不是直接实现 heavy repo graph 或 semantic retrieval。
 - 已完成 Context quality evidence sweep：`scripts/run-context-quality.sh` 可生成 `context-quality.jsonl`、`summary.md` 和 `manifest.json`，用于把 E06.6 trigger decision 绑定到可复核 artifact。
@@ -179,6 +181,7 @@ The main flow should provide at most one recommended action, such as `review tru
 7. Context quality evidence pack for V0 retrieval/packing inspection.
 8. Runtime repo-file provider wiring and explicit-path precision.
 9. Bounded source/symbol auto-context scheduling.
+10. Context V0 snippet validation, visible assembly-skip audit, Unicode-aware session archive retrieval, and long-message chunk/window recall.
 
 ## 10. Acceptance Criteria
 
@@ -186,7 +189,9 @@ The main flow should provide at most one recommended action, such as `review tru
 - Untrusted repository content cannot become system instruction.
 - Secret-like and external content require egress decision before provider context inclusion.
 - Context Engine failure degrades to current memory + tool behavior and does not block ordinary chat.
+- Unsafe or inconsistent Context V0 snippet rendering records a durable control-plane skip reason instead of being silently swallowed.
 - Tool output pruning affects provider context only, not durable audit.
+- Non-English session history and late matches in long prior messages remain retrievable without prefix-only truncation.
 - LSP symbols/references/diagnostics can be used as context source.
 - Runtime source lookup prompts can include bounded Rust source candidates without opening persistent repo graph or semantic retrieval.
 

@@ -55,9 +55,10 @@ impl AppState {
         let projection = self.conversation_queue_projection();
         let count = projection.items.len();
         let next = projection.items.first()?;
+        let noun = queue_summary_noun(next);
         let plural = if count == 1 { "" } else { "s" };
         Some(format!(
-            "queue {count} item{plural} · next {}: {}",
+            "{count} {noun}{plural} pending · next {}: {}",
             queue_target_label(&next.queued.target),
             queue_prompt_preview(next)
         ))
@@ -76,7 +77,7 @@ impl AppState {
         self.reset_composer_queue_action();
         self.composer.queue_panel_focused = true;
         self.blur_composer_agent_panel();
-        self.last_notice = Some("queue focused".to_owned());
+        self.last_notice = Some("follow-ups focused".to_owned());
         true
     }
 
@@ -135,19 +136,19 @@ impl AppState {
 
     pub(super) fn promote_selected_queue_item(&mut self) -> Option<AppAction> {
         let queue_id = self.selected_queue_id()?;
-        self.last_notice = Some("queued input moved to next turn".to_owned());
+        self.last_notice = Some("follow-up will run next".to_owned());
         Some(AppAction::PromoteQueuedConversationInput { queue_id })
     }
 
     pub(super) fn send_selected_queue_item_now(&mut self) -> Option<AppAction> {
         let queue_id = self.selected_queue_id()?;
-        self.last_notice = Some("queued input sending now".to_owned());
+        self.last_notice = Some("interrupting current turn for follow-up".to_owned());
         Some(AppAction::SendQueuedConversationInputNow { queue_id })
     }
 
     pub(super) fn cancel_selected_queue_item(&mut self) -> Option<AppAction> {
         let queue_id = self.selected_queue_id()?;
-        self.last_notice = Some("queued input cancelled".to_owned());
+        self.last_notice = Some("follow-up removed".to_owned());
         Some(AppAction::CancelQueuedConversationInput { queue_id })
     }
 
@@ -173,8 +174,8 @@ impl AppState {
         self.blur_composer_agent_panel();
         self.reset_slash_selector();
         self.reset_input_history_navigation();
-        self.last_notice = Some("editing queued input".to_owned());
-        self.push_event("queue:edit", item.queued.queue_id.as_str());
+        self.last_notice = Some("editing follow-up".to_owned());
+        self.push_event("follow-up:edit", item.queued.queue_id.as_str());
         true
     }
 
@@ -206,8 +207,8 @@ impl AppState {
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.reset_input_history_navigation();
-        self.push_timeline(TimelineRole::Notice, "queued input edited");
-        self.push_event("queue:edit-submit", queue_id.as_str());
+        self.push_timeline(TimelineRole::Notice, "follow-up edited");
+        self.push_event("follow-up:edit-submit", queue_id.as_str());
         Some(AppAction::EditQueuedConversationInput { queue_id, prompt })
     }
 
@@ -240,7 +241,7 @@ impl AppState {
             if self.focus_composer_queue_panel() {
                 return Ok(None);
             }
-            self.last_notice = Some("queue empty".to_owned());
+            self.last_notice = Some("no follow-ups pending".to_owned());
             return Ok(None);
         }
         let mut parts = value.split_whitespace();
@@ -252,9 +253,10 @@ impl AppState {
             "next" | "send" => Ok(self.queue_action_for_target(target, |queue_id| {
                 AppAction::PromoteQueuedConversationInput { queue_id }
             })),
-            "now" | "send-now" => Ok(self.queue_action_for_target(target, |queue_id| {
-                AppAction::SendQueuedConversationInputNow { queue_id }
-            })),
+            "now" | "send-now" | "interrupt" => Ok(self
+                .queue_action_for_target(target, |queue_id| {
+                    AppAction::SendQueuedConversationInputNow { queue_id }
+                })),
             "delete" | "cancel" | "remove" => Ok(self
                 .queue_action_for_target(target, |queue_id| {
                     AppAction::CancelQueuedConversationInput { queue_id }
@@ -285,7 +287,8 @@ impl AppState {
                 }
             })),
             _ => {
-                self.last_notice = Some("usage: /queue <show|next|now|edit|delete>".to_owned());
+                self.last_notice =
+                    Some("usage: /queue <show|next|interrupt|edit|delete>".to_owned());
                 Ok(None)
             }
         }
@@ -296,7 +299,7 @@ impl AppState {
             return false;
         }
         self.composer.queue_edit_target = None;
-        self.last_notice = Some("queue edit cancelled".to_owned());
+        self.last_notice = Some("follow-up edit cancelled".to_owned());
         true
     }
 
@@ -305,7 +308,7 @@ impl AppState {
     }
 
     fn reset_composer_queue_action(&mut self) {
-        self.composer.queue_action_selected = ComposerQueueAction::SendNow;
+        self.composer.queue_action_selected = ComposerQueueAction::KeepNext;
     }
 
     fn selected_queue_id(&self) -> Option<ConversationInputQueueId> {
@@ -381,11 +384,15 @@ impl AppState {
 
 fn queue_slash_options() -> [(&'static str, &'static str, &'static str); 5] {
     [
-        ("show", "show", "focus queue panel"),
+        ("show", "show", "focus follow-up panel"),
         ("next", "next", "run selected after current turn"),
-        ("now", "now", "interrupt current turn and run selected"),
-        ("edit", "edit", "edit selected queued input"),
-        ("delete", "delete", "cancel selected queued input"),
+        (
+            "interrupt",
+            "interrupt",
+            "stop current turn and run selected",
+        ),
+        ("edit", "edit", "edit selected follow-up"),
+        ("delete", "delete", "cancel selected follow-up"),
     ]
 }
 
@@ -415,16 +422,16 @@ fn queue_item_detail(item: &ConversationQueueItemProjection, paused: bool) -> St
 
 fn queue_target_label(target: &sigil_kernel::ConversationInputTarget) -> String {
     match target {
-        sigil_kernel::ConversationInputTarget::MainThread => "main thread".to_owned(),
+        sigil_kernel::ConversationInputTarget::MainThread => "main".to_owned(),
         sigil_kernel::ConversationInputTarget::AgentThread { thread_id } => {
-            format!("agent mailbox {}", thread_id.as_str())
+            format!("agent {}", thread_id.as_str())
         }
     }
 }
 
 fn queue_kind_label(kind: sigil_kernel::ConversationInputKind) -> &'static str {
     match kind {
-        sigil_kernel::ConversationInputKind::Chat => "chat",
+        sigil_kernel::ConversationInputKind::Chat => "follow-up",
         sigil_kernel::ConversationInputKind::PlanPrompt => "plan",
         sigil_kernel::ConversationInputKind::AgentMention => "agent",
         sigil_kernel::ConversationInputKind::AgentMessage => "message",
@@ -459,13 +466,20 @@ fn queue_status_kind(status: ConversationInputStatus, paused: bool) -> StatusKin
 
 fn queue_status_label(status: ConversationInputStatus) -> &'static str {
     match status {
-        ConversationInputStatus::Queued => "queued",
+        ConversationInputStatus::Queued => "pending",
         ConversationInputStatus::Dispatching => "dispatching",
         ConversationInputStatus::Delivered => "delivered",
         ConversationInputStatus::Rejected => "rejected",
         ConversationInputStatus::Cancelled => "cancelled",
         ConversationInputStatus::Stale => "stale",
         ConversationInputStatus::Unknown => "unknown",
+    }
+}
+
+fn queue_summary_noun(item: &ConversationQueueItemProjection) -> &'static str {
+    match &item.queued.target {
+        sigil_kernel::ConversationInputTarget::MainThread => "follow-up",
+        sigil_kernel::ConversationInputTarget::AgentThread { .. } => "agent message",
     }
 }
 

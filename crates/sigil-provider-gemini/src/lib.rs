@@ -11,7 +11,7 @@ mod stream;
 pub use capabilities::gemini_capabilities;
 pub use config::{
     GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV,
-    SIGIL_GEMINI_BASE_URL_ENV, SIGIL_GEMINI_MODEL_ENV, SIGIL_GEMINI_REQUEST_TIMEOUT_SECS_ENV,
+    SIGIL_GEMINI_BASE_URL_ENV, SIGIL_GEMINI_MODEL_ENV,
 };
 pub use provider::GeminiProvider;
 

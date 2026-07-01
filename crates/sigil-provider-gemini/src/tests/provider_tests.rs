@@ -5,12 +5,14 @@ use std::{
 };
 
 use futures::StreamExt;
-use sigil_kernel::{CompletionRequest, ModelMessage, Provider, ProviderChunk};
+use sigil_kernel::{
+    CompletionRequest, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+};
 
 use super::*;
 use crate::{
     GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, SIGIL_GEMINI_API_KEY_ENV, SIGIL_GEMINI_BASE_URL_ENV,
-    SIGIL_GEMINI_MODEL_ENV, SIGIL_GEMINI_REQUEST_TIMEOUT_SECS_ENV,
+    SIGIL_GEMINI_MODEL_ENV,
 };
 
 struct EnvScope {
@@ -25,7 +27,6 @@ impl EnvScope {
             GOOGLE_API_KEY_ENV,
             SIGIL_GEMINI_MODEL_ENV,
             SIGIL_GEMINI_BASE_URL_ENV,
-            SIGIL_GEMINI_REQUEST_TIMEOUT_SECS_ENV,
         ];
         let previous = names
             .into_iter()
@@ -54,11 +55,15 @@ impl Drop for EnvScope {
     }
 }
 
+fn new_gemini_provider(config: GeminiProviderConfig) -> anyhow::Result<GeminiProvider> {
+    GeminiProvider::new(config, ModelRequestTimeouts::default())
+}
+
 #[test]
 fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::clear();
-    let provider = GeminiProvider::new(GeminiProviderConfig {
+    let provider = new_gemini_provider(GeminiProviderConfig {
         api_key: None,
         ..GeminiProviderConfig::default()
     })?;
@@ -73,7 +78,7 @@ async fn provider_rejects_stream_without_api_key_before_network() -> anyhow::Res
     let provider = {
         let _guard = crate::test_env::lock();
         let _scope = EnvScope::clear();
-        GeminiProvider::new(GeminiProviderConfig {
+        new_gemini_provider(GeminiProviderConfig {
             api_key: None,
             ..GeminiProviderConfig::default()
         })?
@@ -402,7 +407,7 @@ fn provider_private_helpers_cover_retry_edges() {
 fn gemini_provider(config: GeminiProviderConfig) -> anyhow::Result<GeminiProvider> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::clear();
-    GeminiProvider::new(config)
+    new_gemini_provider(config)
 }
 
 fn test_request() -> CompletionRequest {

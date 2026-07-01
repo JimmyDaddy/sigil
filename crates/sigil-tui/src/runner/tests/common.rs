@@ -42,6 +42,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: false },
         skills: Default::default(),

@@ -15,7 +15,6 @@ impl EnvScope {
             GOOGLE_API_KEY_ENV,
             SIGIL_GEMINI_MODEL_ENV,
             SIGIL_GEMINI_BASE_URL_ENV,
-            SIGIL_GEMINI_REQUEST_TIMEOUT_SECS_ENV,
         ];
         let previous = names
             .into_iter()
@@ -50,7 +49,7 @@ impl Drop for EnvScope {
 }
 
 #[test]
-fn default_config_has_stable_endpoint_model_and_timeout() {
+fn default_config_has_stable_endpoint_and_model() {
     let config = GeminiProviderConfig::default();
 
     assert_eq!(
@@ -58,7 +57,6 @@ fn default_config_has_stable_endpoint_model_and_timeout() {
         "https://generativelanguage.googleapis.com/v1beta"
     );
     assert_eq!(config.model, "gemini-2.5-pro");
-    assert_eq!(config.request_timeout_secs, 120);
 }
 
 #[test]
@@ -76,13 +74,11 @@ fn resolved_config_prefers_sigil_env_then_gemini_then_google() -> anyhow::Result
                 SIGIL_GEMINI_BASE_URL_ENV,
                 "https://gemini.example.com/v1beta",
             ),
-            (SIGIL_GEMINI_REQUEST_TIMEOUT_SECS_ENV, "43"),
         ]);
         let resolved = base.clone().resolved()?;
         assert_eq!(resolved.api_key.as_deref(), Some("sigil-key"));
         assert_eq!(resolved.model, "gemini-test");
         assert_eq!(resolved.base_url, "https://gemini.example.com/v1beta");
-        assert_eq!(resolved.request_timeout_secs, 43);
     }
 
     {
@@ -108,17 +104,11 @@ fn resolved_config_prefers_sigil_env_then_gemini_then_google() -> anyhow::Result
 }
 
 #[test]
-fn resolved_config_rejects_zero_timeout() {
-    let _guard = test_env::lock();
-    let _scope = EnvScope::set_many(&[(SIGIL_GEMINI_REQUEST_TIMEOUT_SECS_ENV, "0")]);
+fn config_rejects_legacy_provider_timeout_field() {
+    let error = serde_json::from_value::<GeminiProviderConfig>(serde_json::json!({
+        "request_timeout_secs": 43
+    }))
+    .expect_err("provider timeout field should be rejected");
 
-    let error = GeminiProviderConfig::default()
-        .resolved()
-        .expect_err("zero timeout should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("SIGIL_GEMINI_REQUEST_TIMEOUT_SECS must be greater than 0")
-    );
+    assert!(error.to_string().contains("request_timeout_secs"));
 }

@@ -87,7 +87,10 @@ pub async fn stream_deepseek_fim_debug(
 }
 
 fn load_deepseek_debug_provider(root_config: &RootConfig) -> Result<DeepSeekProvider> {
-    DeepSeekProvider::new(load_deepseek_config(root_config)?)
+    DeepSeekProvider::new(
+        load_deepseek_config(root_config)?,
+        root_config.model_request.to_timeouts()?,
+    )
 }
 
 #[cfg(test)]

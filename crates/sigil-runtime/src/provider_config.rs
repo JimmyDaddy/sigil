@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use serde_json::Value;
-use sigil_kernel::RootConfig;
+use sigil_kernel::{ModelRequestConfig, RootConfig};
 use sigil_provider_anthropic::{AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{DeepSeekProviderConfig, SIGIL_API_KEY_ENV, StrictToolsMode};
 use sigil_provider_gemini::{GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV};
@@ -25,7 +25,12 @@ pub struct ProviderConfigFields {
     pub model: String,
     pub api_key: String,
     pub base_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRequestConfigFields {
     pub request_timeout_secs: String,
+    pub stream_idle_timeout_secs: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +182,6 @@ pub fn set_provider_config_fields(
     if base_url.is_empty() {
         bail!("base_url cannot be empty");
     }
-    let request_timeout_secs = parse_request_timeout_secs(&fields.request_timeout_secs)?;
     let api_key = optional_trimmed_string(&fields.api_key);
 
     root_config.agent.provider = provider_name.to_owned();
@@ -190,7 +194,6 @@ pub fn set_provider_config_fields(
             config.model = model.to_owned();
             config.api_key = api_key;
             config.base_url = base_url.to_owned();
-            config.request_timeout_secs = request_timeout_secs;
             root_config.providers.insert(
                 OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
                 serialize_provider_config("openai_compat", &config)?,
@@ -202,7 +205,6 @@ pub fn set_provider_config_fields(
             config.model = model.to_owned();
             config.api_key = api_key;
             config.base_url = base_url.to_owned();
-            config.request_timeout_secs = request_timeout_secs;
             root_config.providers.insert(
                 ANTHROPIC_PROVIDER_KEY.to_owned(),
                 serialize_provider_config("anthropic", &config)?,
@@ -214,7 +216,6 @@ pub fn set_provider_config_fields(
             config.model = model.to_owned();
             config.api_key = api_key;
             config.base_url = base_url.to_owned();
-            config.request_timeout_secs = request_timeout_secs;
             root_config.providers.insert(
                 GEMINI_PROVIDER_KEY.to_owned(),
                 serialize_provider_config("gemini", &config)?,
@@ -247,7 +248,6 @@ pub fn set_provider_config_fields(
             config.user_id_strategy = optional_trimmed_string(&extras.user_id_strategy);
             config.strict_tools_mode = extras.strict_tools_mode.into();
             config.fim_model = fim_model.to_owned();
-            config.request_timeout_secs = request_timeout_secs;
             root_config.providers.insert(
                 DEEPSEEK_PROVIDER_KEY.to_owned(),
                 serialize_provider_config("deepseek", &config)?,
@@ -255,6 +255,38 @@ pub fn set_provider_config_fields(
         }
     }
 
+    Ok(())
+}
+
+#[must_use]
+pub fn model_request_config_fields(root_config: &RootConfig) -> ModelRequestConfigFields {
+    ModelRequestConfigFields {
+        request_timeout_secs: root_config.model_request.request_timeout_secs.to_string(),
+        stream_idle_timeout_secs: root_config
+            .model_request
+            .stream_idle_timeout_secs
+            .to_string(),
+    }
+}
+
+pub fn set_model_request_config_fields(
+    root_config: &mut RootConfig,
+    fields: &ModelRequestConfigFields,
+) -> Result<()> {
+    let request_timeout_secs = parse_model_request_timeout_secs(
+        "model_request.request_timeout_secs",
+        &fields.request_timeout_secs,
+    )?;
+    let stream_idle_timeout_secs = parse_model_request_timeout_secs(
+        "model_request.stream_idle_timeout_secs",
+        &fields.stream_idle_timeout_secs,
+    )?;
+    root_config.model_request = ModelRequestConfig {
+        request_timeout_secs,
+        stream_idle_timeout_secs,
+        stream_total_timeout_secs: root_config.model_request.stream_total_timeout_secs,
+    };
+    root_config.model_request.to_timeouts()?;
     Ok(())
 }
 
@@ -274,7 +306,9 @@ pub fn deepseek_provider_value_for_setup(model: &str, api_key: Option<&str>) -> 
 
 pub fn provider_status_config_from_fields(
     fields: &ProviderConfigFields,
+    model_request: &ModelRequestConfig,
 ) -> Result<ProviderStatusConfig> {
+    model_request.to_timeouts()?;
     let base_url = fields.base_url.trim();
     if base_url.is_empty() {
         bail!("base_url cannot be empty");
@@ -282,7 +316,7 @@ pub fn provider_status_config_from_fields(
     Ok(ProviderStatusConfig {
         api_key: optional_trimmed_string(&fields.api_key),
         base_url: base_url.to_owned(),
-        request_timeout_secs: parse_request_timeout_secs(&fields.request_timeout_secs)?,
+        request_timeout_secs: model_request.request_timeout_secs,
     })
 }
 
@@ -293,7 +327,7 @@ pub fn deepseek_provider_status_config(root_config: &RootConfig) -> Result<Provi
     Ok(ProviderStatusConfig {
         api_key: crate::resolve_deepseek_api_key(&config).map(|secret| secret.value),
         base_url: config.base_url,
-        request_timeout_secs: config.request_timeout_secs,
+        request_timeout_secs: root_config.model_request.request_timeout_secs,
     })
 }
 
@@ -302,7 +336,6 @@ fn provider_config_fields_from_deepseek(config: DeepSeekProviderConfig) -> Provi
         model: config.model,
         api_key: config.api_key.unwrap_or_default(),
         base_url: config.base_url,
-        request_timeout_secs: config.request_timeout_secs.to_string(),
     }
 }
 
@@ -313,7 +346,6 @@ fn provider_config_fields_from_openai_compat(
         model: config.model,
         api_key: config.api_key.unwrap_or_default(),
         base_url: config.base_url,
-        request_timeout_secs: config.request_timeout_secs.to_string(),
     }
 }
 
@@ -322,7 +354,6 @@ fn provider_config_fields_from_anthropic(config: AnthropicProviderConfig) -> Pro
         model: config.model,
         api_key: config.api_key.unwrap_or_default(),
         base_url: config.base_url,
-        request_timeout_secs: config.request_timeout_secs.to_string(),
     }
 }
 
@@ -331,17 +362,16 @@ fn provider_config_fields_from_gemini(config: GeminiProviderConfig) -> ProviderC
         model: config.model,
         api_key: config.api_key.unwrap_or_default(),
         base_url: config.base_url,
-        request_timeout_secs: config.request_timeout_secs.to_string(),
     }
 }
 
-fn parse_request_timeout_secs(raw: &str) -> Result<u64> {
+fn parse_model_request_timeout_secs(label: &str, raw: &str) -> Result<u64> {
     let parsed = raw
         .trim()
         .parse::<u64>()
-        .map_err(|error| anyhow!("request_timeout_secs must be a positive integer: {error}"))?;
+        .map_err(|error| anyhow!("{label} must be a positive integer: {error}"))?;
     if parsed == 0 {
-        bail!("request_timeout_secs must be greater than 0");
+        bail!("{label} must be greater than 0");
     }
     Ok(parsed)
 }

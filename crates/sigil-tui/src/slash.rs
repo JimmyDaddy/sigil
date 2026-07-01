@@ -86,7 +86,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         canonical: "/queue",
         aliases: &[],
-        description: "manage queued input",
+        description: "advanced follow-up controls",
         completes_with_space: true,
     },
     SlashCommandSpec {

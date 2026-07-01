@@ -1233,6 +1233,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     assert!(detail.contains("Terminal 7/12 · terminal integration"));
     assert!(detail.contains("[interaction]"));
+    assert!(detail.contains("- Keyboard enhancement: auto"));
     assert!(detail.contains("- Mouse capture: no"));
     assert!(detail.contains("- OSC52 clipboard: yes"));
     assert!(detail.contains("- Scroll sensitivity: 3 rows"));
@@ -3476,6 +3477,16 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
     assert!(saved.compaction.enabled);
     assert_eq!(saved.compaction.context_window_tokens, None);
     let saved_raw = std::fs::read_to_string(&saved_path)?;
+    assert!(saved_raw.contains("[model_request]"));
+    assert!(saved_raw.contains("stream_idle_timeout_secs = 180"));
+    assert!(
+        !saved_raw
+            .split("[providers.deepseek]")
+            .nth(1)
+            .unwrap_or_default()
+            .lines()
+            .any(|line| line.trim_start().starts_with("request_timeout_secs ="))
+    );
     assert!(!saved_raw.contains("fallback_context_window_tokens"));
     assert!(
         !saved_raw

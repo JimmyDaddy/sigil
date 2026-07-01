@@ -15,6 +15,7 @@ pub mod plan;
 pub mod plugin;
 pub mod projection;
 pub mod provider;
+pub mod provider_timeout;
 pub mod resume;
 pub mod secret;
 pub mod session;
@@ -63,10 +64,13 @@ pub use config::{
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES, LanguageServerConfig, McpServerConfig,
     McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, McpTrustClass, MemoryConfig,
-    MutationArtifactRetentionConfig, RoleModelConfig, RootConfig, SessionConfig, SkillConfig,
-    StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskMode, ThemeColorOverrides, ThemeId,
-    ToolAllowlistConfig, UsageCostCurrency, WorkspaceConfig, default_user_config_dir,
-    default_user_config_path, preferred_config_path, resolve_workspace_root,
+    ModelRequestConfig, ModelRequestTimeouts, MutationArtifactRetentionConfig, RoleModelConfig,
+    RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
+    SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SessionConfig, SkillConfig, StorageConfig,
+    StorageRoot, SyntaxThemeId, TaskConfig, TaskMode, TerminalKeyboardEnhancement,
+    ThemeColorOverrides, ThemeId, ToolAllowlistConfig, UsageCostCurrency, WorkspaceConfig,
+    default_user_config_dir, default_user_config_path, preferred_config_path,
+    resolve_workspace_root,
 };
 pub use context_engine::{
     CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION, CONTEXT_QUALITY_REPORT_SCHEMA_VERSION, ContextBodyRef,
@@ -75,10 +79,11 @@ pub use context_engine::{
     ContextPackOptions, ContextPackPlacement, ContextQualityEvidencePack, ContextQualityFinding,
     ContextQualityFindingKind, ContextQualityItemEvidence, ContextQualityReportArtifacts,
     ContextQualityReportManifest, ContextRepoRevision, ContextSensitivity, ContextSource,
-    ContextTruncation, ContextTrustLevel, DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES, PackedContext,
-    RuntimeContextCandidates, SessionArchive, SessionArchiveEntry, SessionArchiveEntryId,
-    SessionArchiveSearchHit, build_context_quality_evidence_pack, estimate_context_token_cost,
-    pack_context_items, write_context_quality_evidence_artifacts,
+    ContextTruncation, ContextTrustLevel, DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES,
+    DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES, PackedContext, RuntimeContextCandidates,
+    SessionArchive, SessionArchiveEntry, SessionArchiveEntryId, SessionArchiveSearchHit,
+    build_context_quality_evidence_pack, estimate_context_token_cost, pack_context_items,
+    validate_context_render_snippet, write_context_quality_evidence_artifacts,
 };
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
@@ -180,17 +185,22 @@ pub use provider::{
     ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, SessionStats,
     ToolCall, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
 };
+pub use provider_timeout::{
+    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
+    timeout_provider_request, timeout_provider_stream_next,
+};
 pub use resume::{
     JobId, JobIntentEntry, LeaseId, ResumeDisposition, ResumeJobProjection,
     ResumeJobStateProjection, StepLeaseEntry, StepLeaseHeartbeatEntry, StepLeaseStatus,
 };
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
-    CompactionPreview, CompactionRecord, ControlEntry, DomainEventRecord, JsonlSessionStore,
-    McpElicitationDecision, McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry,
-    SessionStreamRecord, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
-    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
-    TypedDomainEventRecord, latest_compaction_record, session_stats_from_entries,
+    CompactionPreview, CompactionRecord, ContextAssemblySkippedEntry, ControlEntry,
+    DomainEventRecord, JsonlSessionStore, McpElicitationDecision, McpElicitationEntry,
+    MemorySnapshot, Session, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolSubjectAudit, TypedDomainEventRecord, latest_compaction_record,
+    session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,

@@ -6,12 +6,20 @@ use std::{
 
 use anyhow::Result;
 use futures::StreamExt;
-use sigil_kernel::{CompletionRequest, ModelMessage, Provider, ProviderChunk};
+use sigil_kernel::{
+    CompletionRequest, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+};
 
 use crate::{
     OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider,
     OpenAiCompatibleProviderConfig,
 };
+
+fn new_openai_compatible_provider(
+    config: OpenAiCompatibleProviderConfig,
+) -> Result<OpenAiCompatibleProvider> {
+    OpenAiCompatibleProvider::new(config, ModelRequestTimeouts::default())
+}
 
 #[tokio::test]
 async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> {
@@ -21,7 +29,7 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
             (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
             (OPENAI_API_KEY_ENV, "   "),
         ]);
-        OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+        new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
             api_key: None,
             ..OpenAiCompatibleProviderConfig::default()
         })?
@@ -49,7 +57,7 @@ async fn provider_stream_surfaces_sse_events_from_http_response() -> Result<()> 
          data: [DONE]\n\n",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()
@@ -81,7 +89,7 @@ async fn provider_stream_sends_optional_openai_headers() -> Result<()> {
          data: [DONE]\n\n",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         organization: Some(" org-1 ".to_owned()),
@@ -115,7 +123,7 @@ async fn provider_stream_emits_done_when_http_stream_ends_without_done_frame() -
          data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}\n\n",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()
@@ -144,7 +152,7 @@ async fn provider_stream_flushes_partial_frame_at_http_eof() -> Result<()> {
          data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()
@@ -173,7 +181,7 @@ async fn provider_stream_reports_invalid_json_frame() -> Result<()> {
          data: {not-json}\n\n",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()
@@ -202,7 +210,7 @@ async fn provider_stream_reports_invalid_partial_frame_at_http_eof() -> Result<(
          event: message",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()
@@ -226,7 +234,7 @@ async fn provider_stream_reports_invalid_utf8_chunk() -> Result<()> {
         b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: \xff\n\n",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()
@@ -279,7 +287,7 @@ async fn provider_stream_maps_http_error_status() -> Result<()> {
         "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 7\r\n\r\nlimited".as_bytes(),
     ])
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()
@@ -308,7 +316,7 @@ async fn provider_stream_retries_retryable_status_once() -> Result<()> {
             .as_bytes(),
     ])
     .await?;
-    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
         ..OpenAiCompatibleProviderConfig::default()

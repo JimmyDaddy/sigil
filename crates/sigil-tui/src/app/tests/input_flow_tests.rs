@@ -598,7 +598,7 @@ fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
 }
 
 #[test]
-fn busy_plain_prompt_queues_without_persisting_user_timeline() -> Result<()> {
+fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.runtime.is_busy = true;
     app.composer.input = "follow up after this finishes".to_owned();
@@ -615,9 +615,9 @@ fn busy_plain_prompt_queues_without_persisting_user_timeline() -> Result<()> {
         }) if prompt == "follow up after this finishes"
     ));
     assert!(app.composer.input.is_empty());
-    assert_eq!(app.last_notice(), Some("queued for next turn"));
+    assert_eq!(app.last_notice(), Some("follow-up will run next"));
     assert!(
-        !app.timeline
+        app.timeline
             .iter()
             .any(|entry| entry.role == TimelineRole::User
                 && entry.text == "follow up after this finishes")
@@ -646,20 +646,23 @@ fn composer_down_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Re
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         action,
-        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
-            if queue_id.as_str() == "queue_2"
-    ));
-    assert_eq!(app.last_notice(), Some("queued input sending now"));
-
-    let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    assert!(tab.is_none());
-    let keep_next = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(matches!(
-        keep_next,
         Some(AppAction::PromoteQueuedConversationInput { ref queue_id })
             if queue_id.as_str() == "queue_2"
     ));
-    assert_eq!(app.last_notice(), Some("queued input moved to next turn"));
+    assert_eq!(app.last_notice(), Some("follow-up will run next"));
+
+    let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert!(tab.is_none());
+    let interrupt = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        interrupt,
+        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("interrupting current turn for follow-up")
+    );
     Ok(())
 }
 
@@ -675,7 +678,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
     assert!(app.is_composer_queue_panel_focused());
     assert_eq!(
         app.selected_composer_queue_action(),
-        ComposerQueueAction::SendNow
+        ComposerQueueAction::KeepNext
     );
 
     app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))?;
@@ -686,7 +689,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(
         app.selected_composer_queue_action(),
-        ComposerQueueAction::SendNow
+        ComposerQueueAction::KeepNext
     );
     app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(
@@ -769,7 +772,7 @@ fn queue_flow_empty_and_direct_actions_cover_boundaries() -> Result<()> {
     assert!(!empty_app.move_composer_queue_selection(true));
     assert!(!empty_app.is_composer_queue_panel_focused());
     assert!(empty_app.execute_queue_slash_command("")?.is_none());
-    assert_eq!(empty_app.last_notice(), Some("queue empty"));
+    assert_eq!(empty_app.last_notice(), Some("no follow-ups pending"));
     assert!(empty_app.execute_queue_slash_command("edit 1")?.is_none());
     assert_eq!(empty_app.last_notice(), Some("queue item not found"));
     assert!(!empty_app.begin_edit_selected_queue_item());
@@ -851,6 +854,14 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
             if queue_id.as_str() == "queue_2"
     ));
+    app.composer.input = "/queue interrupt 2".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+    let interrupt = app.submit_input()?;
+    assert!(matches!(
+        interrupt,
+        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
 
     app.composer.input = "/queue delete second".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
@@ -884,6 +895,7 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         "/queue next",
         "/queue send 1",
         "/queue send-now 1",
+        "/queue interrupt 1",
     ] {
         app.composer.input = command.to_owned();
         app.composer.input_cursor = app.composer.input.chars().count();
@@ -908,7 +920,7 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
     assert!(app.submit_input()?.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("usage: /queue <show|next|now|edit|delete>")
+        Some("usage: /queue <show|next|interrupt|edit|delete>")
     );
     Ok(())
 }
@@ -937,7 +949,7 @@ fn queue_edit_escape_cancels_without_submitting() -> Result<()> {
     assert!(app.composer.queue_edit_target.is_none());
     assert!(app.composer.input.is_empty());
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert_eq!(app.last_notice(), Some("queue edit cancelled"));
+    assert_eq!(app.last_notice(), Some("follow-up edit cancelled"));
     Ok(())
 }
 
@@ -1008,14 +1020,14 @@ fn queue_slash_selector_exposes_next_turn_language() -> Result<()> {
     let rows = app.slash_selector_rows();
 
     let labels = rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>();
-    assert_eq!(labels, vec!["show", "next", "now", "edit", "delete"]);
+    assert_eq!(labels, vec!["show", "next", "interrupt", "edit", "delete"]);
     assert!(
         rows.iter()
             .any(|row| row.1 == "run selected after current turn")
     );
     assert!(
         rows.iter()
-            .any(|row| row.1 == "interrupt current turn and run selected")
+            .any(|row| row.1 == "stop current turn and run selected")
     );
     Ok(())
 }
@@ -1434,12 +1446,15 @@ fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "queued for next turn")
+            .any(|entry| { entry.role == TimelineRole::User && entry.text == "queued" })
     );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text == "follow-up will run next"
+    }));
     assert!(
         app.events
             .iter()
-            .any(|event| event.label == "queue" && event.detail == "queued busy input queued")
+            .any(|event| event.label == "follow-up" && event.detail == "queued busy input queued")
     );
     Ok(())
 }

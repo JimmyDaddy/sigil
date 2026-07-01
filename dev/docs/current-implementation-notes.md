@@ -81,7 +81,7 @@ TUI 当前保持 chat-first：
 - 窄终端自动收起 info rail，优先保证 chat/composer 可用。
 - 启动恢复旧会话时，会把完整 scrollback 分批 seed 到 terminal scrollback，避免长会话集中在单帧重放。
 - prompt 提交后 composer 清空并保持可见。
-- composer 支持常见 readline 风格编辑键，包括当前行首/尾、字符/词移动、词删除、`Ctrl-K/Y` kill/yank、`Shift-Enter` / `Alt-Enter` / `Ctrl-J` 换行，以及 `Ctrl-Z` 恢复最近一次被 `Esc` 清空的非空 draft；paste 通过 bracketed paste 作为文本插入，不会把多行内容解释成提交，大段 paste 只折叠展示但提交完整原文；draft restore 和 paste 折叠都是运行态编辑状态，不写入 durable session/control log。
+- composer 支持常见 readline 风格编辑键，包括当前行首/尾、字符/词移动、词删除、`Ctrl-K/Y` kill/yank、`Ctrl-J` 换行、terminal keyboard enhancement 已启用且可上报 modifier 时的 `Shift-Enter` / `Alt-Enter` 换行，以及 `Ctrl-Z` 恢复最近一次被 `Esc` 清空的非空 draft；paste 通过 bracketed paste 作为文本插入，不会把多行内容解释成提交，大段 paste 只折叠展示但提交完整原文；draft restore 和 paste 折叠都是运行态编辑状态，不写入 durable session/control log。
 - 主屏不要求用户用 `Tab` 在卡片间切焦点；`Shift-Tab` 轮换并持久化默认 `allow / ask / deny` 权限模式。
 
 运行态提示只做渲染层投影，不写回 durable transcript。live phase 只保留在运行态和事件流里。

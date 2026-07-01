@@ -518,7 +518,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                 &elicitation_handler,
                                 &agent_supervisor,
                                 &mut discarded_run_ids,
-                                "run interrupted for queued input",
+                                "run interrupted for follow-up",
                             );
                         }
                     }

@@ -40,6 +40,7 @@ fn root_config() -> RootConfig {
             tool_timeout_secs: 45,
         },
         permission: PermissionConfig::default(),
+        model_request: Default::default(),
         memory: MemoryConfig { enabled: true },
         skills: Default::default(),
         compaction: sigil_kernel::CompactionConfig::default(),

@@ -16,7 +16,6 @@ impl EnvScope {
             SIGIL_ANTHROPIC_BASE_URL_ENV,
             SIGIL_ANTHROPIC_VERSION_ENV,
             SIGIL_ANTHROPIC_MAX_TOKENS_ENV,
-            SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS_ENV,
         ];
         let previous = names
             .into_iter()
@@ -58,7 +57,6 @@ fn default_config_has_stable_endpoint_model_and_limits() {
     assert_eq!(config.model, "claude-sonnet-4-5");
     assert_eq!(config.anthropic_version, "2023-06-01");
     assert_eq!(config.max_tokens, 4096);
-    assert_eq!(config.request_timeout_secs, 120);
 }
 
 #[test]
@@ -74,7 +72,6 @@ fn resolved_config_prefers_sigil_env_over_provider_env() -> anyhow::Result<()> {
         ),
         (SIGIL_ANTHROPIC_VERSION_ENV, "2024-01-01"),
         (SIGIL_ANTHROPIC_MAX_TOKENS_ENV, "1234"),
-        (SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS_ENV, "42"),
     ]);
 
     let resolved = AnthropicProviderConfig::default().resolved()?;
@@ -84,8 +81,17 @@ fn resolved_config_prefers_sigil_env_over_provider_env() -> anyhow::Result<()> {
     assert_eq!(resolved.base_url, "https://anthropic.example.com");
     assert_eq!(resolved.anthropic_version, "2024-01-01");
     assert_eq!(resolved.max_tokens, 1234);
-    assert_eq!(resolved.request_timeout_secs, 42);
     Ok(())
+}
+
+#[test]
+fn config_rejects_legacy_provider_timeout_field() {
+    let error = serde_json::from_value::<AnthropicProviderConfig>(serde_json::json!({
+        "request_timeout_secs": 42
+    }))
+    .expect_err("provider timeout field should be rejected");
+
+    assert!(error.to_string().contains("request_timeout_secs"));
 }
 
 #[test]

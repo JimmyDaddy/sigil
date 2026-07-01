@@ -47,12 +47,12 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
 | Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A` / `Shift-Alt-A` |
-| Focus queued input panel | `Down` from the last composer row when queued input is visible |
-| Run selected queued input now | `Enter` on a selected queued input when the action is `now`; this interrupts the current run |
-| Change queued input action | `Tab` while the queue panel is focused |
+| Focus follow-up panel | `Down` from the last composer row when a follow-up is pending |
+| Run selected follow-up next | `Enter` on a selected follow-up uses the safe `next` action by default |
+| Change follow-up action | `Tab` while the follow-up panel is focused; choose `Interrupt` only when you intend to stop the current run |
 | Expand or collapse thinking / activity | `Ctrl-T` |
 
-When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. `Shift-Enter`, `Alt-Enter`, and `Ctrl-J` insert a newline. `Ctrl-Z` restores the last non-empty draft cleared with `Esc`; it is a single draft restore, not a general undo stack.
+When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. `Ctrl-J` inserts a newline reliably; `Shift-Enter` and `Alt-Enter` also insert a newline when terminal keyboard enhancement is active and reports those modifiers. `Ctrl-Z` restores the last non-empty draft cleared with `Esc`; it is a single draft restore, not a general undo stack.
 
 When `[terminal].mouse_capture = true`, mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header or hidden-preview expand/collapse. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
 
@@ -69,8 +69,8 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
-| `/queue` | Focus queued input |
-| `/queue next|now|edit|delete [item]` | Keep a queued input for the next turn, run it now, edit it, or cancel it |
+| `/queue` | Advanced follow-up controls |
+| `/queue next|interrupt|edit|delete [item]` | Keep a follow-up for the next turn, interrupt and run it now, edit it, or cancel it |
 | `/plan` / `/plan <prompt>` | Enter plan mode or run one read-only planning prompt |
 | `/task <task>` | Create a durable plan and execute the task step by step |
 | `/task continue` | Continue the latest planned task without extra guidance |
@@ -81,7 +81,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 
 `/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
 
-When Sigil is already running, ordinary chat input and `/plan <prompt>` are queued instead of being dropped or added to provider-visible history. Queue dispatch is FIFO after the active turn finishes. `next` moves an item to the front for the next turn; `now` interrupts the current run before dispatching the selected item.
+When Sigil is already running, ordinary chat input becomes a visible follow-up instead of being dropped or added immediately to provider-visible history. Follow-up dispatch is FIFO after the active turn finishes. `next` moves an item to the front for the next turn; `interrupt` stops the current run before dispatching the selected item. Agent mentions are not silently converted into main-thread follow-ups while the session is busy; wait for the current turn or use the dedicated agent messaging surface.
 
 ## Config Panel
 
@@ -179,7 +179,7 @@ For temporary use or CI, prefer an environment variable such as `SIGIL_API_KEY`.
 
 ### What if my terminal has broken mouse or clipboard support?
 
-Review the `Terminal` section in `/config`, or set `[terminal].keyboard_enhancement = false` / `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` / `[terminal].scroll_sensitivity = 3` in `sigil.toml`. Keyboard enhancement and mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action; scroll sensitivity controls mouse wheel row steps in transcript and approval diff views.
+Review the `Terminal` section in `/config`, or set `[terminal].keyboard_enhancement = "off"` / `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` / `[terminal].scroll_sensitivity = 3` in `sigil.toml`. Keyboard enhancement is resolved on the next launch; mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action; scroll sensitivity controls mouse wheel row steps in transcript and approval diff views.
 
 Run `/doctor` to see the detected terminal profile, multiplexer or remote layers, and clipboard bridge warnings.
 

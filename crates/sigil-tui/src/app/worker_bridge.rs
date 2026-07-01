@@ -25,6 +25,13 @@ use sigil_kernel::{
 use sigil_runtime::{BalanceSnapshot, deepseek_provider_status_config};
 
 impl AppState {
+    fn timeline_has_user_prompt(&self, prompt: &str) -> bool {
+        self.timeline
+            .iter()
+            .rev()
+            .any(|entry| entry.role == TimelineRole::User && entry.text == prompt)
+    }
+
     fn set_agent_wait_phase(&mut self, profile_id: &str) {
         self.runtime.run_phase = RunPhase::Agent(profile_id.to_owned());
         self.last_notice = Some(format!("waiting for agent @{profile_id}"));
@@ -315,27 +322,31 @@ impl AppState {
             } => {
                 self.sync_current_session_state(entries);
                 let summary = if let Some(next) = items.first() {
+                    let noun = queued_prompt_summary_noun(&next.queued.target);
+                    let plural = if items.len() == 1 { "" } else { "s" };
                     format!(
-                        "{} {} · next {}",
-                        if paused { "queue paused" } else { "queued" },
+                        "{} {} {noun}{plural} · next {}",
+                        if paused { "paused" } else { "pending" },
                         items.len(),
                         summarize_queued_prompt(&next.queued.prompt)
                     )
                 } else {
-                    "queue empty".to_owned()
+                    "no follow-ups pending".to_owned()
                 };
                 self.last_notice = Some(summary.clone());
-                self.push_event("queue:update", summary);
+                self.push_event("follow-up:update", summary);
             }
             WorkerMessage::ConversationQueueDispatchStarted { queue_id, prompt } => {
                 self.runtime.is_busy = true;
                 self.runtime.run_phase = RunPhase::Thinking;
                 self.runtime.mcp_progress = None;
-                self.last_notice = Some("running queued input".to_owned());
-                self.push_phase_marker(format!("queued|{}", self.runtime.model_name));
-                self.push_timeline(TimelineRole::User, prompt.clone());
+                self.last_notice = Some("running follow-up".to_owned());
+                self.push_phase_marker(format!("follow-up|{}", self.runtime.model_name));
+                if !self.timeline_has_user_prompt(&prompt) {
+                    self.push_timeline(TimelineRole::User, prompt.clone());
+                }
                 self.push_event(
-                    "queue:dispatch",
+                    "follow-up:dispatch",
                     format!("{} {}", queue_id.as_str(), prompt),
                 );
             }
@@ -1699,6 +1710,13 @@ fn summarize_queued_prompt(prompt: &str) -> String {
         normalized
     } else {
         format!("{}...", normalized.chars().take(45).collect::<String>())
+    }
+}
+
+fn queued_prompt_summary_noun(target: &sigil_kernel::ConversationInputTarget) -> &'static str {
+    match target {
+        sigil_kernel::ConversationInputTarget::MainThread => "follow-up",
+        sigil_kernel::ConversationInputTarget::AgentThread { .. } => "agent message",
     }
 }
 

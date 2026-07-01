@@ -112,6 +112,7 @@ fn test_root_config(base_url: &str) -> RootConfig {
             tool_timeout_secs: 5,
         },
         permission: PermissionConfig::default(),
+        model_request: Default::default(),
         memory: MemoryConfig::default(),
         skills: Default::default(),
         compaction: Default::default(),
@@ -130,8 +131,7 @@ fn test_root_config(base_url: &str) -> RootConfig {
                 "model": "deepseek-v4-flash",
                 "fim_model": "deepseek-v4-pro",
                 "api_key": "test-key",
-                "strict_tools_mode": "auto",
-                "request_timeout_secs": 5
+                "strict_tools_mode": "auto"
             }),
         )]),
         mcp_servers: Vec::<McpServerConfig>::new(),

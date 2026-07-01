@@ -97,11 +97,12 @@ pub use product_view::{
 pub use provider_config::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DEFAULT_SETUP_API_KEY_ENV,
     DEFAULT_SETUP_PROVIDER_KEY, DeepSeekProviderConfigFields, GEMINI_PROVIDER_KEY,
-    OPENAI_COMPAT_PROVIDER_KEY, ProviderConfigFields, ProviderStatusConfig,
-    ProviderStrictToolsMode, deepseek_provider_config_fields, deepseek_provider_status_config,
-    deepseek_provider_value_for_setup, default_provider_config_fields,
-    default_setup_provider_model, normalize_provider_name, provider_api_key_env_name,
-    provider_config_fields, provider_status_config_from_fields, set_active_provider_model,
+    ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, ProviderConfigFields,
+    ProviderStatusConfig, ProviderStrictToolsMode, deepseek_provider_config_fields,
+    deepseek_provider_status_config, deepseek_provider_value_for_setup,
+    default_provider_config_fields, default_setup_provider_model, model_request_config_fields,
+    normalize_provider_name, provider_api_key_env_name, provider_config_fields,
+    provider_status_config_from_fields, set_active_provider_model, set_model_request_config_fields,
     set_provider_config_fields,
 };
 pub use provider_debug::{
@@ -127,19 +128,24 @@ pub use skills::{
 /// Returns an error when the configured provider is unsupported or its provider-specific
 /// configuration cannot be parsed or initialized.
 pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
+    let timeouts = root_config.model_request.to_timeouts()?;
     match provider_config_key(&root_config.agent.provider) {
-        "deepseek" => Ok(Box::new(DeepSeekProvider::new(resolve_deepseek_config(
-            root_config,
-        )?)?)),
+        "deepseek" => Ok(Box::new(DeepSeekProvider::new(
+            resolve_deepseek_config(root_config)?,
+            timeouts,
+        )?)),
         "openai_compat" => Ok(Box::new(OpenAiCompatibleProvider::new(
             resolve_openai_compat_config(root_config)?,
+            timeouts,
         )?)),
-        "anthropic" => Ok(Box::new(AnthropicProvider::new(resolve_anthropic_config(
-            root_config,
-        )?)?)),
-        "gemini" => Ok(Box::new(GeminiProvider::new(resolve_gemini_config(
-            root_config,
-        )?)?)),
+        "anthropic" => Ok(Box::new(AnthropicProvider::new(
+            resolve_anthropic_config(root_config)?,
+            timeouts,
+        )?)),
+        "gemini" => Ok(Box::new(GeminiProvider::new(
+            resolve_gemini_config(root_config)?,
+            timeouts,
+        )?)),
         other => Err(anyhow!("unsupported provider {other}")),
     }
 }

@@ -351,14 +351,14 @@ fn render_queue_header(
     let palette = &theme.palette;
     let bg = palette.surface_panel_alt;
     let title = if view_model.queue_paused {
-        "Queue paused"
+        "Follow-ups paused"
     } else {
-        "Queue"
+        "Follow-ups"
     };
     let detail = if view_model.queue_panel_focused {
-        "Up/Down item · Tab action · Enter run"
+        "Up/Down item · Tab action · Enter selected"
     } else {
-        "/queue focus · /queue now"
+        "Down focus · /queue advanced"
     };
     Line::from(vec![
         Span::styled(

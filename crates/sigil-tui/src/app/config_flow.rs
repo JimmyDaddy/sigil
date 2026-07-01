@@ -356,7 +356,7 @@ impl AppState {
                 lines.push("[interaction]".to_owned());
                 lines.push(render_config_readonly_row(
                     "Keyboard enhancement",
-                    bool_summary(config_state.draft.terminal_keyboard_enhancement),
+                    config_state.draft.terminal_keyboard_enhancement.as_str(),
                 ));
                 lines.push(render_config_readonly_row(
                     "Mouse capture",

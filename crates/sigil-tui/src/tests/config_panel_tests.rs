@@ -11,6 +11,7 @@ fn test_root_config() -> RootConfig {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
@@ -204,6 +205,7 @@ fn compaction_context_field_uses_short_fallback_label() {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
@@ -236,6 +238,7 @@ fn config_rows_do_not_pre_pad_labels() {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
@@ -272,6 +275,7 @@ fn api_key_display_uses_status_without_secret_length() {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: Default::default(),
         memory: Default::default(),
         skills: Default::default(),
@@ -328,8 +332,7 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
             "base_url": "https://deepseek.example.com",
             "beta_base_url": "https://deepseek.example.com/beta",
             "anthropic_base_url": "https://deepseek.example.com/anthropic",
-            "fim_model": "deepseek-fim",
-            "request_timeout_secs": 11
+            "fim_model": "deepseek-fim"
         }),
     );
     config.providers.insert(
@@ -337,8 +340,7 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
         serde_json::json!({
             "model": "openai-model",
             "api_key": "openai-key",
-            "base_url": "https://openai.example.com/v1",
-            "request_timeout_secs": 12
+            "base_url": "https://openai.example.com/v1"
         }),
     );
     config.providers.insert(
@@ -346,8 +348,7 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
         serde_json::json!({
             "model": "anthropic-model",
             "api_key": "anthropic-key",
-            "base_url": "https://anthropic.example.com",
-            "request_timeout_secs": 13
+            "base_url": "https://anthropic.example.com"
         }),
     );
     config.providers.insert(
@@ -355,8 +356,7 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
         serde_json::json!({
             "model": "gemini-model",
             "api_key": "gemini-key",
-            "base_url": "https://gemini.example.com/v1beta",
-            "request_timeout_secs": 14
+            "base_url": "https://gemini.example.com/v1beta"
         }),
     );
 
@@ -425,7 +425,6 @@ fn default_provider_field_draft_uses_provider_specific_defaults() {
 
         assert_eq!(draft.model, "provider-model");
         assert!(!draft.base_url.is_empty());
-        assert!(!draft.request_timeout_secs.is_empty());
     }
 }
 
@@ -1035,7 +1034,10 @@ fn config_state_moves_fields_and_footer_boundaries() {
     assert!(!state.focus_field(ConfigField::McpName));
     assert_eq!(state.selected_field, Some(ConfigField::ProviderApiKey));
     assert_eq!(state.move_field(true), ConfigFieldMove::Moved);
-    assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
+    assert_eq!(
+        state.selected_field,
+        Some(ConfigField::ModelRequestTimeoutSecs)
+    );
     state.focus_footer(ConfigFooterAction::Close);
     assert!(state.footer_selected);
     state.move_footer_action(false);
@@ -1058,7 +1060,8 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     draft.provider_anthropic_base_url = " https://proxy.example.test/anthropic ".to_owned();
     draft.provider_user_id_strategy = " ".to_owned();
     draft.provider_fim_model = " deepseek-v4-pro ".to_owned();
-    draft.provider_request_timeout_secs = "60".to_owned();
+    draft.model_request_timeout_secs = "60".to_owned();
+    draft.model_request_stream_idle_timeout_secs = "90".to_owned();
     draft.permission_default_mode = sigil_kernel::ApprovalMode::Deny;
     draft.memory_enabled = true;
     draft.compaction_enabled = true;
@@ -1085,8 +1088,11 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     );
     assert_eq!(config.compaction.context_window_tokens, Some(128000));
     assert_eq!(config.compaction.tail_messages, 8);
+    assert_eq!(config.model_request.request_timeout_secs, 60);
+    assert_eq!(config.model_request.stream_idle_timeout_secs, 90);
     assert!(provider.get("api_key").is_none());
     assert_eq!(provider["base_url"], "https://proxy.example.test");
+    assert!(provider.get("request_timeout_secs").is_none());
     assert!(provider.get("user_id_strategy").is_none());
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers[0].args, vec!["server.js", "--stdio"]);
@@ -1104,8 +1110,7 @@ fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
         serde_json::json!({
             "base_url": "https://openai.example.com/v1",
             "model": "gpt-old",
-            "api_key": "old-key",
-            "request_timeout_secs": 20
+            "api_key": "old-key"
         }),
     );
 
@@ -1120,7 +1125,7 @@ fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
     state.draft.provider_api_key = " new-key ".to_owned();
     state.draft.provider_base_url = " https://proxy.example.test/v1 ".to_owned();
     state.draft.provider_fim_model = " ".to_owned();
-    state.draft.provider_request_timeout_secs = "45".to_owned();
+    state.draft.model_request_timeout_secs = "45".to_owned();
 
     let config = state.draft.to_root_config()?;
     let provider = config.providers[OPENAI_COMPAT_PROVIDER_KEY]
@@ -1132,7 +1137,8 @@ fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
     assert_eq!(provider["model"], "gpt-new");
     assert_eq!(provider["api_key"], "new-key");
     assert_eq!(provider["base_url"], "https://proxy.example.test/v1");
-    assert_eq!(provider["request_timeout_secs"], 45);
+    assert_eq!(config.model_request.request_timeout_secs, 45);
+    assert!(provider.get("request_timeout_secs").is_none());
     Ok(())
 }
 
@@ -1148,8 +1154,7 @@ fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
             "model": "claude-old",
             "api_key": "old-key",
             "anthropic_version": "2023-06-01",
-            "max_tokens": 1024,
-            "request_timeout_secs": 20
+            "max_tokens": 1024
         }),
     );
 
@@ -1163,7 +1168,7 @@ fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
     state.draft.provider_model = " claude-new ".to_owned();
     state.draft.provider_api_key = " new-key ".to_owned();
     state.draft.provider_base_url = " https://proxy.example.test ".to_owned();
-    state.draft.provider_request_timeout_secs = "45".to_owned();
+    state.draft.model_request_timeout_secs = "45".to_owned();
 
     let config = state.draft.to_root_config()?;
     let provider = config.providers[ANTHROPIC_PROVIDER_KEY]
@@ -1177,7 +1182,8 @@ fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
     assert_eq!(provider["base_url"], "https://proxy.example.test");
     assert_eq!(provider["anthropic_version"], "2023-06-01");
     assert_eq!(provider["max_tokens"], 1024);
-    assert_eq!(provider["request_timeout_secs"], 45);
+    assert_eq!(config.model_request.request_timeout_secs, 45);
+    assert!(provider.get("request_timeout_secs").is_none());
     Ok(())
 }
 
@@ -1191,8 +1197,7 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
         serde_json::json!({
             "base_url": "https://gemini.example.com/v1beta",
             "model": "gemini-old",
-            "api_key": "old-key",
-            "request_timeout_secs": 20
+            "api_key": "old-key"
         }),
     );
 
@@ -1206,7 +1211,7 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
     state.draft.provider_model = " gemini-new ".to_owned();
     state.draft.provider_api_key = " new-key ".to_owned();
     state.draft.provider_base_url = " https://proxy.example.test/v1beta ".to_owned();
-    state.draft.provider_request_timeout_secs = "46".to_owned();
+    state.draft.model_request_timeout_secs = "46".to_owned();
 
     let config = state.draft.to_root_config()?;
     let provider = config.providers[GEMINI_PROVIDER_KEY]
@@ -1218,7 +1223,8 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
     assert_eq!(provider["model"], "gemini-new");
     assert_eq!(provider["api_key"], "new-key");
     assert_eq!(provider["base_url"], "https://proxy.example.test/v1beta");
-    assert_eq!(provider["request_timeout_secs"], 46);
+    assert_eq!(config.model_request.request_timeout_secs, 46);
+    assert!(provider.get("request_timeout_secs").is_none());
     Ok(())
 }
 
@@ -1273,13 +1279,19 @@ fn config_draft_validates_provider_and_compaction_values() {
         },
         {
             let mut draft = base.clone();
-            draft.provider_request_timeout_secs = "abc".to_owned();
-            (draft, "request_timeout_secs must be a positive integer")
+            draft.model_request_timeout_secs = "abc".to_owned();
+            (
+                draft,
+                "model_request.request_timeout_secs must be a positive integer",
+            )
         },
         {
             let mut draft = base.clone();
-            draft.provider_request_timeout_secs = "0".to_owned();
-            (draft, "request_timeout_secs must be greater than 0")
+            draft.model_request_timeout_secs = "0".to_owned();
+            (
+                draft,
+                "model_request.request_timeout_secs must be greater than 0",
+            )
         },
         {
             let mut draft = base.clone();

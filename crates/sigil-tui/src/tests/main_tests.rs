@@ -45,6 +45,7 @@ fn test_config() -> RootConfig {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         skills: Default::default(),
@@ -666,13 +667,13 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
     assert!(!flush_pending_worker_commands(&mut app, &mut worker)?);
 
     let mut config = test_config();
+    config.model_request.request_timeout_secs = 1;
     config.providers.insert(
         "deepseek".to_owned(),
         json!({
             "base_url": "https://example.com",
             "model": "deepseek-v4-flash",
-            "api_key": "test-key",
-            "request_timeout_secs": 1
+            "api_key": "test-key"
         }),
     );
     app = AppState::from_root_config(Path::new("sigil.toml"), &config);
@@ -701,13 +702,13 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
 #[test]
 fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result<()> {
     let mut config = test_config();
+    config.model_request.request_timeout_secs = 1;
     config.providers.insert(
         "deepseek".to_owned(),
         json!({
             "base_url": "https://example.com",
             "model": "deepseek-v4-flash",
-            "api_key": "test-key",
-            "request_timeout_secs": 1
+            "api_key": "test-key"
         }),
     );
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);

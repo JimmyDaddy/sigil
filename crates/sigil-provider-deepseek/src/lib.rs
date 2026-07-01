@@ -21,8 +21,7 @@ pub use config::{
     DeepSeekProviderConfig, DeepSeekProviderProfile, DeepSeekProviderQuirkProfile,
     LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV,
     SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV, SIGIL_MODEL_ENV,
-    SIGIL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_STRICT_TOOLS_MODE_ENV, SIGIL_USER_ID_STRATEGY_ENV,
-    StrictToolsMode,
+    SIGIL_STRICT_TOOLS_MODE_ENV, SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
 };
 pub use fim::DeepSeekFimCompletionRequest;
 pub use prefix::DeepSeekPrefixCompletionRequest;

@@ -57,6 +57,7 @@ fn test_root_config(provider: &str) -> RootConfig {
             tool_timeout_secs: 45,
         },
         permission: PermissionConfig::default(),
+        model_request: Default::default(),
         memory: MemoryConfig { enabled: true },
         skills: Default::default(),
         compaction: sigil_kernel::CompactionConfig::default(),
@@ -76,8 +77,7 @@ fn test_root_config(provider: &str) -> RootConfig {
                     "model": "deepseek-v4-flash",
                     "fim_model": "deepseek-v4-pro",
                     "api_key": "test-key",
-                    "strict_tools_mode": "auto",
-                    "request_timeout_secs": 15
+                    "strict_tools_mode": "auto"
                 }),
             ),
             (
@@ -87,8 +87,7 @@ fn test_root_config(provider: &str) -> RootConfig {
                     "model": "gpt-test",
                     "api_key": "openai-config-key",
                     "organization": "org-test",
-                    "project": "project-test",
-                    "request_timeout_secs": 20
+                    "project": "project-test"
                 }),
             ),
             (
@@ -98,8 +97,7 @@ fn test_root_config(provider: &str) -> RootConfig {
                     "model": "claude-test",
                     "api_key": "anthropic-config-key",
                     "anthropic_version": "2023-06-01",
-                    "max_tokens": 1024,
-                    "request_timeout_secs": 21
+                    "max_tokens": 1024
                 }),
             ),
             (
@@ -107,8 +105,7 @@ fn test_root_config(provider: &str) -> RootConfig {
                 json!({
                     "base_url": "https://gemini.example.com/v1beta",
                     "model": "gemini-test",
-                    "api_key": "gemini-config-key",
-                    "request_timeout_secs": 22
+                    "api_key": "gemini-config-key"
                 }),
             ),
         ]),
@@ -226,7 +223,6 @@ fn load_openai_compat_config_reads_provider_block() -> Result<()> {
     assert_eq!(config.api_key.as_deref(), Some("openai-config-key"));
     assert_eq!(config.organization.as_deref(), Some("org-test"));
     assert_eq!(config.project.as_deref(), Some("project-test"));
-    assert_eq!(config.request_timeout_secs, 20);
     Ok(())
 }
 
@@ -237,13 +233,11 @@ fn load_anthropic_and_gemini_config_read_provider_blocks() -> Result<()> {
     assert_eq!(anthropic.model, "claude-test");
     assert_eq!(anthropic.api_key.as_deref(), Some("anthropic-config-key"));
     assert_eq!(anthropic.max_tokens, 1024);
-    assert_eq!(anthropic.request_timeout_secs, 21);
 
     let gemini = load_gemini_config(&test_root_config("gemini"))?;
     assert_eq!(gemini.base_url, "https://gemini.example.com/v1beta");
     assert_eq!(gemini.model, "gemini-test");
     assert_eq!(gemini.api_key.as_deref(), Some("gemini-config-key"));
-    assert_eq!(gemini.request_timeout_secs, 22);
     Ok(())
 }
 

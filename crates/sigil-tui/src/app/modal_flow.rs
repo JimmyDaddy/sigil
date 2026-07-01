@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use sigil_kernel::ModelRequestConfig;
 use sigil_runtime::{
     DEEPSEEK_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse, ProviderConfigFields,
     ProviderStatusConfig, deepseek_provider_status_config, default_provider_config_fields,
@@ -434,22 +435,16 @@ impl AppState {
                 _ => current.trim(),
             };
             let defaults = default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, fallback_model);
-            let request_timeout_secs = state
-                .draft
-                .provider_request_timeout_secs
-                .trim()
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value > 0)
-                .map(|value| value.to_string())
-                .unwrap_or(defaults.request_timeout_secs);
+            let model_request = model_request_config_from_draft_or_default(
+                &state.draft.model_request_timeout_secs,
+                &state.draft.model_request_stream_idle_timeout_secs,
+            );
             let fields = ProviderConfigFields {
                 model: fallback_model.to_owned(),
                 api_key: state.draft.provider_api_key.trim().to_owned(),
                 base_url: non_empty_or(&state.draft.provider_base_url, &defaults.base_url),
-                request_timeout_secs,
             };
-            return provider_status_config_from_fields(&fields);
+            return provider_status_config_from_fields(&fields, &model_request);
         }
 
         if let Some(state) = &self.setup_state {
@@ -458,19 +453,18 @@ impl AppState {
                 model: current.trim().to_owned(),
                 api_key: state.api_key.trim().to_owned(),
                 base_url: defaults.base_url,
-                request_timeout_secs: defaults.request_timeout_secs,
             };
-            return provider_status_config_from_fields(&fields);
+            return provider_status_config_from_fields(&fields, &ModelRequestConfig::default());
         }
 
         if let Some(root_config) = self.config_snapshot.as_ref() {
             return deepseek_provider_status_config(root_config);
         }
 
-        provider_status_config_from_fields(&default_provider_config_fields(
-            DEEPSEEK_PROVIDER_KEY,
-            current.trim(),
-        ))
+        provider_status_config_from_fields(
+            &default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, current.trim()),
+            &ModelRequestConfig::default(),
+        )
     }
 
     pub(super) fn open_secret_input(&mut self, target: SecretInputTarget, current: &str) {
@@ -1005,6 +999,24 @@ impl AppState {
             self.last_notice = Some(format!("editing {}", field.label));
         }
     }
+}
+
+fn model_request_config_from_draft_or_default(
+    request_timeout_secs: &str,
+    stream_idle_timeout_secs: &str,
+) -> ModelRequestConfig {
+    let mut config = ModelRequestConfig::default();
+    if let Ok(value) = request_timeout_secs.trim().parse::<u64>()
+        && value > 0
+    {
+        config.request_timeout_secs = value;
+    }
+    if let Ok(value) = stream_idle_timeout_secs.trim().parse::<u64>()
+        && value > 0
+    {
+        config.stream_idle_timeout_secs = value;
+    }
+    config
 }
 
 fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> bool {

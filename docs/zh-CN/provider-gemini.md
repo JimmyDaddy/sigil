@@ -21,12 +21,15 @@ provider = "gemini"
 model = "gemini-2.5-pro"
 tool_timeout_secs = 30
 
+[model_request]
+request_timeout_secs = 120
+stream_idle_timeout_secs = 180
+
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
 model = "gemini-2.5-pro"
 # 优先使用 SIGIL_GEMINI_API_KEY、GEMINI_API_KEY 或 GOOGLE_API_KEY。
 # api_key = "..."
-request_timeout_secs = 120
 ```
 
 完整起点模板见 [gemini.toml](../examples/config/gemini.toml)。
@@ -48,7 +51,6 @@ Sigil 按这个顺序解析 Gemini 认证：
 | --- | --- |
 | `SIGIL_GEMINI_MODEL` | `[providers.gemini].model` |
 | `SIGIL_GEMINI_BASE_URL` | `[providers.gemini].base_url` |
-| `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS` | `[providers.gemini].request_timeout_secs` |
 
 ## 行为说明
 
@@ -73,4 +75,4 @@ sigil doctor
 | 认证失败 | 确认 `SIGIL_GEMINI_API_KEY`、`GEMINI_API_KEY` 或 `GOOGLE_API_KEY` 哪一个对 `sigil` 进程可见。 |
 | 找不到 model | 确认 Gemini model 名称和 endpoint version。 |
 | Tool/function calls 失败 | 确认该 model 和 endpoint 对你的账号支持 function calling。 |
-| 请求超时 | 检查网络，并考虑 `request_timeout_secs`。 |
+| 请求超时 | 检查网络，并考虑 `[model_request].stream_idle_timeout_secs`。 |

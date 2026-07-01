@@ -329,6 +329,7 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         skills: Default::default(),

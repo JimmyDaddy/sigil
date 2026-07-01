@@ -14,7 +14,7 @@ This page collects the user-facing commands, keys, paths, and environment variab
 | Toggle right info rail compact/detail | `F2` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
-| Insert composer newline | `Shift-Enter`, `Alt-Enter`, `Ctrl-J` |
+| Insert composer newline | `Ctrl-J`; `Shift-Enter` / `Alt-Enter` when terminal keyboard enhancement is active and reports modifiers |
 | Move composer cursor by line or character | `Ctrl-A/E`, `Ctrl-B/F`, `Left/Right` |
 | Move composer cursor by word | `Alt-B/F`, `Ctrl-Left/Right` |
 | Delete composer text | `Backspace/Delete`, `Ctrl-H`, `Ctrl-W`, `Ctrl/Alt-Backspace`, `Ctrl/Alt-Delete` |
@@ -41,8 +41,8 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
-| `/queue` | Focus queued input |
-| `/queue next|now|edit|delete [item]` | Manage queued input; `now` interrupts the current run before dispatch |
+| `/queue` | Advanced follow-up controls |
+| `/queue next|interrupt|edit|delete [item]` | Keep a follow-up for the next turn, interrupt and run it now, edit it, or cancel it |
 | `/plan` / `/plan <prompt>` | Run a read-only planning prompt; accept the plan card to create and run a durable task |
 | `/task <task>` | Create a durable plan and execute the task step by step |
 | `/task continue` | Continue the latest planned task without extra guidance |
@@ -99,6 +99,12 @@ Do not commit real secrets in `sigil.toml` or local memory files. A workspace-ro
 
 ## Provider Environment Variables
 
+Model request:
+
+- `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
+
 DeepSeek:
 
 - `SIGIL_API_KEY`
@@ -108,7 +114,6 @@ DeepSeek:
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_FIM_MODEL`
 - `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_STRICT_TOOLS_MODE`
 - `DEEPSEEK_API_KEY` fallback
 
@@ -117,7 +122,6 @@ OpenAI-compatible:
 - `SIGIL_OPENAI_COMPATIBLE_API_KEY`
 - `SIGIL_OPENAI_COMPATIBLE_MODEL`
 - `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-- `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
 - `OPENAI_API_KEY` fallback
 
 Anthropic:
@@ -127,7 +131,6 @@ Anthropic:
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_ANTHROPIC_VERSION`
 - `SIGIL_ANTHROPIC_MAX_TOKENS`
-- `SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS`
 - `ANTHROPIC_API_KEY` fallback
 
 Gemini:
@@ -135,7 +138,6 @@ Gemini:
 - `SIGIL_GEMINI_API_KEY`
 - `SIGIL_GEMINI_MODEL`
 - `SIGIL_GEMINI_BASE_URL`
-- `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS`
 - `GEMINI_API_KEY` fallback
 - `GOOGLE_API_KEY` fallback
 

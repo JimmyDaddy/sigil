@@ -20,7 +20,7 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
 #[cfg(not(test))]
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
@@ -31,6 +31,8 @@ use ratatui::{
     text::{Line, Span},
 };
 use sigil_kernel::RootConfig;
+#[cfg(not(test))]
+use sigil_kernel::TerminalKeyboardEnhancement;
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
 
@@ -76,11 +78,11 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     cleanup.raw_mode_enabled = true;
     let panic_hook = TuiPanicHookGuard::install();
 
-    let keyboard_enhancement_enabled = if app.terminal_keyboard_enhancement_enabled() {
-        enable_keyboard_enhancement(&mut stdout)?
-    } else {
-        false
-    };
+    let keyboard_enhancement_enabled = enable_keyboard_enhancement_for_policy(
+        app.terminal_keyboard_enhancement_policy(),
+        &mut stdout,
+    )?;
+    app.set_terminal_keyboard_enhancement_enabled(keyboard_enhancement_enabled);
     cleanup.keyboard_enhancement_enabled = keyboard_enhancement_enabled;
     let bracketed_paste_enabled = enable_bracketed_paste(&mut stdout)?;
     cleanup.bracketed_paste_enabled = bracketed_paste_enabled;
@@ -220,6 +222,24 @@ fn restore_terminal_escape_state() {
     let _ = execute!(stdout, DisableMouseCapture);
     let _ = execute!(stdout, Show);
     let _ = disable_raw_mode();
+}
+
+#[cfg(not(test))]
+fn enable_keyboard_enhancement_for_policy<W: io::Write>(
+    policy: TerminalKeyboardEnhancement,
+    writer: &mut W,
+) -> io::Result<bool> {
+    match policy {
+        TerminalKeyboardEnhancement::Auto => {
+            if matches!(supports_keyboard_enhancement(), Ok(true)) {
+                enable_keyboard_enhancement(writer)
+            } else {
+                Ok(false)
+            }
+        }
+        TerminalKeyboardEnhancement::On => enable_keyboard_enhancement(writer),
+        TerminalKeyboardEnhancement::Off => Ok(false),
+    }
 }
 
 #[cfg(not(test))]

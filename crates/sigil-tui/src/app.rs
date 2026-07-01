@@ -39,7 +39,7 @@ use sigil_kernel::{
     MutationArtifactInventoryItem, MutationArtifactRetentionReport, PlanApprovalPermission,
     PlanDraftCreatedEntry, PlanTaskStartMode, ReasoningEffort, RootConfig, SecretRedactor, Session,
     SessionConfig, SessionLogEntry, SessionStats, StorageConfig, TaskStateProjection,
-    ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
+    TerminalKeyboardEnhancement, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
 };
 use sigil_runtime::{
     BalanceSnapshot, ContextWindowSource, SigilPaths, effective_compaction_config,
@@ -91,19 +91,19 @@ enum AgentView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposerQueueAction {
-    SendNow,
     KeepNext,
+    SendNow,
     Edit,
     Delete,
 }
 
 impl ComposerQueueAction {
-    pub(crate) const ORDER: [Self; 4] = [Self::SendNow, Self::KeepNext, Self::Edit, Self::Delete];
+    pub(crate) const ORDER: [Self; 4] = [Self::KeepNext, Self::SendNow, Self::Edit, Self::Delete];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::SendNow => "Send now",
-            Self::KeepNext => "Keep next",
+            Self::KeepNext => "Run next",
+            Self::SendNow => "Interrupt",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
         }
@@ -111,10 +111,10 @@ impl ComposerQueueAction {
 
     pub(crate) fn detail(self) -> &'static str {
         match self {
-            Self::SendNow => "interrupt current turn",
-            Self::KeepNext => "run after current turn",
-            Self::Edit => "edit queued input",
-            Self::Delete => "remove queued input",
+            Self::KeepNext => "run after the current turn",
+            Self::SendNow => "stop current turn and run this follow-up",
+            Self::Edit => "edit follow-up",
+            Self::Delete => "remove follow-up",
         }
     }
 
@@ -263,6 +263,7 @@ pub struct AppState {
     pub activity_scroll_back: usize,
     info_rail_detail: bool,
     config_snapshot: Option<RootConfig>,
+    terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
     setup_state: Option<SetupState>,
     workspace_trust_gate_state: Option<WorkspaceTrustGateState>,
@@ -502,6 +503,7 @@ impl AppState {
             activity_scroll_back: 0,
             info_rail_detail: false,
             config_snapshot: Some(root_config.clone()),
+            terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
             setup_state: None,
             workspace_trust_gate_state: None,
@@ -618,6 +620,7 @@ impl AppState {
             activity_scroll_back: 0,
             info_rail_detail: false,
             config_snapshot: None,
+            terminal_keyboard_enhancement_enabled: false,
             secret_redactor: SecretRedactor::default(),
             setup_state: Some(SetupState::new(config_path, startup_error.clone())),
             workspace_trust_gate_state: None,
@@ -1442,9 +1445,18 @@ impl AppState {
     }
 
     pub fn terminal_keyboard_enhancement_enabled(&self) -> bool {
+        self.terminal_keyboard_enhancement_enabled
+    }
+
+    pub fn set_terminal_keyboard_enhancement_enabled(&mut self, enabled: bool) {
+        self.terminal_keyboard_enhancement_enabled = enabled;
+    }
+
+    pub fn terminal_keyboard_enhancement_policy(&self) -> TerminalKeyboardEnhancement {
         self.config_snapshot
             .as_ref()
-            .is_some_and(|config| config.terminal.keyboard_enhancement)
+            .map(|config| config.terminal.keyboard_enhancement)
+            .unwrap_or(TerminalKeyboardEnhancement::Off)
     }
 
     pub fn terminal_osc52_clipboard_enabled(&self) -> bool {
@@ -1516,18 +1528,10 @@ impl AppState {
 
         if prompt.trim_start().starts_with('@') {
             if self.runtime.is_busy {
-                self.composer.input.clear();
-                self.composer.input_cursor = 0;
-                self.composer.input_paste_spans.clear();
-                self.reset_slash_selector();
-                self.push_timeline(TimelineRole::Notice, "queued for next turn");
-                self.push_event("queue", format!("queued busy input {prompt}"));
-                self.last_notice = Some("queued for next turn".to_owned());
-                return Ok(Some(AppAction::QueueConversationInput {
-                    prompt,
-                    kind: ConversationInputKind::Chat,
-                    target: ConversationInputTarget::MainThread,
-                }));
+                self.push_timeline(TimelineRole::Notice, "busy; @agent input kept for later");
+                self.push_event("agent:busy", prompt);
+                self.last_notice = Some("busy; @agent input kept for later".to_owned());
+                return Ok(None);
             }
             let (profile_id, agent_prompt) = match self.resolve_agent_mention_invocation(&prompt) {
                 Ok(invocation) => invocation,
@@ -1551,9 +1555,10 @@ impl AppState {
             self.composer.input_cursor = 0;
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
-            self.push_timeline(TimelineRole::Notice, "queued for next turn");
-            self.push_event("queue", format!("queued busy input {prompt}"));
-            self.last_notice = Some("queued for next turn".to_owned());
+            self.push_timeline(TimelineRole::User, prompt.clone());
+            self.push_timeline(TimelineRole::Notice, "follow-up will run next");
+            self.push_event("follow-up", format!("queued busy input {prompt}"));
+            self.last_notice = Some("follow-up will run next".to_owned());
             return Ok(Some(AppAction::QueueConversationInput {
                 prompt,
                 kind: ConversationInputKind::Chat,

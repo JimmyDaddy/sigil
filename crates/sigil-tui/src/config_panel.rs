@@ -3,17 +3,18 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
-    PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, SyntaxThemeId, ThemeId,
-    UsageCostCurrency, VerificationAutoRunPolicy,
+    PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, SyntaxThemeId,
+    TerminalKeyboardEnhancement, ThemeId, UsageCostCurrency, VerificationAutoRunPolicy,
 };
 pub(crate) use sigil_runtime::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY,
     normalize_provider_name,
 };
 use sigil_runtime::{
-    DeepSeekProviderConfigFields, ProviderConfigFields, ProviderStrictToolsMode,
-    ResolvedAgentProfile, deepseek_provider_config_fields, default_provider_config_fields,
-    provider_config_fields, set_provider_config_fields,
+    DeepSeekProviderConfigFields, ModelRequestConfigFields, ProviderConfigFields,
+    ProviderStrictToolsMode, ResolvedAgentProfile, deepseek_provider_config_fields,
+    default_provider_config_fields, model_request_config_fields, provider_config_fields,
+    set_model_request_config_fields, set_provider_config_fields,
 };
 
 use crate::ui::theme::{COLOR_TOKEN_GROUPS, COLOR_TOKEN_NAMES, ColorTokenGroup};
@@ -176,6 +177,8 @@ pub(crate) enum ConfigField {
     ProviderName,
     ProviderModel,
     ProviderApiKey,
+    ModelRequestTimeoutSecs,
+    ModelRequestStreamIdleTimeoutSecs,
     // Low-frequency provider endpoint/FIM controls remain part of the persisted
     // draft model, but the default config flow keeps them in sigil.toml.
     #[allow(dead_code)]
@@ -235,9 +238,11 @@ pub(crate) enum ConfigField {
 }
 
 impl ConfigField {
-    const PROVIDER_FIELDS: [Self; 3] = [
+    const PROVIDER_FIELDS: [Self; 5] = [
         Self::ProviderModel,
         Self::ProviderApiKey,
+        Self::ModelRequestTimeoutSecs,
+        Self::ModelRequestStreamIdleTimeoutSecs,
         Self::ProviderName,
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
@@ -287,6 +292,8 @@ impl ConfigField {
             Self::ProviderName => "provider",
             Self::ProviderModel => "model",
             Self::ProviderApiKey => "api_key",
+            Self::ModelRequestTimeoutSecs => "request_start_timeout",
+            Self::ModelRequestStreamIdleTimeoutSecs => "stream_idle_timeout",
             Self::ProviderBaseUrl => "base_url",
             Self::ProviderFimModel => "fim_model",
             Self::PermissionsDefaultMode => "mode",
@@ -324,6 +331,8 @@ impl ConfigField {
             Self::ProviderName => "Provider",
             Self::ProviderModel => "Model",
             Self::ProviderApiKey => "API key",
+            Self::ModelRequestTimeoutSecs => "Request start timeout",
+            Self::ModelRequestStreamIdleTimeoutSecs => "Stream idle timeout",
             Self::ProviderBaseUrl => "Endpoint",
             Self::ProviderFimModel => "FIM model",
             Self::PermissionsDefaultMode => "Mode",
@@ -366,6 +375,12 @@ impl ConfigField {
             }
             Self::ProviderApiKey => {
                 "Saved locally when entered here. Provider-specific environment variables override it at runtime."
+            }
+            Self::ModelRequestTimeoutSecs => {
+                "Seconds to wait for the model provider to accept a request and return response headers."
+            }
+            Self::ModelRequestStreamIdleTimeoutSecs => {
+                "Seconds a streaming response may stay idle between chunks before Sigil treats it as failed."
             }
             Self::ProviderBaseUrl => {
                 "Provider API base URL. Leave this unchanged unless you use a proxy or compatible endpoint."
@@ -453,6 +468,8 @@ impl ConfigField {
         matches!(
             self,
             Self::ProviderModel
+                | Self::ModelRequestTimeoutSecs
+                | Self::ModelRequestStreamIdleTimeoutSecs
                 | Self::ProviderBaseUrl
                 | Self::ProviderFimModel
                 | Self::CompactionSoftThresholdRatio
@@ -694,7 +711,8 @@ pub(crate) struct ConfigDraft {
     pub(crate) provider_user_id_strategy: String,
     pub(crate) provider_strict_tools_mode: ProviderStrictToolsMode,
     pub(crate) provider_fim_model: String,
-    pub(crate) provider_request_timeout_secs: String,
+    pub(crate) model_request_timeout_secs: String,
+    pub(crate) model_request_stream_idle_timeout_secs: String,
     pub(crate) permission_default_mode: ApprovalMode,
     pub(crate) verification_auto_run: VerificationAutoRunPolicy,
     pub(crate) memory_enabled: bool,
@@ -707,7 +725,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) code_intelligence_startup: CodeIntelStartup,
     pub(crate) code_intelligence_discovery_enabled: bool,
     pub(crate) code_intelligence_discovery_report_missing: bool,
-    pub(crate) terminal_keyboard_enhancement: bool,
+    pub(crate) terminal_keyboard_enhancement: TerminalKeyboardEnhancement,
     pub(crate) terminal_mouse_capture: bool,
     pub(crate) terminal_osc52_clipboard: bool,
     pub(crate) terminal_scroll_sensitivity: String,
@@ -755,6 +773,7 @@ impl ConfigDraft {
             .get(provider_name.as_str())
             .cloned()
             .expect("normalized provider has an initialized draft");
+        let model_request_fields = model_request_config_fields(root_config);
         Self {
             base_root_config: root_config.clone(),
             provider_name: provider_name.clone(),
@@ -767,7 +786,8 @@ impl ConfigDraft {
             provider_user_id_strategy: deepseek_fields.user_id_strategy,
             provider_strict_tools_mode: deepseek_fields.strict_tools_mode,
             provider_fim_model: deepseek_fields.fim_model,
-            provider_request_timeout_secs: current_provider_draft.request_timeout_secs,
+            model_request_timeout_secs: model_request_fields.request_timeout_secs,
+            model_request_stream_idle_timeout_secs: model_request_fields.stream_idle_timeout_secs,
             permission_default_mode: root_config.permission.default_mode,
             verification_auto_run: root_config.verification.auto_run,
             memory_enabled: root_config.memory.enabled,
@@ -825,7 +845,6 @@ impl ConfigDraft {
                 model: self.provider_model.clone(),
                 api_key: self.provider_api_key.clone(),
                 base_url: self.provider_base_url.clone(),
-                request_timeout_secs: self.provider_request_timeout_secs.clone(),
             },
         );
     }
@@ -842,7 +861,6 @@ impl ConfigDraft {
         self.provider_model = draft.model;
         self.provider_api_key = draft.api_key;
         self.provider_base_url = draft.base_url;
-        self.provider_request_timeout_secs = draft.request_timeout_secs;
     }
 
     pub(crate) fn to_root_config(&self) -> Result<RootConfig> {
@@ -869,15 +887,6 @@ impl ConfigDraft {
             if fim_model.is_empty() {
                 bail!("fim_model cannot be empty");
             }
-        }
-
-        let request_timeout_secs = self
-            .provider_request_timeout_secs
-            .trim()
-            .parse::<u64>()
-            .map_err(|error| anyhow!("request_timeout_secs must be a positive integer: {error}"))?;
-        if request_timeout_secs == 0 {
-            bail!("request_timeout_secs must be greater than 0");
         }
 
         let soft_threshold_ratio = self
@@ -963,8 +972,12 @@ impl ConfigDraft {
             model: model.to_owned(),
             api_key: api_key.to_owned(),
             base_url: base_url.to_owned(),
-            request_timeout_secs: request_timeout_secs.to_string(),
         };
+        let model_request_fields = ModelRequestConfigFields {
+            request_timeout_secs: self.model_request_timeout_secs.clone(),
+            stream_idle_timeout_secs: self.model_request_stream_idle_timeout_secs.clone(),
+        };
+        set_model_request_config_fields(&mut root_config, &model_request_fields)?;
         let deepseek_fields = DeepSeekProviderConfigFields {
             beta_base_url: self.provider_beta_base_url.trim().to_owned(),
             anthropic_base_url: self.provider_anthropic_base_url.trim().to_owned(),
@@ -1682,6 +1695,10 @@ impl ConfigState {
             ConfigField::ProviderName => Some(&self.draft.provider_name),
             ConfigField::ProviderModel => Some(&self.draft.provider_model),
             ConfigField::ProviderApiKey => Some(&self.draft.provider_api_key),
+            ConfigField::ModelRequestTimeoutSecs => Some(&self.draft.model_request_timeout_secs),
+            ConfigField::ModelRequestStreamIdleTimeoutSecs => {
+                Some(&self.draft.model_request_stream_idle_timeout_secs)
+            }
             ConfigField::ProviderBaseUrl => Some(&self.draft.provider_base_url),
             ConfigField::ProviderFimModel => Some(&self.draft.provider_fim_model),
             ConfigField::CompactionSoftThresholdRatio => {
@@ -1738,6 +1755,12 @@ impl ConfigState {
             ConfigField::ProviderName => Some(&mut self.draft.provider_name),
             ConfigField::ProviderModel => Some(&mut self.draft.provider_model),
             ConfigField::ProviderApiKey => Some(&mut self.draft.provider_api_key),
+            ConfigField::ModelRequestTimeoutSecs => {
+                Some(&mut self.draft.model_request_timeout_secs)
+            }
+            ConfigField::ModelRequestStreamIdleTimeoutSecs => {
+                Some(&mut self.draft.model_request_stream_idle_timeout_secs)
+            }
             ConfigField::ProviderBaseUrl => Some(&mut self.draft.provider_base_url),
             ConfigField::ProviderFimModel => Some(&mut self.draft.provider_fim_model),
             ConfigField::CompactionSoftThresholdRatio => {
@@ -1872,9 +1895,11 @@ impl ConfigState {
             ConfigField::CompactionSoftThresholdRatio
             | ConfigField::CompactionHardThresholdRatio => display_ratio(text_value),
             ConfigField::CompactionTailMessages => format!("{text_value} messages"),
+            ConfigField::ModelRequestTimeoutSecs
+            | ConfigField::ModelRequestStreamIdleTimeoutSecs
+            | ConfigField::McpStartupTimeoutSecs => format!("{text_value} seconds"),
             ConfigField::TerminalScrollSensitivity => format!("{text_value} rows"),
             ConfigField::McpArgsCsv if text_value.trim().is_empty() => "none".to_owned(),
-            ConfigField::McpStartupTimeoutSecs => format!("{text_value} seconds"),
             ConfigField::CompactionContextWindowTokens if text_value.trim().is_empty() => {
                 "provider/model metadata".to_owned()
             }
@@ -1930,6 +1955,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
     match field {
         ConfigField::CompactionContextWindowTokens
         | ConfigField::CompactionTailMessages
+        | ConfigField::ModelRequestTimeoutSecs
+        | ConfigField::ModelRequestStreamIdleTimeoutSecs
         | ConfigField::TerminalScrollSensitivity
         | ConfigField::McpStartupTimeoutSecs => character.is_ascii_digit(),
         ConfigField::CompactionSoftThresholdRatio | ConfigField::CompactionHardThresholdRatio => {

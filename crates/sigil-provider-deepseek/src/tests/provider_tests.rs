@@ -6,8 +6,8 @@ use std::{
 use anyhow::Result;
 use futures::StreamExt;
 use sigil_kernel::{
-    Provider, ProviderChunk, ReasoningStreamSupport, ToolAccess, ToolCall, ToolCategory,
-    ToolPreviewCapability, ToolSpec,
+    ModelRequestTimeouts, Provider, ProviderChunk, ReasoningStreamSupport, ToolAccess, ToolCall,
+    ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -24,7 +24,7 @@ use super::DeepSeekProvider;
 
 fn deepseek_provider(config: crate::DeepSeekProviderConfig) -> Result<DeepSeekProvider> {
     let _guard = crate::test_env::lock();
-    DeepSeekProvider::new(config)
+    DeepSeekProvider::new(config, ModelRequestTimeouts::default())
 }
 
 #[test]
@@ -207,7 +207,6 @@ fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 1,
     })?;
 
     assert_eq!(provider.name(), "deepseek");
@@ -299,7 +298,6 @@ async fn prefix_completion_rejects_unsupported_user_id_strategy() -> Result<()> 
         api_key: Some("test".to_owned()),
         user_id_strategy: Some("unsupported".to_owned()),
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 1,
     })?;
 
     let error = match provider
@@ -345,7 +343,6 @@ async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     };
     let provider = deepseek_provider(config.clone())?;
     let request = sigil_kernel::CompletionRequest {
@@ -394,7 +391,6 @@ async fn provider_reports_missing_api_key_before_network() -> Result<()> {
         api_key: Some("".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 1,
     })?;
 
     let error = match provider
@@ -429,7 +425,6 @@ async fn provider_yields_first_delta_before_stream_finishes() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     };
     let provider = deepseek_provider(config.clone())?;
     let request = sigil_kernel::CompletionRequest {
@@ -470,7 +465,6 @@ async fn provider_stream_ends_after_done_without_waiting_for_socket_close() -> R
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     };
     let provider = deepseek_provider(config.clone())?;
     let request = sigil_kernel::CompletionRequest {
@@ -526,7 +520,6 @@ async fn provider_surfaces_invalid_chat_and_completion_events() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let request = sigil_kernel::CompletionRequest {
         provider_name: "deepseek".to_owned(),
@@ -571,7 +564,6 @@ async fn provider_surfaces_invalid_chat_and_completion_events() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let error = provider
         .stream_fim_completion(DeepSeekFimCompletionRequest {
@@ -614,7 +606,6 @@ async fn prefix_completion_uses_beta_chat_path() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
 
     let chunks = provider
@@ -664,7 +655,6 @@ async fn fim_completion_uses_completions_path() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
 
     let chunks = provider
@@ -720,7 +710,6 @@ async fn fim_completion_yields_first_delta_before_stream_finishes() -> Result<()
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream_fim_completion(DeepSeekFimCompletionRequest {
@@ -765,7 +754,6 @@ async fn provider_retries_rate_limited_status_once() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
 
     let chunks = provider
@@ -808,7 +796,6 @@ async fn provider_returns_invalid_request_after_reasoning_retry_is_exhausted() -
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
 
     let error = match provider
@@ -840,7 +827,6 @@ async fn provider_emits_done_when_chat_stream_ends_without_done_frame() -> Resul
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
 
     let chunks = provider
@@ -870,7 +856,6 @@ async fn provider_surfaces_invalid_utf8_chat_chunks() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream(simple_chat_request("deepseek-v4-flash"))
@@ -902,7 +887,6 @@ async fn fim_completion_surfaces_invalid_utf8_chunks() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream_fim_completion(DeepSeekFimCompletionRequest {
@@ -945,7 +929,6 @@ async fn provider_surfaces_invalid_chat_event_payloads() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream(simple_chat_request("deepseek-v4-flash"))
@@ -973,7 +956,6 @@ async fn fim_completion_emits_done_when_stream_ends_without_done_frame() -> Resu
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
 
     let chunks = provider
@@ -1009,7 +991,6 @@ async fn provider_surfaces_chat_and_completion_body_read_errors() -> Result<()> 
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream(simple_chat_request("deepseek-v4-flash"))
@@ -1035,7 +1016,6 @@ async fn provider_surfaces_chat_and_completion_body_read_errors() -> Result<()> 
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream_fim_completion(DeepSeekFimCompletionRequest {
@@ -1071,7 +1051,6 @@ async fn provider_surfaces_errors_from_unterminated_sse_frames() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream(simple_chat_request("deepseek-v4-flash"))
@@ -1093,7 +1072,6 @@ async fn provider_surfaces_errors_from_unterminated_sse_frames() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
     let mut stream = provider
         .stream_fim_completion(DeepSeekFimCompletionRequest {
@@ -1130,7 +1108,6 @@ async fn fim_completion_surfaces_non_success_status() -> Result<()> {
         api_key: Some("test".to_owned()),
         user_id_strategy: None,
         strict_tools_mode: crate::StrictToolsMode::Auto,
-        request_timeout_secs: 10,
     })?;
 
     let error = match provider

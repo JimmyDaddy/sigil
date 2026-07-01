@@ -30,6 +30,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
             max_turns: None,
             tool_timeout_secs: 30,
         },
+        model_request: Default::default(),
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: false },
         skills: Default::default(),
@@ -49,7 +50,6 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
                 "model": "deepseek-v4-flash",
                 "fim_model": "deepseek-v4-pro",
                 "api_key": "test-key",
-                "request_timeout_secs": 15,
                 "strict_tools_mode": "auto"
             }),
         )]),

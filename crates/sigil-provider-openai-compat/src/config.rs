@@ -1,16 +1,15 @@
 use std::env;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub const OPENAI_COMPATIBLE_API_KEY_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_API_KEY";
 pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 pub const OPENAI_COMPATIBLE_MODEL_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_MODEL";
 pub const OPENAI_COMPATIBLE_BASE_URL_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_BASE_URL";
-pub const OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS_ENV: &str =
-    "SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenAiCompatibleProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
@@ -22,8 +21,6 @@ pub struct OpenAiCompatibleProviderConfig {
     pub organization: Option<String>,
     #[serde(default)]
     pub project: Option<String>,
-    #[serde(default = "default_request_timeout_secs")]
-    pub request_timeout_secs: u64,
 }
 
 impl OpenAiCompatibleProviderConfig {
@@ -43,9 +40,6 @@ impl OpenAiCompatibleProviderConfig {
         if let Some(value) = read_env_string(OPENAI_COMPATIBLE_BASE_URL_ENV) {
             resolved.base_url = value;
         }
-        if let Some(value) = read_env_u64(OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS_ENV)? {
-            resolved.request_timeout_secs = value;
-        }
         if let Some(value) = read_env_string(OPENAI_COMPATIBLE_API_KEY_ENV)
             .or_else(|| read_env_string(OPENAI_API_KEY_ENV))
         {
@@ -64,7 +58,6 @@ impl Default for OpenAiCompatibleProviderConfig {
             api_key: None,
             organization: None,
             project: None,
-            request_timeout_secs: default_request_timeout_secs(),
         }
     }
 }
@@ -77,28 +70,11 @@ fn default_model() -> String {
     "gpt-4.1".to_owned()
 }
 
-fn default_request_timeout_secs() -> u64 {
-    120
-}
-
 fn read_env_string(name: &str) -> Option<String> {
     env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-}
-
-fn read_env_u64(name: &str) -> Result<Option<u64>> {
-    let Some(value) = read_env_string(name) else {
-        return Ok(None);
-    };
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|error| anyhow!("invalid {name}: {error}"))?;
-    if parsed == 0 {
-        return Err(anyhow!("{name} must be greater than 0"));
-    }
-    Ok(Some(parsed))
 }
 
 #[cfg(test)]

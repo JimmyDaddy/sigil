@@ -77,7 +77,7 @@ model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [terminal]
-keyboard_enhancement = false
+keyboard_enhancement = "auto"
 mouse_capture = false
 osc52_clipboard = true
 scroll_sensitivity = 3
@@ -388,13 +388,13 @@ trust_required = true
 
 ```toml
 [terminal]
-keyboard_enhancement = false
+keyboard_enhancement = "auto"
 mouse_capture = false
 osc52_clipboard = true
 scroll_sensitivity = 3
 ```
 
-`keyboard_enhancement` lets the TUI request crossterm keyboard enhancement flags. Keep it off unless your terminal profile is known to handle the enhanced protocol correctly.
+`keyboard_enhancement` controls crossterm keyboard enhancement. The default `auto` probes the current terminal at TUI startup and requests enhanced key reporting only when supported. Use `on` to force the request, or `off` if the terminal, multiplexer, SSH layer, or embedded PTY mishandles the enhanced protocol. Legacy boolean values still load as `true = on` and `false = off`.
 
 `mouse_capture` lets the TUI request terminal mouse events for clicks, scrolling, approval controls, setup/config/session selection, and transcript drag selection. It defaults off so terminal keyboard input remains reliable across multiplexers and embedded PTYs. Turn it on only if you want mouse support and your terminal handles mouse mode well; keyboard controls remain available.
 
@@ -402,13 +402,22 @@ scroll_sensitivity = 3
 
 `scroll_sensitivity` sets how many rows a mouse wheel tick moves in transcript and approval diff views. The default is `3`; use a smaller value for high-resolution wheels and a larger value for slower terminal scroll events.
 
-The TUI `/config` panel includes a read-only `Terminal` section for these controls. Edit `sigil.toml` for compatibility overrides. `keyboard_enhancement` and `mouse_capture` apply on the next launch; `osc52_clipboard` is checked for each copy action; `scroll_sensitivity` applies to the running config after it is saved and reloaded.
+The TUI `/config` panel includes a read-only `Terminal` section for these controls. Edit `sigil.toml` for compatibility overrides. `keyboard_enhancement` is resolved on the next launch; `mouse_capture` applies on the next launch; `osc52_clipboard` is checked for each copy action; `scroll_sensitivity` applies to the running config after it is saved and reloaded.
 
 `doctor` reports the configured switches, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk. For a repeatable manual checklist across iTerm2, Terminal.app, WezTerm, kitty, tmux, and SSH, see [terminal-compatibility.md](terminal-compatibility.md).
 
 ## Provider Environment Overrides
 
 Supported variables:
+
+Model request:
+
+- `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
+- `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
+
+These override `[model_request]` for every provider. Use them when a shell or CI
+job needs a different transport timeout without editing `sigil.toml`.
 
 DeepSeek:
 
@@ -419,7 +428,6 @@ DeepSeek:
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_FIM_MODEL`
 - `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_STRICT_TOOLS_MODE`
 
 `SIGIL_API_KEY` has the highest priority. `DEEPSEEK_API_KEY` remains a fallback source for the DeepSeek provider. If only `[providers.deepseek].api_key` is present, Sigil treats it as plaintext config auth and `doctor` reports a warning with remediation.
@@ -429,7 +437,6 @@ OpenAI-compatible:
 - `SIGIL_OPENAI_COMPATIBLE_MODEL`
 - `SIGIL_OPENAI_COMPATIBLE_API_KEY`
 - `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-- `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
 
 `OPENAI_API_KEY` remains a fallback source for the OpenAI-compatible provider.
 
@@ -440,7 +447,6 @@ Anthropic:
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_ANTHROPIC_VERSION`
 - `SIGIL_ANTHROPIC_MAX_TOKENS`
-- `SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS`
 
 `ANTHROPIC_API_KEY` remains a fallback source for the Anthropic provider.
 
@@ -449,7 +455,6 @@ Gemini:
 - `SIGIL_GEMINI_MODEL`
 - `SIGIL_GEMINI_API_KEY`
 - `SIGIL_GEMINI_BASE_URL`
-- `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS`
 
 `GEMINI_API_KEY` and `GOOGLE_API_KEY` remain fallback sources for the Gemini provider.
 

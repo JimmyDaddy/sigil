@@ -25,16 +25,16 @@ pub(in crate::runner) fn queue_conversation_input(
     if let Some(session) = current_session.as_mut() {
         session
             .append_control(control)
-            .map_err(|error| format!("failed to append queued conversation input: {error:#}"))?;
+            .map_err(|error| format!("failed to append follow-up: {error:#}"))?;
         Ok(session.entries().to_vec())
     } else {
         let store = JsonlSessionStore::new(session_log_path.to_path_buf())
-            .map_err(|error| format!("failed to open session store for queued input: {error:#}"))?;
+            .map_err(|error| format!("failed to open session store for follow-up: {error:#}"))?;
         store
             .append(&SessionLogEntry::Control(control))
-            .map_err(|error| format!("failed to persist queued conversation input: {error:#}"))?;
+            .map_err(|error| format!("failed to persist follow-up: {error:#}"))?;
         JsonlSessionStore::read_entries(session_log_path)
-            .map_err(|error| format!("failed to reload queued conversation input: {error:#}"))
+            .map_err(|error| format!("failed to reload follow-up: {error:#}"))
     }
 }
 
@@ -66,7 +66,7 @@ pub(in crate::runner) fn edit_queued_conversation_input(
     reasoning_effort: ReasoningEffort,
 ) -> std::result::Result<Vec<SessionLogEntry>, String> {
     if prompt.trim().is_empty() {
-        return Err("queued input prompt cannot be empty".to_owned());
+        return Err("follow-up prompt cannot be empty".to_owned());
     }
     ensure_queued_conversation_item_is_mutable(session_log_path, current_session, &queue_id)?;
     append_conversation_queue_control_entries(
@@ -98,7 +98,7 @@ pub(in crate::runner) fn move_queued_conversation_input(
         .iter()
         .position(|item| item.queued.queue_id == queue_id)
     else {
-        return Err(format!("queued input {} not found", queue_id.as_str()));
+        return Err(format!("follow-up {} not found", queue_id.as_str()));
     };
     let after_queue_id = match direction {
         QueueMoveDirection::Up if index == 0 => return Ok(entries),
@@ -189,11 +189,11 @@ pub(in crate::runner) fn ensure_projection_item_is_mutable(
         .iter()
         .find(|item| item.queued.queue_id == *queue_id)
     else {
-        return Err(format!("queued input {} not found", queue_id.as_str()));
+        return Err(format!("follow-up {} not found", queue_id.as_str()));
     };
     if item.status != ConversationInputStatus::Queued {
         return Err(format!(
-            "queued input {} is already {}",
+            "follow-up {} is already {}",
             queue_id.as_str(),
             queue_status_label(item.status)
         ));

@@ -21,6 +21,10 @@ provider = "anthropic"
 model = "claude-sonnet-4-5"
 tool_timeout_secs = 30
 
+[model_request]
+request_timeout_secs = 120
+stream_idle_timeout_secs = 180
+
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
 model = "claude-sonnet-4-5"
@@ -29,7 +33,6 @@ model = "claude-sonnet-4-5"
 anthropic_version = "2023-06-01"
 max_tokens = 4096
 beta_headers = []
-request_timeout_secs = 120
 ```
 
 完整起点模板见 [anthropic.toml](../examples/config/anthropic.toml)。
@@ -52,7 +55,6 @@ Sigil 按这个顺序解析 Anthropic 认证：
 | `SIGIL_ANTHROPIC_BASE_URL` | `[providers.anthropic].base_url` |
 | `SIGIL_ANTHROPIC_VERSION` | `[providers.anthropic].anthropic_version` |
 | `SIGIL_ANTHROPIC_MAX_TOKENS` | `[providers.anthropic].max_tokens` |
-| `SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS` | `[providers.anthropic].request_timeout_secs` |
 
 ## 行为说明
 

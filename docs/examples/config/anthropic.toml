@@ -6,6 +6,10 @@ provider = "anthropic"
 model = "claude-sonnet-4-5"
 tool_timeout_secs = 30
 
+[model_request]
+request_timeout_secs = 120
+stream_idle_timeout_secs = 180
+
 [permission]
 preset = "balanced"
 default_mode = "ask"
@@ -18,6 +22,5 @@ base_url = "https://api.anthropic.com"
 model = "claude-sonnet-4-5"
 anthropic_version = "2023-06-01"
 max_tokens = 4096
-request_timeout_secs = 120
 # Prefer SIGIL_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY.
 # api_key = "sk-ant-..."

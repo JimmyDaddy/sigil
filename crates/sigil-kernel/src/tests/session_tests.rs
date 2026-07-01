@@ -3953,6 +3953,97 @@ fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
 }
 
 #[test]
+fn build_request_records_context_assembly_skip_for_invalid_runtime_snippet() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("Summarize README.md"))?;
+    let mut runtime_context = RuntimeContextCandidates::new();
+    let item = ContextItem {
+        id: "repo-file:README.md".to_owned(),
+        source: ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some("snapshot-readme".to_owned()),
+        token_cost: 1,
+        score: Some(100.0),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: ContextBodyRef::inline("short"),
+    };
+    runtime_context.snippets.insert(
+        item.id.clone(),
+        "one two three words beyond declared budget".to_owned(),
+    );
+    runtime_context.items.push(item);
+
+    let request = session.build_request_with_transient_messages_and_context(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+        &[],
+        runtime_context,
+    )?;
+
+    assert!(request_context_v0_messages(&request).is_empty());
+    let skipped = session
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ContextAssemblySkipped(skipped)) => {
+                Some(skipped)
+            }
+            _ => None,
+        })
+        .expect("context assembly skip should be auditable");
+    assert_eq!(skipped.candidate_count, 1);
+    assert_eq!(skipped.item_ids, vec!["repo-file:README.md"]);
+    assert!(
+        skipped
+            .reason
+            .contains("snippet token cost 7 exceeds declared token cost 1")
+    );
+    let prefix = session.latest_prefix_snapshot().expect("prefix snapshot");
+    assert!(!prefix.materialized_text.contains("sigil_context_v0"));
+    Ok(())
+}
+
+#[test]
+fn build_request_retrieves_context_v0_from_long_history_tail() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("Earlier validation investigation"))?;
+    let long_tail = format!(
+        "{} parser_tail_failure means the final validation stderr identified the parser",
+        "prefix-only context noise ".repeat(140)
+    );
+    session.append_assistant_message(ModelMessage::assistant(Some(long_tail), Vec::new()))?;
+    session.append_user_message(ModelMessage::user("What did parser_tail_failure mean?"))?;
+
+    let request = session.build_request(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+
+    let context_messages = request_context_v0_messages(&request);
+    assert_eq!(context_messages.len(), 1);
+    let context_text = context_messages[0]
+        .content
+        .as_deref()
+        .expect("context content");
+    assert!(context_text.contains("parser_tail_failure"));
+    assert!(context_text.contains("session-archive:message:"));
+    Ok(())
+}
+
+#[test]
 fn build_request_refreshes_session_memory_snapshot_after_disk_memory_changes() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");

@@ -1564,7 +1564,7 @@ fn worker_queue_status_summarizes_long_prompt() -> Result<()> {
     })?;
 
     let notice = app.last_notice().expect("queue notice should be set");
-    assert!(notice.starts_with("queued 1 · next please inspect"));
+    assert!(notice.starts_with("pending 1 follow-up · next please inspect"));
     assert!(notice.ends_with("..."));
     Ok(())
 }
@@ -1902,11 +1902,12 @@ fn worker_queue_messages_update_live_rows_and_dispatch_user_prompt() -> Result<(
 
     assert_eq!(
         app.last_notice(),
-        Some("queued 1 · next follow up after current run")
+        Some("pending 1 follow-up · next follow up after current run")
     );
     assert_eq!(app.composer_queue_rows().len(), 1);
     assert!(app.events.iter().any(|event| {
-        event.label == "queue:update" && event.detail.contains("next follow up after current run")
+        event.label == "follow-up:update"
+            && event.detail.contains("next follow up after current run")
     }));
 
     app.handle_worker_message(WorkerMessage::ConversationQueueDispatchStarted {
@@ -1915,12 +1916,12 @@ fn worker_queue_messages_update_live_rows_and_dispatch_user_prompt() -> Result<(
     })?;
     assert!(app.runtime.is_busy);
     assert_eq!(app.run_phase(), RunPhase::Thinking);
-    assert_eq!(app.last_notice(), Some("running queued input"));
+    assert_eq!(app.last_notice(), Some("running follow-up"));
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "follow up after current run"
     }));
     assert!(app.events.iter().any(|event| {
-        event.label == "queue:dispatch" && event.detail.contains(queue_id.as_str())
+        event.label == "follow-up:dispatch" && event.detail.contains(queue_id.as_str())
     }));
 
     app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
@@ -1928,7 +1929,7 @@ fn worker_queue_messages_update_live_rows_and_dispatch_user_prompt() -> Result<(
         paused: true,
         entries: Vec::new(),
     })?;
-    assert_eq!(app.last_notice(), Some("queue empty"));
+    assert_eq!(app.last_notice(), Some("no follow-ups pending"));
     Ok(())
 }
 
