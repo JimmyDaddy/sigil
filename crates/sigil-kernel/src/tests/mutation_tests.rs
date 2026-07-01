@@ -1863,6 +1863,64 @@ fn workspace_mutation_scan_records_changed_snapshot() -> Result<()> {
 }
 
 #[test]
+fn external_process_mutation_scan_result_records_changed_snapshot_without_tool_call() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "old")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+    let before = recorder.capture_workspace_scan(&workspace, &scope)?;
+
+    assert!(
+        recorder
+            .record_external_process_mutation_scan_result(
+                &before,
+                &before,
+                "mcp_server:clean",
+                ToolEffect::Unknown,
+                std::collections::BTreeMap::new(),
+            )?
+            .is_none(),
+        "unchanged external process scan must not create mutation evidence"
+    );
+
+    fs::write(workspace.join("note.txt"), "new")?;
+    let after = recorder.capture_workspace_scan(&workspace, &scope)?;
+    let event = recorder
+        .record_external_process_mutation_scan_result(
+            &before,
+            &after,
+            "mcp_server:filesystem",
+            ToolEffect::Unknown,
+            std::collections::BTreeMap::from([(
+                "mcp_startup_result".to_owned(),
+                "startup_failed".to_owned(),
+            )]),
+        )?
+        .expect("changed external process scan should record mutation");
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(payload.tool_call_id, None);
+    assert_eq!(payload.tool_name, "mcp_server:filesystem");
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::SnapshotChanged
+    );
+    assert!(!payload.unknown_dirty);
+    assert_eq!(
+        payload
+            .metadata
+            .get("mcp_startup_result")
+            .map(String::as_str),
+        Some("startup_failed")
+    );
+    Ok(())
+}
+
+#[test]
 fn execution_mutation_profile_captures_pre_execution_snapshot() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");

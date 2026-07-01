@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionSandboxProfile,
-    McpServerConfig, McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy,
-    MutationEventRecorder, ProviderCapabilities, SecretRedactor, Tool, ToolAccess, ToolCategory,
-    ToolContext, ToolEffect, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ApprovalMode, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackendCapabilities,
+    ExecutionBackendKind, ExecutionSandboxProfile, McpServerConfig, McpServerPinnedIdentity,
+    McpServerStartup, McpServerTrustPolicy, MutationEventRecorder, ProviderCapabilities,
+    SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext, ToolEffect, ToolEgressAudit,
+    ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, VerificationScope, WorkspaceMutationScan,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -384,6 +385,7 @@ async fn register_mcp_tools_for_startup(
             continue;
         }
 
+        let lifecycle_scan = capture_mcp_server_lifecycle_scan(&options, &server.name)?;
         let client = match McpClient::spawn(
             server.clone(),
             options.roots.clone(),
@@ -397,7 +399,13 @@ async fn register_mcp_tools_for_startup(
         {
             Ok(client) => client,
             Err(error) if !server.required => {
-                record_mcp_server_lifecycle_unknown_dirty(&options, &server.name, None)?;
+                record_mcp_server_lifecycle_scan_result(
+                    &options,
+                    &server.name,
+                    lifecycle_scan.as_ref(),
+                    None,
+                    "startup_failed",
+                )?;
                 warn!(
                     server = %server.name,
                     trust_class = server.trust.trust_class.as_str(),
@@ -407,17 +415,37 @@ async fn register_mcp_tools_for_startup(
                 continue;
             }
             Err(error) => {
-                record_mcp_server_lifecycle_unknown_dirty(&options, &server.name, None)?;
+                record_mcp_server_lifecycle_scan_result(
+                    &options,
+                    &server.name,
+                    lifecycle_scan.as_ref(),
+                    None,
+                    "startup_failed",
+                )?;
                 return Err(error);
             }
         };
         let process_receipt = client.process_receipt().clone();
-        record_mcp_server_lifecycle_unknown_dirty(&options, &server.name, Some(&process_receipt))?;
-        report.process_launch_receipts.push(process_receipt);
         let client = Arc::new(client);
         let tools = match client.list_tools().await {
-            Ok(tools) => tools,
+            Ok(tools) => {
+                record_mcp_server_lifecycle_scan_result(
+                    &options,
+                    &server.name,
+                    lifecycle_scan.as_ref(),
+                    Some(&process_receipt),
+                    "registered",
+                )?;
+                tools
+            }
             Err(error) if !server.required => {
+                record_mcp_server_lifecycle_scan_result(
+                    &options,
+                    &server.name,
+                    lifecycle_scan.as_ref(),
+                    Some(&process_receipt),
+                    "tools_list_failed",
+                )?;
                 warn!(
                     server = %server.name,
                     trust_class = server.trust.trust_class.as_str(),
@@ -427,9 +455,17 @@ async fn register_mcp_tools_for_startup(
                 continue;
             }
             Err(error) => {
+                record_mcp_server_lifecycle_scan_result(
+                    &options,
+                    &server.name,
+                    lifecycle_scan.as_ref(),
+                    Some(&process_receipt),
+                    "tools_list_failed",
+                )?;
                 bail!("MCP server {} tools/list failed: {error:#}", server.name);
             }
         };
+        report.process_launch_receipts.push(process_receipt);
         for tool in tools {
             let tool_name = McpToolName::new(
                 &server.name,
@@ -508,17 +544,97 @@ async fn register_mcp_tools_for_startup(
     Ok(report)
 }
 
-fn record_mcp_server_lifecycle_unknown_dirty(
+fn capture_mcp_server_lifecycle_scan(
     options: &McpToolRegistrationOptions,
     server_name: &str,
+) -> Result<Option<WorkspaceMutationScan>> {
+    let (Some(recorder), Some(workspace_root)) =
+        (&options.mutation_recorder, &options.mutation_workspace_root)
+    else {
+        return Ok(None);
+    };
+    let scope = VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    match recorder.capture_workspace_scan(workspace_root, &scope) {
+        Ok(scan) => Ok(Some(scan)),
+        Err(error) => {
+            let mut metadata = mcp_lifecycle_metadata(None, "scan_unavailable_before_startup");
+            metadata.insert(
+                "mcp_lifecycle_scan".to_owned(),
+                "before_unavailable".to_owned(),
+            );
+            recorder
+                .record_external_process_unknown_dirty_with_metadata(
+                    workspace_root,
+                    format!("mcp_server:{server_name}"),
+                    ToolEffect::Unknown,
+                    metadata,
+                )
+                .with_context(|| {
+                    format!("failed to record MCP server {server_name} lifecycle mutation evidence")
+                })?;
+            warn!(
+                server = %server_name,
+                error = %error,
+                "failed to capture MCP server lifecycle workspace scan before startup"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn record_mcp_server_lifecycle_scan_result(
+    options: &McpToolRegistrationOptions,
+    server_name: &str,
+    before: Option<&WorkspaceMutationScan>,
     receipt: Option<&McpProcessLaunchReceipt>,
+    startup_result: &'static str,
 ) -> Result<()> {
     let (Some(recorder), Some(workspace_root)) =
         (&options.mutation_recorder, &options.mutation_workspace_root)
     else {
         return Ok(());
     };
-    let metadata = receipt
+    let Some(before) = before else {
+        return Ok(());
+    };
+    let metadata = mcp_lifecycle_metadata(receipt, startup_result);
+    let process_name = format!("mcp_server:{server_name}");
+    match recorder.capture_workspace_scan(workspace_root, &before.scope) {
+        Ok(after) => {
+            recorder.record_external_process_mutation_scan_result(
+                before,
+                &after,
+                process_name,
+                ToolEffect::Unknown,
+                metadata,
+            )?;
+        }
+        Err(error) => {
+            recorder
+                .record_external_process_scan_unavailable_after(
+                    before,
+                    process_name,
+                    ToolEffect::Unknown,
+                    metadata,
+                )
+                .with_context(|| {
+                    format!("failed to record MCP server {server_name} lifecycle mutation evidence")
+                })?;
+            warn!(
+                server = %server_name,
+                error = %error,
+                "failed to capture MCP server lifecycle workspace scan after startup"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn mcp_lifecycle_metadata(
+    receipt: Option<&McpProcessLaunchReceipt>,
+    startup_result: &'static str,
+) -> BTreeMap<String, String> {
+    let mut metadata = receipt
         .map(McpProcessLaunchReceipt::audit_metadata)
         .unwrap_or_else(|| {
             BTreeMap::from([(
@@ -526,17 +642,8 @@ fn record_mcp_server_lifecycle_unknown_dirty(
                 McpProcessCoverage::Unsupported.as_str().to_owned(),
             )])
         });
-    recorder
-        .record_external_process_unknown_dirty_with_metadata(
-            workspace_root,
-            format!("mcp_server:{server_name}"),
-            ToolEffect::Unknown,
-            metadata,
-        )
-        .with_context(|| {
-            format!("failed to record MCP server {server_name} lifecycle mutation evidence")
-        })?;
-    Ok(())
+    metadata.insert("mcp_startup_result".to_owned(), startup_result.to_owned());
+    metadata
 }
 
 fn default_mcp_roots() -> Result<Vec<PathBuf>> {

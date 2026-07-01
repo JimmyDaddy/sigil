@@ -1106,6 +1106,52 @@ impl MutationEventRecorder {
         self.append_workspace_mutation_detected(&payload).map(Some)
     }
 
+    /// Records a non-tool external process mutation if its after-snapshot differs.
+    ///
+    /// This is used for process lifecycle paths such as MCP server startup, where the runtime
+    /// has no model-visible tool call id but can still compare workspace snapshots before and
+    /// after the process boundary.
+    pub fn record_external_process_mutation_scan_result(
+        &self,
+        before: &WorkspaceMutationScan,
+        after: &WorkspaceMutationScan,
+        process_name: impl Into<String>,
+        tool_effect: ToolEffect,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<Option<StoredEvent>> {
+        let reason = workspace_mutation_detection_reason(before, after);
+        let Some(reason) = reason else {
+            return Ok(None);
+        };
+        let process_name = process_name.into();
+        let workspace_revision = latest_workspace_revision(&self.store, &before.workspace_id)?
+            .max(before.workspace_revision)
+            .saturating_add(1);
+        let payload = WorkspaceMutationDetected {
+            operation_id: workspace_detection_operation_id(
+                &before.workspace_id,
+                &process_name,
+                before.workspace_snapshot_id.as_deref(),
+                after.workspace_snapshot_id.as_deref(),
+                reason,
+            ),
+            tool_call_id: None,
+            tool_name: process_name,
+            tool_effect,
+            workspace_id: before.workspace_id.clone(),
+            scope_hash: before.scope_hash.clone(),
+            from_workspace_snapshot_id: before.workspace_snapshot_id.clone(),
+            to_workspace_snapshot_id: after.workspace_snapshot_id.clone(),
+            base_workspace_revision: before.workspace_revision,
+            workspace_revision,
+            reason,
+            unknown_dirty: before.workspace_knowledge.is_unknown_dirty()
+                || after.workspace_knowledge.is_unknown_dirty(),
+            metadata,
+        };
+        self.append_workspace_mutation_detected(&payload).map(Some)
+    }
+
     /// Records an unknown-dirty mutation when scan coverage is unavailable.
     pub fn record_workspace_scan_unavailable(
         &self,
@@ -1139,6 +1185,42 @@ impl MutationEventRecorder {
             reason: WorkspaceMutationDetectionReason::ScanUnavailable,
             unknown_dirty: true,
             metadata: BTreeMap::new(),
+        };
+        self.append_workspace_mutation_detected(&payload)
+    }
+
+    /// Records an unknown-dirty non-tool external process mutation after a failed after-scan.
+    pub fn record_external_process_scan_unavailable_after(
+        &self,
+        before: &WorkspaceMutationScan,
+        process_name: impl Into<String>,
+        tool_effect: ToolEffect,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<StoredEvent> {
+        let process_name = process_name.into();
+        let workspace_revision = latest_workspace_revision(&self.store, &before.workspace_id)?
+            .max(before.workspace_revision)
+            .saturating_add(1);
+        let payload = WorkspaceMutationDetected {
+            operation_id: workspace_detection_operation_id(
+                &before.workspace_id,
+                &process_name,
+                before.workspace_snapshot_id.as_deref(),
+                None,
+                WorkspaceMutationDetectionReason::ScanUnavailable,
+            ),
+            tool_call_id: None,
+            tool_name: process_name,
+            tool_effect,
+            workspace_id: before.workspace_id.clone(),
+            scope_hash: before.scope_hash.clone(),
+            from_workspace_snapshot_id: before.workspace_snapshot_id.clone(),
+            to_workspace_snapshot_id: None,
+            base_workspace_revision: before.workspace_revision,
+            workspace_revision,
+            reason: WorkspaceMutationDetectionReason::ScanUnavailable,
+            unknown_dirty: true,
+            metadata,
         };
         self.append_workspace_mutation_detected(&payload)
     }

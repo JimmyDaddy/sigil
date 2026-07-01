@@ -11,6 +11,7 @@ use sigil_kernel::{
     McpServerTrustPolicy, McpTrustClass, MutationEventRecorder, ProviderCapabilities,
     ReasoningStreamSupport, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
     ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason,
 };
 use tokio::{
     io::BufReader,
@@ -436,7 +437,7 @@ while True:
 }
 
 #[tokio::test]
-async fn registration_with_mutation_recorder_records_mcp_lifecycle_unknown_dirty() -> Result<()> {
+async fn registration_with_mutation_recorder_does_not_dirty_clean_startup() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -512,24 +513,9 @@ while True:
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(detected.len(), 1);
-    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
-    assert_eq!(payload.tool_call_id, None);
-    assert_eq!(payload.tool_name, "mcp_server:lifecycle");
-    assert!(payload.unknown_dirty);
-    assert_eq!(
-        payload
-            .metadata
-            .get("mcp_process_coverage")
-            .map(String::as_str),
-        Some("local_stdio_outside_sandbox")
-    );
-    assert_eq!(
-        payload
-            .metadata
-            .get("mcp_process_backend")
-            .map(String::as_str),
-        Some("local")
+    assert!(
+        detected.is_empty(),
+        "clean MCP startup must not make verification inconclusive"
     );
     Ok(())
 }
@@ -545,7 +531,7 @@ async fn mcp_lifecycle_mutation_failure_adds_server_context() -> Result<()> {
     let options = McpToolRegistrationOptions::eager()?
         .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store));
 
-    let error = super::record_mcp_server_lifecycle_unknown_dirty(&options, "filesystem", None)
+    let error = super::capture_mcp_server_lifecycle_scan(&options, "filesystem")
         .expect_err("directory-backed session path should fail mutation evidence append");
 
     assert!(
@@ -626,7 +612,63 @@ while True:
 }
 
 #[tokio::test]
-async fn mcp_startup_failure_with_recorder_records_unknown_dirty() -> Result<()> {
+async fn mcp_startup_failure_without_workspace_change_does_not_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let script = temp.path().join("crashing_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import sys
+
+sys.exit(7)
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_options(
+        &mut registry,
+        &[McpServerConfig {
+            name: "crashy".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                trust_class: McpTrustClass::ThirdParty,
+                approval_default: ApprovalMode::Allow,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone())),
+    )
+    .await
+    .expect_err("startup failure should still surface");
+
+    assert!(registry.specs().is_empty());
+    let detected = JsonlSessionStore::read_event_records(session_store.path())?
+        .into_iter()
+        .filter_map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        detected.is_empty(),
+        "failed MCP startup without workspace writes must not stale verification"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_startup_failure_with_side_effect_records_snapshot_changed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -684,7 +726,18 @@ sys.exit(7)
     let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
     assert_eq!(payload.tool_call_id, None);
     assert_eq!(payload.tool_name, "mcp_server:crashy");
-    assert!(payload.unknown_dirty);
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::SnapshotChanged
+    );
+    assert!(!payload.unknown_dirty);
+    assert_eq!(
+        payload
+            .metadata
+            .get("mcp_startup_result")
+            .map(String::as_str),
+        Some("startup_failed")
+    );
     Ok(())
 }
 
