@@ -299,12 +299,11 @@ fn read_repo_context_snippet_for_candidate(
     path: &Path,
     candidate: &RepoContextCandidate,
 ) -> Option<String> {
-    if !candidate.snippet_terms.is_empty() {
-        if let Some(snippet) =
+    if !candidate.snippet_terms.is_empty()
+        && let Some(snippet) =
             read_repo_context_snippet_around_terms(path, &candidate.snippet_terms)
-        {
-            return Some(snippet);
-        }
+    {
+        return Some(snippet);
     }
     read_repo_context_snippet(path)
 }

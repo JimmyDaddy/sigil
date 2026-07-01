@@ -406,6 +406,12 @@ fn context_source_symbol_candidates_preserve_quoted_natural_word_as_symbol() -> 
         context.items.first().map(|item| item.id.as_str()),
         Some("repo-file:crates/sigil-runtime/src/system.rs")
     );
+    assert!(
+        context
+            .snippets
+            .get("repo-file:crates/sigil-runtime/src/system.rs")
+            .is_some_and(|snippet| snippet.contains("pub fn system"))
+    );
     Ok(())
 }
 
