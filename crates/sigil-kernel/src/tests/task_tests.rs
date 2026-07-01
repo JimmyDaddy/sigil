@@ -309,9 +309,15 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
     assert!(spec.description.contains("Do not call task"));
     assert!(spec.description.contains("subagent_read"));
     assert!(spec.description.contains("subagent_write"));
+    assert!(
+        spec.description
+            .contains("executor for ordinary main-session")
+    );
+    assert!(spec.description.contains("changeset-only write proposals"));
     assert!(spec.input_schema.to_string().contains("display_name"));
     assert!(spec.input_schema.to_string().contains("depends_on"));
     assert!(spec.input_schema.to_string().contains("shared_read_only"));
+    assert!(spec.input_schema.to_string().contains("changeset_only"));
     assert!(
         spec.input_schema
             .to_string()
@@ -322,6 +328,72 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
             .to_string()
             .contains("delegated read-only verification")
     );
+}
+
+#[test]
+fn task_plan_update_rejects_subagent_write_without_changeset_only() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 1,
+        max_plan_versions: 1,
+    };
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: r#"{
+            "plan_version":1,
+            "status":"accepted",
+            "steps":[
+                {
+                    "step_id":"write",
+                    "title":"Write",
+                    "role":"subagent_write",
+                    "mode":"write",
+                    "isolation":"sequential_workspace_write"
+                }
+            ]
+        }"#
+        .to_owned(),
+    };
+
+    let error = task_plan_update_entry(&context, &call)
+        .expect_err("subagent_write must use changeset_only isolation");
+
+    assert!(error.to_string().contains("requires changeset_only"));
+    Ok(())
+}
+
+#[test]
+fn task_plan_update_rejects_changeset_only_without_subagent_write() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 1,
+        max_plan_versions: 1,
+    };
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: r#"{
+            "plan_version":1,
+            "status":"accepted",
+            "steps":[
+                {
+                    "step_id":"write",
+                    "title":"Write",
+                    "role":"executor",
+                    "mode":"write",
+                    "isolation":"changeset_only"
+                }
+            ]
+        }"#
+        .to_owned(),
+    };
+
+    let error = task_plan_update_entry(&context, &call)
+        .expect_err("changeset_only is reserved for subagent_write");
+
+    assert!(error.to_string().contains("requires subagent_write"));
+    Ok(())
 }
 
 #[test]

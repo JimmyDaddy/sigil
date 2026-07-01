@@ -352,6 +352,25 @@ Manual smoke:
 4. Confirm the normal `/task` planner creates and runs the executable task plan.
 5. Confirm missing/passed/stale verification behavior is unchanged.
 
+Opt-in live TUI smoke:
+
+```bash
+scripts/tui-plan-task-smoke.py --timeout 240
+```
+
+This script launches the real TUI in a pseudo-terminal with isolated
+`SIGIL_STATE_HOME` and `SIGIL_CACHE_HOME`, uses the local provider
+configuration, accepts the workspace trust gate, submits `/plan`, accepts the
+plan-ready handoff with Enter, waits for the normal task runtime to complete,
+verifies the file edit, and checks that the session does not contain
+unknown-dirty workspace mutation pollution. It is not a default CI gate because
+it can spend provider tokens and depends on terminal/provider availability.
+
+The `/task` planner/schema contract also treats ordinary writes and delegated
+write proposals as distinct roles: normal main-session edits use
+`executor + sequential_workspace_write`, while `subagent_write` is reserved for
+`changeset_only` delegated write proposals.
+
 ## 15. Open Questions
 
 - Whether a later implementation should move long plan text from bounded inline storage to the general artifact store.

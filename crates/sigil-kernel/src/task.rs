@@ -374,7 +374,7 @@ pub struct TaskPlanUpdateContext {
 pub fn task_plan_update_tool_spec() -> ToolSpec {
     ToolSpec {
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools; delegate work by adding steps whose role is subagent_read or subagent_write."
+        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only work. Use subagent_write only for delegated changeset-only write proposals."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -405,7 +405,7 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "role": {
                                 "type": "string",
                                 "enum": ["planner", "executor", "subagent_read", "subagent_write"],
-                                "description": "Use executor for main-session work, subagent_read for delegated read-only verification in a child session, and subagent_write only when the delegated step may edit files."
+                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only verification. Use subagent_write only with changeset_only isolation for a delegated write proposal."
                             },
                             "depends_on": {
                                 "type": "array",
@@ -423,7 +423,7 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "isolation": {
                                 "type": "string",
                                 "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"],
-                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write; read/review/verify steps default to shared_read_only."
+                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires changeset_only. Read/review/verify steps always use shared_read_only."
                             }
                         },
                         "required": ["step_id", "title", "role"],
@@ -558,6 +558,7 @@ pub fn validate_task_plan_graph_steps(steps: &[TaskStepSpec]) -> Result<()> {
         let mode = step.effective_mode();
         let isolation = step.effective_isolation();
         validate_step_mode_isolation(&step.step_id, mode, isolation)?;
+        validate_step_role_isolation(&step.step_id, step.role, isolation)?;
     }
 
     for step in steps {
@@ -613,6 +614,26 @@ fn validate_step_mode_isolation(
             step_id.as_str(),
             mode = mode.as_str(),
             isolation = isolation.as_str()
+        );
+    }
+    Ok(())
+}
+
+fn validate_step_role_isolation(
+    step_id: &TaskStepId,
+    role: AgentRole,
+    isolation: TaskIsolationMode,
+) -> Result<()> {
+    if role == AgentRole::SubagentWrite && isolation != TaskIsolationMode::ChangesetOnly {
+        bail!(
+            "subagent_write task step {} requires changeset_only isolation; use executor for sequential_workspace_write edits",
+            step_id.as_str()
+        );
+    }
+    if role != AgentRole::SubagentWrite && isolation == TaskIsolationMode::ChangesetOnly {
+        bail!(
+            "changeset_only task step {} requires subagent_write role",
+            step_id.as_str()
         );
     }
     Ok(())

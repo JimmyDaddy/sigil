@@ -20,16 +20,15 @@ use crate::{
     PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
     ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
     SessionLogEntry, SessionRef, SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
-    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec,
-    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
-    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolEffect,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy, VerificationVerdict,
-    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
-    stable_workspace_id, write_file_with_mutation,
+    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolCall, ToolCategory, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
+    WriteLeaseReleaseStatus, WriteLeaseScope, stable_workspace_id, write_file_with_mutation,
 };
 
 use super::{
@@ -184,8 +183,10 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     let prompt = planner_prompt("review implementation");
 
     assert!(prompt.contains("Do not call a task or subagent tool"));
-    assert!(prompt.contains("role subagent_read or subagent_write"));
-    assert!(prompt.contains("child sessions"));
+    assert!(prompt.contains("role executor for ordinary main-session reads and edits"));
+    assert!(prompt.contains("role subagent_read"));
+    assert!(prompt.contains("role subagent_write only for delegated changeset-only"));
+    assert!(prompt.contains("do not pair subagent_write with sequential_workspace_write"));
 }
 
 #[test]
@@ -2482,7 +2483,7 @@ async fn direct_child_session_records_failed_child_provider() -> Result<()> {
 }
 
 #[tokio::test]
-async fn subagent_write_step_routes_denied_approval_to_parent_session() -> Result<()> {
+async fn subagent_write_step_rejects_non_changeset_isolation_before_denied_route() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session-parent.jsonl"))?;
     let mut registry = ToolRegistry::new();
@@ -2508,7 +2509,7 @@ async fn subagent_write_step_routes_denied_approval_to_parent_session() -> Resul
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = DenyApprovalHandler;
 
-    let output = orchestrator
+    let error = orchestrator
         .continue_run(
             &mut session,
             SequentialTaskRequest {
@@ -2523,32 +2524,22 @@ async fn subagent_write_step_routes_denied_approval_to_parent_session() -> Resul
             &mut handler,
             &mut approval_handler,
         )
-        .await?;
+        .await
+        .expect_err("legacy subagent write plans must be rejected before routing approvals");
 
-    assert_eq!(output.status, TaskRunStatus::Paused);
-    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
+    assert!(error.to_string().contains("requires changeset_only"));
+    assert!(session.entries().iter().all(|entry| {
+        !matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(route))
-                if route.status == TaskRouteStatus::Requested
-                    && route.tool_name == "write_file"
+            SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(_))
         )
     }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(route))
-                if route.status == TaskRouteStatus::Rejected
-                    && route.call_id == "call-write-1"
-        )
-    }));
-    assert!(temp.path().join("children/task_1").is_dir());
+    assert!(!temp.path().join("children/task_1").exists());
     Ok(())
 }
 
 #[tokio::test]
-async fn subagent_write_step_routes_approved_approval_to_parent_session() -> Result<()> {
+async fn subagent_write_step_rejects_non_changeset_isolation_before_approved_route() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ApprovalRequiredTool));
     let orchestrator = SequentialTaskOrchestrator::new(
@@ -2572,7 +2563,7 @@ async fn subagent_write_step_routes_approved_approval_to_parent_session() -> Res
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
 
-    let output = orchestrator
+    let error = orchestrator
         .continue_run(
             &mut session,
             SequentialTaskRequest {
@@ -2587,15 +2578,14 @@ async fn subagent_write_step_routes_approved_approval_to_parent_session() -> Res
             &mut handler,
             &mut approval_handler,
         )
-        .await?;
+        .await
+        .expect_err("legacy subagent write plans must be rejected before routing approvals");
 
-    assert_eq!(output.status, TaskRunStatus::Completed);
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
+    assert!(error.to_string().contains("requires changeset_only"));
+    assert!(session.entries().iter().all(|entry| {
+        !matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(route))
-                if route.status == TaskRouteStatus::Resolved
-                    && route.call_id == "call-write-1"
+            SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(_))
         )
     }));
     Ok(())
