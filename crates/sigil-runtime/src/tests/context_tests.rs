@@ -375,6 +375,72 @@ fn context_source_symbol_candidates_do_not_score_natural_language_terms() -> Res
 }
 
 #[test]
+fn context_source_symbol_candidates_preserve_quoted_natural_word_as_symbol() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-runtime/src/system.rs"),
+        "pub fn system() {}\n",
+    )?;
+    fs::create_dir_all(temp.path().join("crates/sigil-noise/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-noise/src/noisy.rs"),
+        "which where automatic system provided most likely answer output only\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Where is `system` defined in Rust source?",
+    )?;
+
+    let source = context
+        .items
+        .iter()
+        .find(|item| item.id == "repo-file:crates/sigil-runtime/src/system.rs")
+        .expect("system.rs source candidate");
+    assert_eq!(
+        source.inclusion_reason,
+        ContextInclusionReason::ExactSymbolMatch
+    );
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:crates/sigil-runtime/src/system.rs")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_candidates_preserve_code_like_term_after_noise_filter() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
+    fs::write(
+        temp.path()
+            .join("crates/sigil-runtime/src/system_config.rs"),
+        "pub struct SystemConfig;\n",
+    )?;
+    fs::create_dir_all(temp.path().join("crates/sigil-noise/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-noise/src/noisy.rs"),
+        "which where automatic system provided most likely answer output only\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Where is SystemConfig defined in Rust source?",
+    )?;
+
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:crates/sigil-runtime/src/system_config.rs")
+    );
+    assert_eq!(
+        context.items.first().map(|item| &item.inclusion_reason),
+        Some(&ContextInclusionReason::ExactSymbolMatch)
+    );
+    Ok(())
+}
+
+#[test]
 fn context_source_symbol_candidates_prefer_exact_file_stem_symbol_match() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path().join("crates/sigil-kernel/src"))?;

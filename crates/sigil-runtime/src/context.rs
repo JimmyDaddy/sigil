@@ -83,9 +83,16 @@ pub fn context_candidates_from_repo_query(
 
     let explicit_candidate_count = candidates.len();
     let terms = lexical_query_terms(query);
-    if explicit_candidate_count == 0 && !terms.is_empty() {
-        collect_lexical_file_candidates(&workspace_root, &terms, &mut candidates);
-        collect_source_symbol_candidates(&workspace_root, query, &terms, &mut candidates);
+    if explicit_candidate_count == 0 {
+        if !terms.is_empty() {
+            collect_lexical_file_candidates(&workspace_root, &terms, &mut candidates);
+        }
+        if !terms.is_empty()
+            || query_has_source_intent(query)
+            || !explicit_code_query_terms(query).is_empty()
+        {
+            collect_source_symbol_candidates(&workspace_root, query, &terms, &mut candidates);
+        }
     }
 
     let builder = CodeContextBuilder::new();
@@ -348,6 +355,17 @@ impl SourceQueryProfile {
         let mut source_terms = BTreeSet::new();
         let mut symbol_terms = BTreeSet::new();
 
+        for term in explicit_code_query_terms(query) {
+            if is_path_like_query_term(&term) {
+                source_terms.insert(term.to_ascii_lowercase());
+            } else {
+                for variant in source_term_variants(&term) {
+                    symbol_terms.insert(variant.clone());
+                    source_terms.insert(variant);
+                }
+            }
+        }
+
         for term in lexical_terms {
             match source_query_term_role(term) {
                 SourceQueryTermRole::SourceIntentHint => {
@@ -412,14 +430,14 @@ fn source_query_term_role(term: &str) -> SourceQueryTermRole {
     }
 
     let lower = trimmed.to_ascii_lowercase();
+    if is_path_like_query_term(trimmed) {
+        return SourceQueryTermRole::PathLike;
+    }
     if is_source_intent_hint(&lower) {
         return SourceQueryTermRole::SourceIntentHint;
     }
     if is_natural_language_query_term(&lower) {
         return SourceQueryTermRole::NaturalLanguage;
-    }
-    if is_path_like_query_term(trimmed) {
-        return SourceQueryTermRole::PathLike;
     }
     if is_code_like_query_token(trimmed) {
         return SourceQueryTermRole::SymbolLike;
@@ -564,6 +582,38 @@ fn source_query_tokens(query: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::trim)
         .filter(|token| token.len() >= 3)
         .map(str::to_owned)
+}
+
+fn explicit_code_query_terms(query: &str) -> BTreeSet<String> {
+    let mut terms = BTreeSet::new();
+    collect_delimited_query_terms(query, '`', &mut terms);
+    collect_delimited_query_terms(query, '"', &mut terms);
+    collect_delimited_query_terms(query, '\'', &mut terms);
+    terms
+}
+
+fn collect_delimited_query_terms(query: &str, delimiter: char, terms: &mut BTreeSet<String>) {
+    let mut rest = query;
+    while let Some(start) = rest.find(delimiter) {
+        rest = &rest[start + delimiter.len_utf8()..];
+        let Some(end) = rest.find(delimiter) else {
+            break;
+        };
+        collect_explicit_query_term(&rest[..end], terms);
+        rest = &rest[end + delimiter.len_utf8()..];
+    }
+}
+
+fn collect_explicit_query_term(segment: &str, terms: &mut BTreeSet<String>) {
+    let term = segment
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | '.' | ',' | ':' | ';'));
+    if term.len() < 3 || term.len() > 96 || term.chars().any(char::is_whitespace) {
+        return;
+    }
+    if term.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+        terms.insert(term.to_owned());
+    }
 }
 
 fn is_code_like_query_token(token: &str) -> bool {

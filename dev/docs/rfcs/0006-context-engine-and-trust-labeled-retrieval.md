@@ -109,7 +109,7 @@ Implementation progress:
 - 已完成 Context quality evidence sweep：`scripts/run-context-quality.sh` 可生成 `context-quality.jsonl`、`summary.md` 和 `manifest.json`，用于把 E06.6 trigger decision 绑定到可复核 artifact。
 - 已完成 runtime repo-file provider wiring：CLI 和 TUI primary chat 会通过 `RuntimeContextCandidates` 向 request assembly 提供 bounded repository candidates，并在 `PrefixSnapshotCaptured` 中保留 Context V0 materialization。
 - 已完成 explicit-path precision polish：用户明确提到存在的 workspace-relative path 时，只注入该路径，不再被同名 README、RFC 或 lexical neighbor 干扰。
-- 已完成 source/symbol auto-context scheduling：对 Rust-like identifier、function/tool name、trait/type、runner handoff、TUI surface 和 source lookup prompt，runtime 会在 bounded `crates/**/*.rs` 范围内加入少量高置信源码候选；query term 会先分类为 intent hint、symbol-like、path-like、lexical hint 或 natural-language noise，避免把 `rust`、`source`、`which` 等自然语言或意图词当成 exact symbol evidence；exact symbol matches 标为 `exact_symbol_match`，source path/module matches 标为 `source_path_match`。
+- 已完成 source/symbol auto-context scheduling：对 Rust-like identifier、function/tool name、trait/type、runner handoff、TUI surface 和 source lookup prompt，runtime 会在 bounded `crates/**/*.rs` 范围内加入少量高置信源码候选；query term 会先分类为 intent hint、symbol-like、path-like、lexical hint 或 natural-language noise，显式反引号/引号包裹的单个代码 token 会优先保留为源码候选，避免把 `rust`、`source`、`which` 等自然语言或意图词当成 exact symbol evidence；exact symbol matches 标为 `exact_symbol_match`，source path/module matches 标为 `source_path_match`。
 
 2026-06-29 审计补充：
 
