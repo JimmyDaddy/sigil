@@ -83,6 +83,10 @@ Enter       create and run task
 Esc         discard
 ```
 
+`Esc` discard is durable for typed plan artifacts: it appends
+`PlanDecisionRecorded { decision: Rejected }` and removes the plan from the pending handoff
+projection. Only non-durable fallback text plans may be dismissed locally.
+
 If the plan requests edits, Sigil can ask one coarse follow-up:
 
 ```text
@@ -124,6 +128,9 @@ Use separate words for separate meanings:
 - `TaskCreatedFromPlan`: durable task was created from the plan artifact.
 
 Do not overload `PlanApproved` to mean both "the plan is a good idea" and "tools may write without prompting".
+In the current codebase, `PlanApproved` is treated as a legacy permission-grant record only; new
+handoff flows use `PlanDecisionRecorded` for acceptance/rejection and `TaskCreatedFromPlan` for
+task materialization.
 
 ## 6. Durable Domain Model
 

@@ -886,7 +886,8 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     .join("\n");
 
     assert!(
-        rendered.contains("[ctl] plan approved v1 permission=workspace_edits expires=next_user")
+        rendered
+            .contains("[ctl] legacy plan grant v1 permission=workspace_edits expires=next_user")
     );
     assert!(rendered.contains("[ctl] task task_1 status=running"));
     assert!(rendered.contains("[ctl] plan task_1 v1 status=accepted steps=1"));

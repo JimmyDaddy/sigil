@@ -175,10 +175,12 @@ pub struct TaskCreatedFromPlanEntry {
     pub created_at_ms: u64,
 }
 
-/// Append-only approval for one plan-mode result.
+/// Legacy append-only permission grant for one plan-mode result.
 ///
-/// This is intentionally separate from durable task plans. A plan approval records a user's
-/// permission decision for a read-only planning result; it does not create or continue a task.
+/// This record predates durable plan artifacts. It records a scoped permission decision for a
+/// read-only planning result; it is not a plan acceptance decision and does not create or
+/// continue a task. New plan-to-task handoff flows use [`PlanDecisionRecordedEntry`] plus
+/// [`TaskCreatedFromPlanEntry`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct PlanApprovedEntry {
@@ -410,7 +412,7 @@ pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
         .unwrap_or(&entry.summary)
         .trim();
     format!(
-        "Execute the following user-approved plan. Treat it as the task input; first create the normal task execution plan, then carry it out with the configured approval and verification requirements.\n\nApproved plan:\n\n{plan_text}"
+        "Execute the following user-approved plan. Treat it as the authoritative task input; first create the normal task execution plan, then carry it out with the configured approval and verification requirements. Preserve the approved plan's scope and order unless a change is necessary for correctness; if you must add, remove, or reorder executable steps, include a concise reason in the task step detail.\n\nApproved plan:\n\n{plan_text}"
     )
 }
 

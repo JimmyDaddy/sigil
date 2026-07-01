@@ -1131,7 +1131,7 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             record.compacted_message_count, record.retained_tail_message_count
         ),
         ControlEntry::PlanApproved(entry) => format!(
-            "[ctl] plan approved v{} permission={} expires={} hash={}",
+            "[ctl] legacy plan grant v{} permission={} expires={} hash={}",
             entry.plan_version,
             plan_approval_permission_label(entry.permission),
             plan_approval_expiry_label(&entry.expires),
@@ -1145,9 +1145,11 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             truncate_session_view_text(&entry.plan_hash, 16)
         ),
         ControlEntry::PlanDecisionRecorded(entry) => format!(
-            "[ctl] plan decision {} decision={}",
+            "[ctl] plan decision {} decision={} hash={} reason={}",
             entry.plan_id.as_str(),
-            entry.decision.as_str()
+            entry.decision.as_str(),
+            truncate_session_view_text(&entry.plan_hash, 16),
+            truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 48)
         ),
         ControlEntry::PlanPermissionGranted(entry) => format!(
             "[ctl] plan grant {} task={} permission={} paths={} snapshot={}",
@@ -1168,9 +1170,9 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
                 )
             };
             format!(
-                "[ctl] task {} from plan {} {} stale={}",
-                entry.task_id.as_str(),
+                "[ctl] task from plan plan={} task={} {} stale={}",
                 entry.plan_id.as_str(),
+                entry.task_id.as_str(),
                 plan_state,
                 truncate_session_view_text(entry.stale_reason.as_deref().unwrap_or("-"), 48)
             )

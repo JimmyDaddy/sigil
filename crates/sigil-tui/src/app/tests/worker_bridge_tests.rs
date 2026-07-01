@@ -276,7 +276,38 @@ fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
 }
 
 #[test]
-fn pending_plan_approval_discard_clears_surface_without_worker_action() -> Result<()> {
+fn pending_durable_plan_discard_requests_worker_rejection() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        "1. Update README.md",
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        Some("snapshot-1".to_owned()),
+    )?
+    .expect("non-empty plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+    assert!(app.pending_plan_approval().is_some());
+    assert!(matches!(
+        action,
+        Some(AppAction::RejectPlan {
+            plan_id,
+            expected_plan_hash,
+        }) if plan_id == draft.plan_id.as_str() && expected_plan_hash == draft.plan_hash
+    ));
+    assert_eq!(app.last_notice(), Some("rejecting plan"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| { event.label == "plan" && event.detail == "reject" })
+    );
+    Ok(())
+}
+
+#[test]
+fn pending_text_plan_discard_clears_surface_without_worker_action() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::PlanRunFinished {
         result: sigil_kernel::AgentRunResult {
@@ -298,6 +329,44 @@ fn pending_plan_approval_discard_clears_surface_without_worker_action() -> Resul
             .iter()
             .any(|event| { event.label == "plan" && event.detail == "dismissed" })
     );
+    Ok(())
+}
+
+#[test]
+fn plan_rejected_message_syncs_session_and_clears_pending_surface() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        "1. Update README.md",
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        Some("snapshot-1".to_owned()),
+    )?
+    .expect("non-empty plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft);
+    let entry = sigil_kernel::PlanDecisionRecordedEntry {
+        plan_id: draft.plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+        decision: sigil_kernel::PlanDecision::Rejected,
+        decided_by: sigil_kernel::PlanDecisionActor::User,
+        decided_at_ms: 42,
+        reason: Some("discarded plan".to_owned()),
+    };
+
+    app.handle_worker_message(WorkerMessage::PlanRejected {
+        entry: entry.clone(),
+        entries: vec![
+            SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)),
+            SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(entry.clone())),
+        ],
+    })?;
+
+    assert!(app.pending_plan_approval().is_none());
+    let expected_notice = format!("plan {} rejected", entry.plan_id.as_str());
+    assert_eq!(app.last_notice(), Some(expected_notice.as_str()));
+    let projection =
+        sigil_kernel::PlanArtifactProjection::from_entries(&app.session_browser.current_entries);
+    assert!(projection.latest_pending_plan().is_none());
+    assert_eq!(projection.latest_decision(&entry.plan_id), Some(&entry));
     Ok(())
 }
 
@@ -326,7 +395,7 @@ fn plan_approved_message_syncs_session_and_clears_pending_surface() -> Result<()
     })?;
 
     assert!(app.pending_plan_approval().is_none());
-    assert_eq!(app.last_notice(), Some("plan approved: ask"));
+    assert_eq!(app.last_notice(), Some("plan grant: ask"));
     assert_eq!(
         sigil_kernel::PlanApprovalProjection::from_entries(&app.session_browser.current_entries)
             .latest_approval,

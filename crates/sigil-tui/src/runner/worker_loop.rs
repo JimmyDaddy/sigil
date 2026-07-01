@@ -86,15 +86,15 @@ pub(in crate::runner) use queue_driver::{
 };
 pub(in crate::runner) use scheduler::run_worker_loop;
 pub(in crate::runner) use task_runtime::{
-    CreateTaskFromPlanRequest, PlanApprovalRequest, SkillChildRunSpawn, TaskContinueSpawn,
-    TaskRunSpawn, VerificationCheckPromotionKind, VerificationCheckPromotionOutcome,
-    append_plan_draft, approve_plan, clean_mutation_artifacts, create_task_from_plan,
-    delete_mutation_artifact, ensure_session_workspace_trust,
+    CreateTaskFromPlanRequest, PlanApprovalRequest, RejectPlanRequest, SkillChildRunSpawn,
+    TaskContinueSpawn, TaskRunSpawn, VerificationCheckPromotionKind,
+    VerificationCheckPromotionOutcome, append_plan_draft, approve_plan, clean_mutation_artifacts,
+    create_task_from_plan, delete_mutation_artifact, ensure_session_workspace_trust,
     format_mutation_artifact_cleanup_report, format_mutation_artifact_delete_report,
     load_worker_skill, next_task_id, plan_mode_transient_context,
-    promote_workspace_verification_check, resolve_continue_task, session_ref_for_log_path,
-    session_workspace_is_trusted, skill_child_session_objective, skill_invocation_prompt,
-    spawn_skill_child_run, spawn_task_continue, spawn_task_run,
+    promote_workspace_verification_check, reject_plan, resolve_continue_task,
+    session_ref_for_log_path, session_workspace_is_trusted, skill_child_session_objective,
+    skill_invocation_prompt, spawn_skill_child_run, spawn_task_continue, spawn_task_run,
 };
 pub(in crate::runner) use terminal_refresh::{
     cancel_terminal_task, refresh_terminal_task_statuses,

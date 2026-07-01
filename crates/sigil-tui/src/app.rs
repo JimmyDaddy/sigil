@@ -348,6 +348,10 @@ pub enum AppAction {
         start_mode: PlanTaskStartMode,
         permission_grant: Option<PlanApprovalPermission>,
     },
+    RejectPlan {
+        plan_id: String,
+        expected_plan_hash: String,
+    },
     SubmitTask(String),
     InvokeInlineSkill {
         skill_id: String,
@@ -1369,14 +1373,26 @@ impl AppState {
             KeyCode::Enter if self.composer.input.trim().is_empty() && key.modifiers.is_empty() => {
                 Some(self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None))
             }
-            KeyCode::Esc if key.modifiers.is_empty() => {
-                self.clear_pending_plan_approval();
-                self.last_notice = Some("plan dismissed".to_owned());
-                self.push_event("plan", "dismissed");
-                Some(None)
-            }
+            KeyCode::Esc if key.modifiers.is_empty() => Some(self.reject_pending_plan()),
             _ => None,
         }
+    }
+
+    fn reject_pending_plan(&mut self) -> Option<AppAction> {
+        let pending = self.composer.pending_plan_approval.as_ref()?;
+        let Some(plan_id) = pending.plan_id.clone() else {
+            self.clear_pending_plan_approval();
+            self.last_notice = Some("plan dismissed".to_owned());
+            self.push_event("plan", "dismissed");
+            return None;
+        };
+        let expected_plan_hash = pending.plan_hash.clone();
+        self.last_notice = Some("rejecting plan".to_owned());
+        self.push_event("plan", "reject");
+        Some(AppAction::RejectPlan {
+            plan_id,
+            expected_plan_hash,
+        })
     }
 
     fn create_task_from_pending_plan(

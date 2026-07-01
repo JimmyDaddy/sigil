@@ -345,6 +345,65 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
 }
 
 #[test]
+fn reject_plan_command_appends_rejected_decision_and_clears_pending_projection() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-plan-reject.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("1. Inspect README.md\n2. Update README.md".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "plan docs update".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))?;
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    let projection = PlanArtifactProjection::from_entries(&entries);
+    let draft = projection
+        .latest_pending_plan()
+        .expect("plan run should append durable draft")
+        .clone();
+
+    worker.send(WorkerCommand::RejectPlan {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+    })?;
+    let rejected =
+        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRejected { .. }))?;
+    let WorkerMessage::PlanRejected { entry, entries } = rejected else {
+        unreachable!("recv_until only returns PlanRejected");
+    };
+
+    assert_eq!(entry.plan_id, draft.plan_id);
+    assert_eq!(entry.plan_hash, draft.plan_hash);
+    assert_eq!(entry.decision, PlanDecision::Rejected);
+    assert_eq!(entry.reason.as_deref(), Some("discarded plan"));
+    let projection = PlanArtifactProjection::from_entries(&entries);
+    assert!(projection.latest_pending_plan().is_none());
+    assert_eq!(projection.latest_decision(&entry.plan_id), Some(&entry));
+    assert!(!projection.task_created_for_plan(&entry.plan_id));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision))
+            if decision.decision == PlanDecision::Rejected
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_plan() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();

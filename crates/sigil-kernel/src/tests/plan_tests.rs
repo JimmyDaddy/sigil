@@ -147,6 +147,8 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
     let task_input = plan_task_input_from_draft(&draft);
 
     assert!(task_input.contains("Execute the following user-approved plan"));
+    assert!(task_input.contains("authoritative task input"));
+    assert!(task_input.contains("Preserve the approved plan's scope and order"));
     assert!(task_input.contains("Approved plan:"));
     assert!(task_input.contains("This docs has typoo"));
     assert_eq!(draft.target_paths, vec!["README.md"]);
@@ -280,6 +282,7 @@ Plan:
     assert_eq!(left, right);
     assert!(left.contains("Update docs/en/quickstart.md copy"));
     assert!(left.contains("task execution plan"));
+    assert!(left.contains("include a concise reason in the task step detail"));
     Ok(())
 }
 

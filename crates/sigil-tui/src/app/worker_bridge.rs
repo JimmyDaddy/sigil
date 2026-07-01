@@ -459,13 +459,22 @@ impl AppState {
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
                 self.last_notice = Some(format!(
-                    "plan approved: {}",
+                    "plan grant: {}",
                     plan_approval_permission_label(entry.permission)
                 ));
                 self.push_event(
-                    "plan:approved",
+                    "plan:grant",
                     format!("v{} {}", entry.plan_version, entry.plan_hash),
                 );
+            }
+            WorkerMessage::PlanRejected { entry, entries } => {
+                self.runtime.is_busy = false;
+                self.approval.pending = None;
+                self.clear_pending_plan_approval();
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.last_notice = Some(format!("plan {} rejected", entry.plan_id.as_str()));
+                self.push_event("plan:rejected", entry.plan_id.as_str().to_owned());
             }
             WorkerMessage::TaskCreatedFromPlan {
                 entry,
@@ -854,6 +863,13 @@ impl AppState {
                 expected_plan_hash,
                 start_mode,
                 permission_grant,
+            },
+            AppAction::RejectPlan {
+                plan_id,
+                expected_plan_hash,
+            } => WorkerCommand::RejectPlan {
+                plan_id,
+                expected_plan_hash,
             },
             AppAction::InvokeInlineSkill {
                 skill_id,

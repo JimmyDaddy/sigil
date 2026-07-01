@@ -1390,6 +1390,33 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                 });
             }
+            Ok(WorkerCommand::RejectPlan {
+                plan_id,
+                expected_plan_hash,
+            }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before rejecting a plan".to_owned(),
+                    ));
+                    continue;
+                }
+                match reject_plan(
+                    &root_config,
+                    &current_session_log_path,
+                    &mut current_session,
+                    RejectPlanRequest {
+                        plan_id,
+                        expected_plan_hash,
+                    },
+                ) {
+                    Ok((entry, entries)) => {
+                        let _ = message_tx.send(WorkerMessage::PlanRejected { entry, entries });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
+                }
+            }
             Ok(WorkerCommand::ApprovePlan {
                 plan_text,
                 permission,

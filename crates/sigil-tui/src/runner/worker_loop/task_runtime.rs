@@ -1168,6 +1168,11 @@ pub(in crate::runner) struct CreateTaskFromPlanRequest {
     pub(in crate::runner) permission_grant: Option<PlanApprovalPermission>,
 }
 
+pub(in crate::runner) struct RejectPlanRequest {
+    pub(in crate::runner) plan_id: String,
+    pub(in crate::runner) expected_plan_hash: String,
+}
+
 pub(in crate::runner) struct CreatedTaskFromPlan {
     pub(in crate::runner) task_id: TaskId,
     pub(in crate::runner) task_id_value: String,
@@ -1330,6 +1335,60 @@ pub(in crate::runner) fn create_task_from_plan(
         start_mode: request.start_mode,
         entries,
     })
+}
+
+pub(in crate::runner) fn reject_plan(
+    root_config: &RootConfig,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    request: RejectPlanRequest,
+) -> std::result::Result<(PlanDecisionRecordedEntry, Vec<SessionLogEntry>), String> {
+    let plan_id = PlanId::new(request.plan_id.clone())
+        .map_err(|error| format!("invalid plan id for rejection: {error:#}"))?;
+    let mut session = load_session(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        current_session_log_path,
+    )
+    .map_err(|error| format!("failed to load session before rejecting plan: {error:#}"))?;
+    let projection = session.plan_artifact_projection();
+    let draft = projection
+        .plans
+        .get(&plan_id)
+        .ok_or_else(|| format!("plan {} is not present in this session", plan_id.as_str()))?;
+    if draft.plan_hash != request.expected_plan_hash {
+        return Err(format!(
+            "plan {} is stale: expected {}, current {}",
+            plan_id.as_str(),
+            request.expected_plan_hash,
+            draft.plan_hash
+        ));
+    }
+    if projection.task_created_for_plan(&plan_id) {
+        return Err(format!("plan {} already created a task", plan_id.as_str()));
+    }
+    if let Some(decision) = projection.latest_decision(&plan_id) {
+        return Err(format!(
+            "plan {} already has decision {}",
+            plan_id.as_str(),
+            decision.decision.as_str()
+        ));
+    }
+
+    let entry = PlanDecisionRecordedEntry {
+        plan_id,
+        plan_hash: draft.plan_hash.clone(),
+        decision: PlanDecision::Rejected,
+        decided_by: PlanDecisionActor::User,
+        decided_at_ms: current_unix_time_ms(),
+        reason: Some("discarded plan".to_owned()),
+    };
+    session
+        .append_control(ControlEntry::PlanDecisionRecorded(entry.clone()))
+        .map_err(|error| format!("failed to append plan rejection state: {error:#}"))?;
+    let entries = session.entries().to_vec();
+    *current_session = Some(session);
+    Ok((entry, entries))
 }
 
 pub(in crate::runner) fn append_cancelled_task_state(
