@@ -263,7 +263,7 @@ cargo clippy --all-targets -- -D warnings
 ./scripts/coverage.sh
 ```
 
-覆盖率门禁默认要求 workspace 单测行覆盖率 `>= 96%`，统一由 `scripts/coverage.sh` 执行。
+覆盖率检查默认生成 workspace 单测覆盖率报告，统一由 `scripts/coverage.sh` 执行。需要发布级阈值时显式指定，例如 `COVERAGE_MIN_LINES=96 ./scripts/coverage.sh`。
 
 本地 pre-commit hook：
 
@@ -279,9 +279,9 @@ git config core.hooksPath .githooks
 
 staged gate 会先读取 staged source snapshot，再检查 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。可识别的声明、导入和类型形状不会进入可执行新增行判断。
 
-为了缩短本地提交耗时，staged gate 不再为每次提交生成 LCOV；完整 workspace 覆盖率仍由显式 `./scripts/coverage.sh` 和 CI 校验。
+为了缩短本地提交耗时，staged gate 不再为每次提交生成 LCOV；完整 workspace 覆盖率由显式 `./scripts/coverage.sh` 和 CI 报告观察趋势。
 
-staged gate 只作为测试证据检查，不替代 targeted tests、`check-touched` 或完整 coverage gate。
+staged gate 只作为测试证据检查，不替代 targeted tests、`check-touched` 或发布级 coverage threshold。
 
 staged coverage 脚本的 diff 分类、同 crate 测试证据和覆盖率辅助解析有独立 Python 单测：
 

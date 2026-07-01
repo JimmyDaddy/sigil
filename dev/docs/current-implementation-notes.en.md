@@ -262,7 +262,7 @@ cargo clippy --all-targets -- -D warnings
 ./scripts/coverage.sh
 ```
 
-The coverage gate requires workspace unit-test line coverage `>= 96%` and is executed through `scripts/coverage.sh`.
+The coverage check reports workspace unit-test coverage through `scripts/coverage.sh` by default. Use an explicit release-grade threshold when needed, for example `COVERAGE_MIN_LINES=96 ./scripts/coverage.sh`.
 
 Local pre-commit hook:
 
@@ -278,9 +278,9 @@ Run staged coverage check directly:
 
 The staged gate reads the staged source snapshot before checking whether Rust business-code executable additions have same-crate test-file changes. Recognized declarations, imports, and type shapes are excluded from the executable-addition decision.
 
-To keep local commits fast, the staged gate no longer generates LCOV for every commit; full workspace coverage still belongs to explicit `./scripts/coverage.sh` runs and CI.
+To keep local commits fast, the staged gate no longer generates LCOV for every commit; full workspace coverage is tracked through explicit `./scripts/coverage.sh` runs and the CI report.
 
-The staged gate is a test-evidence check, not a replacement for targeted tests, `check-touched`, or the full coverage gate.
+The staged gate is a test-evidence check, not a replacement for targeted tests, `check-touched`, or a release-grade coverage threshold.
 
 The staged coverage script has focused Python unit tests for diff classification, same-crate test evidence, and coverage parser helpers:
 

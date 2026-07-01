@@ -109,7 +109,7 @@ cargo clippy --all-targets -- -D warnings
 ./scripts/coverage.sh
 ```
 
-覆盖率门禁默认要求 workspace 单测行覆盖率 `>= 96%`，由 `cargo-llvm-cov` 执行；CI 和本地必须使用同一个脚本入口，避免阈值或统计范围漂移。默认统计范围排除少量 orchestration loop / adapter 文件，具体列表以 `scripts/coverage.sh` 为准；这些文件只能承载入口调度、raw terminal/worker 启动、provider I/O 桥接和启动失败出口，不应成为新增业务逻辑的覆盖率逃逸区。
+覆盖率检查默认生成 workspace 单测覆盖率报告，由 `cargo-llvm-cov` 执行；CI 和本地必须使用同一个脚本入口，避免统计范围漂移。日常 CI 不使用全仓固定行覆盖率阻塞；需要发布级阈值时显式运行 `COVERAGE_MIN_LINES=96 ./scripts/coverage.sh`。默认统计范围排除少量 orchestration loop / adapter 文件，具体列表以 `scripts/coverage.sh` 为准；这些文件只能承载入口调度、raw terminal/worker 启动、provider I/O 桥接和启动失败出口，不应成为新增业务逻辑的覆盖率逃逸区。
 
 本地提交 hook 使用仓库内 `.githooks/pre-commit`。启用方式：
 
@@ -119,7 +119,7 @@ git config core.hooksPath .githooks
 
 hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的声明、导入和类型形状当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
 
-为缩短本地提交耗时，staged gate 不再为每次提交运行 `cargo llvm-cov`。它只证明“业务代码改动有同 crate 测试证据”，不要把它当成完整 workspace 覆盖率替代品。完整 workspace 覆盖率仍通过显式 `./scripts/coverage.sh` 和 CI 执行。RFC/session/mutation/verification 等核心语义变更优先补可复现的语义测试和 conformance case；不要为了满足本地 staged gate 而补无效断言或 pass-only 测试。
+为缩短本地提交耗时，staged gate 不再为每次提交运行 `cargo llvm-cov`。它只证明“业务代码改动有同 crate 测试证据”，不要把它当成完整 workspace 覆盖率替代品。完整 workspace 覆盖率通过显式 `./scripts/coverage.sh` 和 CI 报告观察趋势；发布级阈值应由 release/hardening 任务显式启用。RFC/session/mutation/verification 等核心语义变更优先补可复现的语义测试和 conformance case；不要为了满足本地 staged gate 而补无效断言或 pass-only 测试。
 
 调整 staged diff 分类、同 crate 测试证据判断或覆盖率辅助解析时，必须同步更新 `scripts/test_check_staged_coverage.py` 的纯函数测试。
 

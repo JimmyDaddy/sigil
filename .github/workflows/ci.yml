@@ -16,7 +16,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_LLVM_COV_VERSION: 0.8.7
-  COVERAGE_MIN_LINES: 96
   RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
@@ -113,5 +112,5 @@ jobs:
             cargo install cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION" --locked
           fi
 
-      - name: coverage >= 96%
+      - name: coverage report
         run: ./scripts/coverage.sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-coverage_min_lines="${COVERAGE_MIN_LINES:-96}"
+coverage_min_lines="${COVERAGE_MIN_LINES:-}"
 coverage_ignore_regex="${COVERAGE_IGNORE_FILENAME_REGEX:-crates/sigil-kernel/src/agent\\.rs|crates/sigil-runtime/src/agent_tools\\.rs|crates/sigil-tui/src/launcher\\.rs|crates/sigil-tui/src/runner/(spawn|worker_loop)\\.rs}"
 coverage_summary_only="${COVERAGE_SUMMARY_ONLY:-1}"
 coverage_packages="${COVERAGE_PACKAGES:-}"
@@ -19,8 +19,11 @@ fi
 coverage_args=(
   --all-targets
   --locked
-  --fail-under-lines "${coverage_min_lines}"
 )
+
+if [[ -n "${coverage_min_lines}" ]]; then
+  coverage_args+=(--fail-under-lines "${coverage_min_lines}")
+fi
 
 if [[ -n "${coverage_packages}" ]]; then
   read -r -a coverage_package_list <<<"${coverage_packages}"

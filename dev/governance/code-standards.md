@@ -256,9 +256,9 @@ cargo clippy --all-targets -- -D warnings
 ./scripts/coverage.sh
 ```
 
-单测覆盖率门禁必须保持 `>= 96%` 行覆盖率。覆盖率统计入口统一使用仓库根目录的 `scripts/coverage.sh`，不要在 CI 或本地文档中另写一套不同参数。
+`./scripts/coverage.sh` 默认生成 workspace 覆盖率报告，不再用全仓固定行覆盖率阻塞日常提交或 CI。需要发布级阈值时显式指定，例如 `COVERAGE_MIN_LINES=96 ./scripts/coverage.sh`。
 
-覆盖率门禁默认聚焦可单测的领域逻辑和状态模型；`scripts/coverage.sh` 会排除少量 orchestration loop / adapter 文件（例如 agent 主循环、runtime agent-tool adapter、TUI launcher/worker/spawn 入口），这些文件主要承载 raw terminal / worker / agent 主循环调度、provider I/O 桥接和启动失败出口，回归应通过其下层模块单测、状态转换测试和必要的人工冒烟覆盖。新增业务逻辑不要为了规避覆盖率而放进这些排除文件。
+覆盖率报告默认聚焦可单测的领域逻辑和状态模型；`scripts/coverage.sh` 会排除少量 orchestration loop / adapter 文件（例如 agent 主循环、runtime agent-tool adapter、TUI launcher/worker/spawn 入口），这些文件主要承载 raw terminal / worker / agent 主循环调度、provider I/O 桥接和启动失败出口，回归应通过其下层模块单测、状态转换测试和必要的人工冒烟覆盖。新增业务逻辑不要为了规避覆盖率而放进这些排除文件。
 
 本地提交应启用仓库内版本化 hook：
 
@@ -266,7 +266,7 @@ cargo clippy --all-targets -- -D warnings
 git config core.hooksPath .githooks
 ```
 
-pre-commit hook 通过 `scripts/check-staged-coverage.py` 检查 staged 的 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。检查范围为 `crates/*/src/**/*.rs`，排除测试文件与测试辅助文件；可识别的声明、导入和类型形状不会被当作可执行新增行。为了避免每次提交都重跑 coverage，本地 hook 不再按新增行覆盖率阻塞提交；完整 workspace 覆盖率仍由显式 `./scripts/coverage.sh` 和 CI 承担。新增业务逻辑仍必须有可复现语义测试，不能用空测试或 pass-only 断言满足 hook。
+pre-commit hook 通过 `scripts/check-staged-coverage.py` 检查 staged 的 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。检查范围为 `crates/*/src/**/*.rs`，排除测试文件与测试辅助文件；可识别的声明、导入和类型形状不会被当作可执行新增行。为了避免每次提交都重跑 coverage，本地 hook 不再按新增行覆盖率阻塞提交；完整 workspace 覆盖率由显式 `./scripts/coverage.sh` 和 CI 生成报告。新增业务逻辑仍必须有可复现语义测试，不能用空测试或 pass-only 断言满足 hook。
 
 如果只改文档，可以不跑全量 gate，但至少确认：
 
