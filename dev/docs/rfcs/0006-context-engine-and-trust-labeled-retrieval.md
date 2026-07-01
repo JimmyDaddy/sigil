@@ -1,6 +1,6 @@
 # RFC-0006 Context Engine and Trust-labeled Retrieval
 
-状态：draft / E06.1-E06.5 and E06.7-E06.9 implemented / full repo intelligence gated
+状态：draft / E06.1-E06.5 and E06.7-E06.14 implemented / full repo intelligence gated
 
 创建日期：2026-06-28
 
@@ -107,10 +107,13 @@ Implementation progress:
 - Context V0 request rendering 不会为被排除的 secret-like / external item 输出 snippet；未信任 workspace instruction 仍不能提升为 trusted workspace instruction。
 - 已完成 Context quality evidence pack：`ContextQualityEvidencePack` 记录 query、included/excluded context rows、token budget、source counts、exclusion reason counts、rank/score、trust/sensitivity/egress labels、truncation facts 和 recall/ranking/token-budget/safety findings。它用于判断 E06.6 是否真的需要打开，而不是直接实现 heavy repo graph 或 semantic retrieval。
 - 已完成 Context quality evidence sweep：`scripts/run-context-quality.sh` 可生成 `context-quality.jsonl`、`summary.md` 和 `manifest.json`，用于把 E06.6 trigger decision 绑定到可复核 artifact。
+- 已完成 runtime repo-file provider wiring：CLI 和 TUI primary chat 会通过 `RuntimeContextCandidates` 向 request assembly 提供 bounded repository candidates，并在 `PrefixSnapshotCaptured` 中保留 Context V0 materialization。
+- 已完成 explicit-path precision polish：用户明确提到存在的 workspace-relative path 时，只注入该路径，不再被同名 README、RFC 或 lexical neighbor 干扰。
+- 已完成 source/symbol auto-context scheduling：对 Rust-like identifier、function/tool name、trait/type、runner handoff、TUI surface 和 source lookup prompt，runtime 会在 bounded `crates/**/*.rs` 范围内加入少量高置信源码候选；query term 会先分类为 intent hint、symbol-like、path-like、lexical hint 或 natural-language noise，避免把 `rust`、`source`、`which` 等自然语言或意图词当成 exact symbol evidence；exact symbol matches 标为 `exact_symbol_match`，source path/module matches 标为 `source_path_match`。
 
 2026-06-29 审计补充：
 
-- 当前实现是 V0 Context Engine：ContextDigestV0、session archive BM25、code-intel adapter、token budget packer、TUI provenance summary、deterministic context quality evidence pack 和 evidence sweep。
+- 当前实现是 V0 Context Engine：ContextDigestV0、session archive BM25、code-intel adapter、token budget packer、runtime repo-file provider、source/symbol auto-context scheduling、TUI provenance summary、deterministic context quality evidence pack 和 evidence sweep。
 - 它不是完整持久 repo graph、semantic vector retrieval、call/impact graph 或跨 session repo knowledge。
 - 这些更重能力由 `.repo-local-dev/rfcs/0006-context-engine/e06-06-persistent-repo-graph-semantic-retrieval-trigger.md` 作为 gated trigger 跟踪，只有真实 context-quality 证据或明确产品需求出现后才开工。
 
@@ -174,6 +177,8 @@ The main flow should provide at most one recommended action, such as `review tru
 5. TUI provenance summary.
 6. Context V0 runtime adoption in request assembly.
 7. Context quality evidence pack for V0 retrieval/packing inspection.
+8. Runtime repo-file provider wiring and explicit-path precision.
+9. Bounded source/symbol auto-context scheduling.
 
 ## 10. Acceptance Criteria
 
@@ -183,6 +188,7 @@ The main flow should provide at most one recommended action, such as `review tru
 - Context Engine failure degrades to current memory + tool behavior and does not block ordinary chat.
 - Tool output pruning affects provider context only, not durable audit.
 - LSP symbols/references/diagnostics can be used as context source.
+- Runtime source lookup prompts can include bounded Rust source candidates without opening persistent repo graph or semantic retrieval.
 
 ## 11. Validation
 

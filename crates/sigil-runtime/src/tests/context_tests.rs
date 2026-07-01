@@ -230,3 +230,225 @@ fn context_repo_candidates_do_not_read_secret_like_files() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn context_source_symbol_candidates_find_exact_rust_symbol() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-kernel/src"))?;
+    let filler = "pub fn unrelated_helper() {}\n".repeat(600);
+    fs::write(
+        temp.path().join("crates/sigil-kernel/src/session.rs"),
+        format!("{filler}pub fn build_request_with_transient_messages_and_context() {{}}\n"),
+    )?;
+    fs::create_dir_all(temp.path().join("dev/docs"))?;
+    fs::write(
+        temp.path().join("dev/docs/context.md"),
+        "build request context notes without implementation source\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Where is build_request_with_transient_messages_and_context defined in Rust source?",
+    )?;
+
+    let source = context
+        .items
+        .iter()
+        .find(|item| item.id == "repo-file:crates/sigil-kernel/src/session.rs")
+        .expect("session.rs source candidate");
+    assert_eq!(
+        source.inclusion_reason,
+        ContextInclusionReason::ExactSymbolMatch
+    );
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:crates/sigil-kernel/src/session.rs")
+    );
+    assert!(
+        context
+            .snippets
+            .get("repo-file:crates/sigil-kernel/src/session.rs")
+            .is_some_and(
+                |snippet| snippet.contains("build_request_with_transient_messages_and_context")
+            )
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_candidates_rank_source_paths_for_source_intent() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-runtime/src/context.rs"),
+        "runtime repo file context provider implementation\n",
+    )?;
+    fs::create_dir_all(temp.path().join("dev/docs/rfcs"))?;
+    fs::write(
+        temp.path().join("dev/docs/rfcs/context-engine.md"),
+        "runtime repo file context provider design notes\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Which Rust source file implements the bounded runtime repo-file context provider?",
+    )?;
+
+    let ids = context
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"repo-file:crates/sigil-runtime/src/context.rs"));
+    assert_eq!(
+        context
+            .items
+            .iter()
+            .find(|item| item.id == "repo-file:crates/sigil-runtime/src/context.rs")
+            .map(|item| &item.inclusion_reason),
+        Some(&ContextInclusionReason::SourcePathMatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_candidates_do_not_treat_rust_as_symbol() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-runtime/src/context.rs"),
+        "runtime context provider implementation\n",
+    )?;
+    fs::create_dir_all(temp.path().join("crates/sigil-tui/src/app"))?;
+    fs::write(
+        temp.path()
+            .join("crates/sigil-tui/src/app/workspace_trust_flow.rs"),
+        "workspace trust gate implementation\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Which Rust source file implements runtime context provider?",
+    )?;
+
+    assert!(context.items.iter().all(|item| {
+        item.inclusion_reason != ContextInclusionReason::ExactSymbolMatch
+            || item.id != "repo-file:crates/sigil-tui/src/app/workspace_trust_flow.rs"
+    }));
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:crates/sigil-runtime/src/context.rs")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_candidates_do_not_score_natural_language_terms() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-runtime/src/context.rs"),
+        "runtime context provider implementation\n",
+    )?;
+    fs::create_dir_all(temp.path().join("crates/sigil-noise/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-noise/src/noisy.rs"),
+        "which where automatic system provided most likely answer output only\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Which Rust source file is most likely provided by automatic system for runtime context provider? Only output the answer.",
+    )?;
+
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:crates/sigil-runtime/src/context.rs")
+    );
+    assert!(
+        context
+            .items
+            .iter()
+            .all(|item| item.id != "repo-file:crates/sigil-noise/src/noisy.rs")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_candidates_prefer_exact_file_stem_symbol_match() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-kernel/src"))?;
+    fs::write(
+        temp.path()
+            .join("crates/sigil-kernel/src/execution_backend.rs"),
+        "pub trait ExecutionBackend {}\n",
+    )?;
+    fs::create_dir_all(
+        temp.path()
+            .join("crates/sigil-tools-builtin/src/execution_backends"),
+    )?;
+    fs::write(
+        temp.path()
+            .join("crates/sigil-tools-builtin/src/execution_backends/mod.rs"),
+        "use sigil_kernel::ExecutionBackend;\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "ExecutionBackend trait is defined in which Rust source file?",
+    )?;
+
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:crates/sigil-kernel/src/execution_backend.rs")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_candidates_match_hyphenated_surface_text() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-tui/src/ui"))?;
+    fs::write(
+        temp.path().join("crates/sigil-tui/src/ui/live_panel.rs"),
+        "let title = \"Plan ready\";\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Which Rust source file renders the plan-ready TUI surface?",
+    )?;
+
+    assert_eq!(
+        context.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:crates/sigil-tui/src/ui/live_panel.rs")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_candidates_preserve_explicit_path_precision() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
+    fs::write(
+        temp.path().join("crates/sigil-runtime/src/context.rs"),
+        "pub struct RuntimeContextCandidates;\n",
+    )?;
+    fs::write(
+        temp.path().join("README.md"),
+        "RuntimeContextCandidates user documentation\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Summarize README.md and mention RuntimeContextCandidates",
+    )?;
+
+    let ids = context
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["repo-file:README.md"]);
+    Ok(())
+}
