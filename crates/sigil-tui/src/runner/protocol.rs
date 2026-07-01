@@ -4,8 +4,8 @@ use sigil_kernel::{
     AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionRecord,
     ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
     ConversationQueueItemProjection, MutationArtifactCleanupTarget, PlanApprovalPermission,
-    PlanApprovedEntry, ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus,
-    TerminalTaskEntry,
+    PlanApprovedEntry, PlanTaskStartMode, ReasoningEffort, RunEvent, SessionLogEntry,
+    TaskCreatedFromPlanEntry, TaskRunStatus, TerminalTaskEntry,
 };
 use sigil_runtime::{
     BalanceSnapshot, McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
@@ -101,6 +101,12 @@ pub enum WorkerCommand {
         permission: PlanApprovalPermission,
         scope_summary: String,
         clear_planning_context: bool,
+    },
+    CreateTaskFromPlan {
+        plan_id: String,
+        expected_plan_hash: String,
+        start_mode: PlanTaskStartMode,
+        permission_grant: Option<PlanApprovalPermission>,
     },
     InvokeInlineSkill {
         skill_id: String,
@@ -237,6 +243,11 @@ pub enum WorkerMessage {
     },
     PlanApproved {
         entry: PlanApprovedEntry,
+        entries: Vec<SessionLogEntry>,
+    },
+    TaskCreatedFromPlan {
+        entry: TaskCreatedFromPlanEntry,
+        start_mode: PlanTaskStartMode,
         entries: Vec<SessionLogEntry>,
     },
     TaskRunFinished {

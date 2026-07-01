@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Supported status](status.md) · [简体中文](../zh-CN/changelog.md)
 
-This page is a user-facing summary. Maintainer-facing implementation details still live under `dev/docs/*` and release automation scripts.
+This page is a user-facing summary. Maintainer-facing implementation details still live under `dev/docs/*` and release automation scripts. The first public version is an early preview: expect the core TUI workflow to work, but do not treat config, plugin APIs, advanced sandbox behavior, or automation surfaces as stable compatibility contracts yet.
 
 ## Current Documentation Update
 
@@ -23,13 +23,15 @@ Sigil currently documents these user-facing capabilities:
 - npm, Homebrew tap, Cargo git-tag, GitHub release archive, and checkout install paths.
 - Quick Setup and `/config`.
 - `sigil doctor` and `/doctor`.
-- Durable multi-step tasks through `/task`, with `/plan` reserved for read-only planning prompts.
+- Durable multi-step tasks through `/task`, with `/plan` kept read-only until the user explicitly accepts a plan-to-task handoff.
 - Session restore from append-only logs.
 - Approval-backed file changes, shell execution, MCP, and LSP edits.
 - DeepSeek, OpenAI-compatible, Anthropic, and Gemini providers.
 - stdio MCP servers.
 - Optional code intelligence.
 - Terminal mouse capture and OSC52 clipboard support.
+- Verification status for task completion and explicit user-approved checks.
+- Core execution sandbox receipts for supported local backends, with platform-specific limitations documented separately.
 
 ## Release Archive Notes
 

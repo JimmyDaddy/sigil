@@ -175,32 +175,46 @@ fn plan_actions_map_to_worker_commands() {
 #[test]
 fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        "Inspect and edit README.md\n\n1. Read README.md\n2. Apply the approved copy edit\n3. Verify the result",
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("non-empty plan should create draft");
 
     app.handle_worker_message(WorkerMessage::PlanRunFinished {
         result: sigil_kernel::AgentRunResult {
-            final_text: "1. inspect\n2. edit with preview".to_owned(),
+            final_text: draft.inline_text.clone().unwrap_or_default(),
             tool_calls: 0,
             final_message_id: None,
         },
-        entries: Vec::new(),
+        entries: vec![sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::PlanDraftCreated(draft.clone()),
+        )],
     })?;
 
     let pending = app
         .pending_plan_approval()
         .expect("plan output should create a pending approval");
+    assert_eq!(pending.plan_id.as_deref(), Some(draft.plan_id.as_str()));
     assert!(pending.plan_hash.starts_with("sha256:"));
-    assert_eq!(pending.scope_summary, "1. inspect");
+    assert_eq!(pending.summary, "Inspect and edit README.md");
+    assert_eq!(pending.target_path_count, 1);
+    assert_eq!(pending.suggested_check_count, 0);
+    assert_eq!(app.composer_mode_label(), "Plan");
     assert_eq!(app.last_notice(), Some("plan ready"));
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(app.pending_plan_approval().is_none());
     assert!(matches!(
         action,
-        Some(AppAction::ApprovePlan {
-            permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
-            clear_planning_context: true,
-            ..
-        })
+        Some(AppAction::CreateTaskFromPlan {
+            plan_id,
+            expected_plan_hash,
+            start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
+            permission_grant: None,
+        }) if plan_id == draft.plan_id.as_str() && expected_plan_hash == draft.plan_hash
     ));
 
     app.handle_worker_message(WorkerMessage::PlanRunFinished {
@@ -217,7 +231,28 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
 }
 
 #[test]
-fn pending_plan_approval_continue_returns_to_plan_composer_without_worker_action() -> Result<()> {
+fn plan_ready_bare_letters_stay_composer_input() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let draft = sigil_kernel::plan_draft_created_entry(
+        "1. Update README.md",
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        Some("snapshot-1".to_owned()),
+    )?
+    .expect("non-empty plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.pending_plan_approval().is_some());
+    assert_eq!(app.composer.input, "s");
+    assert_eq!(app.last_notice(), None);
+    Ok(())
+}
+
+#[test]
+fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::PlanRunFinished {
         result: sigil_kernel::AgentRunResult {
@@ -227,18 +262,16 @@ fn pending_plan_approval_continue_returns_to_plan_composer_without_worker_action
         },
         entries: Vec::new(),
     })?;
+    app.composer.input = "/plan revise this plan".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
-    assert!(action.is_none());
     assert!(app.pending_plan_approval().is_none());
-    assert_eq!(app.composer_mode_label(), "Plan");
-    assert_eq!(app.last_notice(), Some("continue planning"));
-    assert!(
-        app.events
-            .iter()
-            .any(|event| { event.label == "plan" && event.detail == "continue" })
-    );
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitPlanPrompt(prompt)) if prompt == "revise this plan"
+    ));
     Ok(())
 }
 
@@ -259,7 +292,7 @@ fn pending_plan_approval_discard_clears_surface_without_worker_action() -> Resul
     assert!(action.is_none());
     assert!(app.pending_plan_approval().is_none());
     assert_eq!(app.composer_mode_label(), "Build");
-    assert_eq!(app.last_notice(), Some("plan approval dismissed"));
+    assert_eq!(app.last_notice(), Some("plan dismissed"));
     assert!(
         app.events
             .iter()

@@ -13,7 +13,7 @@ Sigil 是一个 TUI-first 的 Rust coding agent，用来在真实仓库里协助
 
 [网站](https://jimmydaddy.github.io/sigil/) · [文档](docs/zh-CN/README.md) · [快速上手](docs/zh-CN/quickstart.md) · [视觉导览](docs/zh-CN/visual-tour.md) · [Provider 指南](docs/zh-CN/providers.md)
 
-Sigil 的首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发。自更新仍属于后续 packaging 工作。
+Sigil 的首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发。`v0.0.1` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
 
 ## 快速开始
 
@@ -34,7 +34,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 ```
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
 ```
 
 本地开发时，可以从 checkout 安装：
@@ -67,7 +67,7 @@ sigil doctor
 - 让 agent 通过结构化工具读取、搜索、编辑文件和运行命令。
 - 在高风险写操作前展示 approval card、受影响文件和有边界的 diff。
 - 从 Sigil 用户态 state 目录下的 append-only JSONL 恢复 session。
-- 用 `/plan` 执行只读规划 prompt，用 `/task` 执行 durable 多步骤任务，进入 planner、executor 和可选 subagent 流程。
+- 用 `/plan` 执行只读规划，并在用户显式接受后交接为 durable `/task` 任务，进入 planner、executor 和可选 subagent 流程。
 - 普通 chat 明确要求子 agent 时，会在最终回答前强制等待有效 agent 结果。
 - 受信任的 agent profile 可通过 `@profile <prompt>` 或受信任的 profile slash name 直接调用。
 - 按显式 trust、approval 和 secret-egress policy 接入 stdio MCP server。
@@ -80,7 +80,7 @@ sigil doctor
 | 需求 | 使用 |
 | --- | --- |
 | 普通提问或编辑 | 直接在 composer 输入 |
-| 规划但暂不执行 | `/plan` 后输入 prompt，或 `/plan <prompt>` |
+| 规划后执行 | `/plan` 后输入 prompt，或 `/plan <prompt>`；接受 plan card 后创建并运行 durable task |
 | 执行 durable 多步骤任务 | `/task <任务>`；未完成任务用 `/task continue` |
 | 要求普通 chat 使用子 agent | 明确说明“使用子 agent ...” |
 | 直接调用受信任 agent profile | `@profile <prompt>` 或 `/review-agent <prompt>` 这类受信任 profile slash name |

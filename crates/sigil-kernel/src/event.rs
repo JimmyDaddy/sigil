@@ -61,6 +61,10 @@ pub enum DurableEventType {
     ToolExecutionStarted,
     ToolExecutionFinished,
     ApprovalResolved,
+    PlanDraftCreated,
+    PlanDecisionRecorded,
+    PlanPermissionGranted,
+    TaskCreatedFromPlan,
     MutationPrepared,
     MutationCommitted,
     MutationReconciled,
@@ -117,6 +121,10 @@ impl DurableEventType {
             Self::ToolExecutionStarted => "tool_execution_started",
             Self::ToolExecutionFinished => "tool_execution_finished",
             Self::ApprovalResolved => "approval_resolved",
+            Self::PlanDraftCreated => "plan_draft_created",
+            Self::PlanDecisionRecorded => "plan_decision_recorded",
+            Self::PlanPermissionGranted => "plan_permission_granted",
+            Self::TaskCreatedFromPlan => "task_created_from_plan",
             Self::MutationPrepared => "mutation_prepared",
             Self::MutationCommitted => "mutation_committed",
             Self::MutationReconciled => "mutation_reconciled",
@@ -173,6 +181,10 @@ impl DurableEventType {
             "tool_execution_started" => Self::ToolExecutionStarted,
             "tool_execution_finished" => Self::ToolExecutionFinished,
             "approval_resolved" => Self::ApprovalResolved,
+            "plan_draft_created" => Self::PlanDraftCreated,
+            "plan_decision_recorded" => Self::PlanDecisionRecorded,
+            "plan_permission_granted" => Self::PlanPermissionGranted,
+            "task_created_from_plan" => Self::TaskCreatedFromPlan,
             "mutation_prepared" => Self::MutationPrepared,
             "mutation_committed" => Self::MutationCommitted,
             "mutation_reconciled" => Self::MutationReconciled,
@@ -266,6 +278,10 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::ToolExecutionStarted,
     DurableEventType::ToolExecutionFinished,
     DurableEventType::ApprovalResolved,
+    DurableEventType::PlanDraftCreated,
+    DurableEventType::PlanDecisionRecorded,
+    DurableEventType::PlanPermissionGranted,
+    DurableEventType::TaskCreatedFromPlan,
     DurableEventType::MutationPrepared,
     DurableEventType::MutationCommitted,
     DurableEventType::MutationReconciled,
@@ -514,6 +530,10 @@ pub enum DurableDomainEvent {
     ToolExecutionStarted(DomainPayload),
     ToolExecutionFinished(DomainPayload),
     ApprovalResolved(DomainPayload),
+    PlanDraftCreated(DomainPayload),
+    PlanDecisionRecorded(DomainPayload),
+    PlanPermissionGranted(DomainPayload),
+    TaskCreatedFromPlan(DomainPayload),
     MutationPrepared(DomainPayload),
     MutationCommitted(DomainPayload),
     MutationReconciled(DomainPayload),
@@ -570,6 +590,10 @@ impl DurableDomainEvent {
             Self::ToolExecutionStarted(_) => DurableEventType::ToolExecutionStarted,
             Self::ToolExecutionFinished(_) => DurableEventType::ToolExecutionFinished,
             Self::ApprovalResolved(_) => DurableEventType::ApprovalResolved,
+            Self::PlanDraftCreated(_) => DurableEventType::PlanDraftCreated,
+            Self::PlanDecisionRecorded(_) => DurableEventType::PlanDecisionRecorded,
+            Self::PlanPermissionGranted(_) => DurableEventType::PlanPermissionGranted,
+            Self::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
             Self::MutationPrepared(_) => DurableEventType::MutationPrepared,
             Self::MutationCommitted(_) => DurableEventType::MutationCommitted,
             Self::MutationReconciled(_) => DurableEventType::MutationReconciled,
@@ -634,6 +658,10 @@ impl DurableDomainEvent {
             | Self::ToolExecutionStarted(payload)
             | Self::ToolExecutionFinished(payload)
             | Self::ApprovalResolved(payload)
+            | Self::PlanDraftCreated(payload)
+            | Self::PlanDecisionRecorded(payload)
+            | Self::PlanPermissionGranted(payload)
+            | Self::TaskCreatedFromPlan(payload)
             | Self::MutationPrepared(payload)
             | Self::MutationCommitted(payload)
             | Self::MutationReconciled(payload)
@@ -964,6 +992,12 @@ fn domain_event_from_payload(
             DurableDomainEvent::ToolExecutionFinished(payload)
         }
         DurableEventType::ApprovalResolved => DurableDomainEvent::ApprovalResolved(payload),
+        DurableEventType::PlanDraftCreated => DurableDomainEvent::PlanDraftCreated(payload),
+        DurableEventType::PlanDecisionRecorded => DurableDomainEvent::PlanDecisionRecorded(payload),
+        DurableEventType::PlanPermissionGranted => {
+            DurableDomainEvent::PlanPermissionGranted(payload)
+        }
+        DurableEventType::TaskCreatedFromPlan => DurableDomainEvent::TaskCreatedFromPlan(payload),
         DurableEventType::MutationPrepared => DurableDomainEvent::MutationPrepared(payload),
         DurableEventType::MutationCommitted => DurableDomainEvent::MutationCommitted(payload),
         DurableEventType::MutationReconciled => DurableDomainEvent::MutationReconciled(payload),
@@ -1489,6 +1523,10 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TerminalTask(_) => "terminal_task",
         ControlEntry::CompactionApplied(_) => "compaction_applied",
         ControlEntry::PlanApproved(_) => "plan_approved",
+        ControlEntry::PlanDraftCreated(_) => "plan_draft_created",
+        ControlEntry::PlanDecisionRecorded(_) => "plan_decision_recorded",
+        ControlEntry::PlanPermissionGranted(_) => "plan_permission_granted",
+        ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
         ControlEntry::TaskRun(_) => "task_run",
         ControlEntry::TaskPlan(_) => "task_plan",
         ControlEntry::TaskStep(_) => "task_step",

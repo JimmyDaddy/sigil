@@ -886,8 +886,11 @@ pub fn check_specs_from_user_config(
         if check.id.trim().is_empty() || check.command.trim().is_empty() {
             bail!("verification user config contains a check with empty id or command");
         }
-        let check_spec_id = unique_check_id(check.id.clone(), &mut used_ids);
         let command = check.normalized_command(&canonical_root)?;
+        if !user_configured_check_applies_to_workspace(&canonical_root, &command) {
+            continue;
+        }
+        let check_spec_id = unique_check_id(check.id.clone(), &mut used_ids);
         let candidate = CandidateCheck {
             source: CheckDiscoverySource::UserExplicitConfig,
             command,
@@ -1010,6 +1013,9 @@ fn discover_user_config_checks(
             bail!("verification user config contains a check with empty id or command");
         }
         let command = check.normalized_command(workspace_root)?;
+        if !user_configured_check_applies_to_workspace(workspace_root, &command) {
+            continue;
+        }
         push_discovered_check(
             checks,
             used_ids,
@@ -1397,6 +1403,73 @@ fn normalize_check_cwd(workspace_root: &Path, cwd: Option<&PathBuf>) -> Result<O
         );
     }
     Ok(Some(normalized))
+}
+
+fn user_configured_check_applies_to_workspace(
+    workspace_root: &Path,
+    command: &CheckCommand,
+) -> bool {
+    let check_root = command.cwd.as_ref().map_or_else(
+        || workspace_root.to_path_buf(),
+        |cwd| workspace_root.join(cwd),
+    );
+    match project_marker_family(&command.command) {
+        Some(ProjectMarkerFamily::Cargo) => {
+            has_marker_in_workspace_chain(workspace_root, &check_root, &["Cargo.toml"])
+        }
+        Some(ProjectMarkerFamily::PackageJson) => {
+            has_marker_in_workspace_chain(workspace_root, &check_root, &["package.json"])
+        }
+        Some(ProjectMarkerFamily::Makefile) => has_marker_in_workspace_chain(
+            workspace_root,
+            &check_root,
+            &["Makefile", "makefile", "GNUmakefile"],
+        ),
+        Some(ProjectMarkerFamily::Justfile) => {
+            has_marker_in_workspace_chain(workspace_root, &check_root, &["justfile", "Justfile"])
+        }
+        None => true,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectMarkerFamily {
+    Cargo,
+    PackageJson,
+    Makefile,
+    Justfile,
+}
+
+fn project_marker_family(command: &str) -> Option<ProjectMarkerFamily> {
+    let program = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())?;
+    match program {
+        "cargo" => Some(ProjectMarkerFamily::Cargo),
+        "npm" | "pnpm" | "yarn" | "bun" => Some(ProjectMarkerFamily::PackageJson),
+        "make" | "gmake" => Some(ProjectMarkerFamily::Makefile),
+        "just" => Some(ProjectMarkerFamily::Justfile),
+        _ => None,
+    }
+}
+
+fn has_marker_in_workspace_chain(workspace_root: &Path, start: &Path, markers: &[&str]) -> bool {
+    let mut current = start;
+    loop {
+        if markers.iter().any(|marker| current.join(marker).is_file()) {
+            return true;
+        }
+        if current == workspace_root {
+            return false;
+        }
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        if !parent.starts_with(workspace_root) {
+            return false;
+        }
+        current = parent;
+    }
 }
 
 /// Derives the stable workspace id used by verification snapshots for a workspace root.

@@ -61,12 +61,12 @@ Sigil is built around a few user-facing ideas:
 
 ## Current Distribution Status
 
-The first release is prepared for npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives:
+The first release is prepared for npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1` is an early preview: the core TUI workflow is usable, while config, plugin APIs, advanced sandbox coverage, and automation surfaces may still change.
 
 ```bash
 npm install -g @jimmydaddy/sigil
 brew install JimmyDaddy/sigil/sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
 ```
 
 Local checkout installs remain useful for development:

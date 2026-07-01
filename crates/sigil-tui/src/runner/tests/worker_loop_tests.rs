@@ -63,6 +63,11 @@ fn chat_agent_run_input_with_repo_context_preserves_plan_mode_transience() {
 #[test]
 fn materialize_task_verification_config_records_specs_policy_and_events() {
     let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut root_config = root_config_with_checks(
         temp.path(),
@@ -148,6 +153,49 @@ fn materialize_task_verification_config_records_specs_policy_and_events() {
         })
         .count();
     assert_eq!(control_count, 2);
+}
+
+#[test]
+fn materialize_task_verification_config_skips_inapplicable_user_cargo_check() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let root_config = root_config_with_checks(
+        temp.path(),
+        vec![VerificationCheckConfig {
+            id: "kernel-verification".to_owned(),
+            command: "cargo".to_owned(),
+            args: vec![
+                "test".to_owned(),
+                "-p".to_owned(),
+                "sigil-kernel".to_owned(),
+                "verification".to_owned(),
+            ],
+            cwd: None,
+            effect: ToolEffect::ReadOnly,
+        }],
+    );
+    let (tx, rx) = mpsc::channel();
+    let mut handler = ChannelEventHandler::new(tx);
+    let task_id = TaskId::new("task-1").expect("task id");
+
+    materialize_task_verification_config(
+        &mut session,
+        &mut handler,
+        &root_config,
+        temp.path(),
+        &task_id,
+    )
+    .expect("config materializes");
+
+    let projection = session.verification_state_projection();
+    let scope = sigil_kernel::EvidenceScope::Task("task-1".to_owned());
+    assert!(
+        projection
+            .check_spec(&scope, "kernel-verification")
+            .is_none()
+    );
+    assert!(projection.latest_policy(&scope).is_none());
+    assert!(rx.try_iter().next().is_none());
 }
 
 #[test]

@@ -24,15 +24,11 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     let ignored = app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))?;
     assert!(ignored.is_none());
     assert!(app.pending_plan_approval().is_some());
-    let approved = app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))?;
-    assert!(matches!(
-        approved,
-        Some(AppAction::ApprovePlan {
-            permission: sigil_kernel::PlanApprovalPermission::Ask,
-            clear_planning_context: true,
-            ..
-        })
-    ));
+    assert_eq!(app.composer.input, "z");
+    let discard = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(discard.is_none());
+    assert!(app.pending_plan_approval().is_none());
+    assert_eq!(app.composer_mode_label(), "Build");
 
     app.runtime.is_busy = true;
     app.composer.input = "@review inspect".to_owned();
@@ -1351,6 +1347,84 @@ fn task_sidebar_lines_surface_missing_verification_actions() -> Result<()> {
     assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Warning);
     assert_eq!(strip.rows[0].label, "1. needs check · Fix typo");
     assert_eq!(strip.rows[0].detail, "needs check · fix-typo");
+    Ok(())
+}
+
+#[test]
+fn task_sidebar_lines_label_failed_verification_as_check_failed() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("fix-typo")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "fix typo".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Paused,
+            reason: Some("step fix-typo blocked".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Fix typo".to_owned(),
+                display_name: None,
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: Some(sigil_kernel::TaskStepMode::Write),
+                isolation: Some(sigil_kernel::TaskIsolationMode::SequentialWorkspaceWrite),
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Blocked,
+            title: Some("Fix typo".to_owned()),
+            summary: Some("typo fixed but check failed".to_owned()),
+            reason: Some("verification failed".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+            sigil_kernel::ReadinessEvaluatedEntry {
+                scope: sigil_kernel::EvidenceScope::Step(format!(
+                    "{}:{}",
+                    task_id.as_str(),
+                    step_id.as_str()
+                )),
+                evaluation: sigil_kernel::ReadinessEvaluation {
+                    run_status: sigil_kernel::RunStatus::Blocked,
+                    verification_verdict: sigil_kernel::VerificationVerdict::Failed,
+                    visible_state: sigil_kernel::VisibleCompletionState::FailedVerification,
+                    reasons: vec![sigil_kernel::ReadinessReason::VerificationFailed {
+                        receipt_id: "receipt-1".to_owned(),
+                    }],
+                    required_actions: vec![sigil_kernel::RequiredAction::RunCheck {
+                        check_spec_id: "kernel-verification".to_owned(),
+                    }],
+                },
+                policy_hash: Some("policy".to_owned()),
+                workspace_snapshot_id: Some("snapshot".to_owned()),
+            },
+        )),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"last: v1:fix-typo check failed".to_owned()));
+    assert!(lines.contains(&"verification: check failed".to_owned()));
+    assert!(lines.contains(&"✕ 1. check failed fix-typo · Fix typo".to_owned()));
+
+    let strip = app.task_strip_view().expect("task strip should render");
+    assert_eq!(strip.detail, "paused · v1 · 0/1 done · check failed");
+    assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Error);
+    assert_eq!(strip.rows[0].label, "1. check failed · Fix typo");
+    assert_eq!(strip.rows[0].detail, "check failed · fix-typo");
     Ok(())
 }
 

@@ -222,6 +222,9 @@ pub(crate) fn info_rail_permission_lines(app: &AppState) -> Vec<String> {
 }
 
 fn compact_info_rail_task_lines(app: &AppState) -> Vec<String> {
+    if app.task_strip_view().is_some() {
+        return Vec::new();
+    }
     let lines = app.task_sidebar_lines();
     if lines.len() <= INFO_RAIL_TASK_LINE_LIMIT {
         return lines;
@@ -885,7 +888,7 @@ fn footer_hints(app: &AppState) -> String {
     let agent = format!("agent: {}", app.active_agent_label());
     let queue = app.composer_queue_summary();
     if app.pending_plan_approval().is_some() {
-        return format!("{agent} · A ask · W workspace edits · C continue · Esc discard");
+        return format!("{agent} · Enter create and run task · Esc discard");
     }
     if app.approval.pending.is_some() {
         return format!("{agent} · Y allow · N deny · V diff");
@@ -973,15 +976,17 @@ fn queue_action_buttons(selected: ComposerQueueAction) -> Vec<QueueActionButtonV
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanApprovalViewModel {
-    pub hash: String,
-    pub scope_summary: String,
+    pub summary: String,
+    pub target_path_count: usize,
+    pub suggested_check_count: usize,
 }
 
 impl PlanApprovalViewModel {
     fn from_pending(pending: &crate::app::PendingPlanApproval) -> Self {
         Self {
-            hash: short_plan_hash(&pending.plan_hash),
-            scope_summary: pending.scope_summary.clone(),
+            summary: pending.summary.clone(),
+            target_path_count: pending.target_path_count,
+            suggested_check_count: pending.suggested_check_count,
         }
     }
 }
@@ -1007,10 +1012,6 @@ impl LiveProgressViewModel {
             detail: detail.to_owned(),
         }
     }
-}
-
-fn short_plan_hash(plan_hash: &str) -> String {
-    plan_hash.chars().take(19).collect()
 }
 
 fn tool_progress_title(detail: &str) -> String {

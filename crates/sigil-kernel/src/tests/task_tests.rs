@@ -325,6 +325,62 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
 }
 
 #[test]
+fn task_plan_update_normalizes_model_mode_isolation_mismatches() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 3,
+        max_plan_versions: 1,
+    };
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: r#"{
+            "plan_version":1,
+            "status":"accepted",
+            "steps":[
+                {
+                    "step_id":"write",
+                    "title":"Write",
+                    "role":"executor",
+                    "mode":"write",
+                    "isolation":"shared_read_only"
+                },
+                {
+                    "step_id":"read",
+                    "title":"Read",
+                    "role":"executor",
+                    "mode":"read",
+                    "isolation":"sequential_workspace_write"
+                },
+                {
+                    "step_id":"defaulted",
+                    "title":"Defaulted",
+                    "role":"executor"
+                }
+            ]
+        }"#
+        .to_owned(),
+    };
+
+    let entry = task_plan_update_entry(&context, &call)?;
+
+    assert_eq!(
+        entry.steps[0].effective_isolation(),
+        TaskIsolationMode::SequentialWorkspaceWrite
+    );
+    assert_eq!(
+        entry.steps[1].effective_isolation(),
+        TaskIsolationMode::SharedReadOnly
+    );
+    assert_eq!(entry.steps[2].effective_mode(), TaskStepMode::Write);
+    assert_eq!(
+        entry.steps[2].effective_isolation(),
+        TaskIsolationMode::SequentialWorkspaceWrite
+    );
+    Ok(())
+}
+
+#[test]
 fn task_dag_schema_parses_valid_metadata_and_projects_graph() -> Result<()> {
     let context = TaskPlanUpdateContext {
         task_id: task_id("task_1")?,

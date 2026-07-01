@@ -20,10 +20,11 @@ use crate::{
     ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode, JsonlSessionStore,
     MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
     PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
-    PlanApprovedEntry, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
-    ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, RunEvent, Session,
-    SessionLogEntry, SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus,
-    TaskPlanUpdateContext, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderContinuationState, ReasoningArtifact, ReasoningEffort,
+    ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
+    SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskRunEntry, TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
     ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
     ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
     ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope,
@@ -2931,7 +2932,14 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
 
 #[tokio::test]
 async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
-    let agent = Agent::new(PlanUpdateProvider { valid: true }, ToolRegistry::new());
+    let stream_calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        PlanUpdateProvider {
+            valid: true,
+            stream_calls: Some(Arc::clone(&stream_calls)),
+        },
+        ToolRegistry::new(),
+    );
     let mut session = Session::new("mock-plan", "mock-model");
     let mut handler = crate::event::NoopEventHandler;
 
@@ -2959,7 +2967,12 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
         )
         .await?;
 
-    assert_eq!(output.result.final_text, "done");
+    assert_eq!(
+        output.result.final_text,
+        "task plan accepted; orchestration will continue"
+    );
+    assert_eq!(output.result.final_message_id, None);
+    assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
     assert_eq!(output.outcome.tool_errors.len(), 0);
     assert!(session.entries().iter().any(|entry| {
         matches!(
@@ -2995,7 +3008,13 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
 
 #[tokio::test]
 async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Result<()> {
-    let agent = Agent::new(PlanUpdateProvider { valid: false }, ToolRegistry::new());
+    let agent = Agent::new(
+        PlanUpdateProvider {
+            valid: false,
+            stream_calls: None,
+        },
+        ToolRegistry::new(),
+    );
     let mut session = Session::new("mock-plan", "mock-model");
     let mut handler = crate::event::NoopEventHandler;
 
@@ -3052,6 +3071,7 @@ struct InvalidWriteArgsProvider;
 struct LoopingToolProvider;
 struct PlanUpdateProvider {
     valid: bool,
+    stream_calls: Option<Arc<AtomicUsize>>,
 }
 
 #[async_trait]
@@ -3148,6 +3168,9 @@ impl Provider for PlanUpdateProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(stream_calls) = &self.stream_calls {
+            stream_calls.fetch_add(1, Ordering::SeqCst);
+        }
         let tool_used = request
             .messages
             .iter()
@@ -3338,6 +3361,25 @@ fn session_scoped_approved_workspace_plan(workspace_paths: Vec<&str>) -> PlanApp
     approval
 }
 
+fn task_bound_plan_permission_grant(workspace_paths: Vec<&str>) -> PlanPermissionGrantedEntry {
+    PlanPermissionGrantedEntry {
+        plan_id: PlanId::new("plan_test").expect("plan id"),
+        plan_hash: plan_text_hash("approved workspace edits"),
+        task_id: TaskId::new("task_1").expect("task id"),
+        workspace_snapshot_id: Some("snapshot_1".to_owned()),
+        permission: PlanApprovalPermission::WorkspaceEdits,
+        scope: PlanApprovalScope {
+            summary: "scoped edits for task task_1".to_owned(),
+            workspace_paths: workspace_paths
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        },
+        expires: PlanApprovalExpiry::Session,
+        granted_at_ms: 42,
+    }
+}
+
 #[test]
 fn plan_approval_override_keeps_destructive_tools_behind_approval() -> Result<()> {
     let mut session = Session::new("mock-write", "mock-model");
@@ -3372,6 +3414,72 @@ fn plan_approval_override_keeps_destructive_tools_behind_approval() -> Result<()
         changeset_decision,
     );
     assert_eq!(changeset_decision.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn task_bound_plan_permission_grant_allows_only_scoped_file_edits() -> Result<()> {
+    let mut session = Session::new("mock-write", "mock-model");
+    session.append_control(ControlEntry::PlanPermissionGranted(
+        task_bound_plan_permission_grant(vec!["file.txt"]),
+    ))?;
+    let in_scope = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("file.txt", "file.txt")],
+        false,
+    );
+    let in_scope = super::plan_approval_decision_override(
+        &session,
+        &required_preview_file_spec("write_file"),
+        in_scope,
+    );
+    assert_eq!(in_scope.mode, ApprovalMode::Allow);
+
+    let out_of_scope = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("other.txt", "other.txt")],
+        false,
+    );
+    let out_of_scope = super::plan_approval_decision_override(
+        &session,
+        &required_preview_file_spec("write_file"),
+        out_of_scope,
+    );
+    assert_eq!(out_of_scope.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn task_bound_plan_permission_grant_expires_after_task_terminal_status() -> Result<()> {
+    let mut session = Session::new("mock-write", "mock-model");
+    let grant = task_bound_plan_permission_grant(vec!["file.txt"]);
+    session.append_control(ControlEntry::PlanPermissionGranted(grant.clone()))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: grant.task_id.clone(),
+        parent_session_ref: crate::SessionRef::new_relative("session.jsonl")?,
+        objective: "test task".to_owned(),
+        status: TaskRunStatus::Completed,
+        reason: Some("done".to_owned()),
+    }))?;
+    let decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("file.txt", "file.txt")],
+        false,
+    );
+
+    let decision = super::plan_approval_decision_override(
+        &session,
+        &required_preview_file_spec("write_file"),
+        decision,
+    );
+
+    assert_eq!(decision.mode, ApprovalMode::Ask);
     Ok(())
 }
 

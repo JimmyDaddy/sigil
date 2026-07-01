@@ -141,7 +141,11 @@ pub use permission::{
 };
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,
-    PlanApprovalScope, PlanApprovedEntry, plan_text_hash, plan_workspace_paths,
+    PlanApprovalScope, PlanApprovedEntry, PlanArtifactProjection, PlanDecision, PlanDecisionActor,
+    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
+    PlanSourceRef, PlanSuggestedCheck, PlanTaskStartMode, PlanToTaskStepMapping,
+    TaskCreatedFromPlanEntry, plan_draft_created_entry, plan_task_input_from_draft, plan_text_hash,
+    plan_workspace_paths,
 };
 pub use plugin::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_PLUGIN_HOOK_TIMEOUT_MS,

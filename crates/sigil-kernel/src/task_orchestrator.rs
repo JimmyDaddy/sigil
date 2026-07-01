@@ -358,17 +358,6 @@ where
             )
         })?;
         let (plan_version, steps) = latest_executable_plan(task)?;
-        let runnable = runnable_steps_for_continue(
-            session,
-            task,
-            plan_version,
-            &steps,
-            [
-                &executor_options,
-                &subagent_read_options,
-                &subagent_write_options,
-            ],
-        )?;
         let guidance = normalize_task_guidance(guidance);
         append_task_run(
             session,
@@ -379,171 +368,168 @@ where
         )?;
 
         let mut step_outputs = Vec::new();
-        if runnable.steps.is_empty() {
-            let (status, reason) = if let Some(reason) = runnable.paused_reason {
-                (TaskRunStatus::Paused, reason)
-            } else {
-                (
-                    TaskRunStatus::Completed,
-                    format!("completed plan v{plan_version}"),
+        let max_scheduler_batches = steps.len().saturating_add(1).max(1);
+        for _ in 0..max_scheduler_batches {
+            let projection = session.task_state_projection();
+            let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
+                anyhow!(
+                    "task {} disappeared from session projection",
+                    request.task_id.as_str()
                 )
-            };
-            append_task_run(session, handler, &request, status, Some(reason))?;
-            return Ok(SequentialTaskRunOutput {
-                task_id: request.task_id,
+            })?;
+            let runnable = runnable_steps_for_continue(
+                session,
+                task,
                 plan_version,
-                steps: step_outputs,
-                status,
-            });
-        }
+                &steps,
+                [
+                    &executor_options,
+                    &subagent_read_options,
+                    &subagent_write_options,
+                ],
+            )?;
+            if runnable.steps.is_empty() {
+                let (status, reason) = if let Some(reason) = runnable.paused_reason {
+                    (TaskRunStatus::Paused, reason)
+                } else {
+                    (
+                        TaskRunStatus::Completed,
+                        format!("completed plan v{plan_version}"),
+                    )
+                };
+                append_task_run(session, handler, &request, status, Some(reason))?;
+                return Ok(SequentialTaskRunOutput {
+                    task_id: request.task_id,
+                    plan_version,
+                    steps: step_outputs,
+                    status,
+                });
+            }
 
-        for step in runnable.steps {
-            let step_options = match step.role {
-                AgentRole::Planner | AgentRole::Executor => executor_options.clone(),
-                AgentRole::SubagentRead => subagent_read_options.clone(),
-                AgentRole::SubagentWrite => subagent_write_options.clone(),
-            };
-            append_task_step(
-                session,
-                handler,
-                &request.task_id,
-                plan_version,
-                &step,
-                TaskStepStatus::Running,
-                None,
-                None,
-            )?;
-            let write_lease_id = acquire_task_write_lease(
-                session,
-                handler,
-                &request,
-                plan_version,
-                &step,
-                &step_options,
-            )?;
-            let step_run_result = match step.role {
-                AgentRole::Planner | AgentRole::Executor => {
-                    self.run_parent_step(
-                        session,
-                        &request,
-                        plan_version,
-                        &step,
-                        step_options.clone(),
-                        guidance.as_deref(),
-                        handler,
-                        approval_handler,
-                    )
-                    .await
-                }
-                AgentRole::SubagentRead => {
-                    self.run_child_step(
-                        session,
-                        &request,
-                        plan_version,
-                        &step,
-                        step_options.clone(),
-                        guidance.as_deref(),
-                        handler,
-                        approval_handler,
-                    )
-                    .await
-                }
-                AgentRole::SubagentWrite => {
-                    self.run_child_step(
-                        session,
-                        &request,
-                        plan_version,
-                        &step,
-                        step_options.clone(),
-                        guidance.as_deref(),
-                        handler,
-                        approval_handler,
-                    )
-                    .await
-                }
-            };
-            let output = match step_run_result {
-                Ok(output) => output,
-                Err(error) => {
-                    release_task_write_lease(
-                        session,
-                        handler,
-                        write_lease_id,
-                        WriteLeaseReleaseStatus::Interrupted,
-                    )?;
-                    let readiness = task_step_failure_readiness_nonblocking(
-                        session,
-                        &request,
-                        &step,
-                        &step_options,
-                    )
-                    .await?;
-                    append_task_step(
-                        session,
-                        handler,
-                        &request.task_id,
-                        plan_version,
-                        &step,
-                        TaskStepStatus::Failed,
-                        None,
-                        Some(format!("{error:#}")),
-                    )?;
-                    append_cancelled_dependent_steps(
-                        session,
-                        handler,
-                        &request.task_id,
-                        plan_version,
-                        &steps,
-                        &step.step_id,
-                        TaskStepStatus::Failed,
-                    )?;
-                    append_task_readiness(session, handler, readiness)?;
-                    append_task_run(
-                        session,
-                        handler,
-                        &request,
-                        TaskRunStatus::Failed,
-                        Some(format!("step {} failed: {error:#}", step.step_id.as_str())),
-                    )?;
-                    return Ok(SequentialTaskRunOutput {
-                        task_id: request.task_id,
-                        plan_version,
-                        steps: step_outputs,
-                        status: TaskRunStatus::Failed,
-                    });
-                }
-            };
-            let initial_status = step_status_from_outcome(&output);
-            release_task_write_lease(
-                session,
-                handler,
-                write_lease_id,
-                write_lease_release_status_from_step_status(initial_status),
-            )?;
-            let mut readiness = task_step_readiness_nonblocking(
-                session,
-                &request,
-                &step,
-                initial_status,
-                &output,
-                &step_options,
-            )
-            .await?;
-            if initial_status == TaskStepStatus::Completed
-                && task_step_auto_run_policy(session, &request, &step, &step_options)?
-                    == VerificationAutoRunPolicy::TrustedOnly
-                && run_task_step_verification_checks(
+            for step in runnable.steps {
+                let step_options = match step.role {
+                    AgentRole::Planner | AgentRole::Executor => executor_options.clone(),
+                    AgentRole::SubagentRead => subagent_read_options.clone(),
+                    AgentRole::SubagentWrite => subagent_write_options.clone(),
+                };
+                append_task_step(
                     session,
                     handler,
-                    self.execution_backend.as_deref(),
+                    &request.task_id,
+                    plan_version,
+                    &step,
+                    TaskStepStatus::Running,
+                    None,
+                    None,
+                )?;
+                let write_lease_id = acquire_task_write_lease(
+                    session,
+                    handler,
                     &request,
+                    plan_version,
                     &step,
                     &step_options,
-                    &readiness,
-                )
-                .await?
-            {
-                readiness = task_step_readiness_nonblocking(
+                )?;
+                let step_run_result = match step.role {
+                    AgentRole::Planner | AgentRole::Executor => {
+                        self.run_parent_step(
+                            session,
+                            &request,
+                            plan_version,
+                            &step,
+                            step_options.clone(),
+                            guidance.as_deref(),
+                            handler,
+                            approval_handler,
+                        )
+                        .await
+                    }
+                    AgentRole::SubagentRead => {
+                        self.run_child_step(
+                            session,
+                            &request,
+                            plan_version,
+                            &step,
+                            step_options.clone(),
+                            guidance.as_deref(),
+                            handler,
+                            approval_handler,
+                        )
+                        .await
+                    }
+                    AgentRole::SubagentWrite => {
+                        self.run_child_step(
+                            session,
+                            &request,
+                            plan_version,
+                            &step,
+                            step_options.clone(),
+                            guidance.as_deref(),
+                            handler,
+                            approval_handler,
+                        )
+                        .await
+                    }
+                };
+                let output = match step_run_result {
+                    Ok(output) => output,
+                    Err(error) => {
+                        release_task_write_lease(
+                            session,
+                            handler,
+                            write_lease_id,
+                            WriteLeaseReleaseStatus::Interrupted,
+                        )?;
+                        let readiness = task_step_failure_readiness_nonblocking(
+                            session,
+                            &request,
+                            &step,
+                            &step_options,
+                        )
+                        .await?;
+                        append_task_step(
+                            session,
+                            handler,
+                            &request.task_id,
+                            plan_version,
+                            &step,
+                            TaskStepStatus::Failed,
+                            None,
+                            Some(format!("{error:#}")),
+                        )?;
+                        append_cancelled_dependent_steps(
+                            session,
+                            handler,
+                            &request.task_id,
+                            plan_version,
+                            &steps,
+                            &step.step_id,
+                            TaskStepStatus::Failed,
+                        )?;
+                        append_task_readiness(session, handler, readiness)?;
+                        append_task_run(
+                            session,
+                            handler,
+                            &request,
+                            TaskRunStatus::Failed,
+                            Some(format!("step {} failed: {error:#}", step.step_id.as_str())),
+                        )?;
+                        return Ok(SequentialTaskRunOutput {
+                            task_id: request.task_id,
+                            plan_version,
+                            steps: step_outputs,
+                            status: TaskRunStatus::Failed,
+                        });
+                    }
+                };
+                let initial_status = step_status_from_outcome(&output);
+                release_task_write_lease(
+                    session,
+                    handler,
+                    write_lease_id,
+                    write_lease_release_status_from_step_status(initial_status),
+                )?;
+                let mut readiness = task_step_readiness_nonblocking(
                     session,
                     &request,
                     &step,
@@ -552,94 +538,95 @@ where
                     &step_options,
                 )
                 .await?;
-            }
-            let status = step_status_after_readiness(initial_status, &readiness);
-            if status != initial_status {
-                readiness = task_step_readiness_nonblocking(
-                    session,
-                    &request,
-                    &step,
-                    status,
-                    &output,
-                    &step_options,
-                )
-                .await?;
-            }
-            append_task_step(
-                session,
-                handler,
-                &request.task_id,
-                plan_version,
-                &step,
-                status,
-                Some(output.final_text.clone()),
-                step_reason_from_output(status, &output),
-            )?;
-            if cancels_dependent_steps(status) {
-                append_cancelled_dependent_steps(
+                if initial_status == TaskStepStatus::Completed
+                    && task_step_auto_run_policy(session, &request, &step, &step_options)?
+                        == VerificationAutoRunPolicy::TrustedOnly
+                    && run_task_step_verification_checks(
+                        session,
+                        handler,
+                        self.execution_backend.as_deref(),
+                        &request,
+                        &step,
+                        &step_options,
+                        &readiness,
+                    )
+                    .await?
+                {
+                    readiness = task_step_readiness_nonblocking(
+                        session,
+                        &request,
+                        &step,
+                        initial_status,
+                        &output,
+                        &step_options,
+                    )
+                    .await?;
+                }
+                let status = step_status_after_readiness(initial_status, &readiness);
+                if status != initial_status {
+                    readiness = task_step_readiness_nonblocking(
+                        session,
+                        &request,
+                        &step,
+                        status,
+                        &output,
+                        &step_options,
+                    )
+                    .await?;
+                }
+                append_task_step(
                     session,
                     handler,
                     &request.task_id,
                     plan_version,
-                    &steps,
-                    &step.step_id,
+                    &step,
                     status,
+                    Some(output.final_text.clone()),
+                    step_reason_from_output(status, &output),
                 )?;
-            }
-            append_task_readiness(session, handler, readiness.clone())?;
-            step_outputs.push(SequentialTaskStepOutput {
-                step_id: step.step_id.clone(),
-                status,
-                verification_verdict: readiness.evaluation.verification_verdict,
-                visible_state: readiness.evaluation.visible_state,
-                outcome: output.outcome,
-            });
-            if status != TaskStepStatus::Completed {
-                let task_status = task_status_from_step_status(status);
-                append_task_run(
-                    session,
-                    handler,
-                    &request,
-                    task_status,
-                    Some(step_terminal_reason(&step.step_id, status)),
-                )?;
-                return Ok(SequentialTaskRunOutput {
-                    task_id: request.task_id,
-                    plan_version,
-                    steps: step_outputs,
-                    status: task_status,
+                if cancels_dependent_steps(status) {
+                    append_cancelled_dependent_steps(
+                        session,
+                        handler,
+                        &request.task_id,
+                        plan_version,
+                        &steps,
+                        &step.step_id,
+                        status,
+                    )?;
+                }
+                append_task_readiness(session, handler, readiness.clone())?;
+                step_outputs.push(SequentialTaskStepOutput {
+                    step_id: step.step_id.clone(),
+                    status,
+                    verification_verdict: readiness.evaluation.verification_verdict,
+                    visible_state: readiness.evaluation.visible_state,
+                    outcome: output.outcome,
                 });
+                if status != TaskStepStatus::Completed {
+                    let task_status = task_status_from_step_status(status);
+                    append_task_run(
+                        session,
+                        handler,
+                        &request,
+                        task_status,
+                        Some(step_terminal_reason(&step.step_id, status)),
+                    )?;
+                    return Ok(SequentialTaskRunOutput {
+                        task_id: request.task_id,
+                        plan_version,
+                        steps: step_outputs,
+                        status: task_status,
+                    });
+                }
             }
         }
 
-        let final_projection = session.task_state_projection();
-        let final_task = final_projection
-            .tasks
-            .get(&request.task_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "task {} disappeared from session projection",
-                    request.task_id.as_str()
-                )
-            })?;
-        let (status, reason) = if plan_steps_all_completed(final_task, plan_version, &steps) {
-            (
-                TaskRunStatus::Completed,
-                format!("completed plan v{plan_version}"),
-            )
-        } else {
-            (
-                TaskRunStatus::Paused,
-                format!("plan v{plan_version} has more ready or dependency-blocked steps"),
-            )
-        };
-        append_task_run(session, handler, &request, status, Some(reason))?;
-        Ok(SequentialTaskRunOutput {
-            task_id: request.task_id,
-            plan_version,
-            steps: step_outputs,
-            status,
-        })
+        bail!(
+            "task {} did not reach a terminal or paused scheduler state after {} scheduler batches",
+            request.task_id.as_str(),
+            max_scheduler_batches
+        )
     }
 
     /// Runs one explicit child-session task step without invoking the planner.
@@ -3045,11 +3032,23 @@ fn step_status_after_readiness(
     status: TaskStepStatus,
     readiness: &ReadinessEvaluatedEntry,
 ) -> TaskStepStatus {
-    if status == TaskStepStatus::Completed && !readiness.evaluation.required_actions.is_empty() {
+    if status == TaskStepStatus::Completed && readiness_blocks_step(readiness) {
         TaskStepStatus::Blocked
     } else {
         status
     }
+}
+
+fn readiness_blocks_step(readiness: &ReadinessEvaluatedEntry) -> bool {
+    readiness
+        .evaluation
+        .required_actions
+        .iter()
+        .any(required_action_blocks_task_step)
+}
+
+fn required_action_blocks_task_step(action: &RequiredAction) -> bool {
+    !matches!(action, RequiredAction::ProvideVerificationConfig)
 }
 
 fn step_reason_from_output(status: TaskStepStatus, output: &StepRunOutput) -> Option<String> {
@@ -3159,7 +3158,7 @@ fn hash_text(value: &str) -> String {
 
 fn planner_prompt(objective: &str) -> String {
     format!(
-        "Create an executable plan for this task. Call task_plan_update with an accepted plan before any execution. Do not call a task or subagent tool. To delegate verification or implementation, add plan steps with role subagent_read or subagent_write; the orchestrator will run those steps in child sessions.\n\nObjective:\n{objective}"
+        "Create an executable plan for this task. Call task_plan_update with an accepted plan before any execution. After task_plan_update succeeds, stop; do not inspect files, execute steps, or summarize execution progress. Do not call a task or subagent tool. To delegate verification or implementation, add plan steps with role subagent_read or subagent_write; the orchestrator will run those steps in child sessions.\n\nObjective:\n{objective}"
     )
 }
 

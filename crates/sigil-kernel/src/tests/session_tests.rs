@@ -19,23 +19,24 @@ use crate::{
     DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, ExecutionMutationProfile,
     LegacyEvent, MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
     MemoryLoadReport, MemorySnapshot, MutationEventRecorder, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PluginCapability,
-    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, ProjectionCursor,
-    ProviderContinuationState, ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus,
-    RedactionState, RequiredAction, ResponseHandle, RunStatus, RuntimeContextCandidates,
-    SandboxProfileRequirement, SessionRef, SessionStreamRecord, SkillDescriptor,
-    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
-    TaskId, TaskMemoryV1, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
-    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit,
-    ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats, VerificationAutoRunPolicy,
-    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
-    VerificationScope, VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
-    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, provider::ModelMessage, stable_event_hash,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
+    PlanDecisionRecordedEntry, PlanSourceRef, PluginCapability, PluginManifestSnapshot,
+    PluginTrustDecision, PluginTrustEntry, ProjectionCursor, ProviderContinuationState,
+    ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
+    ResponseHandle, RunStatus, RuntimeContextCandidates, SandboxProfileRequirement, SessionRef,
+    SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode,
+    SkillSource, SkillTrustState, StoredEvent, TaskId, TaskMemoryV1, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
+    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats,
+    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
+    plan_draft_created_entry, provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -3379,6 +3380,69 @@ fn plan_approval_projection_replays_mixed_durable_stream_records() -> Result<()>
         projection.latest_by_hash.get("sha256:second"),
         Some(&second)
     );
+    Ok(())
+}
+
+#[test]
+fn plan_artifact_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let first = plan_draft_created_entry(
+        "1. Inspect README.md",
+        PlanSourceRef {
+            session_ref: Some("legacy.jsonl".to_owned()),
+            run_id: Some("run_legacy".to_owned()),
+            final_message_id: Some("msg_legacy".to_owned()),
+        },
+        10,
+        Some("snapshot_legacy".to_owned()),
+    )?
+    .expect("legacy draft");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+                first
+            )))?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    let second = plan_draft_created_entry(
+        "1. Inspect README.md\n2. Update docs/en/quickstart.md",
+        PlanSourceRef {
+            session_ref: Some("session.jsonl".to_owned()),
+            run_id: Some("run_v2".to_owned()),
+            final_message_id: Some("msg_v2".to_owned()),
+        },
+        20,
+        Some("snapshot_v2".to_owned()),
+    )?
+    .expect("v2 draft");
+    let decision = PlanDecisionRecordedEntry {
+        plan_id: second.plan_id.clone(),
+        plan_hash: second.plan_hash.clone(),
+        decision: PlanDecision::Accepted,
+        decided_by: PlanDecisionActor::User,
+        decided_at_ms: 21,
+        reason: Some("accept plan".to_owned()),
+    };
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+        second.clone(),
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::PlanDecisionRecorded(decision.clone()),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_plan_artifact_projection_from_durable()?
+        .expect("durable session should replay plan artifacts");
+
+    assert_eq!(projection.plans.len(), 2);
+    assert_eq!(projection.latest_plan(), Some(&second));
+    assert!(projection.latest_pending_plan().is_none());
+    assert_eq!(projection.latest_decision(&second.plan_id), Some(&decision));
     Ok(())
 }
 

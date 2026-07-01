@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
 
-This guide covers the first-release install paths. If you want a first-run walkthrough, start with [quickstart.md](quickstart.md).
+This guide covers the first-release install paths. If you want a first-run walkthrough, start with [quickstart.md](quickstart.md). `v0.0.1` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ The release workflow generates `sigil-ai.rb` from the macOS release archives. Ma
 For the first release, Cargo installs from the Git tag rather than crates.io:
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
 ```
 
 This installs the `sigil` binary into Cargo's binary directory. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
@@ -122,7 +122,7 @@ Use the installer you used originally:
 ```bash
 npm install -g @jimmydaddy/sigil@latest
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

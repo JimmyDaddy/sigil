@@ -61,12 +61,12 @@ Sigil 围绕几个用户可感知的概念工作：
 
 ## 当前分发状态
 
-首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发：
+首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发。`v0.0.1` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。
 
 ```bash
 npm install -g @jimmydaddy/sigil
 brew install JimmyDaddy/sigil/sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
 ```
 
 从 checkout 安装仍适合本地开发：

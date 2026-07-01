@@ -262,7 +262,7 @@ impl TaskIsolationMode {
         }
     }
 
-    fn default_for_mode(mode: TaskStepMode) -> Self {
+    pub(crate) fn default_for_mode(mode: TaskStepMode) -> Self {
         match mode {
             TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify => {
                 Self::SharedReadOnly
@@ -418,15 +418,15 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "mode": {
                                 "type": "string",
                                 "enum": ["read", "write", "review", "verify"],
-                                "description": "Step intent. Reviewer output is advisory; verify steps are still bound to system verification."
+                                "description": "Optional step intent. Omit when the role default is enough. Reviewer output is advisory; verify steps are still bound to system verification."
                             },
                             "isolation": {
                                 "type": "string",
                                 "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"],
-                                "description": "Workspace isolation contract. Write steps must not use shared_read_only."
+                                "description": "Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write; read/review/verify steps default to shared_read_only."
                             }
                         },
-                        "required": ["step_id", "title", "role", "mode", "isolation"],
+                        "required": ["step_id", "title", "role"],
                         "additionalProperties": false
                     }
                 },
@@ -490,9 +490,7 @@ pub fn task_plan_update_entry(
             let mode = step
                 .mode
                 .unwrap_or_else(|| TaskStepMode::default_for_role(step.role));
-            let isolation = step
-                .isolation
-                .unwrap_or_else(|| TaskIsolationMode::default_for_mode(mode));
+            let isolation = canonical_task_plan_update_isolation(mode, step.isolation);
             Ok(TaskStepSpec {
                 step_id: TaskStepId::new(step.step_id)?,
                 title: step.title,
@@ -519,13 +517,28 @@ pub fn task_plan_update_entry(
     })
 }
 
+fn canonical_task_plan_update_isolation(
+    mode: TaskStepMode,
+    isolation: Option<TaskIsolationMode>,
+) -> TaskIsolationMode {
+    match mode {
+        TaskStepMode::Write => isolation
+            .filter(|isolation| isolation.is_write_isolation())
+            .unwrap_or(TaskIsolationMode::SequentialWorkspaceWrite),
+        TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify => {
+            TaskIsolationMode::SharedReadOnly
+        }
+    }
+}
+
 /// Bounded model-visible response content for `task_plan_update`.
 pub fn task_plan_update_result_content(entry: &TaskPlanEntry) -> String {
     json!({
         "task_id": entry.task_id.as_str(),
         "plan_version": entry.plan_version,
         "status": entry.status,
-        "steps": entry.steps.len()
+        "steps": entry.steps.len(),
+        "next_action": "stop; the system orchestrator will run accepted plan steps"
     })
     .to_string()
 }

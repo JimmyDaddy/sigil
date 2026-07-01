@@ -186,7 +186,7 @@ The current distribution implementation supports first-release package-manager a
 
 - npm scoped package generation: `scripts/prepare-npm-packages.sh`
 - Homebrew tap formula generation: `scripts/render-homebrew-formula.sh` emits `sigil-ai.rb`
-- Cargo git-tag install: `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil`
+- Cargo git-tag install: `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil`
 - Checkout install: `cargo install --path crates/sigil --locked`
 - Local release archive: `scripts/build-release-archive.sh`
 

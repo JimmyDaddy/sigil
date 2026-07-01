@@ -2401,6 +2401,7 @@ fn user_configured_checks_are_discovered_before_repo_checks_and_can_promote_expl
 #[test]
 fn user_config_discovery_validates_empty_checks_and_normalizes_cwd_edges() {
     let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname = 'demo'\n").expect("cargo file");
     fs::create_dir(temp.path().join("crates")).expect("cwd dir");
     let empty = VerificationConfig {
         auto_run: VerificationAutoRunPolicy::Manual,
@@ -2462,8 +2463,64 @@ fn user_config_discovery_validates_empty_checks_and_normalizes_cwd_edges() {
 }
 
 #[test]
+fn user_configured_project_checks_are_skipped_when_project_marker_is_absent() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let user_config = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
+        checks: vec![
+            VerificationCheckConfig {
+                id: "kernel-verification".to_owned(),
+                command: "cargo".to_owned(),
+                args: vec![
+                    "test".to_owned(),
+                    "-p".to_owned(),
+                    "sigil-kernel".to_owned(),
+                    "verification".to_owned(),
+                ],
+                cwd: None,
+                effect: ToolEffect::ReadOnly,
+            },
+            VerificationCheckConfig {
+                id: "kernel-verification".to_owned(),
+                command: "true".to_owned(),
+                args: Vec::new(),
+                cwd: None,
+                effect: ToolEffect::ReadOnly,
+            },
+        ],
+        ..VerificationConfig::default()
+    };
+
+    let discovered = discover_candidate_checks_with_user_config(
+        temp.path(),
+        "trust-1",
+        "event-config",
+        &user_config,
+    )?;
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].suggested_check_spec_id, "kernel-verification");
+    assert_eq!(discovered[0].candidate.command.command, "true");
+
+    let entries = check_specs_from_user_config(
+        temp.path(),
+        &user_config,
+        EvidenceScope::Task("task-1".to_owned()),
+        "scope-main",
+        "event-config",
+    )?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].trusted_check.check_spec.check_spec_id,
+        "kernel-verification"
+    );
+    assert_eq!(entries[0].trusted_check.check_spec.command.command, "true");
+    Ok(())
+}
+
+#[test]
 fn user_configured_check_specs_are_trusted_and_deduplicate_ids() -> Result<()> {
     let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname = 'demo'\n")?;
     let user_config = VerificationConfig {
         auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![

@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [当前支持状态](status.md) · [English](../en/changelog.md)
 
-这一页是用户可读摘要。面向 maintainer 的实现细节仍在 `dev/docs/*` 和 release automation scripts 中。
+这一页是用户可读摘要。面向 maintainer 的实现细节仍在 `dev/docs/*` 和 release automation scripts 中。首个公开版本是 early preview：核心 TUI 工作流应该可用，但配置、插件 API、高级 sandbox 行为和自动化入口暂不承诺稳定兼容。
 
 ## 当前文档更新
 
@@ -23,13 +23,15 @@
 - npm、Homebrew tap、Cargo git-tag、GitHub release archive 和 checkout 安装路径。
 - Quick Setup 和 `/config`。
 - `sigil doctor` 和 `/doctor`。
-- 通过 `/task` 使用 durable multi-step tasks，`/plan` 保留给只读 planning prompts。
+- 通过 `/task` 使用 durable multi-step tasks，`/plan` 保持只读，直到用户显式接受 plan-to-task handoff。
 - 从 append-only logs 恢复 session。
 - 文件变更、shell execution、MCP 和 LSP edits 通过 approval 控制。
 - DeepSeek、OpenAI-compatible、Anthropic 和 Gemini providers。
 - stdio MCP servers。
 - 可选 code intelligence。
 - Terminal mouse capture 和 OSC52 clipboard 支持。
+- 任务完成 verification 状态和显式用户批准的 checks。
+- 支持的本地执行后端已有 core sandbox receipt，平台差异另见安全与配置文档。
 
 ## Release Archive Notes
 

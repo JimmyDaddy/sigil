@@ -160,7 +160,7 @@ backend = "macos_seatbelt"
 isolation = "require_sandbox"
 ```
 
-`macos_seatbelt` runs non-interactive commands through `/usr/bin/sandbox-exec` with full filesystem reads, writes limited to the command working directory, and network access omitted from the profile. It is macOS-only, does not cover the persistent terminal, MCP servers, plugins, or remote tools, and fails closed if `sandbox-exec` is unavailable. `sandbox-exec` is deprecated by Apple, so this backend is an enforcement MVP rather than the final cross-platform sandbox strategy.
+`macos_seatbelt` runs commands through `/usr/bin/sandbox-exec` with full filesystem reads, writes limited to the command working directory, and network access omitted from the profile. Supported local paths include non-interactive shell execution and the current PTY/MCP/plugin-hook handoff surfaces that report sandbox coverage receipts. It remains macOS-only, does not make remote tools or every container/daemon scenario sandboxed, and fails closed if `sandbox-exec` is unavailable. `sandbox-exec` is deprecated by Apple, so this backend is an enforcement MVP rather than the final cross-platform sandbox strategy.
 
 ## Verification
 
@@ -185,6 +185,8 @@ Each `[[verification.checks]]` entry defines a trusted check from user config:
 - `args`: optional argv list.
 - `cwd`: optional workspace-relative working directory.
 - `effect`: expected tool effect. Use `read_only` for ordinary build/test/lint checks that do not modify verification-scoped files. Mutating checks are treated as mutation evidence and must be followed by a non-writing verification run before the result can be `Passed`.
+
+Project-shaped commands from user config are only applied when they match the current workspace. For example, `cargo` checks require a `Cargo.toml` at the workspace root or in the configured `cwd` chain, package-manager checks such as `npm` require `package.json`, and `make` / `just` checks require their corresponding project files. This keeps a global `~/.sigil/sigil.toml` from making an unrelated scratch directory fail verification just because it lacks the configured project type.
 
 ## Appearance
 
@@ -266,7 +268,7 @@ allow_write_subagents = true
 # Uses the full tool surface only when allow_write_subagents = true.
 ```
 
-Planned tasks are started from the TUI with `/task <task>`. `/plan` is reserved for read-only planning prompts and does not create durable task state. `default_mode = "chat"` keeps normal composer submits chat-first even when the current session has unfinished task state; use `/task continue` or a task UI action for explicit continuation. Switch the default mode only when a build intentionally wants planned tasks as the default flow.
+Planned tasks are started from the TUI with `/task <task>`. `/plan` remains read-only and creates/runs durable task state only after the user explicitly accepts the plan-ready handoff. `default_mode = "chat"` keeps normal composer submits chat-first even when the current session has unfinished task state; use `/task continue` or a task UI action for explicit continuation. Switch the default mode only when a build intentionally wants planned tasks as the default flow.
 
 Role-specific provider/model settings inherit `[agent]` when omitted. Planner and subagent-read default to read-only file/search/code-intelligence tools. Executor can see the full runtime registry. Subagent-write can see the full runtime registry only when `allow_write_subagents = true`; otherwise it falls back to the read-only scope. Mutating tools still go through the normal approval policy.
 

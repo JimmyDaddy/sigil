@@ -79,13 +79,15 @@ status   ready for review</code></pre>
       <section class="section" id="quickstart">
         <div class="section-heading">
           <p class="eyebrow">Quickstart</p>
-          <h2>Install from a checkout and launch from a workspace.</h2>
+          <h2>Install the preview release and launch from a workspace.</h2>
         </div>
         <div class="steps">
           <div class="step">
             <span>1</span>
             <h3>Install</h3>
-            <pre><code>cargo install --path crates/sigil --locked</code></pre>
+            <pre><code>npm install -g @jimmydaddy/sigil
+# or: brew install JimmyDaddy/sigil/sigil-ai
+# or: cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil</code></pre>
           </div>
           <div class="step">
             <span>2</span>
@@ -96,7 +98,7 @@ sigil</code></pre>
           <div class="step">
             <span>3</span>
             <h3>Set up</h3>
-            <p>Quick Setup opens when Sigil cannot find a usable config. Confirm the workspace, choose a provider/model, and enter authentication.</p>
+            <p>Quick Setup opens when Sigil cannot find a usable config. Confirm the workspace, choose a provider/model, and enter authentication. v0.0.1 is an early preview.</p>
           </div>
         </div>
       </section>
@@ -112,8 +114,8 @@ sigil</code></pre>
             <p>Use the composer for ordinary coding work, inspect streamed output, and keep session, usage, permissions, agents, and LSP state visible.</p>
           </article>
           <article>
-            <h3>Durable planning</h3>
-            <p>Use <code>/plan</code> for multi-step work. Planner, executor, and optional subagent roles write recoverable task state.</p>
+            <h3>Durable tasks</h3>
+            <p>Use <code>/task</code> for multi-step work. Use <code>/plan</code> when you want a read-only planning prompt before editing.</p>
           </article>
           <article>
             <h3>Diff-aware tools</h3>

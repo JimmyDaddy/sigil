@@ -49,7 +49,11 @@ use crate::{
     permission::{
         ApprovalMode, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation,
     },
-    plan::{PlanApprovalProjection, PlanApprovedEntry},
+    plan::{
+        PlanApprovalProjection, PlanApprovedEntry, PlanArtifactProjection,
+        PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanPermissionGrantedEntry,
+        TaskCreatedFromPlanEntry,
+    },
     plugin::{
         PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginManifestSnapshot,
         PluginStateProjection, PluginTrustEntry,
@@ -189,6 +193,7 @@ pub const AGENT_RESULT_CONTINUATION_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const CHANGESET_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const CONVERSATION_QUEUE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PLAN_APPROVAL_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const PLAN_ARTIFACT_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PLUGIN_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const SKILL_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const TASK_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
@@ -292,6 +297,14 @@ pub enum ControlEntry {
     CompactionApplied(CompactionRecord),
     #[serde(alias = "PlanApproved")]
     PlanApproved(PlanApprovedEntry),
+    #[serde(alias = "PlanDraftCreated")]
+    PlanDraftCreated(PlanDraftCreatedEntry),
+    #[serde(alias = "PlanDecisionRecorded")]
+    PlanDecisionRecorded(PlanDecisionRecordedEntry),
+    #[serde(alias = "PlanPermissionGranted")]
+    PlanPermissionGranted(PlanPermissionGrantedEntry),
+    #[serde(alias = "TaskCreatedFromPlan")]
+    TaskCreatedFromPlan(TaskCreatedFromPlanEntry),
     #[serde(alias = "TaskRun")]
     TaskRun(TaskRunEntry),
     #[serde(alias = "TaskPlan")]
@@ -1045,6 +1058,10 @@ fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
             DurableEventType::PluginHookExecutionFinished
         }
         ControlEntry::AgentProfileTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
+        ControlEntry::PlanDraftCreated(_) => DurableEventType::PlanDraftCreated,
+        ControlEntry::PlanDecisionRecorded(_) => DurableEventType::PlanDecisionRecorded,
+        ControlEntry::PlanPermissionGranted(_) => DurableEventType::PlanPermissionGranted,
+        ControlEntry::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
         ControlEntry::TaskRun(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
@@ -1633,6 +1650,27 @@ impl Session {
     /// Returns durable plan approvals reconstructed from append-only control entries.
     pub fn plan_approval_projection(&self) -> PlanApprovalProjection {
         PlanApprovalProjection::from_entries(&self.entries)
+    }
+
+    /// Returns durable plan artifact state reconstructed from append-only control entries.
+    pub fn plan_artifact_projection(&self) -> PlanArtifactProjection {
+        PlanArtifactProjection::from_entries(&self.entries)
+    }
+
+    /// Rebuilds plan artifact state directly from the durable mixed-format event stream.
+    pub fn try_plan_artifact_projection_from_durable(
+        &self,
+    ) -> Result<Option<PlanArtifactProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = PlanArtifactProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_plan_artifact_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
     }
 
     /// Rebuilds plan approval state directly from the durable mixed-format event stream.
@@ -2625,6 +2663,32 @@ fn apply_plan_approval_projection_record(
     record: &SessionStreamRecord,
 ) -> Result<()> {
     let next_cursor = record.projection_cursor(PLAN_APPROVAL_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_plan_artifact_projection_record(
+    projection: &mut PlanArtifactProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(PLAN_ARTIFACT_PROJECTION_SCHEMA_VERSION);
     match projection_apply_decision_for_record(
         cursor.as_ref(),
         &next_cursor.session_id,

@@ -4,9 +4,11 @@ use anyhow::Result;
 use sigil_kernel::{
     Agent, AgentRole, ControlEntry, ConversationInputKind, ConversationInputQueueId,
     ConversationInputQueuedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, JsonlSessionStore, McpServerConfig, McpServerStartup, ProviderChunk,
+    ConversationInputTarget, JsonlSessionStore, McpServerConfig, McpServerStartup,
+    PlanApprovalPermission, PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk,
     ReasoningEffort, RunEvent, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
-    SkillTrustState, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolRegistry, ToolResultStatus,
+    SkillTrustState, TaskRunStatus, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolRegistry,
+    ToolResultStatus,
 };
 use tempfile::tempdir;
 
@@ -240,11 +242,305 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
             if execution.tool_name == "write_file"
                 && execution.status == ToolExecutionStatus::Failed
     )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft))
+            if draft.summary == "plan after blocked write"
+    )));
     assert!(!entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::User(message) if message.content.as_deref() == Some("inspect first")
     )));
     assert!(!note_path.exists());
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-plan-task.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta(
+            "1. Inspect README.md\n2. Update README.md\n3. Run cargo test -p sigil-kernel plan"
+                .to_owned(),
+        ),
+        ProviderChunk::Done,
+    ])]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "plan docs update".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))?;
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    let projection = PlanArtifactProjection::from_entries(&entries);
+    let draft = projection
+        .latest_pending_plan()
+        .expect("plan run should append durable draft")
+        .clone();
+    assert_eq!(draft.suggested_checks.len(), 1);
+
+    worker.send(WorkerCommand::CreateTaskFromPlan {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+        start_mode: PlanTaskStartMode::CreatePaused,
+        permission_grant: None,
+    })?;
+    let created = worker
+        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))?;
+    let WorkerMessage::TaskCreatedFromPlan {
+        entry,
+        start_mode,
+        entries,
+    } = created
+    else {
+        unreachable!("recv_until only returns TaskCreatedFromPlan");
+    };
+
+    assert_eq!(start_mode, PlanTaskStartMode::CreatePaused);
+    assert_eq!(entry.plan_id, draft.plan_id);
+    assert_eq!(entry.plan_hash, draft.plan_hash);
+    assert_eq!(entry.task_plan_version, 0);
+    assert!(entry.stale_reason.is_none());
+    assert!(entry.step_mapping.is_empty());
+    let created_task_id = entry.task_id.clone();
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision))
+            if decision.decision == PlanDecision::Accepted
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(run))
+            if run.status == TaskRunStatus::Paused
+                && run.objective.contains("Execute the following user-approved plan")
+    )));
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
+    );
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(created))
+            if created.task_id == created_task_id
+    )));
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(_))
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_plan() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-plan-task-run-now.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta(
+                "Inspect README.md, then update the approved typo and verify it.".to_owned(),
+            ),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Pending,
+    ]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "plan docs typo fix".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))?;
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    let projection = PlanArtifactProjection::from_entries(&entries);
+    let draft = projection
+        .latest_pending_plan()
+        .expect("plan run should append durable draft")
+        .clone();
+
+    worker.send(WorkerCommand::CreateTaskFromPlan {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+        start_mode: PlanTaskStartMode::CreateAndRun,
+        permission_grant: None,
+    })?;
+    let created = worker
+        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))?;
+    let WorkerMessage::TaskCreatedFromPlan {
+        entry,
+        start_mode,
+        entries,
+    } = created
+    else {
+        unreachable!("recv_until only returns TaskCreatedFromPlan");
+    };
+    assert_eq!(start_mode, PlanTaskStartMode::CreateAndRun);
+    assert_eq!(entry.task_plan_version, 0);
+    assert!(entry.step_mapping.is_empty());
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
+    );
+
+    let started =
+        worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
+    assert!(matches!(
+        started,
+        WorkerMessage::TaskRunStarted { ref objective, .. }
+            if objective.contains("Execute the following user-approved plan")
+                && objective.contains("Inspect README.md")
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn create_task_from_plan_records_stale_reason_after_workspace_change() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    fs::write(workspace_root.join("README.md"), "before\n")?;
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-plan-task-stale.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("1. Inspect README.md\n2. Update README.md".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        agent,
+        workspace_root.clone(),
+    )?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "plan docs update".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))?;
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    let projection = PlanArtifactProjection::from_entries(&entries);
+    let draft = projection
+        .latest_pending_plan()
+        .expect("plan run should append durable draft")
+        .clone();
+    assert!(draft.workspace_snapshot_id.is_some());
+
+    fs::write(workspace_root.join("README.md"), "after\n")?;
+    worker.send(WorkerCommand::CreateTaskFromPlan {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+        start_mode: PlanTaskStartMode::CreatePaused,
+        permission_grant: None,
+    })?;
+    let created = worker
+        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))?;
+    let WorkerMessage::TaskCreatedFromPlan { entry, entries, .. } = created else {
+        unreachable!("recv_until only returns TaskCreatedFromPlan");
+    };
+
+    let stale_reason = entry
+        .stale_reason
+        .as_deref()
+        .expect("changed workspace should mark plan stale");
+    assert!(stale_reason.contains("workspace changed since plan"));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(created))
+            if created.stale_reason.as_deref() == Some(stale_reason)
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    fs::write(workspace_root.join("README.md"), "before\n")?;
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-plan-task-grant.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("1. Update README.md".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "plan docs update".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunStarted { .. }))?;
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let WorkerMessage::PlanRunFinished { entries, .. } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    let projection = PlanArtifactProjection::from_entries(&entries);
+    let draft = projection
+        .latest_pending_plan()
+        .expect("plan run should append durable draft")
+        .clone();
+
+    worker.send(WorkerCommand::CreateTaskFromPlan {
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+        start_mode: PlanTaskStartMode::CreatePaused,
+        permission_grant: Some(PlanApprovalPermission::WorkspaceEdits),
+    })?;
+    let created = worker
+        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))?;
+    let WorkerMessage::TaskCreatedFromPlan { entry, entries, .. } = created else {
+        unreachable!("recv_until only returns TaskCreatedFromPlan");
+    };
+
+    let grant = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => Some(grant),
+            _ => None,
+        })
+        .expect("scoped edits should append a permission grant");
+    assert_eq!(grant.plan_id, draft.plan_id);
+    assert_eq!(grant.plan_hash, draft.plan_hash);
+    assert_eq!(grant.task_id, entry.task_id);
+    assert_eq!(grant.permission, PlanApprovalPermission::WorkspaceEdits);
+    assert_eq!(grant.scope.workspace_paths, vec!["README.md".to_owned()]);
+    assert!(grant.workspace_snapshot_id.is_some());
 
     worker.shutdown()?;
     Ok(())

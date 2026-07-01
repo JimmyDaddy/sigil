@@ -730,6 +730,94 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
 }
 
 #[tokio::test]
+async fn sequential_task_orchestrator_continues_dependent_steps_until_completed() -> Result<()> {
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&executor_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Paused,
+        vec![
+            read_executor_step("verify_current", "verify current", Vec::new())?,
+            read_executor_step(
+                "fix_typo",
+                "fix typo",
+                vec![TaskStepId::new("verify_current")?],
+            )?,
+            read_executor_step(
+                "verify_fix",
+                "verify fix",
+                vec![TaskStepId::new("fix_typo")?],
+            )?,
+        ],
+    )?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "fix typo".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.steps.len(), 3);
+    assert!(
+        output
+            .steps
+            .iter()
+            .all(|step| step.status == TaskStepStatus::Completed)
+    );
+    assert_eq!(
+        executor_requests
+            .lock()
+            .expect("executor request lock should not be poisoned")
+            .len(),
+        3
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Completed
+                    && run.reason.as_deref() == Some("completed plan v1")
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn sequential_task_orchestrator_runs_configured_check_after_mutating_step() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -825,7 +913,7 @@ async fn sequential_task_orchestrator_runs_configured_check_after_mutating_step(
 }
 
 #[tokio::test]
-async fn sequential_task_orchestrator_blocks_mutating_step_without_verification_config()
+async fn sequential_task_orchestrator_completes_mutating_step_without_verification_config()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -873,8 +961,8 @@ async fn sequential_task_orchestrator_blocks_mutating_step_without_verification_
         )
         .await?;
 
-    assert_eq!(output.status, TaskRunStatus::Paused);
-    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
     assert_eq!(
         output.steps[0].verification_verdict,
         VerificationVerdict::Missing
@@ -883,7 +971,7 @@ async fn sequential_task_orchestrator_blocks_mutating_step_without_verification_
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))
-                if readiness.evaluation.run_status == crate::RunStatus::Blocked
+                if readiness.evaluation.run_status == crate::RunStatus::Completed
                     && readiness
                         .evaluation
                         .required_actions
@@ -1113,7 +1201,7 @@ async fn task_write_isolation_ready_queue_defers_write_until_read_dependencies_c
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
 
-    let first = orchestrator
+    let output = orchestrator
         .continue_run(
             &mut session,
             SequentialTaskRequest {
@@ -1130,15 +1218,15 @@ async fn task_write_isolation_ready_queue_defers_write_until_read_dependencies_c
         )
         .await?;
 
-    assert_eq!(first.status, TaskRunStatus::Paused);
-    assert_eq!(first.steps.len(), 2);
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.steps.len(), 3);
     assert_eq!(
-        first
+        output
             .steps
             .iter()
             .map(|step| step.step_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["read_a", "read_b"]
+        vec!["read_a", "read_b", "write"]
     );
     assert_eq!(
         read_requests
@@ -1152,42 +1240,24 @@ async fn task_write_isolation_ready_queue_defers_write_until_read_dependencies_c
             .lock()
             .expect("executor requests should not be poisoned")
             .len(),
-        0
-    );
-    assert!(!session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::WriteLeaseAcquired(_))
-        )
-    }));
-
-    let second = orchestrator
-        .continue_run(
-            &mut session,
-            SequentialTaskRequest {
-                task_id: TaskId::new("task_1")?,
-                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "read before write".to_owned(),
-            },
-            options(),
-            options(),
-            options(),
-            None,
-            &mut handler,
-            &mut approval_handler,
-        )
-        .await?;
-
-    assert_eq!(second.status, TaskRunStatus::Completed);
-    assert_eq!(second.steps.len(), 1);
-    assert_eq!(second.steps[0].step_id, TaskStepId::new("write")?);
-    assert_eq!(
-        executor_requests
-            .lock()
-            .expect("executor requests should not be poisoned")
-            .len(),
         1
     );
+    let entries = session.entries();
+    let read_a_completed = task_step_entry_index(entries, "read_a", TaskStepStatus::Completed)
+        .expect("read_a should complete before write lease");
+    let read_b_completed = task_step_entry_index(entries, "read_b", TaskStepStatus::Completed)
+        .expect("read_b should complete before write lease");
+    let write_lease_acquired = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::WriteLeaseAcquired(_))
+            )
+        })
+        .expect("write step should acquire a lease");
+    assert!(write_lease_acquired > read_a_completed);
+    assert!(write_lease_acquired > read_b_completed);
     let lease_projection = session.write_isolation_projection();
     assert_eq!(lease_projection.leases.len(), 1);
     assert!(
@@ -2143,7 +2213,7 @@ async fn direct_child_session_runs_configured_check_after_mutating_write() -> Re
 }
 
 #[tokio::test]
-async fn direct_child_session_blocks_mutating_write_without_verification_config() -> Result<()> {
+async fn direct_child_session_completes_mutating_write_without_verification_config() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -2198,8 +2268,8 @@ async fn direct_child_session_blocks_mutating_write_without_verification_config(
         )
         .await?;
 
-    assert_eq!(output.status, TaskRunStatus::Paused);
-    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
     assert_eq!(
         output.steps[0].verification_verdict,
         VerificationVerdict::Missing
@@ -2208,7 +2278,11 @@ async fn direct_child_session_blocks_mutating_write_without_verification_config(
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))
-                if readiness.evaluation.run_status == crate::RunStatus::Blocked
+                if readiness.evaluation.run_status == crate::RunStatus::Completed
+                    && readiness
+                        .evaluation
+                        .required_actions
+                        .contains(&crate::RequiredAction::ProvideVerificationConfig)
         )
     }));
     Ok(())
@@ -3848,7 +3922,7 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
 }
 
 #[test]
-fn task_step_status_blocks_when_readiness_requires_action() -> Result<()> {
+fn task_step_status_completes_when_only_verification_config_is_missing() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -3891,7 +3965,7 @@ fn task_step_status_blocks_when_readiness_requires_action() -> Result<()> {
 
     assert_eq!(
         step_status_after_readiness(TaskStepStatus::Completed, &readiness),
-        TaskStepStatus::Blocked
+        TaskStepStatus::Completed
     );
     assert!(
         readiness
@@ -3899,6 +3973,19 @@ fn task_step_status_blocks_when_readiness_requires_action() -> Result<()> {
             .required_actions
             .iter()
             .any(|action| matches!(action, crate::RequiredAction::ProvideVerificationConfig))
+    );
+    let run_check_readiness = crate::ReadinessEvaluatedEntry {
+        evaluation: crate::ReadinessEvaluation {
+            required_actions: vec![crate::RequiredAction::RunCheck {
+                check_spec_id: "docs-check".to_owned(),
+            }],
+            ..readiness.evaluation.clone()
+        },
+        ..readiness
+    };
+    assert_eq!(
+        step_status_after_readiness(TaskStepStatus::Completed, &run_check_readiness),
+        TaskStepStatus::Blocked
     );
     Ok(())
 }
@@ -4979,6 +5066,37 @@ fn seed_task_with_steps(
         reason: None,
     }))?;
     Ok(())
+}
+
+fn read_executor_step(
+    step_id: &str,
+    title: &str,
+    depends_on: Vec<TaskStepId>,
+) -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: TaskStepId::new(step_id)?,
+        title: title.to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+        depends_on,
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    })
+}
+
+fn task_step_entry_index(
+    entries: &[SessionLogEntry],
+    step_id: &str,
+    status: TaskStepStatus,
+) -> Option<usize> {
+    entries.iter().position(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.step_id.as_str() == step_id && step.status == status
+        )
+    })
 }
 
 fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Result<()> {

@@ -384,7 +384,9 @@ fn task_strip_step_rows(
             let step = &plan.steps[*index];
             let status = task_sidebar_step_status(task, plan_version, step);
             let readiness = task_step_readiness(task, step, verification_projection);
-            let label = if task_step_needs_user_verification(Some(step), status, readiness) {
+            let label = if task_step_verification_failed(readiness) {
+                format!("{}. check failed · {}", index + 1, step.title)
+            } else if task_step_needs_user_verification(Some(step), status, readiness) {
                 format!("{}. needs check · {}", index + 1, step.title)
             } else if step.is_review_advisory() && status == TaskStepStatus::Completed {
                 format!("{}. reviewed · {}", index + 1, step.title)
@@ -647,6 +649,9 @@ fn task_step_display_label(
     status: TaskStepStatus,
     readiness: Option<&ReadinessEvaluatedEntry>,
 ) -> &'static str {
+    if task_step_verification_failed(readiness) {
+        return "check failed";
+    }
     if task_step_needs_user_verification(step, status, readiness) {
         return "needs check";
     }
@@ -681,14 +686,23 @@ fn task_step_needs_user_verification(
         return true;
     }
     readiness.is_some_and(|entry| {
-        entry.evaluation.visible_state == VisibleCompletionState::NeedsUser
-            || matches!(
-                entry.evaluation.verification_verdict,
-                VerificationVerdict::Missing
-                    | VerificationVerdict::Stale
-                    | VerificationVerdict::Inconclusive
-            )
+        task_step_readiness_has_user_action(entry)
+            && (entry.evaluation.visible_state == VisibleCompletionState::NeedsUser
+                || matches!(
+                    entry.evaluation.verification_verdict,
+                    VerificationVerdict::Missing
+                        | VerificationVerdict::Stale
+                        | VerificationVerdict::Inconclusive
+                ))
     })
+}
+
+fn task_step_readiness_has_user_action(entry: &ReadinessEvaluatedEntry) -> bool {
+    entry
+        .evaluation
+        .required_actions
+        .iter()
+        .any(|action| !matches!(action, RequiredAction::ProvideVerificationConfig))
 }
 
 fn task_step_verification_failed(readiness: Option<&ReadinessEvaluatedEntry>) -> bool {
@@ -736,7 +750,7 @@ fn verification_verdict_label(verdict: VerificationVerdict) -> &'static str {
         VerificationVerdict::NotApplicable => "not applicable",
         VerificationVerdict::Pending => "pending",
         VerificationVerdict::Passed => "passed",
-        VerificationVerdict::Failed => "failed",
+        VerificationVerdict::Failed => "check failed",
         VerificationVerdict::Missing => "missing",
         VerificationVerdict::Inconclusive => "inconclusive",
         VerificationVerdict::Stale => "stale",

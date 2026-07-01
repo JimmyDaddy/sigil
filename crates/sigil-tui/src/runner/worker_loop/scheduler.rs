@@ -176,6 +176,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             Some("parent continuation completed"),
                         );
                     }
+                    if plan_mode
+                        && let Err(error) = append_plan_draft(
+                            &root_config,
+                            &workspace_root,
+                            &current_session_log_path,
+                            &mut current_session,
+                            &run_result.final_text,
+                            run_result.final_message_id.clone(),
+                            task_result.run_id,
+                        )
+                    {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
                     let entries = current_session
                         .as_ref()
                         .map(|session| session.entries().to_vec())
@@ -1279,6 +1292,103 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         let _ = message_tx.send(WorkerMessage::Notice(error));
                     }
                 }
+            }
+            Ok(WorkerCommand::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                start_mode,
+                permission_grant,
+            }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before creating a task from a plan".to_owned(),
+                    ));
+                    continue;
+                }
+                if !root_config.task.enabled {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "task planning is disabled in config".to_owned(),
+                    ));
+                    continue;
+                }
+                let created = match create_task_from_plan(
+                    &root_config,
+                    &workspace_root,
+                    &current_session_log_path,
+                    &mut current_session,
+                    CreateTaskFromPlanRequest {
+                        plan_id,
+                        expected_plan_hash,
+                        start_mode,
+                        permission_grant,
+                    },
+                ) {
+                    Ok(created) => created,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                        continue;
+                    }
+                };
+                let _ = message_tx.send(WorkerMessage::TaskCreatedFromPlan {
+                    entry: created.entry.clone(),
+                    start_mode: created.start_mode,
+                    entries: created.entries.clone(),
+                });
+                if created.start_mode == PlanTaskStartMode::CreatePaused {
+                    continue;
+                }
+
+                let Some(run_session) = current_session.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: created.task_id_value.clone(),
+                    objective: created.objective.clone(),
+                });
+                let handler = ChannelEventHandler::new(message_tx.clone());
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let run_id = next_run_id;
+                next_run_id += 1;
+                let handle = spawn_task_run(
+                    &runtime,
+                    TaskRunSpawn {
+                        run_id,
+                        session: run_session,
+                        task_id: created.task_id,
+                        task_id_value: created.task_id_value,
+                        parent_session_ref,
+                        objective: created.objective,
+                        root_config: root_config.clone(),
+                        options: options.clone(),
+                        base_registry: agent.tool_registry().clone(),
+                        agent_supervisor: agent_supervisor.clone(),
+                        task_result_tx: task_result_tx.clone(),
+                        approval_rx,
+                        handler,
+                        elicitation_audit_buffer: run_elicitation_audit_buffer,
+                    },
+                );
+                active_run = Some(ActiveRun {
+                    run_id,
+                    handle,
+                    approval_tx,
+                    elicitation_audit_buffer,
+                });
             }
             Ok(WorkerCommand::ApprovePlan {
                 plan_text,

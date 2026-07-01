@@ -160,7 +160,7 @@ backend = "macos_seatbelt"
 isolation = "require_sandbox"
 ```
 
-`macos_seatbelt` 会通过 `/usr/bin/sandbox-exec` 运行非交互命令；profile 允许读取文件系统、只允许写入命令工作目录，并且不开放网络访问。它只支持 macOS，不覆盖 persistent terminal、MCP server、plugin 或远端工具；如果 `sandbox-exec` 不可用会 fail closed。Apple 已将 `sandbox-exec` 标记为 deprecated，因此这个 backend 是 enforcement MVP，不是最终跨平台 sandbox 策略。
+`macos_seatbelt` 会通过 `/usr/bin/sandbox-exec` 运行命令；profile 允许读取文件系统、只允许写入命令工作目录，并且不开放网络访问。当前支持的本地路径包括非交互 shell，以及会记录 sandbox coverage receipt 的 PTY、MCP 和 plugin hook handoff surface。它仍然只支持 macOS，不会让远端工具或所有容器/daemon 场景自动获得 sandbox；如果 `sandbox-exec` 不可用会 fail closed。Apple 已将 `sandbox-exec` 标记为 deprecated，因此这个 backend 是 enforcement MVP，不是最终跨平台 sandbox 策略。
 
 ## 验证
 
@@ -185,6 +185,8 @@ effect = "read_only"
 - `args`：可选 argv 列表。
 - `cwd`：可选 workspace-relative 工作目录。
 - `effect`：预期工具副作用。普通 build/test/lint 且不修改验证范围文件时使用 `read_only`。会修改文件的检查只能产生 mutation evidence；要得到 `Passed`，修改后必须再运行一次非写入验证。
+
+用户配置里的项目型命令只会在匹配当前 workspace 时自动应用。例如 `cargo` 检查需要 workspace root 或配置的 `cwd` 向上能找到 `Cargo.toml`，`npm` 等包管理器检查需要 `package.json`，`make` / `just` 检查需要对应项目文件。这样同一份全局 `~/.sigil/sigil.toml` 不会因为某个 scratch 目录缺少对应项目类型，就把无关任务判成 verification failed。
 
 ## Appearance
 
@@ -266,7 +268,7 @@ allow_write_subagents = true
 # 只有 allow_write_subagents = true 时才使用完整工具面。
 ```
 
-计划任务通过 TUI 里的 `/task <任务>` 发起。`/plan` 只用于只读 planning prompt，不创建 durable task state。`default_mode = "chat"` 会让普通 composer 提交始终保持 chat-first，即使当前 session 里还有未完成 task；需要继续任务时使用 `/task continue` 或 task UI action。只有明确想把计划任务作为默认流程时才改成 `plan`。
+计划任务通过 TUI 里的 `/task <任务>` 发起。`/plan` 仍是只读 planning prompt，只有用户显式接受 plan-ready handoff 后才会创建并运行 durable task state。`default_mode = "chat"` 会让普通 composer 提交始终保持 chat-first，即使当前 session 里还有未完成 task；需要继续任务时使用 `/task continue` 或 task UI action。只有明确想把计划任务作为默认流程时才改成 `plan`。
 
 各 role 的 provider/model 未配置时继承 `[agent]`。Planner 和 subagent-read 默认只看到只读文件/搜索/code-intelligence 工具。Executor 可以看到完整 runtime registry。Subagent-write 只有在 `allow_write_subagents = true` 时才能看到完整 registry；否则回退到只读工具面。写工具仍然按正常审批策略执行。
 

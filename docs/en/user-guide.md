@@ -91,7 +91,7 @@ Use `PgUp/PgDn` to move between discovered plugins. The detail view shows the cu
 
 ## Planned Tasks
 
-Normal composer input always stays chat-first and no longer auto-continues a durable task just because the current session has unfinished task state. Use `/task continue` or a task UI action when you want to continue a task. Use `/plan` or `/plan <prompt>` when you want a read-only planning answer before editing. Use `/task <task>` when you want Sigil to break a larger request into durable steps before execution.
+Normal composer input always stays chat-first and no longer auto-continues a durable task just because the current session has unfinished task state. Use `/task continue` or a task UI action when you want to continue a task. Use `/plan` or `/plan <prompt>` when you want a read-only planning answer before editing; press `Enter` on the plan-ready card only when you want Sigil to create and run a normal durable task from that plan. Use `/task <task>` when you want Sigil to break a larger request into durable steps before execution without a separate planning pass.
 
 Planned tasks use role-specific agents:
 

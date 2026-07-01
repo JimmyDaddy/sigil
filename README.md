@@ -13,7 +13,7 @@ Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, 
 
 [Website](https://jimmydaddy.github.io/sigil/) · [Docs](docs/en/README.md) · [Quickstart](docs/en/quickstart.md) · [Visual tour](docs/en/visual-tour.md) · [Provider guide](docs/en/providers.md)
 
-Sigil's first release is prepared for npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. Self-update remains future packaging work.
+Sigil's first release is prepared for npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
 
 ## Quickstart
 
@@ -34,7 +34,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 ```
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
 ```
 
 During local development, install from a checkout:
@@ -67,7 +67,7 @@ sigil doctor
 - Lets the agent read, search, edit, and run commands through structured tools.
 - Shows risky write operations through approval cards, affected files, and bounded diffs.
 - Restores sessions from append-only JSONL records under the per-user Sigil state directory.
-- Supports `/plan` for read-only planning prompts and `/task` for durable multi-step work with planner, executor, and optional subagent roles.
+- Supports `/plan` for read-only planning, then an explicit create-task handoff into durable `/task` work with planner, executor, and optional subagent roles.
 - Honors explicit ordinary-chat requests to delegate to a subagent before accepting a final answer.
 - Lets trusted agent profiles be invoked directly with `@profile <prompt>` or trusted profile slash names.
 - Connects stdio MCP servers under explicit trust, approval, and secret-egress policy.
@@ -82,7 +82,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Ask or edit normally | Type in the composer |
 | Paste multiline text or code | Paste into the composer; large pastes fold visually and submit in full |
 | Edit long composer drafts | `Ctrl-A/E`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
-| Plan before editing | `/plan` then type a prompt, or `/plan <prompt>` |
+| Plan before editing | `/plan` then type a prompt, or `/plan <prompt>`; accept the plan card to create and run a durable task |
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
 | Queue input while Sigil is busy | Submit ordinary chat, or `/plan <prompt>`, while a run is active; Sigil appends it to the visible queue for the next turn |
 | Manage queued input | `/queue show`, `/queue next`, `/queue now`, `/queue edit`, or `/queue delete`; from the composer, `Down` focuses the queue panel |

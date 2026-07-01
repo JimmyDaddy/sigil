@@ -344,13 +344,14 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: Some(PlanApprovalViewModel {
-            hash: "sha256:abc123".to_owned(),
-            scope_summary: "inspect and edit with preview".to_owned(),
+            summary: "inspect and edit with preview".to_owned(),
+            target_path_count: 2,
+            suggested_check_count: 1,
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("plan body")],
     };
-    let backend = TestBackend::new(96, 6);
+    let backend = TestBackend::new(96, 9);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
@@ -364,10 +365,15 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         .collect::<String>();
     assert!(rendered.contains("Plan"));
     assert!(rendered.contains("ready"));
-    assert!(rendered.contains("sha256:abc123"));
-    assert!(rendered.contains("A ask"));
-    assert!(rendered.contains("W workspace edits"));
-    assert!(rendered.contains("C continue"));
+    assert!(rendered.contains("execution plan"));
+    assert!(rendered.contains("2 paths"));
+    assert!(rendered.contains("1 checks suggested"));
+    assert!(rendered.contains("inspect and edit"));
+    assert!(rendered.contains("Enter"));
+    assert!(rendered.contains("create and run task"));
+    assert!(!rendered.contains("scoped edits"));
+    assert!(!rendered.contains("Shift-Enter"));
+    assert!(!rendered.contains("revise"));
     assert!(rendered.contains("Esc discard"));
     Ok(())
 }

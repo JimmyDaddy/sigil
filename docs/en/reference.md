@@ -43,7 +43,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
 | `/queue` | Focus queued input |
 | `/queue next|now|edit|delete [item]` | Manage queued input; `now` interrupts the current run before dispatch |
-| `/plan` / `/plan <prompt>` | Enter plan mode or run one read-only planning prompt |
+| `/plan` / `/plan <prompt>` | Run a read-only planning prompt; accept the plan card to create and run a durable task |
 | `/task <task>` | Create a durable plan and execute the task step by step |
 | `/task continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |

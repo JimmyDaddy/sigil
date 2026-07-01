@@ -430,7 +430,14 @@ impl AppState {
                 self.refresh_session_history();
                 self.recompute_compaction_status(false);
                 self.schedule_balance_refresh();
-                self.set_pending_plan_approval_from_text(&result.final_text);
+                let plan_projection = sigil_kernel::PlanArtifactProjection::from_entries(
+                    &self.session_browser.current_entries,
+                );
+                if let Some(draft) = plan_projection.latest_pending_plan() {
+                    self.set_pending_plan_approval_from_draft(draft);
+                } else {
+                    self.set_pending_plan_approval_from_text(&result.final_text);
+                }
                 self.last_notice = if self.pending_plan_approval().is_some() {
                     Some("plan ready".to_owned())
                 } else {
@@ -458,6 +465,31 @@ impl AppState {
                 self.push_event(
                     "plan:approved",
                     format!("v{} {}", entry.plan_version, entry.plan_hash),
+                );
+            }
+            WorkerMessage::TaskCreatedFromPlan {
+                entry,
+                start_mode,
+                entries,
+            } => {
+                self.clear_pending_plan_approval();
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.last_notice = Some(if entry.stale_reason.is_some() {
+                    format!("task {} created from stale plan", entry.task_id.as_str())
+                } else {
+                    match start_mode {
+                        sigil_kernel::PlanTaskStartMode::CreatePaused => {
+                            format!("task {} created from plan", entry.task_id.as_str())
+                        }
+                        sigil_kernel::PlanTaskStartMode::CreateAndRun => {
+                            format!("task {} created from plan", entry.task_id.as_str())
+                        }
+                    }
+                });
+                self.push_event(
+                    "plan:task",
+                    format!("{} -> {}", entry.plan_id.as_str(), entry.task_id.as_str()),
                 );
             }
             WorkerMessage::TaskRunFinished {
@@ -811,6 +843,17 @@ impl AppState {
                 permission,
                 scope_summary,
                 clear_planning_context,
+            },
+            AppAction::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                start_mode,
+                permission_grant,
+            } => WorkerCommand::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                start_mode,
+                permission_grant,
             },
             AppAction::InvokeInlineSkill {
                 skill_id,

@@ -2,25 +2,32 @@
 
 [Docs home](README.md) · [简体中文](../zh-CN/quickstart.md)
 
-This guide gets you from a checkout to a useful Sigil session. It is written for users who want to try Sigil in a real repository, not for maintainers changing Sigil itself.
+This guide gets you from a first-release install to a useful Sigil session. It is written for users who want to try Sigil in a real repository, not for maintainers changing Sigil itself. `v0.0.1` is an early preview.
 
 ## Before You Begin
 
 You need:
 
 - A modern terminal emulator.
-- A Rust toolchain with `cargo`.
-- A checkout of this repository.
+- One installer: npm, Homebrew, or a Rust toolchain with `cargo`.
 - A model provider credential.
 
 For the smoothest first run, start in a repository where you can inspect `git diff` before and after the session.
 
 ## 1. Install Sigil
 
-Run this from the Sigil repository root:
+Use one of the first-release install paths:
 
 ```bash
-cargo install --path crates/sigil --locked
+npm install -g @jimmydaddy/sigil
+```
+
+```bash
+brew install JimmyDaddy/sigil/sigil-ai
+```
+
+```bash
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
 ```
 
 Confirm the binary is on `PATH`:
@@ -29,7 +36,7 @@ Confirm the binary is on `PATH`:
 sigil --version
 ```
 
-If your shell cannot find `sigil`, make sure Cargo's binary directory is on `PATH`. On macOS and Linux it is usually `~/.cargo/bin`.
+If your shell cannot find `sigil`, check the installer output and confirm its binary directory is on `PATH`.
 
 ## 2. Start In The Workspace You Want To Edit
 
@@ -106,7 +113,7 @@ git diff
 
 ## 6. Use Planning For Larger Work
 
-For work that needs multiple steps, start with:
+For work that needs multiple steps, start directly with:
 
 ```text
 /task improve installation docs for macOS, Linux, and Windows users
@@ -118,7 +125,7 @@ Sigil writes a durable task plan. You can guide or correct the next step in the 
 /task continue
 ```
 
-Planned task state is stored in append-only control records and is restored when you reopen the session.
+For a larger edit where you want a read-only planning pass first, run `/plan <prompt>` and accept the plan-ready card only when you want Sigil to create and run the durable task. Planned task state is stored in append-only control records and is restored when you reopen the session.
 
 ## 7. End A Session Cleanly
 

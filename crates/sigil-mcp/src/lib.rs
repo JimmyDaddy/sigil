@@ -1079,7 +1079,7 @@ impl McpClient {
                 json!({
                     "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": capabilities,
-                    "clientInfo": { "name": "sigil", "version": "0.1.0" }
+                    "clientInfo": { "name": "sigil", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )
             .await?;

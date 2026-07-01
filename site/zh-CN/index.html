@@ -79,13 +79,15 @@ status   ready for review</code></pre>
       <section class="section" id="quickstart">
         <div class="section-heading">
           <p class="eyebrow">快速开始</p>
-          <h2>从 checkout 安装，并在工作区里启动。</h2>
+          <h2>安装 preview release，并在工作区里启动。</h2>
         </div>
         <div class="steps">
           <div class="step">
             <span>1</span>
             <h3>安装</h3>
-            <pre><code>cargo install --path crates/sigil --locked</code></pre>
+            <pre><code>npm install -g @jimmydaddy/sigil
+# 或：brew install JimmyDaddy/sigil/sigil-ai
+# 或：cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil</code></pre>
           </div>
           <div class="step">
             <span>2</span>
@@ -96,7 +98,7 @@ sigil</code></pre>
           <div class="step">
             <span>3</span>
             <h3>配置</h3>
-            <p>找不到可用配置时，Sigil 会打开 Quick Setup。确认 workspace、选择 provider/model，并填写认证信息。</p>
+            <p>找不到可用配置时，Sigil 会打开 Quick Setup。确认 workspace、选择 provider/model，并填写认证信息。v0.0.1 是 early preview。</p>
           </div>
         </div>
       </section>
@@ -112,8 +114,8 @@ sigil</code></pre>
             <p>直接在 composer 输入任务，查看流式输出，并保持 session、usage、permissions、agents 和 LSP 状态可见。</p>
           </article>
           <article>
-            <h3>Durable planning</h3>
-            <p>用 <code>/plan</code> 处理多步骤任务。Planner、executor 和可选 subagent 写入可恢复的 task state。</p>
+            <h3>Durable tasks</h3>
+            <p>用 <code>/task</code> 处理多步骤任务；需要先只读规划时再使用 <code>/plan</code>。</p>
           </article>
           <article>
             <h3>Diff-aware tools</h3>

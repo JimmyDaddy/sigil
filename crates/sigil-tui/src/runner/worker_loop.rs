@@ -19,18 +19,21 @@ use sigil_kernel::{
     EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore, ModelMessage,
     MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, ProviderCapabilities,
-    ReasoningEffort, RootConfig, RunEvent, SandboxProfileRequirement, SequentialTaskOrchestrator,
-    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
+    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
+    PlanSourceRef, PlanTaskStartMode, ProviderCapabilities, ReasoningEffort, RootConfig, RunEvent,
+    SandboxProfileRequirement, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskRouteId, TaskRouteStatus,
     TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
     TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId,
     ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus,
     ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit,
     VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, default_user_config_dir,
-    discover_candidate_checks_with_user_config, plan_text_hash, plan_workspace_paths,
-    saturating_elapsed, stable_event_uuid, stable_workspace_id,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, build_workspace_snapshot,
+    default_user_config_dir, discover_candidate_checks_with_user_config, plan_draft_created_entry,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, saturating_elapsed,
+    stable_event_uuid, stable_workspace_id,
 };
 
 use sigil_runtime::{
@@ -83,9 +86,10 @@ pub(in crate::runner) use queue_driver::{
 };
 pub(in crate::runner) use scheduler::run_worker_loop;
 pub(in crate::runner) use task_runtime::{
-    PlanApprovalRequest, SkillChildRunSpawn, TaskContinueSpawn, TaskRunSpawn,
-    VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, approve_plan,
-    clean_mutation_artifacts, delete_mutation_artifact, ensure_session_workspace_trust,
+    CreateTaskFromPlanRequest, PlanApprovalRequest, SkillChildRunSpawn, TaskContinueSpawn,
+    TaskRunSpawn, VerificationCheckPromotionKind, VerificationCheckPromotionOutcome,
+    append_plan_draft, approve_plan, clean_mutation_artifacts, create_task_from_plan,
+    delete_mutation_artifact, ensure_session_workspace_trust,
     format_mutation_artifact_cleanup_report, format_mutation_artifact_delete_report,
     load_worker_skill, next_task_id, plan_mode_transient_context,
     promote_workspace_verification_check, resolve_continue_task, session_ref_for_log_path,

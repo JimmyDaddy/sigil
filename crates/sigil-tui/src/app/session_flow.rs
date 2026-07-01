@@ -1137,6 +1137,44 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             plan_approval_expiry_label(&entry.expires),
             truncate_session_view_text(&entry.plan_hash, 16)
         ),
+        ControlEntry::PlanDraftCreated(entry) => format!(
+            "[ctl] plan draft {} paths={} suggested_checks={} hash={}",
+            entry.plan_id.as_str(),
+            entry.target_paths.len(),
+            entry.suggested_checks.len(),
+            truncate_session_view_text(&entry.plan_hash, 16)
+        ),
+        ControlEntry::PlanDecisionRecorded(entry) => format!(
+            "[ctl] plan decision {} decision={}",
+            entry.plan_id.as_str(),
+            entry.decision.as_str()
+        ),
+        ControlEntry::PlanPermissionGranted(entry) => format!(
+            "[ctl] plan grant {} task={} permission={} paths={} snapshot={}",
+            entry.plan_id.as_str(),
+            entry.task_id.as_str(),
+            plan_approval_permission_label(entry.permission),
+            entry.scope.workspace_paths.len(),
+            truncate_session_view_text(entry.workspace_snapshot_id.as_deref().unwrap_or("-"), 16)
+        ),
+        ControlEntry::TaskCreatedFromPlan(entry) => {
+            let plan_state = if entry.task_plan_version == 0 {
+                "task_plan=pending".to_owned()
+            } else {
+                format!(
+                    "task_plan=v{} mappings={}",
+                    entry.task_plan_version,
+                    entry.step_mapping.len()
+                )
+            };
+            format!(
+                "[ctl] task {} from plan {} {} stale={}",
+                entry.task_id.as_str(),
+                entry.plan_id.as_str(),
+                plan_state,
+                truncate_session_view_text(entry.stale_reason.as_deref().unwrap_or("-"), 48)
+            )
+        }
         ControlEntry::TaskRun(run) => format!(
             "[ctl] task {} status={}",
             run.task_id.as_str(),

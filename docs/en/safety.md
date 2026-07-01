@@ -119,7 +119,7 @@ backend = "macos_seatbelt"
 isolation = "require_sandbox"
 ```
 
-This backend runs commands through `/usr/bin/sandbox-exec`, allows filesystem reads, restricts writes to the command working directory, and omits network access from the sandbox profile. It does not cover the persistent terminal, MCP servers, plugins, or remote tools.
+This backend runs commands through `/usr/bin/sandbox-exec`, allows filesystem reads, restricts writes to the command working directory, and omits network access from the sandbox profile. Current local handoff paths can record sandbox coverage for non-interactive shell, PTY, MCP stdio, and trusted plugin hook command execution where the selected backend supports that mode. It does not make remote tools, every container/daemon scenario, or unsupported platforms equivalent.
 
 For container-backed non-interactive commands, configure Docker explicitly:
 
@@ -131,7 +131,7 @@ profile = "build_offline"
 container_image = "rust:1.94.1"
 ```
 
-Sigil does not choose or pull a container image implicitly. If Docker is selected without `container_image`, startup and doctor checks fail closed. The Docker backend bind-mounts the command working directory, maps offline profiles to `--network none`, and reports only the capabilities the backend is expected to enforce. Persistent terminal, MCP servers, plugins, and remote tools still need separate coverage labels.
+Sigil does not choose or pull a container image implicitly. If Docker is selected without `container_image`, startup and doctor checks fail closed. The Docker backend bind-mounts the command working directory, maps offline profiles to `--network none`, and reports only the capabilities the backend is expected to enforce. PTY, MCP, plugin, remote, and daemon-style paths use their own coverage labels and may fail closed instead of silently falling back to local execution.
 
 ## MCP Trust
 

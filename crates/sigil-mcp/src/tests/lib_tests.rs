@@ -556,6 +556,76 @@ async fn mcp_lifecycle_mutation_failure_adds_server_context() -> Result<()> {
 }
 
 #[tokio::test]
+async fn mcp_initialize_uses_crate_version_for_client_info() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("version_mcp_server.py");
+    let params_path = temp.path().join("initialize_params.json");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+PARAMS_PATH = sys.argv[1]
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        with open(PARAMS_PATH, "w", encoding="utf-8") as handle:
+            json.dump(message["params"], handle, sort_keys=True)
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "version".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![
+                script.to_string_lossy().to_string(),
+                params_path.to_string_lossy().to_string(),
+            ],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let params: Value = serde_json::from_str(&fs::read_to_string(params_path)?)?;
+    assert_eq!(params["clientInfo"]["name"], "sigil");
+    assert_eq!(params["clientInfo"]["version"], env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcp_startup_failure_with_recorder_records_unknown_dirty() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");

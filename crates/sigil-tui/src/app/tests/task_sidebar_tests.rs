@@ -33,7 +33,7 @@ fn verification_labels_cover_all_sidebar_variants() {
         (VerificationVerdict::NotApplicable, "not applicable"),
         (VerificationVerdict::Pending, "pending"),
         (VerificationVerdict::Passed, "passed"),
-        (VerificationVerdict::Failed, "failed"),
+        (VerificationVerdict::Failed, "check failed"),
         (VerificationVerdict::Missing, "missing"),
         (VerificationVerdict::Inconclusive, "inconclusive"),
         (VerificationVerdict::Stale, "stale"),
@@ -504,7 +504,7 @@ fn task_sidebar_separates_review_advisory_from_system_verify() {
 }
 
 #[test]
-fn task_sidebar_marks_non_user_state_missing_verification_as_needing_check() {
+fn task_sidebar_keeps_non_actionable_missing_verification_completed() {
     let entries = task_entries_with_custom_readiness(
         TaskRunStatus::Completed,
         TaskStepStatus::Completed,
@@ -515,7 +515,10 @@ fn task_sidebar_marks_non_user_state_missing_verification_as_needing_check() {
 
     let strip = task_strip_view(&entries).expect("task strip should project");
 
-    assert_eq!(strip.rows[0].label, "1. needs check · Fix typo");
+    assert_eq!(strip.detail, "completed · v1 · 1/1 done");
+    assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Success);
+    assert_eq!(strip.rows[0].label, "1. Fix typo");
+    assert_eq!(strip.rows[0].detail, "completed · fix_typo");
 }
 
 #[test]

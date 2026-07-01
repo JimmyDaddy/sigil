@@ -1122,6 +1122,216 @@ pub(in crate::runner) fn approve_plan(
     Ok((entry, entries))
 }
 
+pub(in crate::runner) fn append_plan_draft(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    final_text: &str,
+    final_message_id: Option<String>,
+    run_id: u64,
+) -> std::result::Result<Option<PlanDraftCreatedEntry>, String> {
+    let Some(session) = current_session.as_mut() else {
+        return Err("session state is unavailable for plan artifact".to_owned());
+    };
+    let session_ref = session_ref_for_log_path(current_session_log_path)?
+        .as_path()
+        .display()
+        .to_string();
+    let source = PlanSourceRef {
+        session_ref: Some(session_ref),
+        run_id: Some(run_id.to_string()),
+        final_message_id,
+    };
+    let workspace_snapshot_id = plan_handoff_workspace_snapshot_id(root_config, workspace_root)
+        .map_err(|error| format!("failed to build plan workspace snapshot: {error}"))?;
+    let Some(entry) = plan_draft_created_entry(
+        final_text,
+        source,
+        current_unix_time_ms(),
+        workspace_snapshot_id,
+    )
+    .map_err(|error| format!("failed to build plan artifact: {error:#}"))?
+    else {
+        return Ok(None);
+    };
+    session
+        .append_control(ControlEntry::PlanDraftCreated(entry.clone()))
+        .map_err(|error| format!("failed to append plan artifact: {error:#}"))?;
+    Ok(Some(entry))
+}
+
+pub(in crate::runner) struct CreateTaskFromPlanRequest {
+    pub(in crate::runner) plan_id: String,
+    pub(in crate::runner) expected_plan_hash: String,
+    pub(in crate::runner) start_mode: PlanTaskStartMode,
+    pub(in crate::runner) permission_grant: Option<PlanApprovalPermission>,
+}
+
+pub(in crate::runner) struct CreatedTaskFromPlan {
+    pub(in crate::runner) task_id: TaskId,
+    pub(in crate::runner) task_id_value: String,
+    pub(in crate::runner) objective: String,
+    pub(in crate::runner) entry: TaskCreatedFromPlanEntry,
+    pub(in crate::runner) start_mode: PlanTaskStartMode,
+    pub(in crate::runner) entries: Vec<SessionLogEntry>,
+}
+
+fn plan_handoff_workspace_snapshot_id(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+) -> std::result::Result<Option<String>, String> {
+    let workspace_id = stable_workspace_id(workspace_root).map_err(|error| format!("{error:#}"))?;
+    let scope = root_config
+        .verification
+        .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    let snapshot = build_workspace_snapshot(workspace_root, workspace_id, &scope, 0)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(snapshot.workspace_snapshot_id)
+}
+
+fn plan_handoff_stale_reason(
+    base_workspace_snapshot_id: Option<&str>,
+    current_workspace_snapshot_id: Option<&str>,
+) -> Option<String> {
+    match (base_workspace_snapshot_id, current_workspace_snapshot_id) {
+        (Some(base), Some(current)) if base != current => Some(format!(
+            "plan may be stale: workspace changed since plan was created (base={}, current={})",
+            truncate_plan_snapshot_id(base),
+            truncate_plan_snapshot_id(current)
+        )),
+        (Some(base), None) => Some(format!(
+            "plan may be stale: current workspace snapshot is unavailable (base={})",
+            truncate_plan_snapshot_id(base)
+        )),
+        _ => None,
+    }
+}
+
+fn truncate_plan_snapshot_id(snapshot_id: &str) -> String {
+    snapshot_id.chars().take(24).collect()
+}
+
+pub(in crate::runner) fn create_task_from_plan(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    request: CreateTaskFromPlanRequest,
+) -> std::result::Result<CreatedTaskFromPlan, String> {
+    let plan_id = PlanId::new(request.plan_id.clone())
+        .map_err(|error| format!("invalid plan id for task creation: {error:#}"))?;
+    let mut session = load_session(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        current_session_log_path,
+    )
+    .map_err(|error| format!("failed to load session before creating task from plan: {error:#}"))?;
+    let projection = session.plan_artifact_projection();
+    let draft = projection
+        .plans
+        .get(&plan_id)
+        .ok_or_else(|| format!("plan {} is not present in this session", plan_id.as_str()))?;
+    if draft.plan_hash != request.expected_plan_hash {
+        return Err(format!(
+            "plan {} is stale: expected {}, current {}",
+            plan_id.as_str(),
+            request.expected_plan_hash,
+            draft.plan_hash
+        ));
+    }
+    if projection.plan_is_rejected(&plan_id) {
+        return Err(format!("plan {} was rejected", plan_id.as_str()));
+    }
+    if projection.task_created_for_plan(&plan_id) {
+        return Err(format!("plan {} already created a task", plan_id.as_str()));
+    }
+
+    let current_workspace_snapshot_id =
+        plan_handoff_workspace_snapshot_id(root_config, workspace_root)
+            .map_err(|error| format!("failed to build current workspace snapshot: {error}"))?;
+    let stale_reason = plan_handoff_stale_reason(
+        draft.workspace_snapshot_id.as_deref(),
+        current_workspace_snapshot_id.as_deref(),
+    );
+    let task_id = next_task_id(&session)?;
+    let task_id_value = task_id.as_str().to_owned();
+    let parent_session_ref = session_ref_for_log_path(current_session_log_path)?;
+    let objective = plan_task_input_from_draft(draft);
+    let decision = PlanDecisionRecordedEntry {
+        plan_id: plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+        decision: PlanDecision::Accepted,
+        decided_by: PlanDecisionActor::User,
+        decided_at_ms: current_unix_time_ms(),
+        reason: Some("created task from plan".to_owned()),
+    };
+    let task_created = TaskCreatedFromPlanEntry {
+        plan_id: plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+        task_id: task_id.clone(),
+        task_plan_version: 0,
+        step_mapping: Vec::new(),
+        stale_reason,
+        created_at_ms: current_unix_time_ms(),
+    };
+    let permission_grant = match request.permission_grant {
+        Some(permission) => {
+            if draft.target_paths.is_empty() {
+                return Err(format!(
+                    "plan {} has no concrete target paths for scoped edits",
+                    plan_id.as_str()
+                ));
+            }
+            Some(PlanPermissionGrantedEntry {
+                plan_id: plan_id.clone(),
+                plan_hash: draft.plan_hash.clone(),
+                task_id: task_id.clone(),
+                workspace_snapshot_id: current_workspace_snapshot_id,
+                permission,
+                scope: PlanApprovalScope {
+                    summary: format!("scoped edits for task {}", task_id.as_str()),
+                    workspace_paths: draft.target_paths.clone(),
+                },
+                expires: PlanApprovalExpiry::Session,
+                granted_at_ms: current_unix_time_ms(),
+            })
+        }
+        None => None,
+    };
+
+    let mut controls = vec![ControlEntry::PlanDecisionRecorded(decision)];
+    if request.start_mode == PlanTaskStartMode::CreatePaused {
+        controls.push(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref,
+            objective: objective.clone(),
+            status: TaskRunStatus::Paused,
+            reason: Some(format!("created from plan {}", plan_id.as_str())),
+        }));
+    }
+    controls.push(ControlEntry::TaskCreatedFromPlan(task_created.clone()));
+    if let Some(grant) = permission_grant {
+        controls.push(ControlEntry::PlanPermissionGranted(grant));
+    }
+    for control in controls {
+        session
+            .append_control(control)
+            .map_err(|error| format!("failed to append task-from-plan state: {error:#}"))?;
+    }
+
+    let entries = session.entries().to_vec();
+    *current_session = Some(session);
+    Ok(CreatedTaskFromPlan {
+        task_id,
+        task_id_value,
+        objective,
+        entry: task_created,
+        start_mode: request.start_mode,
+        entries,
+    })
+}
+
 pub(in crate::runner) fn append_cancelled_task_state(
     session: &mut Session,
 ) -> std::result::Result<(), String> {
@@ -1199,7 +1409,7 @@ pub(in crate::runner) fn session_ref_for_log_path(
 pub(in crate::runner) fn plan_mode_transient_context(prompt: String) -> Vec<ModelMessage> {
     vec![
         ModelMessage::system(
-            "Plan mode is active for this turn. Research, inspect, and propose a concrete plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. End with the plan and any open questions needed before implementation.",
+            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. End with a concise human-readable plan that the user can approve as the input to a normal /task run. Do not include hidden machine-readable blocks.",
         ),
         ModelMessage::user(prompt),
     ]

@@ -573,7 +573,7 @@ fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result
 }
 
 #[test]
-fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()> {
+fn ui_view_model_hides_compact_task_lines_when_task_strip_is_available() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     let task_id = TaskId::new("task_1")?;
     let step_id = TaskStepId::new("step_1")?;
@@ -627,26 +627,30 @@ fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()
     })?;
     let view_model = UiViewModel::from_app(&app);
 
+    assert!(view_model.info_rail.task_lines.is_empty());
+
+    app.toggle_info_rail_detail();
+    let detail = UiViewModel::from_app(&app);
     assert!(
-        view_model
+        detail
             .info_rail
             .task_lines
             .contains(&"task: task_1".to_owned())
     );
     assert!(
-        view_model
+        detail
             .info_rail
             .task_lines
             .contains(&"status: running".to_owned())
     );
     assert!(
-        view_model
+        detail
             .info_rail
             .task_lines
             .contains(&"progress: 0/1 done".to_owned())
     );
     assert!(
-        view_model
+        detail
             .info_rail
             .task_lines
             .contains(&"current: v1:step_1 running".to_owned())
@@ -992,15 +996,17 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     let mut plan_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     plan_app.set_pending_plan_approval_from_text("1. inspect\n2. implement");
     let plan_view = UiViewModel::from_app(&plan_app);
-    assert!(plan_view.footer.hints.contains("A ask"));
-    assert!(plan_view.footer.hints.contains("W workspace edits"));
+    assert!(plan_view.footer.hints.contains("Enter create and run task"));
+    assert!(plan_view.footer.hints.contains("Esc discard"));
+    assert!(!plan_view.footer.hints.contains("S scoped edits"));
+    assert!(!plan_view.footer.hints.contains("R revise"));
     let live_view = LivePanelViewModel::from_app(&plan_app, 4);
     let approval = live_view
         .plan_approval
         .expect("pending plan approval should project");
-    assert!(approval.hash.starts_with("sha256:"));
-    assert!(approval.hash.len() <= 19);
-    assert_eq!(approval.scope_summary, "1. inspect");
+    assert_eq!(approval.summary, "1. inspect");
+    assert_eq!(approval.target_path_count, 0);
+    assert_eq!(approval.suggested_check_count, 0);
 
     let mut mention_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     mention_app.handle_key_event(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE))?;

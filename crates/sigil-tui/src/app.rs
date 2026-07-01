@@ -37,9 +37,9 @@ use sigil_kernel::{
     CompactionConfig, CompactionRecord, CompactionThresholdStatus, ConversationInputKind,
     ConversationInputQueueId, ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
     MutationArtifactInventoryItem, MutationArtifactRetentionReport, PlanApprovalPermission,
-    ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig, SessionLogEntry,
-    SessionStats, StorageConfig, TaskStateProjection, ToolPreviewSnapshot, plan_text_hash,
-    resolve_workspace_root,
+    PlanDraftCreatedEntry, PlanTaskStartMode, ReasoningEffort, RootConfig, SecretRedactor, Session,
+    SessionConfig, SessionLogEntry, SessionStats, StorageConfig, TaskStateProjection,
+    ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
 };
 use sigil_runtime::{
     BalanceSnapshot, ContextWindowSource, SigilPaths, effective_compaction_config,
@@ -217,9 +217,12 @@ struct SessionViewCache {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingPlanApproval {
+    pub(crate) plan_id: Option<String>,
     pub(crate) plan_text: String,
     pub(crate) plan_hash: String,
-    pub(crate) scope_summary: String,
+    pub(crate) summary: String,
+    pub(crate) target_path_count: usize,
+    pub(crate) suggested_check_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +341,12 @@ pub enum AppAction {
         permission: PlanApprovalPermission,
         scope_summary: String,
         clear_planning_context: bool,
+    },
+    CreateTaskFromPlan {
+        plan_id: String,
+        expected_plan_hash: String,
+        start_mode: PlanTaskStartMode,
+        permission_grant: Option<PlanApprovalPermission>,
     },
     SubmitTask(String),
     InvokeInlineSkill {
@@ -896,7 +905,7 @@ impl AppState {
         }
 
         if let Some(outcome) = self.handle_pending_plan_approval_key_event(key) {
-            return Ok(Some(outcome));
+            return Ok(outcome);
         }
 
         if self.runtime.is_busy
@@ -1351,47 +1360,49 @@ impl AppState {
         Ok(None)
     }
 
-    fn handle_pending_plan_approval_key_event(&mut self, key: KeyEvent) -> Option<AppAction> {
+    fn handle_pending_plan_approval_key_event(
+        &mut self,
+        key: KeyEvent,
+    ) -> Option<Option<AppAction>> {
         self.composer.pending_plan_approval.as_ref()?;
-        if !key.modifiers.is_empty() {
-            return None;
-        }
         match key.code {
-            KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.approve_pending_plan(PlanApprovalPermission::Ask)
+            KeyCode::Enter if self.composer.input.trim().is_empty() && key.modifiers.is_empty() => {
+                Some(self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None))
             }
-            KeyCode::Char('w') | KeyCode::Char('W') => {
-                self.approve_pending_plan(PlanApprovalPermission::WorkspaceEdits)
-            }
-            KeyCode::Char('c') | KeyCode::Char('C') => {
+            KeyCode::Esc if key.modifiers.is_empty() => {
                 self.clear_pending_plan_approval();
-                self.composer.mode = ComposerMode::Plan;
-                self.last_notice = Some("continue planning".to_owned());
-                self.push_event("plan", "continue");
-                None
-            }
-            KeyCode::Esc | KeyCode::Char('d') | KeyCode::Char('D') => {
-                self.clear_pending_plan_approval();
-                self.last_notice = Some("plan approval dismissed".to_owned());
+                self.last_notice = Some("plan dismissed".to_owned());
                 self.push_event("plan", "dismissed");
-                None
+                Some(None)
             }
             _ => None,
         }
     }
 
-    fn approve_pending_plan(&mut self, permission: PlanApprovalPermission) -> Option<AppAction> {
+    fn create_task_from_pending_plan(
+        &mut self,
+        start_mode: PlanTaskStartMode,
+        permission_grant: Option<PlanApprovalPermission>,
+    ) -> Option<AppAction> {
         let pending = self.composer.pending_plan_approval.take()?;
-        self.last_notice = Some(match permission {
-            PlanApprovalPermission::Ask => "approving plan: ask".to_owned(),
-            PlanApprovalPermission::WorkspaceEdits => "approving plan: workspace edits".to_owned(),
+        let Some(plan_id) = pending.plan_id else {
+            self.last_notice = Some("plan is not durable yet".to_owned());
+            self.composer.pending_plan_approval = Some(pending);
+            return None;
+        };
+        self.last_notice = Some(match start_mode {
+            PlanTaskStartMode::CreatePaused if permission_grant.is_some() => {
+                "creating task with scoped edits".to_owned()
+            }
+            PlanTaskStartMode::CreatePaused => "creating task from plan".to_owned(),
+            PlanTaskStartMode::CreateAndRun => "creating and running task from plan".to_owned(),
         });
-        self.push_event("plan", "approve");
-        Some(AppAction::ApprovePlan {
-            plan_text: pending.plan_text,
-            permission,
-            scope_summary: pending.scope_summary,
-            clear_planning_context: true,
+        self.push_event("plan", "create_task");
+        Some(AppAction::CreateTaskFromPlan {
+            plan_id,
+            expected_plan_hash: pending.plan_hash,
+            start_mode,
+            permission_grant,
         })
     }
 
@@ -2090,10 +2101,28 @@ impl AppState {
             return;
         }
         self.composer.pending_plan_approval = Some(PendingPlanApproval {
+            plan_id: None,
             plan_text: plan_text.to_owned(),
             plan_hash: plan_text_hash(plan_text),
-            scope_summary: first_nonempty_plan_line(plan_text)
+            summary: first_nonempty_plan_line(plan_text)
                 .unwrap_or_else(|| "approved plan scope".to_owned()),
+            target_path_count: 0,
+            suggested_check_count: 0,
+        });
+    }
+
+    pub(crate) fn set_pending_plan_approval_from_draft(&mut self, draft: &PlanDraftCreatedEntry) {
+        let plan_text = draft
+            .inline_text
+            .clone()
+            .unwrap_or_else(|| draft.summary.clone());
+        self.composer.pending_plan_approval = Some(PendingPlanApproval {
+            plan_id: Some(draft.plan_id.as_str().to_owned()),
+            plan_text,
+            plan_hash: draft.plan_hash.clone(),
+            summary: draft.summary.clone(),
+            target_path_count: draft.target_paths.len(),
+            suggested_check_count: draft.suggested_checks.len(),
         });
     }
 
@@ -2102,6 +2131,9 @@ impl AppState {
     }
 
     pub(crate) fn composer_mode_label(&self) -> &'static str {
+        if self.composer.pending_plan_approval.is_some() {
+            return ComposerMode::Plan.label();
+        }
         self.composer.mode.label()
     }
 

@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Installation](installation.md) · [Changelog](changelog.md) · [简体中文](../zh-CN/status.md)
 
-This page separates what users can rely on today from what is experimental, limited, or future packaging work.
+This page separates what users can rely on today from what is experimental, limited, or future packaging work. `v0.0.1` is an early preview, not a stable API or plugin compatibility promise.
 
 ## Supported Today
 
@@ -11,14 +11,14 @@ This page separates what users can rely on today from what is experimental, limi
 | TUI entrypoint | `sigil` opens the TUI and is the primary product surface. |
 | npm install | `npm install -g @jimmydaddy/sigil` is the scoped first-release npm package path. |
 | Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` installs the tap formula while keeping the binary name `sigil`. |
-| Cargo git install | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil` installs from the release tag. |
+| Cargo git install | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil` installs from the release tag. |
 | Source install | `cargo install --path crates/sigil --locked` remains supported for local checkout development. |
 | Quick Setup | First-run setup can create a usable local config. |
 | Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |
 | Chat workflow | Users can work through the composer with visible tool activity. |
 | Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |
 | Session recovery | Session and control records are append-only and can restore visible state after restart. |
-| Planning | `/plan` runs read-only planning prompts; `/task <task>` creates durable multi-step task state, and `/task continue` resumes the latest task. |
+| Planning | `/plan` runs read-only planning prompts and can explicitly hand an accepted plan to durable `/task` execution; `/task <task>` creates durable multi-step task state directly, and `/task continue` resumes the latest task. |
 | DeepSeek provider | DeepSeek is the default Quick Setup path. |
 | OpenAI-compatible provider | Supported through `[providers.openai_compat]` for compatible Chat Completions endpoints. |
 | Anthropic provider | Supported through `[providers.anthropic]` for Anthropic Messages streaming. |
@@ -41,6 +41,9 @@ This page separates what users can rely on today from what is experimental, limi
 | External directories | Disabled by default and should stay narrow and approval-backed. |
 | Headless automation | `sigil run` is useful for scripts but cannot show interactive approval modals. |
 | HTTP/SSE adapter | `sigil serve` validates local bind/token defaults and prints a preflight plan; HTTP routing and listener startup remain future work. |
+| Execution sandbox | macOS, Linux, Docker, PTY, MCP stdio, and trusted plugin-hook paths have core coverage and receipts where supported, but coverage is not equivalent across all platforms and remote/container daemon scenarios. |
+| Context retrieval | Context V0 supports session/task memory and bounded repo-file candidates. Full semantic repo graph, impact graph, and vector retrieval remain evidence-gated future work. |
+| Model evals | Deterministic eval infrastructure exists. Real-model eval runner, repeat policy, and release/nightly trend reports are not part of the supported user path yet. |
 
 ## Future Work
 
@@ -51,6 +54,12 @@ These are not the current supported path unless a later release says otherwise:
 - hosted documentation search;
 - richer generated release notes;
 - broader provider-specific setup assistants;
+- full semantic repo graph or vector retrieval by default;
+- transparent in-flight crash resume for running shell/agent processes;
+- parallel write-agent worktree isolation as a default workflow;
+- stable plugin API compatibility;
+- all-platform equivalent OS sandbox behavior;
+- built-in real-model eval runner for end users;
 - fully automated terminal screenshot generation for release docs.
 
 ## How To Read The Docs

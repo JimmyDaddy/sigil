@@ -27,7 +27,7 @@ use crate::{
         ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
     },
     task::{
-        TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanUpdateContext, task_plan_update_entry,
+        TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanStatus, TaskPlanUpdateContext, task_plan_update_entry,
         task_plan_update_result_content, task_plan_update_tool_spec,
     },
     terminal_task::TerminalTaskEntry,
@@ -649,7 +649,22 @@ where
                 if let Some(recorder) = session.mutation_event_recorder() {
                     tool_ctx = tool_ctx.with_mutation_recorder(recorder);
                 }
+                let accepted_task_plan_in_batch = completed_calls.iter().any(|call| {
+                    task_plan_update
+                        .as_ref()
+                        .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
+                });
+                let mut accepted_task_plan = false;
                 for mut call in completed_calls {
+                    if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
+                        append_tool_ignored_after_task_plan_acceptance(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                        )?;
+                        continue;
+                    }
                     if call.name == TASK_PLAN_UPDATE_TOOL_NAME {
                         let Some(context) = task_plan_update.as_ref() else {
                             let mut result = ToolResult::error(
@@ -672,13 +687,14 @@ where
                             handler.handle(RunEvent::ToolResult(result))?;
                             continue;
                         };
-                        handle_task_plan_update_call(
+                        let accepted = handle_task_plan_update_call(
                             session,
                             handler,
                             &mut outcome,
                             &call,
                             context,
                         )?;
+                        accepted_task_plan = accepted_task_plan || accepted;
                         continue;
                     }
                     if let Some(mut result) =
@@ -1229,6 +1245,25 @@ where
                     handler.handle(RunEvent::ToolResult(result))?;
                     transient_context.extend(tool_transient_context);
                 }
+                if accepted_task_plan {
+                    outcome.tool_calls = total_tool_calls;
+                    append_run_lifecycle_events(
+                        session,
+                        "completed",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: "task plan accepted; orchestration will continue"
+                                .to_owned(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                    });
+                }
                 continue;
             }
 
@@ -1383,11 +1418,11 @@ fn plan_approval_decision_override(
     {
         return decision;
     }
-    let Some(approval) = active_plan_approval(session) else {
+    let Some((permission, workspace_paths)) = active_plan_permission_scope(session) else {
         return decision;
     };
-    if approval.permission.covers_tool(spec)
-        && plan_approval_covers_subjects(&approval.scope.workspace_paths, &decision.subjects)
+    if permission.covers_tool(spec)
+        && plan_approval_covers_subjects(&workspace_paths, &decision.subjects)
     {
         decision.mode = ApprovalMode::Allow;
     }
@@ -1396,6 +1431,65 @@ fn plan_approval_decision_override(
 
 fn plan_approval_can_auto_allow_decision(decision: &PermissionDecision) -> bool {
     matches!(decision.risk, PermissionRisk::Low | PermissionRisk::Medium)
+}
+
+fn active_plan_permission_scope(
+    session: &Session,
+) -> Option<(crate::PlanApprovalPermission, Vec<String>)> {
+    active_plan_permission_grant(session)
+        .map(|grant| (grant.permission, grant.scope.workspace_paths))
+        .or_else(|| {
+            active_plan_approval(session)
+                .map(|approval| (approval.permission, approval.scope.workspace_paths))
+        })
+}
+
+fn active_plan_permission_grant(session: &Session) -> Option<crate::PlanPermissionGrantedEntry> {
+    let entries = session.entries();
+    let (grant_index, grant) = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, entry)| match entry {
+            crate::SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => {
+                Some((index, grant.clone()))
+            }
+            _ => None,
+        })?;
+    if task_has_terminal_status_after(entries, &grant.task_id, grant_index) {
+        return None;
+    }
+    match grant.expires {
+        PlanApprovalExpiry::NextUserPrompt => {
+            let user_messages_after_grant = entries
+                .iter()
+                .skip(grant_index.saturating_add(1))
+                .filter(|entry| matches!(entry, crate::SessionLogEntry::User(_)))
+                .count();
+            (user_messages_after_grant == 0).then_some(grant)
+        }
+        PlanApprovalExpiry::Session => Some(grant),
+        PlanApprovalExpiry::AtUnixMs(expires_at_ms) => {
+            (unix_time_ms() <= expires_at_ms).then_some(grant)
+        }
+    }
+}
+
+fn task_has_terminal_status_after(
+    entries: &[SessionLogEntry],
+    task_id: &crate::TaskId,
+    start_index: usize,
+) -> bool {
+    entries
+        .iter()
+        .skip(start_index.saturating_add(1))
+        .any(|entry| {
+            matches!(
+                entry,
+                crate::SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                    if &run.task_id == task_id && run.status.is_terminal()
+            )
+        })
 }
 
 fn active_plan_approval(session: &Session) -> Option<crate::PlanApprovedEntry> {
@@ -1489,19 +1583,30 @@ fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &ToolResult) {
     outcome.tool_errors.push(error.clone());
 }
 
+fn task_plan_update_call_is_accepted(context: &TaskPlanUpdateContext, call: &ToolCall) -> bool {
+    if call.name != TASK_PLAN_UPDATE_TOOL_NAME {
+        return false;
+    }
+    task_plan_update_entry(context, call)
+        .map(|entry| entry.status == TaskPlanStatus::Accepted)
+        .unwrap_or(false)
+}
+
 fn handle_task_plan_update_call<H>(
     session: &mut Session,
     handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
     context: &TaskPlanUpdateContext,
-) -> Result<()>
+) -> Result<bool>
 where
     H: EventHandler + Send,
 {
     append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
+    let mut accepted = false;
     let result = match task_plan_update_entry(context, call) {
         Ok(entry) => {
+            accepted = entry.status == TaskPlanStatus::Accepted;
             let control = ControlEntry::TaskPlan(entry.clone());
             session.append_control(control.clone())?;
             handler.handle(RunEvent::Control(control))?;
@@ -1539,6 +1644,36 @@ where
             result
         }
     };
+    record_tool_run_outcome(outcome, &result);
+    session.append_tool_message(result.to_model_message())?;
+    handler.handle(RunEvent::ToolResult(result))?;
+    Ok(accepted)
+}
+
+fn append_tool_ignored_after_task_plan_acceptance<H>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::Unsupported,
+        "task plan was accepted; additional planner tool calls are ignored and orchestration will continue",
+    );
+    attach_tool_call_context(&mut result, call, &[]);
+    append_tool_execution_audit(
+        session,
+        call,
+        &[],
+        ToolExecutionStatus::Cancelled,
+        None,
+        Some(&result),
+    )?;
     record_tool_run_outcome(outcome, &result);
     session.append_tool_message(result.to_model_message())?;
     handler.handle(RunEvent::ToolResult(result))?;

@@ -26,7 +26,7 @@ use super::{
 
 pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
 pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
-const LIVE_PLAN_APPROVAL_ROWS: u16 = 2;
+const LIVE_PLAN_APPROVAL_BASE_ROWS: u16 = 2;
 const LIVE_QUEUE_ROW_LIMIT: usize = 4;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
 
@@ -119,11 +119,10 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
     } else {
         0
     };
-    let plan_rows = if app.pending_plan_approval().is_some() {
-        LIVE_PLAN_APPROVAL_ROWS
-    } else {
-        0
-    };
+    let plan_rows = app
+        .pending_plan_approval()
+        .map(|_| live_plan_approval_rows())
+        .unwrap_or(0);
     let task_rows = app
         .task_strip_view()
         .map(|view| live_task_strip_rows(view.rows.len()))
@@ -143,11 +142,11 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
     } else {
         0
     };
-    let plan_rows = if view_model.plan_approval.is_some() {
-        LIVE_PLAN_APPROVAL_ROWS
-    } else {
-        0
-    };
+    let plan_rows = view_model
+        .plan_approval
+        .as_ref()
+        .map(|_| live_plan_approval_rows())
+        .unwrap_or(0);
     let task_rows = view_model
         .task_strip
         .as_ref()
@@ -180,6 +179,10 @@ fn live_queue_strip_rows(row_count: usize) -> u16 {
         return 0;
     }
     2 + row_count.min(LIVE_QUEUE_ROW_LIMIT) as u16
+}
+
+fn live_plan_approval_rows() -> u16 {
+    LIVE_PLAN_APPROVAL_BASE_ROWS
 }
 
 fn render_live_status_band(
@@ -223,7 +226,7 @@ fn render_live_status_band(
     if let Some(plan_approval) = &view_model.plan_approval {
         lines.extend(render_plan_approval_lines(
             plan_approval,
-            area.width as usize,
+            content_area.width as usize,
             theme,
         ));
     }
@@ -474,50 +477,48 @@ fn render_plan_approval_lines(
 ) -> Vec<Line<'static>> {
     let palette = &theme.palette;
     let bg = palette.surface_panel_alt;
-    let title_width = width.saturating_sub(24);
-    let scope = truncate_display_width(&plan.scope_summary, title_width);
-    vec![
-        Line::from(vec![
-            Span::styled(
-                "Plan",
-                Style::default()
-                    .fg(palette.accent_warning)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                "ready",
-                Style::default()
-                    .fg(palette.text_primary)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  ·  {}  ·  {}", plan.hash, scope),
-                Style::default().fg(palette.text_secondary).bg(bg),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("A", Style::default().fg(palette.text_primary).bg(bg)),
-            Span::styled(" ask", Style::default().fg(palette.text_secondary).bg(bg)),
-            Span::styled("  W", Style::default().fg(palette.text_primary).bg(bg)),
-            Span::styled(
-                " workspace edits",
-                Style::default().fg(palette.text_secondary).bg(bg),
-            ),
-            Span::styled("  C", Style::default().fg(palette.text_primary).bg(bg)),
-            Span::styled(
-                " continue",
-                Style::default().fg(palette.text_secondary).bg(bg),
-            ),
-            Span::styled("  Esc", Style::default().fg(palette.text_primary).bg(bg)),
-            Span::styled(
-                " discard",
-                Style::default().fg(palette.text_secondary).bg(bg),
-            ),
-        ]),
-    ]
+    let counts = format!(
+        "execution plan · {} paths · {} checks suggested",
+        plan.target_path_count, plan.suggested_check_count
+    );
+    let reserved_width =
+        UnicodeWidthStr::width("Plan ready") + UnicodeWidthStr::width(counts.as_str()) + 10;
+    let summary_width = width.saturating_sub(reserved_width);
+    let summary = truncate_display_width(&plan.summary, summary_width);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "Plan",
+            Style::default()
+                .fg(palette.accent_warning)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "ready",
+            Style::default()
+                .fg(palette.text_primary)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  ·  {counts}  ·  {summary}"),
+            Style::default().fg(palette.text_secondary).bg(bg),
+        ),
+    ])];
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(palette.text_primary).bg(bg)),
+        Span::styled(
+            " create and run task",
+            Style::default().fg(palette.text_secondary).bg(bg),
+        ),
+        Span::styled("  Esc", Style::default().fg(palette.text_primary).bg(bg)),
+        Span::styled(
+            " discard",
+            Style::default().fg(palette.text_secondary).bg(bg),
+        ),
+    ]));
+    lines
 }
 
 fn render_task_strip_lines(

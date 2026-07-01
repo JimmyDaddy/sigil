@@ -43,7 +43,7 @@
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
 | `/queue` | 聚焦 queued input |
 | `/queue next|now|edit|delete [item]` | 管理 queued input；`now` 会先 interrupt 当前 run 再 dispatch |
-| `/plan` / `/plan <prompt>` | 进入 plan mode，或运行一次只读 planning prompt |
+| `/plan` / `/plan <prompt>` | 运行一次只读 planning prompt；接受 plan card 后创建并运行 durable task |
 | `/task <task>` | 创建 durable plan，并分步骤执行任务 |
 | `/task continue` | 不带额外 guidance 继续最新 planned task |
 | `/model <flash|pro|id>` | 切换下一轮 run 的 model，并开始新 session |

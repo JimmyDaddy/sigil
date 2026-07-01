@@ -133,7 +133,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         keys: &[],
         slash: Some("/plan"),
         label: "Plan",
-        help: "Enter plan mode for a read-only planning prompt.",
+        help: "Run a read-only planning prompt; accept the plan to create and run a durable task.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
