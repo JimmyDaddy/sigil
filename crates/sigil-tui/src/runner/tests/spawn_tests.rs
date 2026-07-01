@@ -5,7 +5,7 @@ use serde_json::json;
 use sigil_kernel::{
     AgentConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
     MemoryConfig, PermissionConfig, RootConfig, SessionConfig, SessionStreamRecord,
-    WorkspaceConfig, WorkspaceMutationDetected,
+    WorkspaceConfig,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -281,25 +281,21 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         } if server_name == "ready-eager"
             && process_coverage == "local stdio outside local sandbox"
     ));
-    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
-    let lifecycle_mutation = records.into_iter().find_map(|record| {
-        let SessionStreamRecord::Stored(event) = record else {
-            return None;
-        };
-        (DurableEventType::from_event_type(&event.event_type)
-            == Some(DurableEventType::WorkspaceMutationDetected))
-        .then(|| serde_json::from_value::<WorkspaceMutationDetected>(event.payload).ok())
-        .flatten()
-    });
-    assert!(matches!(
-        lifecycle_mutation,
-        Some(WorkspaceMutationDetected {
-            tool_call_id: None,
-            tool_name,
-            unknown_dirty: true,
-            ..
-        }) if tool_name == "mcp_server:ready-eager"
-    ));
+    let lifecycle_mutations = JsonlSessionStore::read_event_records(&session_log_path)?
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if DurableEventType::from_event_type(&event.event_type)
+                        == Some(DurableEventType::WorkspaceMutationDetected)
+            )
+        })
+        .count();
+    assert_eq!(
+        lifecycle_mutations, 0,
+        "clean eager MCP startup must not stale workspace verification"
+    );
     let _ = command_tx.send(WorkerCommand::Shutdown);
     Ok(())
 }

@@ -12,13 +12,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ControlEntry,
-    ExecutionBackendKind, ExecutionIsolationPolicy, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, InteractionMode, JsonlSessionStore, LanguageServerConfig,
-    McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ProviderCapabilities,
-    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionConfig,
-    SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool,
-    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ExecutionBackendKind, ExecutionIsolationPolicy, ExecutionSandboxProfile, InteractionMode,
+    JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
+    PermissionConfig, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport,
+    RoleModelConfig, RootConfig, Session, SessionConfig, SessionLogEntry, SkillDescriptor,
+    SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig,
+    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
+    ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
@@ -1092,7 +1092,7 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
     config.execution.backend = ExecutionBackendKind::MacosSeatbelt;
     config.execution.isolation = ExecutionIsolationPolicy::RequireSandbox;
     config.execution.profile = ExecutionSandboxProfile::WorkspaceWrite;
-    config.execution.fallback = ExecutionSandboxFallback::Deny;
+    config.execution.fallback = sigil_kernel::ExecutionSandboxFallback::Deny;
     let registry =
         build_tool_registry(&config, &provider.capabilities(), temp.path().to_path_buf()).await?;
 
