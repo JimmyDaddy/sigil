@@ -109,6 +109,7 @@ pub(in crate::runner) use agent_runtime::{
     partition_agent_result_continuations, pending_agent_result_continuations_from_session,
 };
 pub(in crate::runner) use task_runtime::append_cancelled_task_state;
+pub(in crate::runner) use task_runtime::{RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder};
 #[cfg(test)]
 pub(in crate::runner) use task_runtime::{
     materialize_task_verification_config, skill_child_agent_role,

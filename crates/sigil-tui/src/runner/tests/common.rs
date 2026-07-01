@@ -21,7 +21,10 @@ use super::super::{
     WorkerCommand, WorkerMessage,
     elicitation_bridge::ChannelMcpElicitationHandler,
     mcp_event_bridge::ChannelMcpRuntimeEventHandler,
-    worker_loop::{WorkerLoopMcpHandlers, run_worker_loop},
+    worker_loop::{
+        RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder, WorkerLoopMcpHandlers,
+        run_worker_loop,
+    },
 };
 
 pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &str) -> RootConfig {
@@ -134,6 +137,25 @@ pub(super) fn spawn_test_worker<P>(
 where
     P: Provider + Send + Sync + 'static,
 {
+    spawn_test_worker_with_role_provider_builder(
+        root_config,
+        session_log_path,
+        agent,
+        workspace_root,
+        Arc::new(RuntimeTaskRoleProviderBuilder),
+    )
+}
+
+pub(super) fn spawn_test_worker_with_role_provider_builder<P>(
+    root_config: RootConfig,
+    session_log_path: PathBuf,
+    agent: Agent<P>,
+    workspace_root: PathBuf,
+    role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+) -> Result<TestWorker>
+where
+    P: Provider + Send + Sync + 'static,
+{
     let (command_tx, command_rx) = mpsc::channel();
     let (message_tx, message_rx) = mpsc::channel();
     let options = sigil_runtime::build_run_options(
@@ -168,6 +190,7 @@ where
                     elicitation_handler,
                     event_handler: mcp_event_handler,
                     event_rx: mcp_event_rx,
+                    role_provider_builder,
                 },
             );
         })
@@ -214,6 +237,30 @@ impl PlannedProvider {
         Self {
             plans: Arc::new(Mutex::new(VecDeque::from(plans))),
         }
+    }
+}
+
+pub(super) fn planned_role_provider_builder(
+    plans: Vec<StreamPlan>,
+) -> Arc<dyn TaskRoleProviderBuilder> {
+    Arc::new(PlannedRoleProviderBuilder {
+        plans: Arc::new(Mutex::new(VecDeque::from(plans))),
+    })
+}
+
+struct PlannedRoleProviderBuilder {
+    plans: Arc<Mutex<VecDeque<StreamPlan>>>,
+}
+
+impl TaskRoleProviderBuilder for PlannedRoleProviderBuilder {
+    fn build(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+    ) -> std::result::Result<Box<dyn Provider>, String> {
+        Ok(Box::new(PlannedProvider {
+            plans: Arc::clone(&self.plans),
+        }))
     }
 }
 

@@ -16,7 +16,7 @@ use super::{
     elicitation_bridge::ChannelMcpElicitationHandler,
     mcp_event_bridge::ChannelMcpRuntimeEventHandler,
     protocol::{McpActivationStatus, WorkerCommand, WorkerMessage},
-    worker_loop::{WorkerLoopMcpHandlers, run_worker_loop},
+    worker_loop::{RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers, run_worker_loop},
 };
 
 pub fn spawn_agent_worker(
@@ -114,6 +114,7 @@ pub fn spawn_agent_worker(
                     elicitation_handler,
                     event_handler: mcp_event_handler,
                     event_rx: mcp_event_rx,
+                    role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                 },
             );
         })

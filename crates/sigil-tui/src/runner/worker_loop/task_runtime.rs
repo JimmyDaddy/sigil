@@ -1,5 +1,29 @@
 use super::*;
 
+pub(in crate::runner) trait TaskRoleProviderBuilder: Send + Sync {
+    fn build(
+        &self,
+        root_config: &RootConfig,
+        role: AgentRole,
+    ) -> std::result::Result<Box<dyn sigil_kernel::Provider>, String>;
+}
+
+/// Default role-provider builder used by product runtime paths.
+///
+/// The trait seam exists so runner tests can exercise task orchestration with deterministic
+/// providers without registering a fake provider in `sigil-runtime`.
+pub(in crate::runner) struct RuntimeTaskRoleProviderBuilder;
+
+impl TaskRoleProviderBuilder for RuntimeTaskRoleProviderBuilder {
+    fn build(
+        &self,
+        root_config: &RootConfig,
+        role: AgentRole,
+    ) -> std::result::Result<Box<dyn sigil_kernel::Provider>, String> {
+        sigil_runtime::build_role_provider(root_config, role).map_err(|error| format!("{error:#}"))
+    }
+}
+
 pub(in crate::runner) struct TaskRunSpawn {
     pub(in crate::runner) run_id: u64,
     pub(in crate::runner) session: Session,
@@ -11,6 +35,7 @@ pub(in crate::runner) struct TaskRunSpawn {
     pub(in crate::runner) options: AgentRunOptions,
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
+    pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) task_result_tx: mpsc::Sender<RunTaskResult>,
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
@@ -29,6 +54,7 @@ pub(in crate::runner) struct TaskContinueSpawn {
     pub(in crate::runner) options: AgentRunOptions,
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
+    pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) task_result_tx: mpsc::Sender<RunTaskResult>,
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
@@ -49,6 +75,7 @@ pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) options: AgentRunOptions,
     pub(in crate::runner) base_registry: ToolRegistry,
     pub(in crate::runner) agent_supervisor: sigil_runtime::AgentSupervisor,
+    pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
     pub(in crate::runner) task_result_tx: mpsc::Sender<RunTaskResult>,
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
@@ -80,6 +107,7 @@ pub(in crate::runner) fn spawn_task_run(
             options,
             base_registry,
             agent_supervisor,
+            role_provider_builder,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -95,6 +123,7 @@ pub(in crate::runner) fn spawn_task_run(
                 options,
                 base_registry,
                 agent_supervisor,
+                role_provider_builder: role_provider_builder.as_ref(),
                 approval_rx,
                 handler: &mut handler,
             },
@@ -125,6 +154,7 @@ pub(in crate::runner) fn spawn_task_continue(
             options,
             base_registry,
             agent_supervisor,
+            role_provider_builder,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -141,6 +171,7 @@ pub(in crate::runner) fn spawn_task_continue(
                 options,
                 base_registry,
                 agent_supervisor,
+                role_provider_builder: role_provider_builder.as_ref(),
                 approval_rx,
                 handler: &mut handler,
             },
@@ -173,6 +204,7 @@ pub(in crate::runner) fn spawn_skill_child_run(
             options,
             base_registry,
             agent_supervisor,
+            role_provider_builder,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -191,6 +223,7 @@ pub(in crate::runner) fn spawn_skill_child_run(
                 options,
                 base_registry,
                 agent_supervisor,
+                role_provider_builder: role_provider_builder.as_ref(),
                 approval_rx,
                 handler: &mut handler,
             },
@@ -212,6 +245,7 @@ pub(in crate::runner) struct TaskRunOrchestration<'a> {
     options: AgentRunOptions,
     base_registry: ToolRegistry,
     agent_supervisor: sigil_runtime::AgentSupervisor,
+    role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
 }
@@ -227,6 +261,7 @@ pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
     options: AgentRunOptions,
     base_registry: ToolRegistry,
     agent_supervisor: sigil_runtime::AgentSupervisor,
+    role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
 }
@@ -240,6 +275,7 @@ pub(in crate::runner) struct TaskContinueOrchestration<'a> {
     options: AgentRunOptions,
     base_registry: ToolRegistry,
     agent_supervisor: sigil_runtime::AgentSupervisor,
+    role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
 }
@@ -256,6 +292,7 @@ pub(in crate::runner) async fn run_task_orchestration(
         options,
         base_registry,
         agent_supervisor,
+        role_provider_builder,
         approval_rx,
         handler,
     } = request;
@@ -272,7 +309,13 @@ pub(in crate::runner) async fn run_task_orchestration(
         executor_options,
         subagent_read_options,
         subagent_write_options,
-    } = build_task_role_runtime(&root_config, &options, &base_registry, agent_supervisor)?;
+    } = build_task_role_runtime(
+        &root_config,
+        &options,
+        &base_registry,
+        agent_supervisor,
+        role_provider_builder,
+    )?;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .run(
@@ -308,6 +351,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
         options,
         base_registry,
         agent_supervisor,
+        role_provider_builder,
         approval_rx,
         handler,
     } = request;
@@ -324,7 +368,13 @@ pub(in crate::runner) async fn continue_task_orchestration(
         subagent_read_options,
         subagent_write_options,
         ..
-    } = build_task_role_runtime(&root_config, &options, &base_registry, agent_supervisor)?;
+    } = build_task_role_runtime(
+        &root_config,
+        &options,
+        &base_registry,
+        agent_supervisor,
+        role_provider_builder,
+    )?;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .continue_run(
@@ -361,6 +411,7 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         options,
         base_registry,
         agent_supervisor,
+        role_provider_builder,
         approval_rx,
         handler,
     } = request;
@@ -384,6 +435,7 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         &loaded.descriptor,
         child_role,
         agent_supervisor,
+        role_provider_builder,
     )?;
     session
         .append_control(ControlEntry::SkillLoaded(loaded.entry))
@@ -818,18 +870,15 @@ pub(in crate::runner) fn build_task_role_runtime(
     options: &AgentRunOptions,
     base_registry: &ToolRegistry,
     agent_supervisor: sigil_runtime::AgentSupervisor,
+    role_provider_builder: &dyn TaskRoleProviderBuilder,
 ) -> std::result::Result<TaskRoleRuntime, String> {
     agent_supervisor.reset_turn_budget();
-    let planner_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Planner)
-        .map_err(|error| format!("{error:#}"))?;
-    let executor_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Executor)
-        .map_err(|error| format!("{error:#}"))?;
+    let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
+    let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
     let subagent_read_provider =
-        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentRead)
-            .map_err(|error| format!("{error:#}"))?;
+        role_provider_builder.build(root_config, AgentRole::SubagentRead)?;
     let subagent_write_provider =
-        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentWrite)
-            .map_err(|error| format!("{error:#}"))?;
+        role_provider_builder.build(root_config, AgentRole::SubagentWrite)?;
     let planner_registry =
         sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
             .into_registry();
@@ -898,18 +947,15 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
     skill: &SkillDescriptor,
     child_role: AgentRole,
     agent_supervisor: sigil_runtime::AgentSupervisor,
+    role_provider_builder: &dyn TaskRoleProviderBuilder,
 ) -> std::result::Result<TaskRoleRuntime, String> {
     agent_supervisor.reset_turn_budget();
-    let planner_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Planner)
-        .map_err(|error| format!("{error:#}"))?;
-    let executor_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Executor)
-        .map_err(|error| format!("{error:#}"))?;
+    let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
+    let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
     let subagent_read_provider =
-        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentRead)
-            .map_err(|error| format!("{error:#}"))?;
+        role_provider_builder.build(root_config, AgentRole::SubagentRead)?;
     let subagent_write_provider =
-        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentWrite)
-            .map_err(|error| format!("{error:#}"))?;
+        role_provider_builder.build(root_config, AgentRole::SubagentWrite)?;
     let planner_registry =
         sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
             .into_registry();

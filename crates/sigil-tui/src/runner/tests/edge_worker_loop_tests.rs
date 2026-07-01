@@ -31,10 +31,10 @@ use super::{
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
         worker_loop::append_cancelled_task_state,
         worker_loop::{
-            PlanApprovalRequest, WorkerLoopMcpHandlers, agent_delegation_requirement_for_prompt,
-            append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
-            next_task_id, partition_agent_result_continuations,
-            pending_agent_result_continuations_from_session,
+            PlanApprovalRequest, RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers,
+            agent_delegation_requirement_for_prompt, append_mcp_elicitation_audits, approve_plan,
+            cancel_terminal_task, close_agent_thread, next_task_id,
+            partition_agent_result_continuations, pending_agent_result_continuations_from_session,
             queued_background_ready_transient_context, refresh_terminal_task_statuses,
             resolve_continue_task, run_worker_loop,
         },
@@ -1129,6 +1129,7 @@ fn spawn_loop_with_shared_agent(
                     elicitation_handler,
                     event_handler: mcp_event_handler,
                     event_rx: mcp_event_rx,
+                    role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
                 },
             );
         })

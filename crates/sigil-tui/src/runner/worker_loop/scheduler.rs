@@ -19,6 +19,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         elicitation_handler,
         event_handler: mcp_event_handler,
         event_rx: mcp_event_rx,
+        role_provider_builder,
     } = mcp_handlers;
     let mut current_session_log_path = session_log_path;
     let mut current_session = match load_session(
@@ -986,6 +987,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: agent_supervisor.clone(),
+                        role_provider_builder: Arc::clone(&role_provider_builder),
                         task_result_tx: task_result_tx.clone(),
                         approval_rx,
                         handler,
@@ -1065,6 +1067,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: agent_supervisor.clone(),
+                        role_provider_builder: Arc::clone(&role_provider_builder),
                         task_result_tx: task_result_tx.clone(),
                         approval_rx,
                         handler,
@@ -1144,6 +1147,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: agent_supervisor.clone(),
+                        role_provider_builder: Arc::clone(&role_provider_builder),
                         task_result_tx: task_result_tx.clone(),
                         approval_rx,
                         handler,
@@ -1377,6 +1381,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
                         agent_supervisor: agent_supervisor.clone(),
+                        role_provider_builder: Arc::clone(&role_provider_builder),
                         task_result_tx: task_result_tx.clone(),
                         approval_rx,
                         handler,

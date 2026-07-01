@@ -4,6 +4,7 @@ pub(in crate::runner) struct WorkerLoopMcpHandlers {
     pub(in crate::runner) elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     pub(in crate::runner) event_handler: Arc<ChannelMcpRuntimeEventHandler>,
     pub(in crate::runner) event_rx: mpsc::Receiver<McpRuntimeEvent>,
+    pub(in crate::runner) role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
 }
 
 #[allow(clippy::too_many_arguments)]

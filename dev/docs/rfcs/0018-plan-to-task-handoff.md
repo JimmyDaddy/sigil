@@ -323,9 +323,26 @@ Recommended checks by slice:
 cargo test -p sigil-kernel plan
 cargo test -p sigil-tui plan
 cargo test -p sigil-tui create_task_from_plan
+cargo test -p sigil-tui plan_handoff_run_now_uses_normal_task_planner_and_executes_resulting_plan
 cargo test -p sigil-tui task_sidebar
 cargo fmt --all --check
 ```
+
+Deterministic runner coverage should include the full TUI worker path:
+
+```text
+/plan
+  -> PlanDraftCreated
+  -> user accepts create-and-run
+  -> PlanDecisionRecorded(Accepted)
+  -> TaskCreatedFromPlan(task_plan_version = 0)
+  -> normal /task planner emits TaskPlanEntry { status: Accepted }
+  -> orchestrator executes the resulting task step
+```
+
+This is deliberately a provider-injected runner test, not a live model test. It proves the
+handoff control plane and task runtime semantics without relying on model behavior or network
+availability.
 
 Manual smoke:
 
