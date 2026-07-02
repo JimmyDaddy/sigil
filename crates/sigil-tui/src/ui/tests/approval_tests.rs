@@ -153,7 +153,7 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
     assert!(empty_text.contains("No preview summary provided."));
     assert!(markdown_text.contains("bold line"));
     assert!(markdown_text.contains("code line"));
-    assert!(!markdown_text.contains("third line"));
+    assert!(markdown_text.contains("third line"));
 }
 
 #[test]
@@ -257,9 +257,13 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
 
     let single_text = plain_lines_text(&approval_footer_lines(&single));
     let multiple_text = plain_lines_text(&approval_footer_lines(&multiple));
+    let single_lines = approval_footer_lines(&single);
 
     assert!(!single_text.contains(",/. file"));
     assert!(multiple_text.contains(",/. file"));
+    assert!(plain_line_text(&single_lines[0]).contains("Allow once"));
+    assert!(!plain_line_text(&single_lines[0]).contains("Enter"));
+    assert!(plain_line_text(&single_lines[1]).contains("Enter select"));
 }
 
 #[test]
@@ -373,14 +377,10 @@ fn approval_header_lines_handle_empty_and_multiline_summaries() {
     );
 
     assert_eq!(plain_line_text(&empty[2]), "No preview summary provided.");
-    assert_eq!(multiline.len(), 5);
+    assert_eq!(multiline.len(), 6);
     assert!(plain_line_text(&multiline[2]).contains("line one"));
     assert!(plain_line_text(&multiline[3]).contains("line two"));
-    assert!(
-        !multiline
-            .iter()
-            .any(|line| plain_line_text(line).contains("line three"))
-    );
+    assert!(plain_line_text(&multiline[4]).contains("line three"));
 }
 
 #[test]
@@ -408,6 +408,8 @@ fn approval_footer_lines_only_show_file_navigation_for_multiple_files() {
 
     assert!(!plain_line_text(&single[1]).contains(",/. file"));
     assert!(plain_line_text(&multi[1]).contains(",/. file"));
+    assert!(!plain_line_text(&single[0]).contains("Enter"));
+    assert!(plain_line_text(&single[1]).contains("Enter select"));
 }
 
 #[test]

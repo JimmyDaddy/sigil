@@ -43,7 +43,15 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
         if let Some(code) = summary.metadata.exit_code {
             details.push(format!("exit {code}"));
         }
-        if let Some(network_policy) = &summary.metadata.execution_network_policy {
+        if let Some(verdict) = summary.metadata.shell_verdict.as_deref() {
+            details.push(verdict.to_owned());
+        }
+        if let Some(network_policy) = summary
+            .metadata
+            .execution_network_policy
+            .as_deref()
+            .filter(|policy| *policy != "unknown")
+        {
             let network_label = summary
                 .metadata
                 .execution_backend
@@ -132,6 +140,27 @@ pub(super) fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
         let command = call_argument(summary, "command")
             .or_else(|| summary.metadata.call_summary.clone())
             .unwrap_or_else(|| summary.tool_name.clone());
+        if matches!(
+            summary.metadata.shell_command_family.as_deref(),
+            Some("check_touched")
+        ) {
+            let tier = command
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .find_map(|pair| (pair[0] == "--tier").then_some(pair[1]))
+                .or_else(|| {
+                    command
+                        .split_whitespace()
+                        .find_map(|part| part.strip_prefix("--tier="))
+                });
+            return ToolCardTitle::new(
+                "Ran",
+                tier.map(|tier| format!("check-touched {tier}"))
+                    .unwrap_or_else(|| "check-touched".to_owned()),
+                None,
+            );
+        }
         if !summary.is_error
             && let Some(search) = classify_simple_shell_search(&command)
         {

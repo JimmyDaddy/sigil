@@ -15,6 +15,7 @@ mod diagnostics_flow;
 mod formatting;
 mod input_flow;
 mod input_history;
+mod key_router;
 mod modal_flow;
 mod mouse_flow;
 mod runtime_status;
@@ -918,6 +919,10 @@ impl AppState {
         }
 
         if let Some(outcome) = self.handle_pending_plan_approval_key_event(key) {
+            return Ok(outcome);
+        }
+
+        if let Some(outcome) = self.handle_key_router_event(key)? {
             return Ok(outcome);
         }
 

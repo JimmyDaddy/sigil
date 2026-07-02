@@ -628,6 +628,6 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
 
     view.metadata_collapsed = false;
     view.preview_summary = "line one\nline two\nline three".to_owned();
-    assert_eq!(approval_header_line_count(&view), 5);
+    assert_eq!(approval_header_line_count(&view), 6);
     assert!(approval_modal_hit_areas(Rect::new(0, 0, 4, 4), &view).is_some());
 }

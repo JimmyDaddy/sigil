@@ -12,7 +12,7 @@ use sigil_kernel::{
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
     ExecutionConfig, ExecutionIsolationPolicy, ExecutionNetworkPolicy, ExecutionReceipt,
     ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxProfile, ExecutionTimeoutSource,
-    JsonlSessionStore, MutationEventRecorder, SessionStreamRecord,
+    JsonlSessionStore, MutationEventRecorder, PathTrustZone, PermissionRisk, SessionStreamRecord,
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
     TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCall,
     ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolRegistry,
@@ -2605,6 +2605,8 @@ fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
         "find . -name lib.rs",
         "command -v cargo",
         "rustc --version",
+        "pwd | wc -l",
+        "ls *.rs",
     ] {
         assert_eq!(
             bash_tool(temp.path()).permission_access(&ctx, &json!({ "command": command }))?,
@@ -2616,8 +2618,6 @@ fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
     for command in [
         "echo hi > out.txt",
         "echo $HOME",
-        "pwd | wc -l",
-        "ls *.rs",
         "(pwd)",
         "find . -exec echo {} \\;",
         "find . -delete",
@@ -2667,6 +2667,107 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
             .all(|subject| !subject.normalized.contains("&1"))
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
+    let tool = bash_tool(workspace.path());
+
+    let first = tool.permission_subjects(&ctx, &json!({ "command": "cargo check 2>&1" }))?;
+    let piped = tool.permission_subjects(
+        &ctx,
+        &json!({ "command": "cd . && cargo check 2>&1 | tail -20" }),
+    )?;
+
+    assert_eq!(first.len(), 1);
+    assert_eq!(piped.len(), 1);
+    assert_eq!(first[0].normalized, "family:cargo_check");
+    assert_eq!(piped[0].normalized, "family:cargo_check");
+    assert_eq!(
+        tool.permission_access(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?,
+        ToolAccess::Execute
+    );
+    assert_eq!(
+        tool.permission_operation(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?,
+        ToolOperation::ExecuteUnknownCommand
+    );
+    assert!(
+        sigil_kernel::tool_approval_session_grant_available_for_parts(
+            ToolAccess::Execute,
+            ToolOperation::ExecuteUnknownCommand,
+            PermissionRisk::High,
+            &first,
+            &[PathTrustZone::Unknown],
+            None,
+            false,
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_shell_analysis_allows_safe_search_and_devices_without_external_approval() -> Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
+    let tool = bash_tool(workspace.path());
+
+    assert_eq!(
+        tool.permission_access(
+            &ctx,
+            &json!({ "command": "grep -r 'XYZ' --include='*.rs' --include='*.md' ." })
+        )?,
+        ToolAccess::Read
+    );
+    let subjects =
+        tool.permission_subjects(&ctx, &json!({ "command": "cargo check >/dev/null 2>&1" }))?;
+    assert!(
+        subjects
+            .iter()
+            .all(|subject| subject.scope != ToolSubjectScope::External),
+        "{subjects:?}"
+    );
+    assert_eq!(
+        tool.permission_operation(&ctx, &json!({ "command": "cargo check > /dev/null 2>&1" }))?,
+        ToolOperation::ExecuteUnknownCommand
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
+    let receipt = ExecutionReceipt {
+        exit_code: Some(0),
+        stdout: b"ok\n".to_vec(),
+        stderr: Vec::new(),
+        timed_out: false,
+        backend: ExecutionBackendKind::Local,
+        capabilities: ExecutionBackendCapabilities::default(),
+        network: Default::default(),
+        resources: Default::default(),
+    };
+    let workspace = tempfile::tempdir()?;
+    let analysis = super::analyze_shell_command(
+        workspace.path(),
+        "./scripts/check-touched.sh --tier quick 2>&1",
+    )?;
+    let result = super::bash_tool_result_from_execution_receipt_with_analysis(
+        "call".to_owned(),
+        "bash".to_owned(),
+        receipt,
+        &analysis,
+    )?;
+
+    assert_eq!(result.metadata.exit_code, Some(0));
+    assert_eq!(
+        result.metadata.details["shell"]["command_family"],
+        "check_touched"
+    );
+    assert_eq!(result.metadata.details["shell"]["verdict"], "passed");
+    assert_eq!(result.metadata.details["shell"]["rerun_not_needed"], true);
     Ok(())
 }
 

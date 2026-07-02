@@ -165,6 +165,8 @@ struct ToolCardMetadata {
     execution_network_policy: Option<String>,
     execution_timeout_source: Option<String>,
     execution_cleanup_status: Option<String>,
+    shell_command_family: Option<String>,
+    shell_verdict: Option<String>,
     terminal_enforcement_backend: Option<String>,
     terminal_sandbox_profile: Option<String>,
     terminal_cleanup_status: Option<String>,

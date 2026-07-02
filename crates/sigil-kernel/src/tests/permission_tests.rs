@@ -681,6 +681,25 @@ fn session_grant_availability_requires_stable_low_or_medium_risk_scope() -> Resu
 }
 
 #[test]
+fn workspace_config_secret_write_is_protected_and_not_session_grantable() -> Result<()> {
+    let decision = PermissionPolicy::new(&PermissionConfig::default()).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![path_subject("sigil.toml")],
+    )?;
+
+    assert_eq!(decision.risk, PermissionRisk::Protected);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    assert!(
+        decision
+            .subject_zones
+            .contains(&PathTrustZone::WorkspaceConfigSecret)
+    );
+    assert!(!tool_approval_session_grant_available(&decision));
+    Ok(())
+}
+
+#[test]
 fn session_grant_availability_allows_exact_high_risk_commands_only() -> Result<()> {
     let exact_command = PermissionPolicy::new(&PermissionConfig::default()).decide(
         &spec(ToolAccess::Execute),

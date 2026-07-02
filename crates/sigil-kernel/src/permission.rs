@@ -751,6 +751,7 @@ pub fn derive_permission_risk(
             zone,
             PathTrustZone::WorkspaceGitMetadata
                 | PathTrustZone::WorkspaceRuntimeState
+                | PathTrustZone::WorkspaceConfigSecret
                 | PathTrustZone::UserState
                 | PathTrustZone::UserCache
         )

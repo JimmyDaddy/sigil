@@ -213,6 +213,16 @@ pub trait AgentToolDelegate: Send {
         handler: &mut (dyn EventHandler + Send),
         approval_handler: &mut (dyn ApprovalHandler + Send),
     ) -> Result<Option<ToolResult>>;
+
+    /// Returns a model-visible continuation prompt when a final answer must wait for delegated
+    /// agent work. The default keeps non-agent runtimes unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delegate cannot inspect its durable state.
+    fn final_answer_blocker(&mut self, _session: &mut Session) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Provider-backed agent loop with a registered tool surface.
@@ -1325,6 +1335,20 @@ where
                     },
                     outcome,
                 });
+            }
+
+            if let Some(blocker_prompt) = agent_delegate
+                .as_deref_mut()
+                .map(|delegate| delegate.final_answer_blocker(session))
+                .transpose()?
+                .flatten()
+            {
+                handler.handle(RunEvent::Notice(
+                    "pending join-before-final agent work blocks final answer; continuing"
+                        .to_owned(),
+                ))?;
+                transient_context.push(ModelMessage::user(blocker_prompt));
+                continue;
             }
 
             let assistant_message =

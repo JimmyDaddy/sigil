@@ -1899,6 +1899,14 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
 
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    app.active_pane = PaneFocus::Activity;
+    app.sidebar_selected_card = SidebarCard::Agents;
+    app.sidebar_agent_selected = 0;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.sidebar_selected_card, SidebarCard::Agents);
+    assert_eq!(app.sidebar_agent_selected, 1);
+
     app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.active_pane, PaneFocus::Activity);

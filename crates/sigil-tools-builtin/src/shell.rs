@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use sigil_kernel::{
     ExecutionBackend, ExecutionReceipt, ExecutionRequest, Tool, ToolAccess, ToolCategory,
     ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject,
+    ToolSpec, ToolSubject, ToolSubjectScope,
 };
 
 use crate::{
@@ -52,26 +52,17 @@ impl Tool for BashTool {
 
     fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let command = required_string(args, "command")?;
-        let mut subjects = vec![ToolSubject::command(
-            command.to_owned(),
-            command_permission_subject(command),
-        )];
-        subjects.extend(bash_path_subjects(&ctx.workspace_root, command)?);
-        Ok(subjects)
+        Ok(analyze_shell_command(&ctx.workspace_root, command)?.subjects)
     }
 
-    fn permission_access(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
+    fn permission_access(&self, ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
         let command = required_string(args, "command")?;
-        if bash_command_is_safe_readonly(command) {
-            Ok(ToolAccess::Read)
-        } else {
-            Ok(ToolAccess::Execute)
-        }
+        Ok(analyze_shell_command(&ctx.workspace_root, command)?.access)
     }
 
-    fn permission_operation(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
         let command = required_string(args, "command")?;
-        Ok(shell_command_permission_operation(command))
+        Ok(analyze_shell_command(&ctx.workspace_root, command)?.operation)
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -84,11 +75,173 @@ impl Tool for BashTool {
         tokio::fs::create_dir_all(&scratch_root)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
+        let analysis = analyze_shell_command(&ctx.workspace_root, command)?;
         let request =
             bash_execution_request(command, &ctx.workspace_root, &scratch_root, timeout_secs);
         let receipt = self.backend.execute(request).await?;
-        bash_tool_result_from_execution_receipt(call_id, self.spec().name, receipt)
+        bash_tool_result_from_execution_receipt_with_analysis(
+            call_id,
+            self.spec().name,
+            receipt,
+            &analysis,
+        )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShellCommandAnalysis {
+    pub(crate) command_family: CommandFamily,
+    pub(crate) access: ToolAccess,
+    pub(crate) operation: ToolOperation,
+    pub(crate) subjects: Vec<ToolSubject>,
+    pub(crate) grant_scope: Option<CommandGrantScope>,
+    pub(crate) explanation: ShellApprovalReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommandFamily {
+    CargoCheck,
+    CargoFmtCheck,
+    CargoTest,
+    CheckTouched { tier: Option<String> },
+    GitReadOnly,
+    Search,
+    ListRead,
+    Unknown,
+}
+
+impl CommandFamily {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::CargoCheck => "cargo_check",
+            Self::CargoFmtCheck => "cargo_fmt_check",
+            Self::CargoTest => "cargo_test",
+            Self::CheckTouched { .. } => "check_touched",
+            Self::GitReadOnly => "git_read_only",
+            Self::Search => "search",
+            Self::ListRead => "list_read",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn stable_subject(&self) -> String {
+        match self {
+            Self::CheckTouched { tier } => tier
+                .as_deref()
+                .map(|tier| format!("family:check_touched:{tier}"))
+                .unwrap_or_else(|| "family:check_touched".to_owned()),
+            _ => format!("family:{}", self.as_str()),
+        }
+    }
+
+    fn is_workspace_check(&self) -> bool {
+        matches!(
+            self,
+            Self::CargoCheck | Self::CargoFmtCheck | Self::CargoTest | Self::CheckTouched { .. }
+        )
+    }
+
+    fn is_workspace_read_only(&self) -> bool {
+        matches!(self, Self::GitReadOnly | Self::Search | Self::ListRead)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommandGrantScope {
+    WorkspaceCheckFamily,
+    WorkspaceReadOnlyShell,
+}
+
+impl CommandGrantScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::WorkspaceCheckFamily => "workspace_check_family",
+            Self::WorkspaceReadOnlyShell => "workspace_read_only_shell",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShellApprovalReason {
+    WorkspaceCheck,
+    WorkspaceReadOnly,
+    UnknownCommand,
+    DestructiveCommand,
+}
+
+impl ShellApprovalReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::WorkspaceCheck => "workspace_check",
+            Self::WorkspaceReadOnly => "workspace_read_only",
+            Self::UnknownCommand => "unknown_command",
+            Self::DestructiveCommand => "destructive_command",
+        }
+    }
+}
+
+pub(crate) fn analyze_shell_command(
+    workspace_root: &Path,
+    command: &str,
+) -> Result<ShellCommandAnalysis> {
+    let family = classify_shell_command_family(workspace_root, command)?;
+    let destructive = shell_command_is_destructive(command);
+    let mut subjects = Vec::new();
+    let access;
+    let operation;
+    let grant_scope;
+    let explanation;
+
+    if destructive {
+        access = ToolAccess::Execute;
+        operation = ToolOperation::ExecuteDestructiveCommand;
+        grant_scope = None;
+        explanation = ShellApprovalReason::DestructiveCommand;
+        subjects.push(ToolSubject::command(
+            command.to_owned(),
+            command_permission_subject(command),
+        ));
+        subjects.extend(bash_path_subjects(workspace_root, command)?);
+    } else if family.is_workspace_check() {
+        access = ToolAccess::Execute;
+        operation = ToolOperation::ExecuteUnknownCommand;
+        grant_scope = Some(CommandGrantScope::WorkspaceCheckFamily);
+        explanation = ShellApprovalReason::WorkspaceCheck;
+        let stable_subject = family.stable_subject();
+        subjects.push(ToolSubject::command(stable_subject.clone(), stable_subject));
+        subjects.extend(external_shell_path_subjects(workspace_root, command)?);
+    } else if family.is_workspace_read_only() || bash_command_is_safe_readonly(command) {
+        access = ToolAccess::Read;
+        operation = ToolOperation::ExecuteReadOnlyCommand;
+        grant_scope = Some(CommandGrantScope::WorkspaceReadOnlyShell);
+        explanation = ShellApprovalReason::WorkspaceReadOnly;
+        let stable_subject = if family == CommandFamily::Unknown {
+            command_permission_subject(command)
+        } else {
+            family.stable_subject()
+        };
+        subjects.push(ToolSubject::command(stable_subject.clone(), stable_subject));
+        subjects.extend(bash_path_subjects(workspace_root, command)?);
+    } else {
+        access = ToolAccess::Execute;
+        operation = ToolOperation::ExecuteUnknownCommand;
+        grant_scope = None;
+        explanation = ShellApprovalReason::UnknownCommand;
+        subjects.push(ToolSubject::command(
+            command.to_owned(),
+            command_permission_subject(command),
+        ));
+        subjects.extend(bash_path_subjects(workspace_root, command)?);
+    }
+
+    Ok(ShellCommandAnalysis {
+        command_family: family,
+        access,
+        operation,
+        subjects,
+        grant_scope,
+        explanation,
+    })
 }
 
 pub(crate) fn bash_execution_request(
@@ -113,10 +266,29 @@ pub(crate) fn bash_execution_request(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn bash_tool_result_from_execution_receipt(
     call_id: String,
     tool_name: String,
     receipt: ExecutionReceipt,
+) -> Result<ToolResult> {
+    bash_tool_result_from_execution_receipt_inner(call_id, tool_name, receipt, None)
+}
+
+pub(crate) fn bash_tool_result_from_execution_receipt_with_analysis(
+    call_id: String,
+    tool_name: String,
+    receipt: ExecutionReceipt,
+    analysis: &ShellCommandAnalysis,
+) -> Result<ToolResult> {
+    bash_tool_result_from_execution_receipt_inner(call_id, tool_name, receipt, Some(analysis))
+}
+
+fn bash_tool_result_from_execution_receipt_inner(
+    call_id: String,
+    tool_name: String,
+    receipt: ExecutionReceipt,
+    analysis: Option<&ShellCommandAnalysis>,
 ) -> Result<ToolResult> {
     if receipt.timed_out {
         let mut result = ToolResult::error(
@@ -130,7 +302,7 @@ pub(crate) fn bash_tool_result_from_execution_receipt(
             stdout_bytes: Some(receipt.stdout.len() as u64),
             stderr_bytes: Some(receipt.stderr.len() as u64),
             total_bytes: Some(receipt.stdout.len() as u64 + receipt.stderr.len() as u64),
-            details: execution_receipt_details(&receipt),
+            details: execution_receipt_details(&receipt, analysis, false, false),
             ..ToolResultMeta::default()
         };
         return Ok(result);
@@ -150,18 +322,19 @@ pub(crate) fn bash_tool_result_from_execution_receipt(
         }
         content.push_str(&limited_stderr.content);
     }
+    let output_truncated = limited_stdout.truncated || limited_stderr.truncated;
     let metadata = ToolResultMeta {
         exit_code: receipt.exit_code,
         stdout_bytes: Some(receipt.stdout.len() as u64),
         stderr_bytes: Some(receipt.stderr.len() as u64),
-        truncated: limited_stdout.truncated || limited_stderr.truncated,
+        truncated: output_truncated,
         omitted_bytes: Some(limited_stdout.omitted_bytes + limited_stderr.omitted_bytes),
         limit_bytes: Some(limit_bytes as u64),
         returned_bytes: Some(limited_stdout.returned_bytes + limited_stderr.returned_bytes),
         total_bytes: Some(receipt.stdout.len() as u64 + receipt.stderr.len() as u64),
         returned_lines: Some(limited_stdout.returned_lines + limited_stderr.returned_lines),
         total_lines: Some(limited_stdout.total_lines + limited_stderr.total_lines),
-        details: execution_receipt_details(&receipt),
+        details: execution_receipt_details(&receipt, analysis, output_truncated, output_truncated),
         ..ToolResultMeta::default()
     };
     if receipt.exit_code == Some(0) {
@@ -183,15 +356,47 @@ pub(crate) fn bash_tool_result_from_execution_receipt(
     }
 }
 
-pub(crate) fn execution_receipt_details(receipt: &ExecutionReceipt) -> Value {
-    json!({
+pub(crate) fn execution_receipt_details(
+    receipt: &ExecutionReceipt,
+    analysis: Option<&ShellCommandAnalysis>,
+    output_truncated: bool,
+    tail_available: bool,
+) -> Value {
+    let mut details = json!({
         "execution": {
             "backend": receipt.backend,
             "capabilities": receipt.capabilities,
             "network": receipt.network,
             "resources": receipt.resources,
         }
-    })
+    });
+    if let Some(analysis) = analysis {
+        details["shell"] = json!({
+            "command_family": analysis.command_family.as_str(),
+            "grant_scope": analysis.grant_scope.as_ref().map(CommandGrantScope::as_str),
+            "approval_reason": analysis.explanation.as_str(),
+            "verdict": shell_verdict(receipt),
+            "output_truncated": output_truncated,
+            "tail_available": tail_available,
+            "rerun_not_needed": shell_rerun_not_needed(analysis, receipt),
+        });
+    }
+    details
+}
+
+fn shell_verdict(receipt: &ExecutionReceipt) -> &'static str {
+    match receipt.exit_code {
+        Some(0) if !receipt.timed_out => "passed",
+        Some(_) if !receipt.timed_out => "failed",
+        _ if receipt.timed_out => "timed_out",
+        _ => "unknown",
+    }
+}
+
+fn shell_rerun_not_needed(analysis: &ShellCommandAnalysis, receipt: &ExecutionReceipt) -> bool {
+    analysis.command_family.is_workspace_check()
+        && receipt.exit_code == Some(0)
+        && !receipt.timed_out
 }
 
 pub(crate) fn command_permission_subject(command: &str) -> String {
@@ -203,6 +408,178 @@ pub(crate) fn command_permission_subject(command: &str) -> String {
     }
     let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
     format!("{truncated}...")
+}
+
+fn classify_shell_command_family(workspace_root: &Path, command: &str) -> Result<CommandFamily> {
+    let workspace_root = canonical_workspace_root(workspace_root)?;
+    let tokens = strip_workspace_cd_prefix(&workspace_root, tokenize_shell_subject_words(command))?;
+    if tokens.is_empty() {
+        return Ok(CommandFamily::Unknown);
+    }
+    let command_segments = split_shell_command_segments(&tokens);
+    if command_segments.is_empty() {
+        return Ok(CommandFamily::Unknown);
+    }
+    if command_segments.len() == 2
+        && command_family_for_pipeline(command_segments[0]) == CommandFamily::ListRead
+        && shell_segment_is_exit_echo(command_segments[1])
+    {
+        return Ok(CommandFamily::ListRead);
+    }
+    if command_segments.len() != 1 {
+        return Ok(CommandFamily::Unknown);
+    }
+    Ok(command_family_for_pipeline(command_segments[0]))
+}
+
+fn strip_workspace_cd_prefix(workspace_root: &Path, tokens: Vec<String>) -> Result<Vec<String>> {
+    let Some(separator_index) = tokens
+        .iter()
+        .position(|token| matches!(token.as_str(), "&&" | ";"))
+    else {
+        return Ok(tokens);
+    };
+    let prefix = &tokens[..separator_index];
+    if !matches!(prefix.first().map(String::as_str), Some("cd")) {
+        return Ok(tokens);
+    }
+    let Some(target) = prefix.get(1).filter(|target| !target.starts_with('-')) else {
+        return Ok(tokens);
+    };
+    let resolved = resolve_tool_path_from_base(workspace_root, workspace_root, target)?;
+    if resolved.scope != ToolSubjectScope::Workspace {
+        return Ok(tokens);
+    }
+    Ok(tokens[separator_index + 1..].to_vec())
+}
+
+fn split_shell_command_segments(tokens: &[String]) -> Vec<&[String]> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if matches!(token.as_str(), "&&" | "||" | ";") {
+            if start < index {
+                segments.push(&tokens[start..index]);
+            }
+            start = index.saturating_add(1);
+        }
+    }
+    if start < tokens.len() {
+        segments.push(&tokens[start..]);
+    }
+    segments
+}
+
+fn command_family_for_pipeline(tokens: &[String]) -> CommandFamily {
+    let pipeline = split_shell_pipeline(tokens);
+    let Some(primary) = pipeline.first().copied() else {
+        return CommandFamily::Unknown;
+    };
+    if pipeline.len() > 2 {
+        return CommandFamily::Unknown;
+    }
+    if let Some(filter) = pipeline.get(1)
+        && !shell_segment_is_read_filter(filter)
+    {
+        return CommandFamily::Unknown;
+    }
+    command_family_for_simple_segment(primary)
+}
+
+fn split_shell_pipeline(tokens: &[String]) -> Vec<&[String]> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "|" {
+            if start < index {
+                segments.push(&tokens[start..index]);
+            }
+            start = index.saturating_add(1);
+        }
+    }
+    if start < tokens.len() {
+        segments.push(&tokens[start..]);
+    }
+    segments
+}
+
+fn command_family_for_simple_segment(tokens: &[String]) -> CommandFamily {
+    let words = tokens
+        .iter()
+        .filter(|token| !is_fd_duplication_token(token))
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some((command, args)) = shell_segment_command_and_args(&words) else {
+        return CommandFamily::Unknown;
+    };
+    match command {
+        "cargo" => cargo_command_family(args),
+        "git" if git_segment_is_safe_readonly(&words) => CommandFamily::GitReadOnly,
+        "grep" | "rg" if search_segment_is_read_only(command, args) => CommandFamily::Search,
+        "find" if find_segment_is_safe_readonly(&words) => CommandFamily::Search,
+        "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "du" | "file" | "readlink"
+        | "realpath" | "basename" | "dirname" | "diff" | "cmp" | "pwd" => CommandFamily::ListRead,
+        command if command.ends_with("check-touched.sh") => CommandFamily::CheckTouched {
+            tier: check_touched_tier(args),
+        },
+        _ => CommandFamily::Unknown,
+    }
+}
+
+fn cargo_command_family(args: &[String]) -> CommandFamily {
+    match args.first().map(String::as_str) {
+        Some("check") => CommandFamily::CargoCheck,
+        Some("test") => CommandFamily::CargoTest,
+        Some("fmt") if args.iter().skip(1).any(|arg| arg == "--check") => {
+            CommandFamily::CargoFmtCheck
+        }
+        _ => CommandFamily::Unknown,
+    }
+}
+
+fn check_touched_tier(args: &[String]) -> Option<String> {
+    args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--tier=").map(str::to_owned).or_else(|| {
+            (arg == "--tier")
+                .then(|| args.get(index + 1).cloned())
+                .flatten()
+        })
+    })
+}
+
+fn shell_segment_is_read_filter(tokens: &[String]) -> bool {
+    let words = tokens
+        .iter()
+        .filter(|token| !is_fd_duplication_token(token))
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some((command, _args)) = shell_segment_command_and_args(&words) else {
+        return false;
+    };
+    matches!(command, "head" | "tail" | "wc" | "cat")
+}
+
+fn search_segment_is_read_only(_command: &str, _args: &[String]) -> bool {
+    true
+}
+
+fn shell_segment_is_exit_echo(tokens: &[String]) -> bool {
+    matches!(tokens.first().map(String::as_str), Some("echo"))
+        && tokens
+            .iter()
+            .skip(1)
+            .all(|token| token == "EXIT=$?" || !token.contains('>'))
+}
+
+fn is_fd_duplication_token(token: &str) -> bool {
+    matches!(token, "2>&1" | "1>&2" | ">&2" | ">&1")
+}
+
+fn external_shell_path_subjects(workspace_root: &Path, command: &str) -> Result<Vec<ToolSubject>> {
+    Ok(bash_path_subjects(workspace_root, command)?
+        .into_iter()
+        .filter(|subject| subject.scope == ToolSubjectScope::External)
+        .collect())
 }
 
 pub(crate) fn shell_command_permission_operation(command: &str) -> ToolOperation {
@@ -298,9 +675,23 @@ pub(crate) fn shell_command_basename(command: &str) -> &str {
 }
 
 pub(crate) fn shell_segment_has_overwrite_redirection(words: &[String]) -> bool {
-    words
-        .iter()
-        .any(|word| is_overwrite_redirection_operator(word) || overwrite_redirection_target(word))
+    let mut index = 0usize;
+    while index < words.len() {
+        let word = &words[index];
+        if overwrite_redirection_target(word) {
+            return true;
+        }
+        if is_overwrite_redirection_operator(word) {
+            if overwrite_redirection_operator_target_is_destructive(
+                words.get(index + 1).map(String::as_str),
+            ) {
+                return true;
+            }
+            index += 1;
+        }
+        index += 1;
+    }
+    false
 }
 
 pub(crate) fn is_overwrite_redirection_operator(word: &str) -> bool {
@@ -309,8 +700,17 @@ pub(crate) fn is_overwrite_redirection_operator(word: &str) -> bool {
 
 pub(crate) fn overwrite_redirection_target(word: &str) -> bool {
     ["1>", "2>", "&>", ">"].iter().any(|prefix| {
-        word.strip_prefix(prefix)
-            .is_some_and(|target| !target.is_empty())
+        word.strip_prefix(prefix).is_some_and(|target| {
+            !target.is_empty()
+                && !target.starts_with('&')
+                && !shell_requested_path_is_safe_device(target)
+        })
+    })
+}
+
+fn overwrite_redirection_operator_target_is_destructive(target: Option<&str>) -> bool {
+    target.is_none_or(|target| {
+        !target.starts_with('&') && !shell_requested_path_is_safe_device(target)
     })
 }
 
@@ -489,20 +889,37 @@ pub(crate) fn collect_bash_segment_subjects(
     while index < words.len() {
         let word = &words[index];
         if let Some(target) = redirection_target(word) {
-            subjects.push(shell_path_subject(workspace_root, cwd, target)?);
+            push_shell_path_subject(subjects, workspace_root, cwd, target)?;
         } else if command == "dd" && word.starts_with("of=") && word.len() > 3 {
-            subjects.push(shell_path_subject(workspace_root, cwd, &word[3..])?);
+            push_shell_path_subject(subjects, workspace_root, cwd, &word[3..])?;
         } else if is_redirection_operator(word) {
             if let Some(target) = words.get(index + 1) {
-                subjects.push(shell_path_subject(workspace_root, cwd, target)?);
+                push_shell_path_subject(subjects, workspace_root, cwd, target)?;
                 index += 1;
             }
         } else if is_path_argument(command, word) {
-            subjects.push(shell_path_subject(workspace_root, cwd, word)?);
+            push_shell_path_subject(subjects, workspace_root, cwd, word)?;
         }
         index += 1;
     }
     Ok(())
+}
+
+fn push_shell_path_subject(
+    subjects: &mut Vec<ToolSubject>,
+    workspace_root: &Path,
+    cwd: &Path,
+    requested: &str,
+) -> Result<()> {
+    if shell_requested_path_is_safe_device(requested) {
+        return Ok(());
+    }
+    subjects.push(shell_path_subject(workspace_root, cwd, requested)?);
+    Ok(())
+}
+
+fn shell_requested_path_is_safe_device(requested: &str) -> bool {
+    matches!(requested, "/dev/null" | "/dev/stdout" | "/dev/stderr")
 }
 
 pub(crate) fn shell_path_subject(
@@ -572,6 +989,12 @@ pub(crate) fn tokenize_shell_subject_words(command: &str) -> Vec<String> {
                     words.push(std::mem::take(&mut current));
                 }
                 words.push("||".to_owned());
+            }
+            '|' => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+                words.push("|".to_owned());
             }
             _ => current.push(ch),
         }

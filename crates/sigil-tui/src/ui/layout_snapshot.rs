@@ -948,7 +948,7 @@ fn approval_header_line_count(view: &ApprovalModalView) -> u16 {
     let summary_lines = if view.metadata_collapsed || view.preview_summary.trim().is_empty() {
         1
     } else {
-        view.preview_summary.lines().take(2).count().max(1) as u16
+        view.preview_summary.lines().take(4).count().max(1) as u16
     };
     let change_set_lines = if view.change_set.is_some() { 2 } else { 0 };
     let source_agent_lines = u16::from(view.source_agent.is_some());

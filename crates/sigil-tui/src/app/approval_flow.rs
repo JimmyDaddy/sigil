@@ -7,7 +7,7 @@ use sigil_kernel::{PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOp
 use super::{
     AppAction, AppState, ApprovalChangeSetSummary, ApprovalDiagnosticSummary, ApprovalDiffLine,
     ApprovalDiffLineKind, ApprovalDiffMode, ApprovalFileRow, ApprovalModalView, PaneFocus,
-    formatting::normalize_command_prefix_character,
+    PendingApproval, formatting::normalize_command_prefix_character,
 };
 
 impl AppState {
@@ -273,13 +273,19 @@ impl AppState {
         let access_label = approval_access_label(&pending.spec);
         let source_agent = self.pending_approval_source_agent(&pending.call.id);
         let Some(preview) = pending.preview.as_ref() else {
+            let shell_preview = approval_shell_preview(pending);
             return Some(ApprovalModalView {
                 tool_name: pending.call.name.clone(),
                 call_id: pending.call.id.clone(),
                 source_agent,
                 access_label,
-                preview_title: format!("Run {}", pending.call.name),
-                preview_summary: approval_subject_summary(&pending.subjects)
+                preview_title: shell_preview
+                    .as_ref()
+                    .map(|preview| preview.title.clone())
+                    .unwrap_or_else(|| format!("Run {}", pending.call.name)),
+                preview_summary: shell_preview
+                    .map(|preview| preview.summary)
+                    .or_else(|| approval_subject_summary(&pending.subjects))
                     .unwrap_or_else(|| "Tool preview unavailable for this call.".to_owned()),
                 change_set: None,
                 metadata_collapsed: self.approval.metadata_collapsed,
@@ -596,6 +602,81 @@ impl AppState {
 
 fn approval_access_label(spec: &sigil_kernel::ToolSpec) -> String {
     format!("{} {}", spec.category.as_str(), spec.access.as_str())
+}
+
+#[derive(Debug, Clone)]
+struct ShellApprovalPreview {
+    title: String,
+    summary: String,
+}
+
+fn approval_shell_preview(pending: &PendingApproval) -> Option<ShellApprovalPreview> {
+    if pending.call.name != "bash" {
+        return None;
+    }
+    let args: Value = serde_json::from_str(&pending.call.args_json).ok()?;
+    let command = args.get("command")?.as_str()?.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let family: Option<&str> = pending.subjects.iter().find_map(|subject| {
+        (subject.kind == sigil_kernel::ToolSubjectKind::Command)
+            .then_some(subject.normalized.as_str())
+    });
+    let (title, reason, grant) = match family {
+        Some("family:cargo_check") => (
+            "Run workspace check",
+            "Runs a Cargo build check through bash.",
+            "Allow cargo-check commands in this workspace for this session.",
+        ),
+        Some("family:cargo_fmt_check") => (
+            "Run workspace check",
+            "Runs a Cargo formatting check through bash.",
+            "Allow cargo-fmt-check commands in this workspace for this session.",
+        ),
+        Some("family:cargo_test") => (
+            "Run workspace tests",
+            "Runs Cargo tests through bash.",
+            "Allow cargo-test commands in this workspace for this session.",
+        ),
+        Some(value) if value.starts_with("family:check_touched") => (
+            "Run repository check",
+            "Runs the repository touched-file gate through bash.",
+            "Allow matching check-touched commands in this workspace for this session.",
+        ),
+        Some("family:git_read_only" | "family:search" | "family:list_read") => (
+            "Run workspace read",
+            "Reads workspace state through bash without external writes.",
+            "Allow matching read-only shell commands in this workspace for this session.",
+        ),
+        _ => (
+            "Run shell command",
+            "Runs a shell command whose effects need confirmation.",
+            "Session grant is not available for this command.",
+        ),
+    };
+    let access = approval_shell_access_summary(pending);
+    let grant_line = if pending.session_grant_available {
+        format!("Session grant: {grant}")
+    } else {
+        "Session grant: not available for this call.".to_owned()
+    };
+    Some(ShellApprovalPreview {
+        title: title.to_owned(),
+        summary: format!("{command}\nReason: {reason}\nAccess: {access}\n{grant_line}"),
+    })
+}
+
+fn approval_shell_access_summary(pending: &PendingApproval) -> &'static str {
+    if pending.subject_zones.contains(&PathTrustZone::External) {
+        return "touches an external path";
+    }
+    match pending.operation {
+        ToolOperation::ExecuteReadOnlyCommand => "workspace read · no external writes",
+        ToolOperation::ExecuteUnknownCommand => "workspace command · no external writes",
+        ToolOperation::ExecuteDestructiveCommand => "destructive command",
+        _ => "workspace command",
+    }
 }
 
 fn approval_permission_lines(

@@ -281,7 +281,7 @@ fn approval_header_lines_with_palette(
     } else {
         let markdown_options =
             MarkdownRenderOptions::modal(max_content_width).with_syntax_theme(syntax_theme);
-        lines.extend(view.preview_summary.lines().take(2).map(|line| {
+        lines.extend(view.preview_summary.lines().take(4).map(|line| {
             Line::from(render_inline_markdown_spans_with_palette(
                 line,
                 Style::default().fg(palette.text_secondary),
@@ -379,22 +379,17 @@ fn approval_footer_lines_with_palette(
         ""
     };
     let mut action_line = approval_action_badges(view, palette);
-    action_line.push(Span::raw(" "));
-    action_line.push(approval_badge_with_palette(
-        "Enter choose",
-        palette.accent_warning,
-        palette,
-    ));
-    action_line.push(Span::raw(" "));
-    action_line.push(approval_badge_with_palette(
-        "Y once / N deny",
-        palette.text_muted,
-        palette,
-    ));
+    if action_line.is_empty() {
+        action_line.push(Span::styled(
+            "No available actions",
+            Style::default().fg(palette.text_muted),
+        ));
+    }
+    let action_hint = "Tab/Left/Right action  Enter select  Y allow once  N deny  M meta  V view";
     vec![
         Line::from(action_line),
         Line::styled(
-            format!("Tab/Left/Right action  M meta  V view  [,] hunk{file_hint}  Up/Down scroll"),
+            format!("{action_hint}  [,] hunk{file_hint}  Up/Down scroll"),
             Style::default().fg(palette.text_muted),
         ),
     ]

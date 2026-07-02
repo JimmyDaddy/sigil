@@ -1,0 +1,50 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::{InputContext, RoutedKeyCommand, key_binding_snapshot, resolve_binding};
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+#[test]
+fn key_router_maps_activity_agent_list_keys_without_sidebar_fallback() {
+    assert_eq!(
+        resolve_binding(InputContext::ActivityAgentList, key(KeyCode::Down)),
+        Some(RoutedKeyCommand::ActivityAgentNext)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ActivityAgentList, key(KeyCode::Up)),
+        Some(RoutedKeyCommand::ActivityAgentPrevious)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ActivityAgentList, key(KeyCode::Enter)),
+        Some(RoutedKeyCommand::ActivityAgentActivate)
+    );
+    assert_eq!(
+        resolve_binding(
+            InputContext::ActivityAgentList,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL),
+        ),
+        None
+    );
+}
+
+#[test]
+fn key_router_snapshot_covers_high_risk_contexts() {
+    let snapshot = key_binding_snapshot();
+    assert!(snapshot.iter().any(|binding| {
+        binding.context == InputContext::ComposerQueuePanel
+            && binding.key == "Down"
+            && binding.command == RoutedKeyCommand::QueueSelectionNext
+    }));
+    assert!(snapshot.iter().any(|binding| {
+        binding.context == InputContext::ComposerAgentPanel
+            && binding.key == "Down"
+            && binding.command == RoutedKeyCommand::AgentSelectionNext
+    }));
+    assert!(snapshot.iter().any(|binding| {
+        binding.context == InputContext::ActivityAgentList
+            && binding.key == "Down"
+            && binding.command == RoutedKeyCommand::ActivityAgentNext
+    }));
+}

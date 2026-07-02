@@ -259,4 +259,46 @@ impl AgentToolDelegate for AgentToolRuntime {
         };
         Ok(Some(result))
     }
+
+    fn final_answer_blocker(&mut self, session: &mut Session) -> Result<Option<String>> {
+        let projection = session.agent_thread_state_projection();
+        let pending = projection
+            .threads
+            .values()
+            .filter(|thread| {
+                thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
+                    && !thread.status.is_terminal()
+                    && !agent_thread_is_backgrounded(thread)
+            })
+            .map(|thread| {
+                json!({
+                    "thread_id": thread.thread_id.as_str(),
+                    "display_name": thread.display_name.as_deref(),
+                    "status": thread_status_label(thread.status),
+                    "objective": &thread.objective,
+                    "required_action": {
+                        "tool": WAIT_AGENT_TOOL_NAME,
+                        "args": { "thread_id": thread.thread_id.as_str() }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            json!({
+                "error": "join_before_final_agent_pending",
+                "message": "A join-before-final child agent is still running. Do not give the final answer yet; wait for the agent result or read the result if it is ready.",
+                "pending_threads": pending
+            })
+            .to_string(),
+        ))
+    }
+}
+
+fn agent_thread_is_backgrounded(thread: &sigil_kernel::AgentThreadProjection) -> bool {
+    thread.invocation_mode == Some(AgentInvocationMode::Background)
+        || thread.reason.as_deref() == Some("agent moved to background")
+        || thread.attempts.values().any(|attempt| attempt.background)
 }

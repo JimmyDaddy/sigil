@@ -323,6 +323,16 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|cleanup| cleanup.get("status"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        shell_command_family: details
+            .and_then(|details| details.get("shell"))
+            .and_then(|shell| shell.get("command_family"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        shell_verdict: details
+            .and_then(|details| details.get("shell"))
+            .and_then(|shell| shell.get("verdict"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         terminal_enforcement_backend: terminal_context
             .and_then(|details| details.get("enforcement_backend"))
             .and_then(Value::as_str)

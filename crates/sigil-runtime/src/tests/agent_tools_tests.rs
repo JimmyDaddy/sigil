@@ -1658,6 +1658,62 @@ async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "agent_pending_final",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        None,
+    )?;
+
+    let blocker = runtime
+        .final_answer_blocker(&mut session)?
+        .expect("pending join-before-final thread should block final answer");
+    let payload: serde_json::Value = serde_json::from_str(&blocker)?;
+
+    assert_eq!(payload["error"], "join_before_final_agent_pending");
+    assert_eq!(
+        payload["pending_threads"][0]["thread_id"],
+        thread_id.as_str()
+    );
+    assert_eq!(
+        payload["pending_threads"][0]["required_action"]["tool"],
+        WAIT_AGENT_TOOL_NAME
+    );
+    assert_eq!(
+        payload["pending_threads"][0]["required_action"]["args"]["thread_id"],
+        thread_id.as_str()
+    );
+    Ok(())
+}
+
+#[test]
+fn final_answer_blocker_ignores_backgrounded_agent_threads() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    append_projected_agent_thread(
+        &mut session,
+        "agent_backgrounded",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        Some("agent moved to background"),
+    )?;
+
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_none(),
+        "backgrounded join-before-final threads should not block final answer"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result<()> {
     let config = root_config();
@@ -2704,6 +2760,77 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
             .is_some_and(|reason| reason.contains("fan-out budget"))
     );
     Ok(())
+}
+
+fn append_projected_agent_thread(
+    session: &mut Session,
+    thread_id: &str,
+    invocation_mode: sigil_kernel::AgentInvocationMode,
+    status: sigil_kernel::AgentThreadStatus,
+    reason: Option<&str>,
+) -> Result<sigil_kernel::AgentThreadId> {
+    let thread_id = sigil_kernel::AgentThreadId::new(thread_id)?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let profile_snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore")?;
+    let run_context = sigil_kernel::AgentRunContextSnapshot {
+        profile_snapshot_id: profile_snapshot_id.clone(),
+        provider: "deepseek".to_owned(),
+        model: "deepseek-v4-pro".to_owned(),
+        reasoning_effort: None,
+        workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/workspace")?,
+        effective_tool_scope_hash: "sha256:tools".to_owned(),
+        effective_permission_policy_hash: "sha256:permissions".to_owned(),
+        effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+        provider_capability_hash: "sha256:provider".to_owned(),
+        model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+        budget_policy_hash: "sha256:budget".to_owned(),
+        provider_background_handle_ref: None,
+    };
+    session.append_control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: profile_snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: sigil_kernel::AgentTrustState::Trusted,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: thread_id.clone(),
+            parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: sigil_kernel::SessionRef::new_relative(format!(
+                "children/{}.jsonl",
+                thread_id.as_str()
+            ))?,
+            profile_id,
+            profile_snapshot_id,
+            run_context,
+            objective: "inspect".to_owned(),
+            prompt_hash: "sha256:prompt".to_owned(),
+            invocation_mode,
+            invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+            display_name: Some("explore".to_owned()),
+            created_at_ms: None,
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status,
+            reason: reason.map(str::to_owned),
+            updated_at_ms: None,
+        },
+    ))?;
+    Ok(thread_id)
 }
 
 async fn spawned_runtime_session()
