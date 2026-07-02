@@ -2766,8 +2766,48 @@ async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
         result.metadata.details["shell"]["command_family"],
         "check_touched"
     );
+    assert_eq!(
+        result.metadata.details["shell"]["command"],
+        "./scripts/check-touched.sh --tier quick 2>&1"
+    );
+    assert_eq!(
+        result.metadata.details["shell"]["grant_scope"],
+        "workspace_script"
+    );
+    assert_eq!(
+        result.metadata.details["shell"]["grant_scope_detail"]["path"],
+        "scripts/check-touched.sh"
+    );
+    assert_eq!(
+        result.metadata.details["shell"]["grant_scope_detail"]["args_family"],
+        "quick"
+    );
+    assert_eq!(result.metadata.details["shell"]["exit_code"], 0);
     assert_eq!(result.metadata.details["shell"]["verdict"], "passed");
     assert_eq!(result.metadata.details["shell"]["rerun_not_needed"], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_shell_analysis_treats_missing_relative_paths_as_workspace_subjects() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
+    let tool = bash_tool(workspace.path());
+
+    let subjects =
+        tool.permission_subjects(&ctx, &json!({ "command": "ls missing_workspace_dir" }))?;
+
+    assert!(subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.scope == ToolSubjectScope::Workspace
+            && subject.normalized.ends_with("missing_workspace_dir")
+    }));
+    assert!(
+        subjects
+            .iter()
+            .all(|subject| subject.scope != ToolSubjectScope::External),
+        "{subjects:?}"
+    );
     Ok(())
 }
 

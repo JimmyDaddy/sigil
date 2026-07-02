@@ -90,6 +90,7 @@ impl Tool for BashTool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShellCommandAnalysis {
+    pub(crate) command: String,
     pub(crate) command_family: CommandFamily,
     pub(crate) access: ToolAccess,
     pub(crate) operation: ToolOperation,
@@ -148,15 +149,22 @@ impl CommandFamily {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandGrantScope {
+    ExactCommand,
     WorkspaceCheckFamily,
     WorkspaceReadOnlyShell,
+    WorkspaceScript {
+        path: String,
+        args_family: Option<String>,
+    },
 }
 
 impl CommandGrantScope {
     fn as_str(&self) -> &'static str {
         match self {
+            Self::ExactCommand => "exact_command",
             Self::WorkspaceCheckFamily => "workspace_check_family",
             Self::WorkspaceReadOnlyShell => "workspace_read_only_shell",
+            Self::WorkspaceScript { .. } => "workspace_script",
         }
     }
 }
@@ -205,7 +213,7 @@ pub(crate) fn analyze_shell_command(
     } else if family.is_workspace_check() {
         access = ToolAccess::Execute;
         operation = ToolOperation::ExecuteUnknownCommand;
-        grant_scope = Some(CommandGrantScope::WorkspaceCheckFamily);
+        grant_scope = workspace_check_grant_scope(&family);
         explanation = ShellApprovalReason::WorkspaceCheck;
         let stable_subject = family.stable_subject();
         subjects.push(ToolSubject::command(stable_subject.clone(), stable_subject));
@@ -213,7 +221,11 @@ pub(crate) fn analyze_shell_command(
     } else if family.is_workspace_read_only() || bash_command_is_safe_readonly(command) {
         access = ToolAccess::Read;
         operation = ToolOperation::ExecuteReadOnlyCommand;
-        grant_scope = Some(CommandGrantScope::WorkspaceReadOnlyShell);
+        grant_scope = if family == CommandFamily::Unknown {
+            Some(CommandGrantScope::ExactCommand)
+        } else {
+            Some(CommandGrantScope::WorkspaceReadOnlyShell)
+        };
         explanation = ShellApprovalReason::WorkspaceReadOnly;
         let stable_subject = if family == CommandFamily::Unknown {
             command_permission_subject(command)
@@ -235,6 +247,7 @@ pub(crate) fn analyze_shell_command(
     }
 
     Ok(ShellCommandAnalysis {
+        command: command.to_owned(),
         command_family: family,
         access,
         operation,
@@ -242,6 +255,16 @@ pub(crate) fn analyze_shell_command(
         grant_scope,
         explanation,
     })
+}
+
+fn workspace_check_grant_scope(family: &CommandFamily) -> Option<CommandGrantScope> {
+    match family {
+        CommandFamily::CheckTouched { tier } => Some(CommandGrantScope::WorkspaceScript {
+            path: "scripts/check-touched.sh".to_owned(),
+            args_family: tier.clone(),
+        }),
+        _ => Some(CommandGrantScope::WorkspaceCheckFamily),
+    }
 }
 
 pub(crate) fn bash_execution_request(
@@ -372,9 +395,12 @@ pub(crate) fn execution_receipt_details(
     });
     if let Some(analysis) = analysis {
         details["shell"] = json!({
+            "command": analysis.command.as_str(),
             "command_family": analysis.command_family.as_str(),
             "grant_scope": analysis.grant_scope.as_ref().map(CommandGrantScope::as_str),
+            "grant_scope_detail": shell_grant_scope_detail(analysis.grant_scope.as_ref()),
             "approval_reason": analysis.explanation.as_str(),
+            "exit_code": receipt.exit_code,
             "verdict": shell_verdict(receipt),
             "output_truncated": output_truncated,
             "tail_available": tail_available,
@@ -382,6 +408,16 @@ pub(crate) fn execution_receipt_details(
         });
     }
     details
+}
+
+fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Value {
+    match scope {
+        Some(CommandGrantScope::WorkspaceScript { path, args_family }) => json!({
+            "path": path,
+            "args_family": args_family,
+        }),
+        _ => Value::Null,
+    }
 }
 
 fn shell_verdict(receipt: &ExecutionReceipt) -> &'static str {

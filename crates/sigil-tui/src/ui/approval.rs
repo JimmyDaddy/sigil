@@ -385,7 +385,8 @@ fn approval_footer_lines_with_palette(
             Style::default().fg(palette.text_muted),
         ));
     }
-    let action_hint = "Tab/Left/Right action  Enter select  Y allow once  N deny  M meta  V view";
+    let action_hint =
+        "Tab/Left/Right switch  Enter select  Y allow once  N deny  M details  V view";
     vec![
         Line::from(action_line),
         Line::styled(

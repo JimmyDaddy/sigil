@@ -31,7 +31,7 @@ pub mod write_isolation;
 
 pub use agent::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
-    AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate,
+    AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
 };
 pub use agent_thread::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentFinalAnswerRef,

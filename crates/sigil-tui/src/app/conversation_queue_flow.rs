@@ -90,15 +90,6 @@ impl AppState {
         self.blur_composer_agent_panel();
     }
 
-    pub(super) fn selected_composer_queue_is_first(&self) -> bool {
-        self.composer.queue_selected == 0
-    }
-
-    pub(super) fn selected_composer_queue_is_last(&self) -> bool {
-        let count = self.conversation_queue_projection().items.len();
-        count == 0 || self.composer.queue_selected + 1 >= count.min(COMPOSER_QUEUE_VISIBLE_ROWS)
-    }
-
     pub(super) fn move_composer_queue_selection(&mut self, next: bool) -> bool {
         let count = self.conversation_queue_projection().items.len();
         if count == 0 {

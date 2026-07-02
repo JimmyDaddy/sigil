@@ -227,6 +227,14 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
             )),
             ProviderChunk::Done,
         ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta(structured_plan_text(
+                "plan after blocked write",
+                "Inspect README.md after blocked write",
+                "README.md",
+            )),
+            ProviderChunk::Done,
+        ]),
     ]);
     let mut registry = ToolRegistry::new();
     registry.register(std::sync::Arc::new(WriteTool));

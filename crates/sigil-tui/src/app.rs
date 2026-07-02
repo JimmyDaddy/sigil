@@ -914,15 +914,15 @@ impl AppState {
             return Ok(Some(AppAction::CancelRun));
         }
 
-        if let Some(outcome) = self.handle_pending_approval_key_event(key) {
-            return Ok(outcome);
-        }
-
         if let Some(outcome) = self.handle_pending_plan_approval_key_event(key) {
             return Ok(outcome);
         }
 
         if let Some(outcome) = self.handle_key_router_event(key)? {
+            return Ok(outcome);
+        }
+
+        if let Some(outcome) = self.handle_pending_approval_key_event(key) {
             return Ok(outcome);
         }
 
@@ -1133,90 +1133,12 @@ impl AppState {
             {
                 self.move_slash_selector(false);
             }
-            KeyCode::Tab if self.composer.queue_panel_focused => {
-                self.cycle_composer_queue_action(true);
-            }
-            KeyCode::BackTab if self.composer.queue_panel_focused => {
-                self.cycle_composer_queue_action(false);
-            }
-            KeyCode::Right if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                self.cycle_composer_queue_action(true);
-            }
-            KeyCode::Left if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                self.cycle_composer_queue_action(false);
-            }
             KeyCode::Tab if self.active_pane == PaneFocus::Composer && key.modifiers.is_empty() => {
                 self.focus_composer_queue_panel();
             }
             KeyCode::Tab => {}
             KeyCode::BackTab if self.approval.pending.is_none() => {
                 return self.toggle_runtime_permission_mode();
-            }
-            KeyCode::Up
-                if self.composer.queue_panel_focused
-                    && has_alt_without_control(key)
-                    && self.selected_composer_queue_is_first() =>
-            {
-                return Ok(self.move_selected_queue_item(QueueMoveDirection::Up));
-            }
-            KeyCode::Down
-                if self.composer.queue_panel_focused
-                    && has_alt_without_control(key)
-                    && self.selected_composer_queue_is_last() =>
-            {
-                return Ok(self.move_selected_queue_item(QueueMoveDirection::Down));
-            }
-            KeyCode::Up if self.composer.queue_panel_focused && has_alt_without_control(key) => {
-                return Ok(self.move_selected_queue_item(QueueMoveDirection::Up));
-            }
-            KeyCode::Down if self.composer.queue_panel_focused && has_alt_without_control(key) => {
-                return Ok(self.move_selected_queue_item(QueueMoveDirection::Down));
-            }
-            KeyCode::Up if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                self.move_composer_queue_selection(false);
-            }
-            KeyCode::Down if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                self.move_composer_queue_selection(true);
-            }
-            KeyCode::Esc if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                self.blur_composer_queue_panel();
-            }
-            KeyCode::Enter if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                return Ok(self.execute_selected_queue_action());
-            }
-            KeyCode::Backspace | KeyCode::Delete
-                if self.composer.queue_panel_focused && key.modifiers.is_empty() =>
-            {
-                return Ok(self.cancel_selected_queue_item());
-            }
-            KeyCode::Char(_) if self.composer.queue_panel_focused && key.modifiers.is_empty() => {}
-            KeyCode::Up if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
-                if self.selected_composer_agent_is_first() {
-                    if !self.focus_composer_queue_panel() {
-                        self.blur_composer_agent_panel();
-                    }
-                } else {
-                    self.move_composer_agent_selection(false);
-                }
-            }
-            KeyCode::Down if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
-                self.move_composer_agent_selection(true);
-            }
-            KeyCode::Esc if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
-                self.blur_composer_agent_panel();
-            }
-            KeyCode::Char('c') | KeyCode::Char('C')
-                if self.composer.agent_panel_focused && key.modifiers.is_empty() =>
-            {
-                return self.close_selected_agent_from_panel();
-            }
-            KeyCode::Char('m') | KeyCode::Char('M')
-                if self.composer.agent_panel_focused && key.modifiers.is_empty() =>
-            {
-                self.begin_message_selected_agent_from_panel();
-            }
-            KeyCode::Enter if self.composer.agent_panel_focused && key.modifiers.is_empty() => {
-                self.activate_selected_agent_view();
             }
             KeyCode::Up
                 if self.active_pane == PaneFocus::Composer

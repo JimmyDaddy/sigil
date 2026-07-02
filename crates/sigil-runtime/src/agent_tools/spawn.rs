@@ -21,6 +21,9 @@ impl AgentToolRuntime {
                 );
             }
         };
+        if let Some(warning) = spawn_scope_overlap_warning(session, &parsed) {
+            let _ = handler.handle(RunEvent::Notice(warning));
+        }
         let role = role_for_profile_id(&parsed.profile_id);
         let resolved_profile = match self.resolve_spawn_profile(&parsed.profile_id) {
             Ok(profile) => profile,
@@ -687,5 +690,102 @@ impl AgentToolRuntime {
             )));
         }
         Ok(child_thread.thread_id)
+    }
+}
+
+fn spawn_scope_overlap_warning(session: &Session, parsed: &SpawnAgentArgs) -> Option<String> {
+    let parent_prompt = session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::User(message) = entry else {
+            return None;
+        };
+        message.content.as_deref()
+    })?;
+    let parent_tokens = scope_tokens(parent_prompt);
+    if parent_tokens.is_empty() {
+        return None;
+    }
+    let child_tokens = scope_tokens(&format!("{}\n{}", parsed.objective, parsed.prompt));
+    let overlap = parent_tokens
+        .intersection(&child_tokens)
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>();
+    if overlap.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "agent scope overlap warning: child objective references parent scope tokens {}; keep parent work non-overlapping or wait/read the child result before final.",
+        overlap.join(", ")
+    ))
+}
+
+fn scope_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']'
+            )
+    })
+    .filter_map(|raw| {
+        let token = raw.trim_matches(|character: char| {
+            matches!(
+                character,
+                ':' | '.' | ',' | ';' | ')' | '(' | '[' | ']' | '<' | '>' | '。' | '，'
+            )
+        });
+        let token = token.trim_start_matches("./");
+        let looks_like_scope = token.contains('/')
+            || token.ends_with(".rs")
+            || token.ends_with(".md")
+            || token.ends_with(".toml")
+            || token.ends_with(".sh")
+            || token.ends_with(".json")
+            || token.ends_with(".yaml")
+            || token.ends_with(".yml");
+        looks_like_scope.then(|| token.to_owned())
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_scope_overlap_warning_detects_parent_child_path_overlap() -> Result<()> {
+        let mut session = Session::new("parent", "model");
+        session.append_user_message(ModelMessage::user(
+            "Review crates/sigil-kernel/src/permission.rs and approval flow",
+        ))?;
+        let parsed = SpawnAgentArgs {
+            profile_id: AgentProfileId::new("explore")?,
+            objective: "inspect crates/sigil-kernel/src/permission.rs".to_owned(),
+            prompt: "read permission implementation".to_owned(),
+            mode: AgentInvocationMode::JoinBeforeFinal,
+            display_name_hint: None,
+        };
+
+        let warning = spawn_scope_overlap_warning(&session, &parsed)
+            .expect("path overlap should produce a warning");
+
+        assert!(warning.contains("crates/sigil-kernel/src/permission.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_scope_overlap_warning_ignores_unrelated_scopes() -> Result<()> {
+        let mut session = Session::new("parent", "model");
+        session.append_user_message(ModelMessage::user("Review crates/sigil-tui/src/app.rs"))?;
+        let parsed = SpawnAgentArgs {
+            profile_id: AgentProfileId::new("explore")?,
+            objective: "inspect crates/sigil-kernel/src/permission.rs".to_owned(),
+            prompt: "read permission implementation".to_owned(),
+            mode: AgentInvocationMode::JoinBeforeFinal,
+            display_name_hint: None,
+        };
+
+        assert!(spawn_scope_overlap_warning(&session, &parsed).is_none());
+        Ok(())
     }
 }

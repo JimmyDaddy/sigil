@@ -30,8 +30,40 @@ fn key_router_maps_activity_agent_list_keys_without_sidebar_fallback() {
 }
 
 #[test]
+fn key_router_maps_approval_keys_before_legacy_fallbacks() {
+    assert_eq!(
+        resolve_binding(InputContext::ApprovalModal, key(KeyCode::Enter)),
+        Some(RoutedKeyCommand::ApprovalSelect)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ApprovalModal, key(KeyCode::Tab)),
+        Some(RoutedKeyCommand::ApprovalActionNext)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ApprovalModal, key(KeyCode::Down)),
+        Some(RoutedKeyCommand::ApprovalScrollDown)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ApprovalModal, key(KeyCode::Char('v'))),
+        Some(RoutedKeyCommand::ApprovalDiffMode)
+    );
+    assert_eq!(
+        resolve_binding(
+            InputContext::ApprovalModal,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        ),
+        None
+    );
+}
+
+#[test]
 fn key_router_snapshot_covers_high_risk_contexts() {
     let snapshot = key_binding_snapshot();
+    assert!(snapshot.iter().any(|binding| {
+        binding.context == InputContext::ApprovalModal
+            && binding.key == "Enter"
+            && binding.command == RoutedKeyCommand::ApprovalSelect
+    }));
     assert!(snapshot.iter().any(|binding| {
         binding.context == InputContext::ComposerQueuePanel
             && binding.key == "Down"

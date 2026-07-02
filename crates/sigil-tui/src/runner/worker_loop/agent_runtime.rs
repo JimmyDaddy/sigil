@@ -387,7 +387,6 @@ where
     if let Some(reasoning_effort) = reasoning_effort {
         options.reasoning_effort = Some(reasoning_effort);
     }
-    let delegation_requirement = agent_delegation_requirement_for_prompt(&prompt);
     let workspace_root = options.workspace_root.clone();
     agent_supervisor.reset_turn_budget();
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
@@ -407,15 +406,12 @@ where
         let mut run_session = run_session;
         let result = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-            let mut input = chat_agent_run_input_with_repo_context(
+            let input = chat_agent_run_input_with_repo_context(
                 &workspace_root,
                 prompt,
                 plan_mode,
                 background_ready_context,
             );
-            if let Some(requirement) = delegation_requirement {
-                input = input.with_agent_delegation_requirement(requirement);
-            }
             if let Some(tools) = plan_tools {
                 agent
                     .run_with_approval_input_tool_registry_and_agent_delegate(
@@ -684,79 +680,4 @@ pub(in crate::runner) fn queued_background_ready_transient_context(
         thread_ids.join(", "),
         hidden_suffix
     ))]
-}
-
-pub(in crate::runner) fn agent_delegation_requirement_for_prompt(
-    prompt: &str,
-) -> Option<AgentDelegationRequirement> {
-    let normalized = prompt.to_lowercase().replace(
-        ['\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}'],
-        "-",
-    );
-    let compact = normalized
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    let mentions_subagent = normalized.contains("subagent")
-        || normalized.contains("sub-agent")
-        || normalized.contains("sub agent")
-        || compact.contains("子agent")
-        || compact.contains("子代理");
-    if !mentions_subagent {
-        return None;
-    }
-    let compact_negations = [
-        "不要用子agent",
-        "不用子agent",
-        "别用子agent",
-        "不要使用子agent",
-        "不使用子agent",
-        "不需要子agent",
-        "无需子agent",
-        "别开子agent",
-        "不要开子agent",
-        "不要启动子agent",
-    ];
-    let normalized_negations = [
-        "do not use subagent",
-        "do not use sub-agent",
-        "don't use subagent",
-        "don't use sub-agent",
-        "don't use a subagent",
-        "don't use a sub-agent",
-        "without subagent",
-        "without sub-agent",
-        "without a subagent",
-        "without a sub-agent",
-        "do not spawn subagent",
-        "do not spawn a sub-agent",
-    ];
-    let negated = compact_negations
-        .iter()
-        .any(|phrase| compact.contains(phrase))
-        || normalized_negations
-            .iter()
-            .any(|phrase| normalized.contains(phrase));
-    if negated {
-        return None;
-    }
-    let explicit = compact.contains("必须用子agent")
-        || compact.contains("必须使用子agent")
-        || compact.contains("同时用子agent")
-        || compact.contains("让子agent")
-        || compact.contains("用子agent")
-        || compact.contains("使用子agent")
-        || normalized.contains("must use subagent")
-        || normalized.contains("must use sub-agent")
-        || normalized.contains("use a subagent")
-        || normalized.contains("use a sub-agent")
-        || normalized.contains("use subagent")
-        || normalized.contains("use sub-agent")
-        || normalized.contains("delegate to a subagent")
-        || normalized.contains("delegate to a sub-agent");
-    explicit.then(|| {
-        AgentDelegationRequirement::new(
-            "the user explicitly requested sub-agent delegation in the current prompt",
-        )
-    })
 }

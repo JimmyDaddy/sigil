@@ -497,6 +497,16 @@ fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
         },
         ..base_summary("bash")
     };
+    let unknown_network = ToolCardRender {
+        metadata: ToolCardMetadata {
+            exit_code: Some(0),
+            shell_verdict: Some("passed".to_owned()),
+            execution_backend: Some("local".to_owned()),
+            execution_network_policy: Some("unknown".to_owned()),
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("bash")
+    };
     let timed_out = ToolCardRender {
         is_error: true,
         error_kind: Some("timeout".to_owned()),
@@ -546,6 +556,13 @@ fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
     assert_eq!(
         build_tool_card_display(&no_output).status.detail.as_deref(),
         Some("exit 0 · docker network denied")
+    );
+    assert_eq!(
+        build_tool_card_display(&unknown_network)
+            .status
+            .detail
+            .as_deref(),
+        Some("exit 0 · passed")
     );
     let timeout_display = build_tool_card_display(&timed_out);
     assert_eq!(timeout_display.status.label, "TIMEOUT");

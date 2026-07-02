@@ -1229,7 +1229,7 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
 
     let view_model = UiViewModel::from_app(&app);
 
-    assert!(view_model.footer.hints.contains("Y once"));
+    assert!(view_model.footer.hints.contains("Y allow once"));
     assert!(!view_model.footer.hints.contains("Esc interrupt"));
     assert!(
         !view_model
@@ -1331,7 +1331,7 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Y once · N deny · V diff"
+        "agent: main · Shortcuts: Y allow once · N deny · V details"
     );
     Ok(())
 }

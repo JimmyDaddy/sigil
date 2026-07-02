@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    AppAction, AppState, PaneFocus, QueueMoveDirection, SidebarCard, has_alt_without_control,
+    AppAction, AppState, ApprovalAction, PaneFocus, QueueMoveDirection, SidebarCard,
+    approval_flow::spawn_agent_background_args_json,
+    formatting::normalize_command_prefix_character, has_alt_without_control,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,7 @@ pub(crate) enum InputContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RoutedKeyCommand {
+    Noop,
     QueueActionNext,
     QueueActionPrevious,
     QueueSelectionNext,
@@ -34,6 +37,25 @@ pub(crate) enum RoutedKeyCommand {
     ActivityAgentNext,
     ActivityAgentPrevious,
     ActivityAgentActivate,
+    ApprovalAllowOnce,
+    ApprovalDeny,
+    ApprovalBackground,
+    ApprovalSelect,
+    ApprovalActionNext,
+    ApprovalActionPrevious,
+    ApprovalToggleMetadata,
+    ApprovalPreviousHunk,
+    ApprovalNextHunk,
+    ApprovalPreviousFile,
+    ApprovalNextFile,
+    ApprovalDiffMode,
+    ApprovalScrollUp,
+    ApprovalScrollDown,
+    ApprovalPageUp,
+    ApprovalPageDown,
+    ApprovalHome,
+    ApprovalEnd,
+    ApprovalSlashComposer,
 }
 
 #[cfg(test)]
@@ -61,6 +83,7 @@ impl AppState {
         command: RoutedKeyCommand,
     ) -> anyhow::Result<Option<AppAction>> {
         let action = match command {
+            RoutedKeyCommand::Noop => None,
             RoutedKeyCommand::QueueActionNext => {
                 self.cycle_composer_queue_action(true);
                 None
@@ -88,10 +111,16 @@ impl AppState {
                 None
             }
             RoutedKeyCommand::AgentSelectionNext => {
+                if !self.composer.agent_panel_focused {
+                    self.focus_composer_agent_panel();
+                }
                 self.move_composer_agent_selection(true);
                 None
             }
             RoutedKeyCommand::AgentSelectionPrevious => {
+                if !self.composer.agent_panel_focused {
+                    self.focus_composer_agent_panel();
+                }
                 if self.selected_composer_agent_is_first() {
                     if !self.focus_composer_queue_panel() {
                         self.blur_composer_agent_panel();
@@ -126,8 +155,129 @@ impl AppState {
                 self.activate_selected_agent_view();
                 None
             }
+            RoutedKeyCommand::ApprovalAllowOnce => self.approval_decision(true),
+            RoutedKeyCommand::ApprovalDeny => self.approval_decision(false),
+            RoutedKeyCommand::ApprovalBackground => self.approval_background_decision(),
+            RoutedKeyCommand::ApprovalSelect => self.approval_selected_decision(),
+            RoutedKeyCommand::ApprovalActionNext => {
+                self.move_approval_action(true);
+                None
+            }
+            RoutedKeyCommand::ApprovalActionPrevious => {
+                self.move_approval_action(false);
+                None
+            }
+            RoutedKeyCommand::ApprovalToggleMetadata => {
+                self.toggle_approval_metadata();
+                None
+            }
+            RoutedKeyCommand::ApprovalPreviousHunk => {
+                self.jump_approval_hunk(false);
+                None
+            }
+            RoutedKeyCommand::ApprovalNextHunk => {
+                self.jump_approval_hunk(true);
+                None
+            }
+            RoutedKeyCommand::ApprovalPreviousFile => {
+                self.switch_approval_file(false);
+                None
+            }
+            RoutedKeyCommand::ApprovalNextFile => {
+                self.switch_approval_file(true);
+                None
+            }
+            RoutedKeyCommand::ApprovalDiffMode => {
+                self.cycle_approval_diff_mode();
+                None
+            }
+            RoutedKeyCommand::ApprovalScrollUp => {
+                self.scroll_active_pane(1);
+                None
+            }
+            RoutedKeyCommand::ApprovalScrollDown => {
+                self.unscroll_active_pane(1);
+                None
+            }
+            RoutedKeyCommand::ApprovalPageUp => {
+                self.scroll_active_pane(8);
+                None
+            }
+            RoutedKeyCommand::ApprovalPageDown => {
+                self.unscroll_active_pane(8);
+                None
+            }
+            RoutedKeyCommand::ApprovalHome => {
+                self.scroll_active_pane(usize::MAX / 2);
+                None
+            }
+            RoutedKeyCommand::ApprovalEnd => {
+                self.unscroll_active_pane(usize::MAX / 2);
+                None
+            }
+            RoutedKeyCommand::ApprovalSlashComposer => {
+                self.active_pane = PaneFocus::Composer;
+                self.insert_input_character('/');
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+                None
+            }
         };
         Ok(action)
+    }
+
+    fn approval_decision(&self, approved: bool) -> Option<AppAction> {
+        self.approval
+            .pending
+            .as_ref()
+            .map(|pending| AppAction::ApprovalDecision {
+                call_id: pending.call.id.clone(),
+                approved,
+            })
+    }
+
+    fn approval_background_decision(&self) -> Option<AppAction> {
+        let pending = self.approval.pending.as_ref()?;
+        let args_json =
+            spawn_agent_background_args_json(&pending.call.name, &pending.call.args_json)?;
+        Some(AppAction::ApprovalDecisionWithArgs {
+            call_id: pending.call.id.clone(),
+            args_json,
+        })
+    }
+
+    fn approval_selected_decision(&self) -> Option<AppAction> {
+        let pending = self.approval.pending.as_ref()?;
+        let selected = self
+            .approval
+            .selected_action
+            .normalized(pending.session_grant_available);
+        Some(match selected {
+            ApprovalAction::AllowOnce => AppAction::ApprovalDecision {
+                call_id: pending.call.id.clone(),
+                approved: true,
+            },
+            ApprovalAction::AllowSession => AppAction::ApprovalSessionDecision {
+                call_id: pending.call.id.clone(),
+            },
+            ApprovalAction::Deny => AppAction::ApprovalDecision {
+                call_id: pending.call.id.clone(),
+                approved: false,
+            },
+        })
+    }
+
+    fn move_approval_action(&mut self, forward: bool) {
+        let session_grant_available = self
+            .approval
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.session_grant_available);
+        self.approval.selected_action = self
+            .approval
+            .selected_action
+            .next(session_grant_available, forward);
+        self.push_event("approval:action", self.approval.selected_action.label());
     }
 
     fn move_activity_agent_selection(&mut self, next: bool) {
@@ -154,6 +304,13 @@ pub(crate) fn resolve_input_context(app: &AppState) -> InputContext {
     if app.composer.agent_panel_focused {
         return InputContext::ComposerAgentPanel;
     }
+    if app.active_pane == PaneFocus::Composer
+        && app.composer.input.trim().is_empty()
+        && !app.has_slash_selector()
+        && app.composer_agent_rows().len() > 1
+    {
+        return InputContext::ComposerAgentPanel;
+    }
     if app.active_pane == PaneFocus::Activity
         && app.sidebar_selected_card == SidebarCard::Agents
         && app.agent_sidebar_rows().len() > 1
@@ -171,9 +328,38 @@ pub(crate) fn resolve_binding(context: InputContext, key: KeyEvent) -> Option<Ro
         InputContext::ComposerQueuePanel => resolve_queue_binding(key),
         InputContext::ComposerAgentPanel => resolve_agent_panel_binding(key),
         InputContext::ActivityAgentList => resolve_activity_agent_binding(key),
-        InputContext::ApprovalModal | InputContext::ActivitySidebar | InputContext::Composer => {
-            None
+        InputContext::ApprovalModal => resolve_approval_binding(key),
+        InputContext::ActivitySidebar | InputContext::Composer => None,
+    }
+}
+
+fn resolve_approval_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('y' | 'Y') => Some(RoutedKeyCommand::ApprovalAllowOnce),
+        KeyCode::Char('n' | 'N') => Some(RoutedKeyCommand::ApprovalDeny),
+        KeyCode::Char('b' | 'B') => Some(RoutedKeyCommand::ApprovalBackground),
+        KeyCode::Enter if key.modifiers.is_empty() => Some(RoutedKeyCommand::ApprovalSelect),
+        KeyCode::Left | KeyCode::BackTab => Some(RoutedKeyCommand::ApprovalActionPrevious),
+        KeyCode::Right | KeyCode::Tab => Some(RoutedKeyCommand::ApprovalActionNext),
+        KeyCode::Char('m' | 'M') => Some(RoutedKeyCommand::ApprovalToggleMetadata),
+        KeyCode::Char('[') => Some(RoutedKeyCommand::ApprovalPreviousHunk),
+        KeyCode::Char(']') => Some(RoutedKeyCommand::ApprovalNextHunk),
+        KeyCode::Char(',') => Some(RoutedKeyCommand::ApprovalPreviousFile),
+        KeyCode::Char('.') => Some(RoutedKeyCommand::ApprovalNextFile),
+        KeyCode::Char('v' | 'V') => Some(RoutedKeyCommand::ApprovalDiffMode),
+        KeyCode::Up => Some(RoutedKeyCommand::ApprovalScrollUp),
+        KeyCode::Down => Some(RoutedKeyCommand::ApprovalScrollDown),
+        KeyCode::PageUp => Some(RoutedKeyCommand::ApprovalPageUp),
+        KeyCode::PageDown => Some(RoutedKeyCommand::ApprovalPageDown),
+        KeyCode::Home => Some(RoutedKeyCommand::ApprovalHome),
+        KeyCode::End => Some(RoutedKeyCommand::ApprovalEnd),
+        KeyCode::Char(character) if normalize_command_prefix_character(character).is_some() => {
+            Some(RoutedKeyCommand::ApprovalSlashComposer)
         }
+        _ => None,
     }
 }
 
@@ -192,6 +378,7 @@ fn resolve_queue_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
         KeyCode::Backspace | KeyCode::Delete if key.modifiers.is_empty() => {
             Some(RoutedKeyCommand::QueueCancel)
         }
+        KeyCode::Char(_) if key.modifiers.is_empty() => Some(RoutedKeyCommand::Noop),
         _ => None,
     }
 }
@@ -206,6 +393,12 @@ fn resolve_agent_panel_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
         KeyCode::Char('m' | 'M') if key.modifiers.is_empty() => {
             Some(RoutedKeyCommand::AgentMessage)
         }
+        KeyCode::Left | KeyCode::Right | KeyCode::Backspace | KeyCode::Delete
+            if key.modifiers.is_empty() =>
+        {
+            Some(RoutedKeyCommand::Noop)
+        }
+        KeyCode::Char(_) if key.modifiers.is_empty() => Some(RoutedKeyCommand::Noop),
         _ => None,
     }
 }
@@ -225,6 +418,16 @@ fn resolve_activity_agent_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
 #[cfg(test)]
 pub(crate) fn key_binding_snapshot() -> Vec<KeyBindingView> {
     vec![
+        KeyBindingView {
+            context: InputContext::ApprovalModal,
+            key: "Enter",
+            command: RoutedKeyCommand::ApprovalSelect,
+        },
+        KeyBindingView {
+            context: InputContext::ApprovalModal,
+            key: "Tab",
+            command: RoutedKeyCommand::ApprovalActionNext,
+        },
         KeyBindingView {
             context: InputContext::ComposerQueuePanel,
             key: "Down",

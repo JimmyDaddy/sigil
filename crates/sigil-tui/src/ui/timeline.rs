@@ -147,7 +147,13 @@ fn render_user_entry_lines(
     lines.push(user_bubble_padding_line(accent, bubble_bg, content_width));
     for line in entry.text.lines() {
         if line.trim().is_empty() {
-            lines.push(Line::raw(String::new()));
+            lines.push(user_bubble_content_line(
+                "",
+                accent,
+                bubble_bg,
+                content_width,
+                palette,
+            ));
             continue;
         }
         for row in wrap_display_width(line, content_width) {

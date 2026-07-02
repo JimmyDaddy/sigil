@@ -108,6 +108,32 @@ fn render_timeline_entry_lines_highlights_indented_user_slash_command() {
 }
 
 #[test]
+fn render_timeline_entry_lines_keeps_multiline_user_prompt_in_one_bubble() {
+    let entry = TimelineEntry {
+        role: TimelineRole::User,
+        text: "\n目标：评估当前 Sigil\n\n要求：\n1. 检查审批\n2. 检查 agent".to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines(&entry);
+    let plain = rendered_plain_lines(&lines);
+    let internal = &lines[..lines.len().saturating_sub(1)];
+    let internal_plain = &plain[..plain.len().saturating_sub(1)];
+    let user_bg = Theme::default().palette.surface_user_message;
+
+    assert!(
+        internal_plain.iter().all(|line| !line.is_empty()),
+        "user bubble should not contain naked blank separator lines: {internal_plain:?}"
+    );
+    assert!(
+        internal
+            .iter()
+            .all(|line| { line.spans.iter().any(|span| span.style.bg == Some(user_bg)) })
+    );
+    assert!(plain.iter().any(|line| line.contains("目标")));
+    assert!(plain.iter().any(|line| line.contains("检查审批")));
+}
+
+#[test]
 fn render_timeline_entry_lines_marks_intermediate_assistant_info_only() {
     let entry = TimelineEntry {
         role: TimelineRole::Assistant,

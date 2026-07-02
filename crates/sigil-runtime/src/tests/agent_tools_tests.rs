@@ -19,7 +19,8 @@ use sigil_kernel::{
     PermissionAccessConfig, PermissionConfig, PermissionPolicy, PermissionPreset, Provider,
     ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig,
     RunEvent, Session, SessionConfig, SessionLogEntry, ToolAccess, ToolCall, ToolCategory,
-    ToolPreviewCapability, ToolRegistry, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResultMeta,
+    ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -1694,7 +1695,7 @@ fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()
 }
 
 #[test]
-fn final_answer_blocker_ignores_backgrounded_agent_threads() -> Result<()> {
+fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
@@ -1709,8 +1710,60 @@ fn final_answer_blocker_ignores_backgrounded_agent_threads() -> Result<()> {
 
     assert!(
         runtime.final_answer_blocker(&mut session)?.is_none(),
-        "backgrounded join-before-final threads should not block final answer"
+        "backgrounded agent threads should not hard block final answer"
     );
+    let context = runtime
+        .final_answer_context(&session)?
+        .expect("background agent should be included in final-answer facts");
+    let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
+    assert_eq!(payload["type"], "run_facts_summary");
+    assert_eq!(payload["session_facts"]["subagents"]["running"], 1);
+    Ok(())
+}
+
+#[test]
+fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-check".to_owned(),
+        tool_name: "bash".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(120),
+        subjects: Vec::new(),
+        changed_files: vec!["crates/sigil-tui/src/app/key_router.rs".to_owned()],
+        metadata: ToolResultMeta {
+            exit_code: Some(0),
+            details: json!({
+                "shell": {
+                    "command": "cargo check 2>&1",
+                    "command_family": "cargo_check",
+                    "verdict": "passed"
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+        error: None,
+        model_content_hash: None,
+    })))?;
+
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_none(),
+        "recorded facts should not hard block a generic final answer"
+    );
+    let context = runtime
+        .final_answer_context(&session)?
+        .expect("recorded facts should produce final-answer context");
+    let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
+    assert_eq!(payload["type"], "run_facts_summary");
+    assert_eq!(
+        payload["session_facts"]["commands"][0]["command"],
+        "cargo check 2>&1"
+    );
+    assert_eq!(payload["session_facts"]["gates"][0]["verdict"], "passed");
+    assert!(!context.key.is_empty());
     Ok(())
 }
 

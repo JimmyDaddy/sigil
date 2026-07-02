@@ -16,11 +16,11 @@ use sigil_kernel::{
     AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult, AgentThreadStatus,
     AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
     AgentUsageSummary, ApprovalHandler, ApprovalMode, ControlEntry, EventHandler,
-    JsonlSessionStore, ModelMessage, PermissionConfig, PermissionPreset, Provider, RootConfig,
-    RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, Tool,
-    ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreview,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    saturating_elapsed,
+    FinalAnswerContext, JsonlSessionStore, ModelMessage, PermissionConfig, PermissionPreset,
+    Provider, RootConfig, RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus,
+    TaskId, Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction, ToolCall, ToolCategory,
+    ToolContext, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, saturating_elapsed,
 };
 
 use crate::{

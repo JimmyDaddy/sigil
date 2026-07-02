@@ -396,6 +396,9 @@ struct WriteTool {
 struct ReadPathTool {
     executions: Arc<AtomicUsize>,
 }
+struct BashCargoCheckFamilyTool {
+    executions: Arc<AtomicUsize>,
+}
 struct DefaultAllowWriteTool {
     executed: Arc<AtomicBool>,
 }
@@ -503,6 +506,60 @@ impl Tool for ReadPathTool {
             call_id,
             "read_path",
             args["path"].as_str().unwrap_or_default(),
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for BashCargoCheckFamilyTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "bash".to_owned(),
+            description: "bash".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"}
+                },
+                "required": ["command"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        Ok(vec![ToolSubject::command(
+            "family:cargo_check",
+            "family:cargo_check",
+        )])
+    }
+
+    fn permission_operation(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<crate::ToolOperation> {
+        Ok(crate::ToolOperation::ExecuteUnknownCommand)
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "bash",
+            args["command"].as_str().unwrap_or_default(),
             ToolResultMeta::default(),
         ))
     }
@@ -3135,6 +3192,9 @@ struct WriteMockProvider;
 struct SessionGrantReadProvider {
     calls: Arc<AtomicUsize>,
 }
+struct SessionGrantCargoCheckProvider {
+    calls: Arc<AtomicUsize>,
+}
 struct InvalidWriteArgsProvider;
 struct LoopingToolProvider;
 struct PlanUpdateProvider {
@@ -3235,6 +3295,56 @@ impl Provider for SessionGrantReadProvider {
                         id: call_id,
                         name: "read_path".to_owned(),
                         args_json: r#"{"path":"file.txt"}"#.to_owned(),
+                    })),
+                    Ok(ProviderChunk::Done),
+                ])))
+            }
+            _ => Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ]))),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for SessionGrantCargoCheckProvider {
+    fn name(&self) -> &str {
+        "mock-session-grant-cargo-check"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        match call_index {
+            0 | 2 => {
+                let call_number = (call_index / 2) + 1;
+                let call_id = format!("call-cargo-{call_number}");
+                let command = if call_number == 1 {
+                    "cargo check 2>&1"
+                } else {
+                    "cd . && cargo check 2>&1 | tail -20"
+                };
+                let args_json = serde_json::json!({ "command": command }).to_string();
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderChunk::ToolCallStart {
+                        id: call_id.clone(),
+                        name: "bash".to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallArgsDelta {
+                        id: call_id.clone(),
+                        delta: args_json.clone(),
+                    }),
+                    Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                        id: call_id,
+                        name: "bash".to_owned(),
+                        args_json,
                     })),
                     Ok(ProviderChunk::Done),
                 ])))
@@ -3796,6 +3906,109 @@ async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> R
             entry,
             SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
                 if approval.call_id == "call-read-2"
+                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
+                    && approval.policy_decision == ApprovalMode::Allow
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Result<()> {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(BashCargoCheckFamilyTool {
+        executions: Arc::clone(&executions),
+    }));
+    let agent = Agent::new(
+        SessionGrantCargoCheckProvider {
+            calls: Arc::clone(&provider_calls),
+        },
+        registry,
+    );
+    let workspace = tempfile::tempdir()?;
+    let run_options = || AgentRunOptions {
+        workspace_root: workspace.path().to_path_buf(),
+        max_turns: Some(4),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig {
+            access: crate::PermissionAccessConfig {
+                execute: Some(ApprovalMode::Ask),
+                ..crate::PermissionAccessConfig::default()
+            },
+            ..PermissionConfig::default()
+        },
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig { enabled: false },
+        compaction_config: CompactionConfig::default(),
+    };
+    let mut session = Session::new("mock-session-grant-cargo-check", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = ApproveForSessionHandler {
+        approvals: Arc::clone(&approvals),
+    };
+
+    let first = agent
+        .run_with_approval(
+            &mut session,
+            "run cargo check",
+            run_options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+    let second = agent
+        .run_with_approval(
+            &mut session,
+            "show cargo check tail",
+            run_options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(first.final_text, "done");
+    assert_eq!(second.final_text, "done");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(executions.load(Ordering::SeqCst), 2);
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
+            .count(),
+        1
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
+                if grant.call_id == "call-cargo-1"
+                    && grant.tool_name == "bash"
+                    && grant.access == ToolAccess::Execute
+                    && grant.subjects.len() == 1
+                    && grant.subjects[0].normalized == "family:cargo_check"
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-cargo-2"
+                    && approval.action == ToolApprovalAuditAction::Requested
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-cargo-2"
                     && approval.action == ToolApprovalAuditAction::PolicyEvaluated
                     && approval.policy_decision == ApprovalMode::Allow
         )

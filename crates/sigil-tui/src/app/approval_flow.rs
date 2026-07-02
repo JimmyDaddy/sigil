@@ -124,11 +124,11 @@ impl AppState {
 
         lines.push(String::new());
         if spawn_agent_background_args_json(&pending.call.name, &pending.call.args_json).is_some() {
-            lines.push("Y allow once  B background  N deny".to_owned());
+            lines.push("Shortcuts: Y allow once · B background · N deny".to_owned());
         } else if pending.session_grant_available {
-            lines.push("Y allow once  Tab/←/→ action  Enter choose  N deny".to_owned());
+            lines.push("Shortcuts: Tab switch · Enter select · Y allow once · N deny".to_owned());
         } else {
-            lines.push("Y allow once  N deny".to_owned());
+            lines.push("Shortcuts: Y allow once · N deny".to_owned());
         }
         lines
     }
@@ -272,8 +272,8 @@ impl AppState {
         let pending = self.approval.pending.as_ref()?;
         let access_label = approval_access_label(&pending.spec);
         let source_agent = self.pending_approval_source_agent(&pending.call.id);
+        let shell_preview = approval_shell_preview(pending);
         let Some(preview) = pending.preview.as_ref() else {
-            let shell_preview = approval_shell_preview(pending);
             return Some(ApprovalModalView {
                 tool_name: pending.call.name.clone(),
                 call_id: pending.call.id.clone(),
@@ -401,8 +401,13 @@ impl AppState {
             call_id: pending.call.id.clone(),
             source_agent,
             access_label,
-            preview_title: preview.title.clone(),
-            preview_summary: preview.summary.clone(),
+            preview_title: shell_preview
+                .as_ref()
+                .map(|preview| preview.title.clone())
+                .unwrap_or_else(|| preview.title.clone()),
+            preview_summary: shell_preview
+                .map(|preview| preview.summary)
+                .unwrap_or_else(|| preview.summary.clone()),
             change_set,
             metadata_collapsed: self.approval.metadata_collapsed,
             file_rows,
@@ -925,7 +930,7 @@ fn normalize_approval_diagnostic_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_owned()
 }
 
-fn spawn_agent_background_args_json(tool_name: &str, args_json: &str) -> Option<String> {
+pub(super) fn spawn_agent_background_args_json(tool_name: &str, args_json: &str) -> Option<String> {
     if tool_name != sigil_runtime::SPAWN_AGENT_TOOL_NAME {
         return None;
     }

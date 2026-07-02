@@ -130,6 +130,13 @@ impl AgentRunInput {
     }
 }
 
+/// Model-visible context that should be injected before accepting a final answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalAnswerContext {
+    pub key: String,
+    pub prompt: String,
+}
+
 /// A per-run guard that requires at least one successful model-visible agent-thread tool result
 /// before a final answer can be accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +228,18 @@ pub trait AgentToolDelegate: Send {
     ///
     /// Returns an error if the delegate cannot inspect its durable state.
     fn final_answer_blocker(&mut self, _session: &mut Session) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Returns model-visible factual context that should be present before the final answer.
+    ///
+    /// This is advisory context, not a hard quality gate. Implementations should return a stable
+    /// key for the facts they provide so the agent loop can avoid repeated retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delegate cannot inspect its durable state.
+    fn final_answer_context(&mut self, _session: &Session) -> Result<Option<FinalAnswerContext>> {
         Ok(None)
     }
 }
@@ -487,6 +506,7 @@ where
             agent_delegation.filter(|_| tool_registry_has_agent_tools(tools));
         let mut satisfied_agent_tool_calls = 0usize;
         let mut delegation_retry_used = false;
+        let mut final_answer_context_key: Option<String> = None;
 
         let mut model_turns = 0usize;
         loop {
@@ -1344,10 +1364,23 @@ where
                 .flatten()
             {
                 handler.handle(RunEvent::Notice(
-                    "pending join-before-final agent work blocks final answer; continuing"
-                        .to_owned(),
+                    "pending agent state blocks final answer; continuing".to_owned(),
                 ))?;
                 transient_context.push(ModelMessage::user(blocker_prompt));
+                continue;
+            }
+            if let Some(context) = agent_delegate
+                .as_deref_mut()
+                .map(|delegate| delegate.final_answer_context(session))
+                .transpose()?
+                .flatten()
+                && final_answer_context_key.as_deref() != Some(context.key.as_str())
+            {
+                final_answer_context_key = Some(context.key);
+                handler.handle(RunEvent::Notice(
+                    "recorded run facts added before final answer; continuing".to_owned(),
+                ))?;
+                transient_context.push(ModelMessage::user(context.prompt));
                 continue;
             }
 

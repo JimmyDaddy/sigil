@@ -32,9 +32,9 @@ use super::{
         worker_loop::append_cancelled_task_state,
         worker_loop::{
             PlanApprovalRequest, RuntimeTaskRoleProviderBuilder, WorkerLoopMcpHandlers,
-            agent_delegation_requirement_for_prompt, append_mcp_elicitation_audits, approve_plan,
-            cancel_terminal_task, close_agent_thread, next_task_id,
-            partition_agent_result_continuations, pending_agent_result_continuations_from_session,
+            append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
+            next_task_id, partition_agent_result_continuations,
+            pending_agent_result_continuations_from_session,
             queued_background_ready_transient_context, refresh_terminal_task_statuses,
             resolve_continue_task, run_worker_loop,
         },
@@ -77,29 +77,6 @@ fn next_task_id_uses_session_local_counter() -> Result<()> {
         "task_2"
     );
     Ok(())
-}
-
-#[test]
-fn agent_delegation_requirement_detects_explicit_subagent_prompts() {
-    assert!(
-        agent_delegation_requirement_for_prompt(
-            "梳理 crates/sigil-tui，同时必须用子 agent 梳理 kernel"
-        )
-        .is_some()
-    );
-    assert!(
-        agent_delegation_requirement_for_prompt(
-            "Please use a sub-agent to inspect the runtime crate"
-        )
-        .is_some()
-    );
-    assert!(agent_delegation_requirement_for_prompt("讨论一下 subagent 设计").is_none());
-    assert!(agent_delegation_requirement_for_prompt("这次不要用子 agent").is_none());
-    assert!(agent_delegation_requirement_for_prompt("不需要子 agent，主 agent 直接回答").is_none());
-    assert!(agent_delegation_requirement_for_prompt("无需子 agent，直接解释").is_none());
-    assert!(agent_delegation_requirement_for_prompt("别开子 agent，保持单 agent").is_none());
-    assert!(agent_delegation_requirement_for_prompt("answer without sub-agent").is_none());
-    assert!(agent_delegation_requirement_for_prompt("please don't use a subagent").is_none());
 }
 
 #[test]

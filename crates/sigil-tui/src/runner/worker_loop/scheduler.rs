@@ -620,22 +620,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
                 next_run_id += 1;
-                let delegation_requirement = agent_delegation_requirement_for_prompt(&prompt);
                 let workspace_root = options.workspace_root.clone();
 
                 let handle = runtime.spawn(async move {
                     let mut run_session = run_session;
                     let result = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-                        let mut input = chat_agent_run_input_with_repo_context(
+                        let input = chat_agent_run_input_with_repo_context(
                             &workspace_root,
                             prompt,
                             plan_mode,
                             Vec::new(),
                         );
-                        if let Some(requirement) = delegation_requirement {
-                            input = input.with_agent_delegation_requirement(requirement);
-                        }
                         if let Some(tools) = plan_tools {
                             agent
                                 .run_with_approval_input_tool_registry_and_agent_delegate(

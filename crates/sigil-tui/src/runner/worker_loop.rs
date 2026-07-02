@@ -7,17 +7,16 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentDelegationRequirement, AgentInvocationMode, AgentProfileId,
-    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRunInput,
-    AgentRunOptions, AgentRunResult, AgentThreadId, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, CheckDiscoverySource, CheckPromotion, CheckSpec,
-    CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, ConversationInputEditedEntry,
-    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
-    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
-    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
-    ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
-    EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore, ModelMessage,
-    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
+    Agent, AgentInvocationMode, AgentProfileId, AgentResultContinuationEntry,
+    AgentResultContinuationStatus, AgentRole, AgentRunInput, AgentRunOptions, AgentRunResult,
+    AgentThreadId, AgentThreadStatus, AgentThreadStatusChangedEntry, CheckDiscoverySource,
+    CheckPromotion, CheckSpec, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
+    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
+    ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
+    ConversationInputTarget, ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    DiscoveredCheck, EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore,
+    ModelMessage, MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
     PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
@@ -105,8 +104,8 @@ pub(in crate::runner) use agent_runtime::chat_agent_run_input_with_repo_context;
 #[cfg(test)]
 pub(in crate::runner) use agent_runtime::queued_background_ready_transient_context;
 pub(in crate::runner) use agent_runtime::{
-    agent_delegation_requirement_for_prompt, append_mcp_elicitation_audits,
-    partition_agent_result_continuations, pending_agent_result_continuations_from_session,
+    append_mcp_elicitation_audits, partition_agent_result_continuations,
+    pending_agent_result_continuations_from_session,
 };
 pub(in crate::runner) use task_runtime::append_cancelled_task_state;
 pub(in crate::runner) use task_runtime::{RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder};

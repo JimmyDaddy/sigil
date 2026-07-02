@@ -178,6 +178,10 @@ allowed_tools = ["grep"]
                 ProviderChunk::TextDelta("spawn denied and handled".to_owned()),
                 ProviderChunk::Done,
             ]),
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("spawn denied and handled".to_owned()),
+                ProviderChunk::Done,
+            ]),
         ]),
         registry,
     );

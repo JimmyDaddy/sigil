@@ -896,12 +896,12 @@ fn footer_hints(app: &AppState) -> String {
             .pending
             .as_ref()
             .is_some_and(|pending| pending.session_grant_available);
-        let action_hint = if session {
-            "Tab action · Y once · N deny"
+        let shortcut_hint = if session {
+            "Shortcuts: Tab switch · Enter select · Y allow once · N deny"
         } else {
-            "Y once · N deny"
+            "Shortcuts: Y allow once · N deny"
         };
-        return format!("{agent} · {action_hint} · V diff");
+        return format!("{agent} · {shortcut_hint} · V details");
     }
     if app.is_composer_queue_panel_focused() {
         return format!("{agent} · Follow-ups ↑↓ item · Tab action · Enter selected · Esc input");
