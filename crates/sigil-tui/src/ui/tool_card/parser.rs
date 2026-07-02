@@ -334,14 +334,6 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|shell| shell.get("verdict"))
             .and_then(Value::as_str)
             .map(str::to_owned),
-        terminal_enforcement_backend: terminal_context
-            .and_then(|details| details.get("enforcement_backend"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        terminal_sandbox_profile: terminal_context
-            .and_then(|details| details.get("sandbox_profile"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
         terminal_cleanup_status: terminal_context
             .and_then(|details| details.get("cleanup"))
             .and_then(|cleanup| cleanup.get("status"))

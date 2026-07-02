@@ -325,6 +325,7 @@ pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub timeout_secs: u64,
     pub mutation_recorder: Option<MutationEventRecorder>,
+    progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
 }
 
@@ -334,6 +335,7 @@ impl std::fmt::Debug for ToolContext {
             .field("workspace_root", &self.workspace_root)
             .field("timeout_secs", &self.timeout_secs)
             .field("mutation_recorder", &self.mutation_recorder.is_some())
+            .field("progress_sink", &self.progress_sink.is_some())
             .field(
                 "execution_mutation_profile_recorded_call_ids",
                 &self.execution_mutation_profile_recorded_call_ids.len(),
@@ -349,6 +351,7 @@ impl ToolContext {
             workspace_root: workspace_root.into(),
             timeout_secs,
             mutation_recorder: None,
+            progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
         }
     }
@@ -357,6 +360,24 @@ impl ToolContext {
     pub fn with_mutation_recorder(mut self, recorder: MutationEventRecorder) -> Self {
         self.mutation_recorder = Some(recorder);
         self
+    }
+
+    #[must_use]
+    pub fn with_progress_sink(mut self, sink: Arc<dyn ToolProgressSink>) -> Self {
+        self.progress_sink = Some(sink);
+        self
+    }
+
+    /// Emits a transient tool progress update to the runtime event stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the downstream progress channel has been closed.
+    pub fn emit_progress(&self, event: ToolProgressEvent) -> Result<()> {
+        if let Some(sink) = &self.progress_sink {
+            sink.emit(event)?;
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -374,6 +395,43 @@ impl ToolContext {
         self.execution_mutation_profile_recorded_call_ids
             .contains(call_id)
     }
+}
+
+/// Transient progress sink installed by the agent loop while a tool is executing.
+///
+/// Progress events are for live UI surfaces and must not be treated as provider-visible final
+/// tool results. Durable audit state should continue to use started/completed tool execution
+/// entries and final [`ToolResult`] metadata.
+pub trait ToolProgressSink: Send + Sync {
+    /// Emits one progress event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the receiver cannot accept the event.
+    fn emit(&self, event: ToolProgressEvent) -> Result<()>;
+}
+
+/// Provider-neutral live progress update for a running tool execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolProgressEvent {
+    pub execution_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub sequence: u64,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_log_ref: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
+    #[serde(default)]
+    pub details: Value,
 }
 
 /// Normalized tool execution result returned to the agent loop and UI.

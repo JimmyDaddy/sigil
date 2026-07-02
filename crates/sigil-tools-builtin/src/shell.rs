@@ -135,7 +135,7 @@ impl CommandFamily {
         }
     }
 
-    fn is_workspace_check(&self) -> bool {
+    pub(crate) fn is_workspace_check(&self) -> bool {
         matches!(
             self,
             Self::CargoCheck | Self::CargoFmtCheck | Self::CargoTest | Self::CheckTouched { .. }

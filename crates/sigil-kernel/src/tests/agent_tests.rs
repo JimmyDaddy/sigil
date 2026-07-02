@@ -27,9 +27,9 @@ use crate::{
     TaskRunEntry, TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
     ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
     ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope, UsageStats, VerificationVerdict, VisibleCompletionState,
-    WorkspaceMutationDetected, plan_text_hash,
+    ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, VerificationVerdict,
+    VisibleCompletionState, WorkspaceMutationDetected, plan_text_hash,
 };
 
 use super::{
@@ -379,6 +379,7 @@ impl Provider for WorkspaceMutationToolProvider {
 }
 
 struct EchoTool;
+struct ProgressEchoTool;
 struct AgentCategoryTool;
 struct FailingAgentCategoryTool;
 struct RunningSpawnAgentCategoryTool;
@@ -432,6 +433,53 @@ impl Tool for EchoTool {
         call_id: String,
         args: serde_json::Value,
     ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "echo",
+            args["value"].as_str().unwrap_or_default(),
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for ProgressEchoTool {
+    fn spec(&self) -> crate::ToolSpec {
+        EchoTool.spec()
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        ctx.emit_progress(ToolProgressEvent {
+            execution_id: "progress-echo".to_owned(),
+            call_id: call_id.clone(),
+            tool_name: "echo".to_owned(),
+            sequence: 1,
+            status: "running".to_owned(),
+            message: Some("progress one".to_owned()),
+            output_preview: Some("one".to_owned()),
+            output_log_ref: None,
+            total_bytes: Some(3),
+            updated_at_ms: Some(1),
+            details: json!({"phase": "one"}),
+        })?;
+        ctx.emit_progress(ToolProgressEvent {
+            execution_id: "progress-echo".to_owned(),
+            call_id: call_id.clone(),
+            tool_name: "echo".to_owned(),
+            sequence: 2,
+            status: "running".to_owned(),
+            message: Some("progress two".to_owned()),
+            output_preview: Some("two".to_owned()),
+            output_log_ref: None,
+            total_bytes: Some(6),
+            updated_at_ms: Some(2),
+            details: json!({"phase": "two"}),
+        })?;
         Ok(ToolResult::ok(
             call_id,
             "echo",
@@ -1946,6 +1994,71 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
                     && execution.error.is_none()
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_forwards_tool_progress_without_persisting_progress_as_tool_messages() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ProgressEchoTool));
+    let agent = Agent::new(MockProvider, registry);
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::ToolProgress(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(
+                |event| matches!(event, RunEvent::ToolResult(result) if result.tool_name == "echo")
+            )
+            .count(),
+        1
+    );
+    let messages = session.messages();
+    let tool_messages = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .collect::<Vec<_>>();
+    assert_eq!(tool_messages.len(), 1);
+    assert!(
+        tool_messages
+            .iter()
+            .all(|message| message
+                .content
+                .as_deref()
+                .is_some_and(|content| !content.contains("progress one")
+                    && !content.contains("progress two")))
+    );
     Ok(())
 }
 

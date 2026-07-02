@@ -2,15 +2,18 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
-    ToolOperation, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCategory,
+    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
+use tokio::time::sleep;
 
 use crate::{
     constants::{
@@ -31,6 +34,9 @@ use crate::{
         TerminalStartRequest, TerminalTaskPermissionContext,
     },
 };
+
+const FOREGROUND_TERMINAL_POLL_INTERVAL_MS: u64 = 500;
+const FOREGROUND_TERMINAL_PROGRESS_LIMIT_BYTES: usize = 12 * 1024;
 
 pub(crate) struct TerminalStartTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
@@ -110,7 +116,7 @@ impl Tool for TerminalStartTool {
         ToolSpec {
             name: "terminal_start".to_owned(),
             description: format!(
-                "Start a background terminal task from the workspace, optionally with PTY support. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                "Start a terminal task from the workspace. Use mode=foreground for one-shot checks that should return a single final result, mode=background for long-lived tasks, and pty=true/mode=interactive for tasks that need input. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
                 self.scratch_label
             ),
             input_schema: json!({
@@ -120,6 +126,10 @@ impl Tool for TerminalStartTool {
                     "command": { "type": "string" },
                     "cwd": { "type": "string" },
                     "shell": { "type": "string" },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["foreground", "background", "interactive"]
+                    },
                     "pty": { "type": "boolean" },
                     "rows": { "type": "integer" },
                     "cols": { "type": "integer" }
@@ -174,6 +184,7 @@ impl Tool for TerminalStartTool {
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
         let analysis = analyze_shell_command(&ctx.workspace_root, &args.command)?;
+        let execution_mode = resolve_terminal_start_execution_mode(args.mode, args.pty, &analysis)?;
         let mut env = BTreeMap::new();
         env.insert(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),
@@ -191,6 +202,18 @@ impl Tool for TerminalStartTool {
         } else {
             manager.start(request).await?
         };
+        if execution_mode == TerminalStartExecutionMode::Foreground {
+            return wait_for_foreground_terminal(
+                &ctx,
+                manager,
+                call_id,
+                self.spec().name,
+                entry,
+                &analysis,
+                execution_mode,
+            )
+            .await;
+        }
         Ok(terminal_entry_result_with_shell_analysis(
             call_id,
             self.spec().name,
@@ -482,12 +505,39 @@ impl Tool for TerminalCancelTool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalStartExecutionMode {
+    Foreground,
+    Background,
+    Interactive,
+}
+
+impl TerminalStartExecutionMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Foreground => "foreground",
+            Self::Background => "background",
+            Self::Interactive => "interactive",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "foreground" => Ok(Self::Foreground),
+            "background" => Ok(Self::Background),
+            "interactive" => Ok(Self::Interactive),
+            _ => bail!("terminal_start mode must be foreground, background, or interactive"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TerminalStartArgs {
     task_id: Option<TerminalTaskId>,
     command: String,
     cwd: Option<PathBuf>,
     shell: Option<String>,
+    mode: Option<TerminalStartExecutionMode>,
     pty: bool,
     pty_size: Option<TerminalPtySize>,
 }
@@ -499,6 +549,9 @@ pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArg
     let command = required_string(args, "command")?.to_owned();
     let cwd = optional_string(args, "cwd").map(PathBuf::from);
     let shell = optional_string(args, "shell").map(str::to_owned);
+    let mode = optional_string(args, "mode")
+        .map(TerminalStartExecutionMode::parse)
+        .transpose()?;
     let pty = args.get("pty").and_then(Value::as_bool).unwrap_or(false);
     let pty_size = if args.get("rows").is_some() || args.get("cols").is_some() {
         Some(required_terminal_pty_size(args)?)
@@ -510,9 +563,35 @@ pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArg
         command,
         cwd,
         shell,
+        mode,
         pty,
         pty_size,
     })
+}
+
+fn resolve_terminal_start_execution_mode(
+    requested: Option<TerminalStartExecutionMode>,
+    pty: bool,
+    analysis: &ShellCommandAnalysis,
+) -> Result<TerminalStartExecutionMode> {
+    let mode = requested.unwrap_or_else(|| {
+        if pty {
+            TerminalStartExecutionMode::Interactive
+        } else if analysis.command_family.is_workspace_check() {
+            TerminalStartExecutionMode::Foreground
+        } else {
+            TerminalStartExecutionMode::Background
+        }
+    });
+    match (mode, pty) {
+        (TerminalStartExecutionMode::Foreground, true) => {
+            bail!("terminal_start mode=foreground does not support pty=true")
+        }
+        (TerminalStartExecutionMode::Interactive, false) => {
+            bail!("terminal_start mode=interactive requires pty=true")
+        }
+        _ => Ok(mode),
+    }
 }
 
 pub(crate) fn required_terminal_task_id(args: &Value) -> Result<TerminalTaskId> {
@@ -607,6 +686,250 @@ pub(crate) fn terminal_entry_result_with_shell_analysis(
     )
 }
 
+async fn wait_for_foreground_terminal(
+    ctx: &ToolContext,
+    manager: Arc<TerminalProcessManager>,
+    call_id: String,
+    tool_name: String,
+    entry: TerminalTaskEntry,
+    analysis: &ShellCommandAnalysis,
+    execution_mode: TerminalStartExecutionMode,
+) -> Result<ToolResult> {
+    let started = Instant::now();
+    let timeout_after = Duration::from_secs(ctx.timeout_secs.max(1));
+    let task_id = entry.handle.task_id.clone();
+    let read_limit =
+        FOREGROUND_TERMINAL_PROGRESS_LIMIT_BYTES.clamp(1, HARD_TERMINAL_READ_LIMIT_BYTES);
+    let mut latest = entry;
+    let mut next_offset = 0;
+    let mut sequence = 0;
+
+    emit_terminal_progress(
+        ctx,
+        &call_id,
+        &tool_name,
+        sequence,
+        &latest,
+        analysis,
+        execution_mode,
+        None,
+        None,
+        None,
+    )?;
+
+    loop {
+        if latest.status.is_terminal() {
+            return Ok(terminal_foreground_result(
+                call_id,
+                tool_name,
+                latest,
+                analysis,
+                execution_mode,
+                elapsed_millis(started),
+                None,
+                None,
+            ));
+        }
+
+        if started.elapsed() >= timeout_after {
+            let cancelled = manager
+                .cancel(&task_id)
+                .await
+                .unwrap_or_else(|_| latest.clone());
+            sequence = sequence.saturating_add(1);
+            let duration_ms = elapsed_millis(started);
+            emit_terminal_progress(
+                ctx,
+                &call_id,
+                &tool_name,
+                sequence,
+                &cancelled,
+                analysis,
+                execution_mode,
+                None,
+                None,
+                Some("timed_out"),
+            )?;
+            return Ok(terminal_foreground_result(
+                call_id,
+                tool_name,
+                cancelled,
+                analysis,
+                execution_mode,
+                duration_ms,
+                Some("timed_out"),
+                Some(ToolErrorKind::Timeout),
+            ));
+        }
+
+        sleep(Duration::from_millis(FOREGROUND_TERMINAL_POLL_INTERVAL_MS)).await;
+        let previous_status = latest.status.clone();
+        let read = manager.read(&task_id, next_offset, read_limit).await?;
+        next_offset = read.next_offset.unwrap_or(read.total_bytes);
+        if let Some(entry) = read.latest_entry.clone() {
+            latest = entry;
+        }
+        if read.returned_bytes > 0
+            || latest.status != previous_status
+            || latest.status.is_terminal()
+        {
+            sequence = sequence.saturating_add(1);
+            emit_terminal_progress(
+                ctx,
+                &call_id,
+                &tool_name,
+                sequence,
+                &latest,
+                analysis,
+                execution_mode,
+                (!read.content.is_empty()).then_some(read.content.as_str()),
+                Some(read.total_bytes),
+                None,
+            )?;
+        }
+    }
+}
+
+fn emit_terminal_progress(
+    ctx: &ToolContext,
+    call_id: &str,
+    tool_name: &str,
+    sequence: u64,
+    entry: &TerminalTaskEntry,
+    analysis: &ShellCommandAnalysis,
+    execution_mode: TerminalStartExecutionMode,
+    output_preview: Option<&str>,
+    total_bytes: Option<u64>,
+    verdict_override: Option<&str>,
+) -> Result<()> {
+    ctx.emit_progress(ToolProgressEvent {
+        execution_id: entry.handle.task_id.as_str().to_owned(),
+        call_id: call_id.to_owned(),
+        tool_name: tool_name.to_owned(),
+        sequence,
+        status: entry.status.as_str().to_owned(),
+        message: Some(format!(
+            "terminal {} {}",
+            entry.handle.task_id.as_str(),
+            entry.status.as_str()
+        )),
+        output_preview: output_preview.map(str::to_owned),
+        output_log_ref: Some(entry.handle.log_path.clone()),
+        total_bytes,
+        updated_at_ms: Some(entry.updated_at_ms),
+        details: terminal_entry_details_with_execution_mode(
+            entry,
+            Some(analysis),
+            execution_mode,
+            verdict_override,
+        ),
+    })
+}
+
+fn terminal_foreground_result(
+    call_id: String,
+    tool_name: String,
+    entry: TerminalTaskEntry,
+    analysis: &ShellCommandAnalysis,
+    execution_mode: TerminalStartExecutionMode,
+    duration_ms: u64,
+    verdict_override: Option<&str>,
+    error_kind_override: Option<ToolErrorKind>,
+) -> ToolResult {
+    let exit_code = terminal_exit_code(&entry.status);
+    let verdict = verdict_override.unwrap_or_else(|| terminal_verdict(&entry.status));
+    let rerun_not_needed = matches!(verdict, "passed" | "failed");
+    let mut details =
+        terminal_entry_details_with_execution_mode(&entry, Some(analysis), execution_mode, None);
+    set_terminal_details_verdict(&mut details, verdict, rerun_not_needed);
+    if let Some(object) = details.as_object_mut() {
+        object.insert("duration_ms".to_owned(), json!(duration_ms));
+        object.insert("output_log_ref".to_owned(), json!(&entry.handle.log_path));
+    }
+
+    let content = terminal_foreground_content(&entry, verdict, duration_ms);
+    let metadata = ToolResultMeta {
+        duration_ms: Some(duration_ms),
+        exit_code,
+        truncated: entry.output_truncated,
+        returned_bytes: Some(content.len() as u64),
+        returned_lines: Some(content.lines().count() as u64),
+        details: details.clone(),
+        ..ToolResultMeta::default()
+    };
+
+    if let Some(error_kind) = error_kind_override.or_else(|| terminal_error_kind(&entry.status)) {
+        let mut result = ToolResult::error(call_id, tool_name, error_kind, content)
+            .with_error_details(false, details);
+        result.metadata = metadata;
+        return result;
+    }
+
+    ToolResult::ok(call_id, tool_name, content, metadata)
+}
+
+fn terminal_foreground_content(
+    entry: &TerminalTaskEntry,
+    verdict: &str,
+    duration_ms: u64,
+) -> String {
+    let mut lines = vec![format!(
+        "terminal task {} {} · verdict {} · {} ms",
+        entry.handle.task_id.as_str(),
+        entry.status.as_str(),
+        verdict,
+        duration_ms
+    )];
+    if let Some(code) = terminal_exit_code(&entry.status) {
+        lines.push(format!("exit_code: {code}"));
+    }
+    lines.push(format!("log: {}", entry.handle.log_path.display()));
+    if entry.output_truncated {
+        lines.push("output_truncated: true".to_owned());
+    }
+    if let Some(preview) = entry
+        .output_preview
+        .as_deref()
+        .filter(|preview| !preview.is_empty())
+    {
+        lines.push(String::new());
+        lines.push(preview.to_owned());
+    }
+    lines.join("\n")
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn terminal_exit_code(status: &TerminalTaskStatus) -> Option<i32> {
+    match status {
+        TerminalTaskStatus::Exited { exit_code } => *exit_code,
+        _ => None,
+    }
+}
+
+fn terminal_verdict(status: &TerminalTaskStatus) -> &'static str {
+    match status {
+        TerminalTaskStatus::Exited { exit_code: Some(0) } => "passed",
+        TerminalTaskStatus::Exited { .. } | TerminalTaskStatus::Failed { .. } => "failed",
+        TerminalTaskStatus::Cancelled => "cancelled",
+        TerminalTaskStatus::Interrupted => "interrupted",
+        TerminalTaskStatus::Starting | TerminalTaskStatus::Running => "running",
+    }
+}
+
+fn terminal_error_kind(status: &TerminalTaskStatus) -> Option<ToolErrorKind> {
+    match status {
+        TerminalTaskStatus::Exited { exit_code: Some(0) } => None,
+        TerminalTaskStatus::Exited { .. } => Some(ToolErrorKind::ExitStatus),
+        TerminalTaskStatus::Failed { .. } => Some(ToolErrorKind::Internal),
+        TerminalTaskStatus::Cancelled => Some(ToolErrorKind::Interrupted),
+        TerminalTaskStatus::Interrupted => Some(ToolErrorKind::Interrupted),
+        TerminalTaskStatus::Starting | TerminalTaskStatus::Running => None,
+    }
+}
+
 pub(crate) fn terminal_entry_details(
     entry: &TerminalTaskEntry,
     analysis: Option<&ShellCommandAnalysis>,
@@ -667,6 +990,59 @@ pub(crate) fn terminal_entry_details(
         );
     }
     details
+}
+
+fn terminal_entry_details_with_execution_mode(
+    entry: &TerminalTaskEntry,
+    analysis: Option<&ShellCommandAnalysis>,
+    execution_mode: TerminalStartExecutionMode,
+    verdict_override: Option<&str>,
+) -> Value {
+    let mut details = terminal_entry_details(entry, analysis);
+    let verdict = verdict_override.unwrap_or_else(|| terminal_verdict(&entry.status));
+    let rerun_not_needed = matches!(verdict, "passed" | "failed");
+    if let Some(object) = details.as_object_mut() {
+        object.insert(
+            "execution_id".to_owned(),
+            json!(entry.handle.task_id.as_str()),
+        );
+        object.insert("execution_mode".to_owned(), json!(execution_mode.as_str()));
+        object.insert(
+            "exit_code".to_owned(),
+            json!(terminal_exit_code(&entry.status)),
+        );
+        object.insert("verdict".to_owned(), json!(verdict));
+        object.insert("output_log_ref".to_owned(), json!(&entry.handle.log_path));
+        object.insert("tail_available".to_owned(), json!(false));
+        object.insert("rerun_not_needed".to_owned(), json!(rerun_not_needed));
+        if let Some(shell) = object
+            .get_mut("shell_analysis")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            shell.insert(
+                "exit_code".to_owned(),
+                json!(terminal_exit_code(&entry.status)),
+            );
+        }
+    }
+    set_terminal_details_verdict(&mut details, verdict, rerun_not_needed);
+    details
+}
+
+fn set_terminal_details_verdict(details: &mut Value, verdict: &str, rerun_not_needed: bool) {
+    let Some(object) = details.as_object_mut() else {
+        return;
+    };
+    object.insert("verdict".to_owned(), json!(verdict));
+    object.insert("rerun_not_needed".to_owned(), json!(rerun_not_needed));
+    if let Some(shell) = object
+        .get_mut("shell_analysis")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        shell.insert("verdict".to_owned(), json!(verdict));
+        shell.insert("tail_available".to_owned(), json!(false));
+        shell.insert("rerun_not_needed".to_owned(), json!(rerun_not_needed));
+    }
 }
 
 pub(crate) fn terminal_input_result(

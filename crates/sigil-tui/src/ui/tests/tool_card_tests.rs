@@ -914,7 +914,7 @@ fn tool_card_renders_terminal_task_status_and_preview() {
     assert!(activity.defaults_expanded);
     assert!(text.contains("Terminal terminal-1 cargo test"));
     assert!(text.contains("RUNNING"));
-    assert!(text.contains("local unconfined"));
+    assert!(!text.contains("local unconfined"));
     assert!(text.contains("terminal"));
     assert!(text.contains("log"));
     assert!(text.contains("running tests"));
@@ -995,7 +995,7 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
     assert_eq!(exited_display.status.label, "EXITED");
     assert_eq!(
         exited_display.status.detail.as_deref(),
-        Some("exit 7 · local unconfined · cleanup completed")
+        Some("exit 7 · cleanup completed")
     );
     assert_eq!(exited_activity.key, "terminal_task:terminal-exited");
     assert_eq!(exited_activity.title, "Terminal terminal-exited cargo test");
@@ -1494,14 +1494,6 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
     assert_eq!(
         metadata.execution_cleanup_status.as_deref(),
         Some("completed")
-    );
-    assert_eq!(
-        metadata.terminal_enforcement_backend.as_deref(),
-        Some("local")
-    );
-    assert_eq!(
-        metadata.terminal_sandbox_profile.as_deref(),
-        Some("unconfined")
     );
     assert_eq!(
         metadata.terminal_cleanup_status.as_deref(),

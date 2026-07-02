@@ -1,14 +1,16 @@
 use std::{
     collections::BTreeMap,
     path::Path,
+    sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 
 use crate::{
     CheckpointRestored, ExecutionMutationProfile, MutationCommitted, MutationReconciled,
@@ -39,9 +41,9 @@ use crate::{
     time::saturating_elapsed,
     tool::{
         ToolCategory, ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
-        ToolPreviewCapability, ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta,
-        ToolResultStatus, ToolSpec, ToolSubject, ToolSubjectScope,
-        execution_mutation_profile_for_tool,
+        ToolPreviewCapability, ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink,
+        ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec, ToolSubject,
+        ToolSubjectScope, execution_mutation_profile_for_tool,
     },
     verification::{
         DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope, ReadinessEvaluatedEntry,
@@ -64,6 +66,44 @@ pub struct AgentRunOptions {
     pub permission_context: PermissionEvaluationContext,
     pub memory_config: MemoryConfig,
     pub compaction_config: CompactionConfig,
+}
+
+struct ChannelToolProgressSink {
+    sender: mpsc::UnboundedSender<ToolProgressEvent>,
+}
+
+impl ToolProgressSink for ChannelToolProgressSink {
+    fn emit(&self, event: ToolProgressEvent) -> Result<()> {
+        self.sender
+            .send(event)
+            .map_err(|error| anyhow!("failed to forward tool progress: {error}"))
+    }
+}
+
+async fn execute_after_started_audit_with_progress(
+    tools: &ToolRegistry,
+    ctx: ToolContext,
+    call: ToolCall,
+    handler: &mut (impl EventHandler + Send),
+) -> Result<ToolResult> {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let ctx = ctx.with_progress_sink(Arc::new(ChannelToolProgressSink { sender }));
+    let execution = tools.execute_after_started_audit(ctx, call);
+    tokio::pin!(execution);
+
+    loop {
+        tokio::select! {
+            result = &mut execution => {
+                while let Ok(progress) = receiver.try_recv() {
+                    handler.handle(RunEvent::ToolProgress(progress))?;
+                }
+                return result;
+            }
+            Some(progress) = receiver.recv() => {
+                handler.handle(RunEvent::ToolProgress(progress))?;
+            }
+        }
+    }
 }
 
 /// Final aggregate result from one completed agent run.
@@ -1206,9 +1246,13 @@ where
                             .await
                         {
                             Ok(Some(result)) => result,
-                            Ok(None) => match tools
-                                .execute_after_started_audit(tool_ctx.clone(), call.clone())
-                                .await
+                            Ok(None) => match execute_after_started_audit_with_progress(
+                                tools,
+                                tool_ctx.clone(),
+                                call.clone(),
+                                handler,
+                            )
+                            .await
                             {
                                 Ok(result) => result,
                                 Err(error) => ToolResult::error(
@@ -1225,9 +1269,13 @@ where
                                 error.to_string(),
                             ),
                         },
-                        None => match tools
-                            .execute_after_started_audit(tool_ctx.clone(), call.clone())
-                            .await
+                        None => match execute_after_started_audit_with_progress(
+                            tools,
+                            tool_ctx.clone(),
+                            call.clone(),
+                            handler,
+                        )
+                        .await
                         {
                             Ok(result) => result,
                             Err(error) => ToolResult::error(

@@ -35,9 +35,9 @@ use crate::{
     TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
     TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
     ToolCategory, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, TypedDomainEvent, TypedStoredEventDecode, UsageStats,
-    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolProgressEvent,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, TypedDomainEvent, TypedStoredEventDecode,
+    UsageStats, VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
     VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
     VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationVerdict,
     VisibleCompletionState, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
@@ -1059,6 +1059,9 @@ fn run_event_transient_boundary_excludes_durable_facts() {
         id: "call-1".to_owned(),
         delta: "{}".to_owned(),
     }));
+    assert!(is_transient_run_event(&RunEvent::ToolProgress(
+        tool_progress_event("call-progress")
+    )));
     assert!(!is_transient_run_event(&RunEvent::ToolCallStarted(
         tool_call("call-1")
     )));
@@ -1192,6 +1195,10 @@ fn public_run_event_projects_all_internal_run_event_variants() {
             )),
             "tool_result",
         ),
+        (
+            RunEvent::ToolProgress(tool_progress_event("call-progress")),
+            "tool_progress",
+        ),
         (RunEvent::Usage(UsageStats::default()), "usage"),
         (
             RunEvent::ContinuationState(continuation_state("cursor")),
@@ -1210,6 +1217,24 @@ fn public_run_event_projects_all_internal_run_event_variants() {
         .expect("public run event should serialize");
 
         assert_eq!(value["event"]["type"], expected_type);
+    }
+}
+
+fn tool_progress_event(call_id: &str) -> ToolProgressEvent {
+    ToolProgressEvent {
+        execution_id: "execution-1".to_owned(),
+        call_id: call_id.to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        sequence: 1,
+        status: "running".to_owned(),
+        message: Some("running".to_owned()),
+        output_preview: Some("building".to_owned()),
+        output_log_ref: Some(std::path::PathBuf::from(
+            "state/artifacts/tasks/t/output.log",
+        )),
+        total_bytes: Some(8),
+        updated_at_ms: Some(10),
+        details: json!({"task_id": "terminal-1"}),
     }
 }
 

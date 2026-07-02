@@ -12,8 +12,8 @@ use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
     EventHandler, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess, ToolCall,
-    ToolCategory, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject, UsageStats,
+    ToolCategory, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolProgressEvent, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
 };
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tokio::{
@@ -192,6 +192,35 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         result
             .stderr
             .contains("[tool:result] write_file error=true denied")
+    );
+
+    let progress = render_run_event(RunEvent::ToolProgress(ToolProgressEvent {
+        execution_id: "execution-1".to_owned(),
+        call_id: "call-1".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        sequence: 1,
+        status: "running".to_owned(),
+        message: Some("running workspace check".to_owned()),
+        output_preview: Some("Compiling sigil".to_owned()),
+        output_log_ref: None,
+        total_bytes: Some(128),
+        updated_at_ms: Some(10),
+        details: serde_json::json!({"task_id": "terminal-1"}),
+    }));
+    assert!(
+        progress
+            .stderr
+            .contains("[tool:progress] terminal_start (call-1) running")
+    );
+    assert!(
+        progress
+            .stderr
+            .contains("[tool:progress:message] running workspace check")
+    );
+    assert!(
+        progress
+            .stderr
+            .contains("[tool:progress:preview] Compiling sigil")
     );
 
     let usage = render_run_event(RunEvent::Usage(UsageStats {

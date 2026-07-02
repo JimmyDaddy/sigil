@@ -490,6 +490,22 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
             ),
             ..RenderedOutput::default()
         },
+        RunEvent::ToolProgress(progress) => {
+            let mut stderr = format!(
+                "[tool:progress] {} ({}) {}\n",
+                progress.tool_name, progress.call_id, progress.status
+            );
+            if let Some(message) = progress.message {
+                stderr.push_str(&format!("[tool:progress:message] {message}\n"));
+            }
+            if let Some(output_preview) = progress.output_preview {
+                stderr.push_str(&format!("[tool:progress:preview] {output_preview}\n"));
+            }
+            RenderedOutput {
+                stderr,
+                ..RenderedOutput::default()
+            }
+        }
         RunEvent::Usage(usage) => render_stream_event(StreamRenderEvent::Usage(usage)),
         RunEvent::Notice(note) => RenderedOutput {
             stderr: format!("[notice] {note}\n"),

@@ -20,7 +20,7 @@ use crate::runner::{
 };
 use sigil_kernel::{
     ControlEntry, EventHandler, RunEvent, ToolCall, ToolDiffBudget, ToolExecutionStatus,
-    ToolPreviewSnapshot, ToolResult,
+    ToolPreviewSnapshot, ToolProgressEvent, ToolResult, ToolResultMeta,
 };
 use sigil_runtime::{BalanceSnapshot, deepseek_provider_status_config};
 
@@ -107,6 +107,9 @@ impl AppState {
             }
             RunEvent::ToolResult(result) => {
                 self.push_live_child_entry(TimelineRole::Tool, result.content)
+            }
+            RunEvent::ToolProgress(progress) => {
+                self.push_live_child_entry(TimelineRole::Tool, tool_progress_summary(&progress))
             }
             RunEvent::AssistantMessage(message) => {
                 if message.assistant_kind == Some(sigil_kernel::AssistantMessageKind::ToolPreamble)
@@ -1503,6 +1506,24 @@ impl EventHandler for AppState {
                     );
                 }
             }
+            RunEvent::ToolProgress(progress) => {
+                self.runtime.run_phase = RunPhase::Tool(progress.tool_name.clone());
+                self.finish_streaming_assistant_entry();
+                self.finish_streaming_reasoning_entry();
+                self.push_phase_marker(format!("tool|{}", progress.tool_name));
+                let result = tool_progress_result(progress);
+                let rendered =
+                    format_tool_result_block_redacted(&result, None, &self.secret_redactor);
+                if let Some(index) = terminal_task_replacement_index(&self.timeline, &rendered) {
+                    self.replace_tool_timeline_entry(index, rendered);
+                } else {
+                    self.push_timeline(TimelineRole::Tool, rendered);
+                }
+                self.push_event(
+                    "tool:progress",
+                    format!("{} {}", result.tool_name, result.content),
+                );
+            }
             RunEvent::ToolResult(result) => {
                 let is_agent_tool = agent_tool_name(&result.tool_name);
                 if !is_agent_tool {
@@ -1690,6 +1711,43 @@ fn terminal_task_replacement_index(timeline: &[TimelineEntry], rendered: &str) -
                     .is_some_and(|previous_key| previous_key == current_key))
             .then_some(index)
         })
+}
+
+fn tool_progress_result(progress: ToolProgressEvent) -> ToolResult {
+    let content = progress
+        .output_preview
+        .clone()
+        .filter(|preview| !preview.is_empty())
+        .unwrap_or_else(|| tool_progress_summary(&progress));
+    ToolResult::ok(
+        progress.call_id,
+        progress.tool_name,
+        content,
+        ToolResultMeta {
+            bytes: progress.total_bytes,
+            total_bytes: progress.total_bytes,
+            returned_bytes: progress
+                .output_preview
+                .as_ref()
+                .map(|preview| preview.len() as u64),
+            returned_lines: progress
+                .output_preview
+                .as_ref()
+                .map(|preview| preview.lines().count() as u64),
+            details: progress.details,
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+fn tool_progress_summary(progress: &ToolProgressEvent) -> String {
+    progress.message.clone().unwrap_or_else(|| {
+        format!(
+            "{} {}",
+            progress.tool_name,
+            progress.status.replace('_', " ")
+        )
+    })
 }
 
 fn terminal_task_key_from_tool_block(text: &str) -> Option<String> {

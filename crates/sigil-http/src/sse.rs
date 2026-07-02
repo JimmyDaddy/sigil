@@ -574,7 +574,8 @@ fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
     match event {
         PublicRunEventKind::TextDelta { .. }
         | PublicRunEventKind::ReasoningDelta { .. }
-        | PublicRunEventKind::ToolCallArgsDelta { .. } => HttpProtocolEventClass::Transient,
+        | PublicRunEventKind::ToolCallArgsDelta { .. }
+        | PublicRunEventKind::ToolProgress { .. } => HttpProtocolEventClass::Transient,
         PublicRunEventKind::RunStarted { .. }
         | PublicRunEventKind::TaskRunStarted { .. }
         | PublicRunEventKind::RunFinished { .. }

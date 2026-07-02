@@ -94,9 +94,6 @@ pub(in crate::ui::tool_card) fn terminal_task_display_status(
         }
         _ => {}
     }
-    if let Some(boundary) = terminal_execution_boundary_detail(summary) {
-        details.push(boundary);
-    }
     if let Some(cleanup_status) = summary
         .metadata
         .terminal_cleanup_status
@@ -111,20 +108,6 @@ pub(in crate::ui::tool_card) fn terminal_task_display_status(
         kind: terminal_task_status_kind(summary),
         is_error: summary.is_error
             || matches!(summary.metadata.terminal_status.as_deref(), Some("failed")),
-    }
-}
-
-pub(in crate::ui::tool_card) fn terminal_execution_boundary_detail(
-    summary: &ToolCardRender,
-) -> Option<String> {
-    let backend = summary.metadata.terminal_enforcement_backend.as_deref();
-    let profile = summary.metadata.terminal_sandbox_profile.as_deref();
-    match (backend, profile) {
-        (Some("local"), Some("unconfined")) => Some("local unconfined".to_owned()),
-        (Some(backend), Some(profile)) => Some(format!("{backend} {profile}")),
-        (Some(backend), None) => Some(backend.to_owned()),
-        (None, Some(profile)) => Some(profile.to_owned()),
-        (None, None) => None,
     }
 }
 

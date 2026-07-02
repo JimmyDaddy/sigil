@@ -244,9 +244,10 @@ pub use time::saturating_elapsed;
 pub use tool::{
     ScopedToolRegistry, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats,
     ToolEgressAudit, ToolError, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision,
-    ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
-    ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink,
+    ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolSpec,
+    ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };
 pub use verification::{
     ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,

@@ -1979,6 +1979,46 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
+async fn terminal_start_foreground_waits_and_returns_final_facts() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let result = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-foreground",
+                    "command": "printf foreground-ok",
+                    "shell": shell,
+                    "mode": "foreground"
+                }),
+            ),
+        )
+        .await?;
+
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert_eq!(result.metadata.exit_code, Some(0));
+    assert_eq!(result.metadata.details["task_id"], "terminal-foreground");
+    assert_eq!(result.metadata.details["status"], "exited");
+    assert_eq!(result.metadata.details["execution_mode"], "foreground");
+    assert_eq!(result.metadata.details["verdict"], "passed");
+    assert_eq!(result.metadata.details["rerun_not_needed"], true);
+    assert_eq!(
+        result.metadata.details["shell_analysis"]["verdict"],
+        "passed"
+    );
+    assert!(result.content.contains("foreground-ok"));
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
 async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");

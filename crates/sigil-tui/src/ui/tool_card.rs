@@ -167,8 +167,6 @@ struct ToolCardMetadata {
     execution_cleanup_status: Option<String>,
     shell_command_family: Option<String>,
     shell_verdict: Option<String>,
-    terminal_enforcement_backend: Option<String>,
-    terminal_sandbox_profile: Option<String>,
     terminal_cleanup_status: Option<String>,
     terminal_task_id: Option<String>,
     terminal_status: Option<String>,

@@ -4,7 +4,9 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use sigil_kernel::{PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision};
+use sigil_kernel::{
+    PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision, ToolProgressEvent,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -983,6 +985,41 @@ async fn live_event_bus_delivers_transient_events_without_replay_id() {
         .expect("subscriber should receive transient event");
     assert_eq!(live.event_class, HttpProtocolEventClass::Transient);
     assert_eq!(live.run_event.sequence, 1);
+    assert!(
+        bus.replay_run_after("session-1", "run-1", None)
+            .expect("replay should work")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn live_event_bus_treats_tool_progress_as_transient() {
+    let bus = HttpLiveEventBus::new(8);
+    let progress = ToolProgressEvent {
+        execution_id: "execution-1".to_owned(),
+        call_id: "call-1".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        sequence: 1,
+        status: "running".to_owned(),
+        message: Some("running workspace check".to_owned()),
+        output_preview: Some("Compiling sigil-tui".to_owned()),
+        output_log_ref: Some("state/artifacts/tasks/terminal-1/output.log".into()),
+        total_bytes: Some(64),
+        updated_at_ms: Some(10),
+        details: json!({"task_id": "terminal-1"}),
+    };
+
+    let published = bus
+        .publish_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-1",
+            1,
+            PublicRunEventKind::ToolProgress { progress },
+        ))
+        .expect("tool progress event should publish");
+
+    assert_eq!(published.event_class, HttpProtocolEventClass::Transient);
+    assert_eq!(published.replay_id, None);
     assert!(
         bus.replay_run_after("session-1", "run-1", None)
             .expect("replay should work")

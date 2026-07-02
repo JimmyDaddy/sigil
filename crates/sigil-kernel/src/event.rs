@@ -11,8 +11,9 @@ use crate::{
     ChangeSet, ChangeSetResult, ControlEntry, JobIntentEntry, ModelMessage, MutationCommitted,
     MutationPrepared, PathTrustZone, PermissionConfirmation, PermissionRisk,
     ProviderContinuationState, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
-    TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview, ToolResult, ToolSpec, ToolSubject,
-    UsageStats, VerificationCheckRunEntry, VerificationRecordedEntry, WorkspaceMutationDetected,
+    TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview, ToolProgressEvent, ToolResult,
+    ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationRecordedEntry,
+    WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -1174,7 +1175,10 @@ pub fn projection_apply_decision_for_record(
 pub fn is_transient_run_event(event: &RunEvent) -> bool {
     matches!(
         event,
-        RunEvent::TextDelta(_) | RunEvent::ReasoningDelta(_) | RunEvent::ToolCallArgsDelta { .. }
+        RunEvent::TextDelta(_)
+            | RunEvent::ReasoningDelta(_)
+            | RunEvent::ToolCallArgsDelta { .. }
+            | RunEvent::ToolProgress(_)
     )
 }
 
@@ -1278,6 +1282,7 @@ pub enum RunEvent {
         approved: bool,
         reason: Option<String>,
     },
+    ToolProgress(ToolProgressEvent),
     ToolResult(ToolResult),
     Usage(UsageStats),
     ContinuationState(ProviderContinuationState),
@@ -1390,6 +1395,9 @@ pub enum PublicRunEventKind {
     ToolResult {
         result: ToolResult,
     },
+    ToolProgress {
+        progress: ToolProgressEvent,
+    },
     Usage {
         usage: UsageStats,
     },
@@ -1488,6 +1496,7 @@ impl From<RunEvent> for PublicRunEventKind {
                 approved,
                 reason,
             },
+            RunEvent::ToolProgress(progress) => Self::ToolProgress { progress },
             RunEvent::ToolResult(result) => Self::ToolResult { result },
             RunEvent::Usage(usage) => Self::Usage { usage },
             RunEvent::ContinuationState(state) => Self::ContinuationState { state },

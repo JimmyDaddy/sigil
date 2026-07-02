@@ -2431,6 +2431,57 @@ fn terminal_tool_results_replace_existing_task_card() -> Result<()> {
 }
 
 #[test]
+fn terminal_progress_updates_existing_task_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    for (sequence, preview) in [(1, "phase one"), (2, "phase two")] {
+        app.handle(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+            execution_id: "terminal-progress".to_owned(),
+            call_id: "call-terminal-progress".to_owned(),
+            tool_name: "terminal_start".to_owned(),
+            sequence,
+            status: "running".to_owned(),
+            message: Some(format!("progress {sequence}")),
+            output_preview: Some(preview.to_owned()),
+            output_log_ref: Some(std::path::PathBuf::from(
+                ".sigil/tasks/terminal-progress/output.log",
+            )),
+            total_bytes: Some(preview.len() as u64),
+            updated_at_ms: Some(sequence),
+            details: json!({
+                "task_id": "terminal-progress",
+                "status": "running",
+                "status_detail": {"state": "running"},
+                "command": "./scripts/check-touched.sh --tier quick",
+                "cwd": ".",
+                "shell": "sh",
+                "log_path": ".sigil/tasks/terminal-progress/output.log",
+                "created_at_ms": 1,
+                "updated_at_ms": sequence,
+                "output_preview": preview,
+                "output_hash": null,
+                "output_truncated": false,
+                "execution_mode": "foreground"
+            }),
+        }))?;
+    }
+
+    let terminal_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("terminal_start"))
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_cards.len(), 1);
+    assert!(terminal_cards[0].text.contains("phase two"));
+    assert!(!terminal_cards[0].text.contains("phase one"));
+    assert_eq!(
+        app.selected_tool_activity_key.as_deref(),
+        Some("terminal_task:terminal-progress")
+    );
+    Ok(())
+}
+
+#[test]
 fn new_session_started_restores_empty_session_view() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.push_timeline(TimelineRole::Assistant, "old context");
