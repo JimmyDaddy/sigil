@@ -301,17 +301,11 @@ pub(super) fn format_terminal_task_block_redacted(
         .map(|preview| redactor.redact_text(preview));
     let preview_lines = output_preview
         .as_deref()
-        .map(|preview| {
-            preview
-                .lines()
-                .take(12)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
+        .map(|preview| preview.lines().map(str::to_owned).collect::<Vec<_>>())
         .unwrap_or_default();
     let hidden_lines = output_preview
         .as_deref()
-        .map(|preview| preview.lines().count().saturating_sub(preview_lines.len()))
+        .map(|_| 0usize)
         .unwrap_or(0)
         .saturating_add(usize::from(entry.output_truncated));
     let details = serde_json::json!({
@@ -432,8 +426,8 @@ fn format_tool_preview_payload(
             .collect::<Vec<_>>()
     };
     let total_lines = all_lines.len();
-    let preview_lines = select_tool_preview_lines(tool_name, &all_lines);
-    let hidden_lines = total_lines.saturating_sub(preview_lines.len());
+    let preview_lines = all_lines;
+    let hidden_lines = 0usize;
     let bytes = metadata
         .and_then(|value| value.bytes)
         .unwrap_or(original_bytes);
@@ -506,10 +500,7 @@ fn format_tool_preview_payload(
         );
     }
     if let Some(preview_value) = preview_value {
-        object.insert(
-            "preview_value".to_owned(),
-            compact_preview_value(&preview_value, 0),
-        );
+        object.insert("preview_value".to_owned(), preview_value);
     }
     if let Some((_, diff)) = diff_payload {
         object.insert("diff".to_owned(), diff);
@@ -940,79 +931,6 @@ fn agent_tool_preview_source(
             .or_else(|| Some(("text", String::new()))),
         "wait_agent" | "message_agent" | "close_agent" => Some(("text", String::new())),
         _ => None,
-    }
-}
-
-fn compact_preview_value(value: &serde_json::Value, depth: usize) -> serde_json::Value {
-    const MAX_DEPTH: usize = 3;
-    const MAX_ITEMS: usize = 10;
-    const MAX_STRING_CHARS: usize = 160;
-
-    match value {
-        serde_json::Value::Array(items) => {
-            if depth >= MAX_DEPTH {
-                return serde_json::Value::String(format!("… {} items", items.len()));
-            }
-            let limit = items.len().min(MAX_ITEMS);
-            let mut compacted = items
-                .iter()
-                .take(limit)
-                .map(|item| compact_preview_value(item, depth + 1))
-                .collect::<Vec<_>>();
-            if items.len() > limit {
-                compacted.push(serde_json::Value::String(format!(
-                    "… {} more items",
-                    items.len() - limit
-                )));
-            }
-            serde_json::Value::Array(compacted)
-        }
-        serde_json::Value::Object(object) => {
-            if depth >= MAX_DEPTH {
-                return serde_json::Value::String(format!("… {} keys", object.len()));
-            }
-            let limit = object.len().min(MAX_ITEMS);
-            let mut compacted = serde_json::Map::new();
-            for (key, nested) in object.iter().take(limit) {
-                compacted.insert(key.clone(), compact_preview_value(nested, depth + 1));
-            }
-            if object.len() > limit {
-                compacted.insert(
-                    "…".to_owned(),
-                    serde_json::Value::String(format!("{} more keys", object.len() - limit)),
-                );
-            }
-            serde_json::Value::Object(compacted)
-        }
-        serde_json::Value::String(text) => {
-            let truncated = text.chars().take(MAX_STRING_CHARS).collect::<String>();
-            if text.chars().count() > MAX_STRING_CHARS {
-                serde_json::Value::String(format!("{truncated}..."))
-            } else {
-                serde_json::Value::String(truncated)
-            }
-        }
-        _ => value.clone(),
-    }
-}
-
-fn select_tool_preview_lines(tool_name: &str, lines: &[String]) -> Vec<String> {
-    let limit = tool_preview_limit(tool_name);
-    if lines.len() <= limit {
-        return lines.to_vec();
-    }
-    if tool_name == "bash" {
-        return lines[lines.len().saturating_sub(limit)..].to_vec();
-    }
-    lines[..limit].to_vec()
-}
-
-fn tool_preview_limit(tool_name: &str) -> usize {
-    match tool_name {
-        "bash" => 16,
-        "read_file" => 18,
-        "grep" | "glob" | "ls" => 14,
-        _ => 12,
     }
 }
 

@@ -121,32 +121,6 @@ fn preview_helpers_cover_json_markdown_and_limits() {
     );
     assert_eq!(markdown_path_kind, "markdown");
 
-    let compacted = compact_preview_value(
-        &json!({
-            "items": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            "deep": { "nested": { "value": { "leaf": "x" } } },
-            "text": "a".repeat(200)
-        }),
-        0,
-    );
-    assert_eq!(compacted["items"][10], "… 1 more items");
-    assert_eq!(compacted["deep"]["nested"]["value"], "… 1 keys");
-    assert!(
-        compacted["text"]
-            .as_str()
-            .is_some_and(|text: &str| text.ends_with("..."))
-    );
-
-    let lines = (0..20)
-        .map(|index| format!("line {index}"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        select_tool_preview_lines("bash", &lines).first(),
-        Some(&"line 4".to_owned())
-    );
-    assert_eq!(tool_preview_limit("bash"), 16);
-    assert_eq!(tool_preview_limit("ls"), 14);
-    assert_eq!(tool_preview_limit("other"), 12);
     assert_eq!(
         format_tool_preview_summary("bash", 20, 16, 4, 2_048),
         "last 16/20 lines · 2.0 KB"

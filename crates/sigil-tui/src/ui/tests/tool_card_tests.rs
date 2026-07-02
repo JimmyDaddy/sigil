@@ -139,8 +139,8 @@ fn tool_card_parses_legacy_previews_and_mcp_metadata() {
     let mcp_card = build_tool_card_display(&mcp);
 
     assert!(markdown.preview_kind == ToolPreviewKind::Markdown);
-    assert_eq!(markdown.preview_lines.len(), 18);
-    assert_eq!(markdown.hidden_lines, 2);
+    assert_eq!(markdown.preview_lines.len(), 20);
+    assert_eq!(markdown.hidden_lines, 0);
 
     assert!(json_summary.preview_kind == ToolPreviewKind::Json);
     assert!(json_summary.preview_value.is_some());

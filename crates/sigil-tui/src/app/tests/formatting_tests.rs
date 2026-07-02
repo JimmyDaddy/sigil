@@ -205,6 +205,96 @@ fn read_file_results_use_markdown_preview_kind() -> Result<()> {
 }
 
 #[test]
+fn format_tool_result_block_redacted_keeps_full_preview_payloads_for_expansion() -> Result<()> {
+    let markdown_content = (1..=24)
+        .map(|line| {
+            if line == 1 {
+                "# Title".to_owned()
+            } else {
+                format!("- item {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let markdown_payload: serde_json::Value =
+        serde_json::from_str(&format_tool_result_block_redacted(
+            &ToolResult::ok(
+                "call-read-long",
+                "read_file",
+                markdown_content,
+                ToolResultMeta::default(),
+            ),
+            None,
+            &SecretRedactor::empty(),
+        ))?;
+    let markdown_lines = markdown_payload["preview_lines"]
+        .as_array()
+        .expect("read_file preview should preserve lines");
+    assert_eq!(markdown_lines.len(), 24);
+    assert_eq!(markdown_lines[23], "- item 24");
+    assert_eq!(markdown_payload["hidden_lines"], 0);
+    assert!(
+        markdown_payload["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("24 lines"))
+    );
+
+    let bash_content = (1..=30)
+        .map(|line| format!("bash line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bash_payload: serde_json::Value =
+        serde_json::from_str(&format_tool_result_block_redacted(
+            &ToolResult::ok(
+                "call-bash-long",
+                "bash",
+                bash_content,
+                ToolResultMeta::default(),
+            ),
+            None,
+            &SecretRedactor::empty(),
+        ))?;
+    let bash_lines = bash_payload["preview_lines"]
+        .as_array()
+        .expect("bash preview should preserve lines");
+    assert_eq!(bash_lines.len(), 30);
+    assert_eq!(bash_lines[0], "bash line 1");
+    assert_eq!(bash_lines[29], "bash line 30");
+    assert_eq!(bash_payload["hidden_lines"], 0);
+
+    let json_items = (1..=15)
+        .map(|index| json!({ "path": format!("file-{index}.rs") }))
+        .collect::<Vec<_>>();
+    let json_content = json!({ "items": json_items }).to_string();
+    let json_payload: serde_json::Value =
+        serde_json::from_str(&format_tool_result_block_redacted(
+            &ToolResult::ok(
+                "call-json-long",
+                "custom_tool",
+                json_content,
+                ToolResultMeta::default(),
+            ),
+            None,
+            &SecretRedactor::empty(),
+        ))?;
+    assert_eq!(
+        json_payload["preview_value"]["items"]
+            .as_array()
+            .map(Vec::len),
+        Some(15)
+    );
+    assert!(
+        json_payload["preview_lines"]
+            .as_array()
+            .is_some_and(|lines| lines
+                .iter()
+                .any(|line| line == "      \"path\": \"file-15.rs\""))
+    );
+    assert_eq!(json_payload["hidden_lines"], 0);
+    Ok(())
+}
+
+#[test]
 fn format_terminal_task_block_redacted_summarizes_failed_and_exited_statuses() -> Result<()> {
     let failed: serde_json::Value = serde_json::from_str(&format_terminal_task_block_redacted(
         &format_terminal_entry(
@@ -260,6 +350,34 @@ fn format_terminal_task_block_redacted_summarizes_failed_and_exited_statuses() -
         exited["metadata"]["details"]["terminal_task"]["cleanup"]["status"],
         "not_needed"
     );
+    Ok(())
+}
+
+#[test]
+fn format_terminal_task_block_redacted_keeps_full_output_preview_for_expansion() -> Result<()> {
+    let mut entry = format_terminal_entry(
+        "terminal-long-preview",
+        sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(0) },
+    )?;
+    entry.output_preview = Some(
+        (1..=24)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    let payload: serde_json::Value = serde_json::from_str(&format_terminal_task_block_redacted(
+        &entry,
+        &SecretRedactor::empty(),
+    ))?;
+
+    let preview_lines = payload["preview_lines"]
+        .as_array()
+        .expect("terminal payload should include preview lines");
+    assert_eq!(preview_lines.len(), 24);
+    assert_eq!(preview_lines[0], "line 1");
+    assert_eq!(preview_lines[23], "line 24");
+    assert_eq!(payload["hidden_lines"], 0);
     Ok(())
 }
 

@@ -1891,6 +1891,25 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
     assert!(read.metadata.truncated);
     assert_eq!(read.metadata.details["next_offset"], 3);
     assert_eq!(read.content, "012");
+    assert_eq!(read.metadata.details["content_returned"], true);
+
+    let summarized_read = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_read",
+                json!({ "task_id": "terminal-tool-read", "limit_bytes": 3 }),
+            ),
+        )
+        .await?;
+    assert!(matches!(summarized_read.status, ToolResultStatus::Ok));
+    assert!(!summarized_read.content.contains("012"));
+    assert!(summarized_read.content.contains("read omitted"));
+    assert_eq!(summarized_read.metadata.returned_bytes, Some(3));
+    assert_eq!(summarized_read.metadata.omitted_bytes, Some(3));
+    assert_eq!(summarized_read.metadata.returned_lines, Some(0));
+    assert_eq!(summarized_read.metadata.details["content_returned"], false);
+    assert_eq!(summarized_read.metadata.details["content_omitted"], true);
 
     let shell = test_shell(temp.path())?;
     registry
@@ -1963,7 +1982,11 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
     }
     let read = latest.expect("terminal_read should eventually report terminal task status");
 
-    assert_eq!(read.content, "0123456789");
+    assert!(read.content.contains("read omitted from model context"));
+    assert!(!read.content.contains("0123456789"));
+    assert_eq!(read.metadata.omitted_bytes, Some(10));
+    assert_eq!(read.metadata.details["content_returned"], false);
+    assert_eq!(read.metadata.details["content_omitted"], true);
     assert_eq!(
         read.metadata.details["terminal_task"]["task_id"],
         "terminal-read-status"
@@ -1973,6 +1996,24 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
         read.metadata.details["terminal_task"]["status_detail"]["exit_code"],
         0
     );
+
+    let raw_read = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_read",
+                json!({
+                    "task_id": "terminal-read-status",
+                    "limit_bytes": 10,
+                    "include_content": true
+                }),
+            ),
+        )
+        .await?;
+    assert_eq!(raw_read.content, "0123456789");
+    assert_eq!(raw_read.metadata.omitted_bytes, None);
+    assert_eq!(raw_read.metadata.details["content_returned"], true);
+    assert_eq!(raw_read.metadata.details["content_omitted"], false);
     Ok(())
 }
 
@@ -2012,7 +2053,148 @@ async fn terminal_start_foreground_waits_and_returns_final_facts() -> Result<()>
         result.metadata.details["shell_analysis"]["verdict"],
         "passed"
     );
-    assert!(result.content.contains("foreground-ok"));
+    assert!(
+        result
+            .metadata
+            .details
+            .get("output_preview")
+            .is_some_and(|preview| preview.as_str() == Some("foreground-ok"))
+    );
+    assert!(!result.content.contains("foreground-ok"));
+    let model_content: serde_json::Value = serde_json::from_str(&result.to_model_content())?;
+    assert_eq!(
+        model_content["meta"]["details"]["output_preview"]["omitted"],
+        true
+    );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_start_foreground_uses_long_task_timeout_contract() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let result = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-foreground-long-contract",
+                    "command": "sleep 2; printf foreground-late-ok",
+                    "shell": shell,
+                    "mode": "foreground"
+                }),
+            ),
+        )
+        .await?;
+
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert_eq!(result.metadata.exit_code, Some(0));
+    assert_eq!(result.metadata.details["verdict"], "passed");
+    assert_eq!(result.metadata.details["rerun_not_needed"], true);
+    assert_eq!(result.metadata.details["foreground_timeout_secs"], 1800);
+    assert_eq!(
+        result.metadata.details["foreground_inactivity_timeout_secs"],
+        300
+    );
+    assert!(
+        result
+            .metadata
+            .details
+            .get("output_preview")
+            .is_some_and(|preview| preview.as_str() == Some("foreground-late-ok"))
+    );
+    assert!(!result.content.contains("foreground-late-ok"));
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_start_foreground_explicit_total_timeout_cancels_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 30);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let result = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-foreground-total-timeout",
+                    "command": "sleep 5; printf never",
+                    "shell": shell,
+                    "mode": "foreground",
+                    "foreground_timeout_secs": 1,
+                    "foreground_inactivity_timeout_secs": 10
+                }),
+            ),
+        )
+        .await?;
+
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("expected foreground timeout to surface as an error result");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Timeout);
+    assert_eq!(result.metadata.details["verdict"], "timed_out");
+    assert_eq!(result.metadata.details["timeout_kind"], "total");
+    assert_eq!(result.metadata.details["foreground_timeout_secs"], 1);
+    assert_eq!(result.metadata.details["rerun_not_needed"], false);
+    assert!(result.content.contains("timeout_kind: total"));
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_start_foreground_explicit_inactivity_timeout_cancels_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 30);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let result = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-foreground-inactivity-timeout",
+                    "command": "sleep 5; printf never",
+                    "shell": shell,
+                    "mode": "foreground",
+                    "foreground_timeout_secs": 10,
+                    "foreground_inactivity_timeout_secs": 1
+                }),
+            ),
+        )
+        .await?;
+
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("expected foreground inactivity timeout to surface as an error result");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Timeout);
+    assert_eq!(result.metadata.details["verdict"], "inactive_timeout");
+    assert_eq!(result.metadata.details["timeout_kind"], "inactivity");
+    assert_eq!(
+        result.metadata.details["shell_analysis"]["timeout_kind"],
+        "inactivity"
+    );
+    assert_eq!(
+        result.metadata.details["foreground_inactivity_timeout_secs"],
+        1
+    );
+    assert!(result.content.contains("timeout_kind: inactivity"));
     Ok(())
 }
 
@@ -4376,7 +4558,11 @@ async fn wait_for_terminal_read(
                 ctx.clone(),
                 tool_call(
                     "terminal_read",
-                    json!({ "task_id": task_id, "limit_bytes": limit_bytes }),
+                    json!({
+                        "task_id": task_id,
+                        "limit_bytes": limit_bytes,
+                        "include_content": true
+                    }),
                 ),
             )
             .await?;
@@ -4390,7 +4576,11 @@ async fn wait_for_terminal_read(
             ctx,
             tool_call(
                 "terminal_read",
-                json!({ "task_id": task_id, "limit_bytes": limit_bytes }),
+                json!({
+                    "task_id": task_id,
+                    "limit_bytes": limit_bytes,
+                    "include_content": true
+                }),
             ),
         )
         .await
@@ -4408,7 +4598,11 @@ async fn wait_for_terminal_read_contains(
                 ctx.clone(),
                 tool_call(
                     "terminal_read",
-                    json!({ "task_id": task_id, "limit_bytes": 1024 }),
+                    json!({
+                        "task_id": task_id,
+                        "limit_bytes": 1024,
+                        "include_content": true
+                    }),
                 ),
             )
             .await?;
@@ -4422,7 +4616,11 @@ async fn wait_for_terminal_read_contains(
             ctx,
             tool_call(
                 "terminal_read",
-                json!({ "task_id": task_id, "limit_bytes": 1024 }),
+                json!({
+                    "task_id": task_id,
+                    "limit_bytes": 1024,
+                    "include_content": true
+                }),
             ),
         )
         .await

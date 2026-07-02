@@ -1065,6 +1065,66 @@ fn tool_result_serializes_error_message_meta_and_summary() {
 }
 
 #[test]
+fn tool_result_model_content_omits_ui_only_and_oversized_details() {
+    let long_detail = "detail-".repeat(900);
+    let output_preview = "terminal output\n".repeat(300);
+    let mut result = ToolResult::error(
+        "call-terminal",
+        "terminal_start",
+        ToolErrorKind::ExitStatus,
+        "terminal failed",
+    )
+    .with_error_details(
+        true,
+        json!({
+            "output_preview": output_preview,
+            "nested": {
+                "large_text": long_detail
+            }
+        }),
+    );
+    result.metadata = ToolResultMeta {
+        details: json!({
+            "output_preview": "ui visible terminal output",
+            "status": "exited",
+            "nested": {
+                "output_preview": "nested ui visible output"
+            }
+        }),
+        ..ToolResultMeta::default()
+    };
+
+    let content: serde_json::Value =
+        serde_json::from_str(&result.to_model_content()).expect("tool result should serialize");
+
+    assert_eq!(
+        result.metadata.details["output_preview"],
+        "ui visible terminal output"
+    );
+    assert_eq!(
+        content["meta"]["details"]["output_preview"]["omitted"],
+        true
+    );
+    assert_eq!(
+        content["meta"]["details"]["output_preview"]["reason"],
+        "ui_artifact_only"
+    );
+    assert_eq!(
+        content["meta"]["details"]["nested"]["output_preview"]["omitted"],
+        true
+    );
+    assert_eq!(
+        content["error"]["details"]["output_preview"]["omitted"],
+        true
+    );
+    assert_eq!(
+        content["error"]["details"]["nested"]["large_text"]["reason"],
+        "model_context_limit"
+    );
+    assert!(!content.to_string().contains("ui visible terminal output"));
+}
+
+#[test]
 fn bounded_diff_and_meta_helpers_cover_zero_budgets_and_empty_values() {
     let bounded = super::bounded_diff_text("@@ -1 +1 @@\n-a\n+b", 0, 32);
     assert!(bounded.truncated);

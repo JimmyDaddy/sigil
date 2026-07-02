@@ -37,6 +37,8 @@ use crate::{
 
 const FOREGROUND_TERMINAL_POLL_INTERVAL_MS: u64 = 500;
 const FOREGROUND_TERMINAL_PROGRESS_LIMIT_BYTES: usize = 12 * 1024;
+const DEFAULT_FOREGROUND_TERMINAL_TIMEOUT_SECS: u64 = 30 * 60;
+const DEFAULT_FOREGROUND_TERMINAL_INACTIVITY_TIMEOUT_SECS: u64 = 5 * 60;
 
 pub(crate) struct TerminalStartTool {
     pub(crate) managers: Arc<TerminalProcessManagers>,
@@ -132,7 +134,15 @@ impl Tool for TerminalStartTool {
                     },
                     "pty": { "type": "boolean" },
                     "rows": { "type": "integer" },
-                    "cols": { "type": "integer" }
+                    "cols": { "type": "integer" },
+                    "foreground_timeout_secs": {
+                        "type": "integer",
+                        "description": "Foreground-only total timeout. Defaults to 1800 seconds and is independent from the short tool-call timeout."
+                    },
+                    "foreground_inactivity_timeout_secs": {
+                        "type": "integer",
+                        "description": "Foreground-only no-output/no-status-change timeout. Defaults to 300 seconds."
+                    }
                 },
                 "required": ["command"]
             }),
@@ -211,6 +221,7 @@ impl Tool for TerminalStartTool {
                 entry,
                 &analysis,
                 execution_mode,
+                args.foreground_timeouts,
             )
             .await;
         }
@@ -235,7 +246,11 @@ impl Tool for TerminalReadTool {
                 "properties": {
                     "task_id": { "type": "string" },
                     "offset": { "type": "integer" },
-                    "limit_bytes": { "type": "integer" }
+                    "limit_bytes": { "type": "integer" },
+                    "include_content": {
+                        "type": "boolean",
+                        "description": "Return the raw output slice in the tool result content. Defaults to false so polling a long terminal task only returns structured facts and a log reference."
+                    }
                 },
                 "required": ["task_id"]
             }),
@@ -254,6 +269,10 @@ impl Tool for TerminalReadTool {
         let task_id = required_terminal_task_id(&args)?;
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
         let limit_bytes = terminal_read_limit(&args)?;
+        let include_content = args
+            .get("include_content")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let manager = self.managers.manager_for(
             &ctx.workspace_root,
             &self.artifact_root,
@@ -263,15 +282,20 @@ impl Tool for TerminalReadTool {
         Ok(ToolResult::ok(
             call_id,
             self.spec().name,
-            read.content.clone(),
+            terminal_read_content(&read, include_content),
             ToolResultMeta {
                 bytes: Some(read.total_bytes),
                 truncated: read.truncated,
                 limit_bytes: Some(limit_bytes as u64),
                 returned_bytes: Some(read.returned_bytes),
+                omitted_bytes: (!include_content).then_some(read.returned_bytes),
                 total_bytes: Some(read.total_bytes),
-                returned_lines: Some(read.content.lines().count() as u64),
-                details: terminal_read_details(&read, limit_bytes),
+                returned_lines: Some(if include_content {
+                    read.content.lines().count() as u64
+                } else {
+                    0
+                }),
+                details: terminal_read_details(&read, limit_bytes, include_content),
                 ..ToolResultMeta::default()
             },
         ))
@@ -540,6 +564,7 @@ pub(crate) struct TerminalStartArgs {
     mode: Option<TerminalStartExecutionMode>,
     pty: bool,
     pty_size: Option<TerminalPtySize>,
+    foreground_timeouts: ForegroundTerminalTimeouts,
 }
 
 pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArgs> {
@@ -558,6 +583,7 @@ pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArg
     } else {
         None
     };
+    let foreground_timeouts = ForegroundTerminalTimeouts::from_args(args)?;
     Ok(TerminalStartArgs {
         task_id,
         command,
@@ -566,7 +592,71 @@ pub(crate) fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArg
         mode,
         pty,
         pty_size,
+        foreground_timeouts,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForegroundTerminalTimeouts {
+    total: Duration,
+    inactivity: Duration,
+}
+
+impl ForegroundTerminalTimeouts {
+    fn from_args(args: &Value) -> Result<Self> {
+        let total_secs = optional_positive_u64(args, "foreground_timeout_secs")?
+            .unwrap_or(DEFAULT_FOREGROUND_TERMINAL_TIMEOUT_SECS);
+        let inactivity_secs = optional_positive_u64(args, "foreground_inactivity_timeout_secs")?
+            .unwrap_or(DEFAULT_FOREGROUND_TERMINAL_INACTIVITY_TIMEOUT_SECS);
+        Ok(Self {
+            total: Duration::from_secs(total_secs),
+            inactivity: Duration::from_secs(inactivity_secs),
+        })
+    }
+
+    fn total_secs(self) -> u64 {
+        self.total.as_secs()
+    }
+
+    fn inactivity_secs(self) -> u64 {
+        self.inactivity.as_secs()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundTerminalTimeoutKind {
+    Total,
+    Inactivity,
+}
+
+impl ForegroundTerminalTimeoutKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Total => "total",
+            Self::Inactivity => "inactivity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ForegroundTerminalProgress<'a> {
+    output_preview: Option<&'a str>,
+    total_bytes: Option<u64>,
+    verdict_override: Option<&'a str>,
+    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
+}
+
+fn optional_positive_u64(args: &Value, key: &str) -> Result<Option<u64>> {
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_u64() else {
+        bail!("{key} must be a positive integer");
+    };
+    if value == 0 {
+        bail!("{key} must be greater than 0");
+    }
+    Ok(Some(value))
 }
 
 fn resolve_terminal_start_execution_mode(
@@ -694,9 +784,10 @@ async fn wait_for_foreground_terminal(
     entry: TerminalTaskEntry,
     analysis: &ShellCommandAnalysis,
     execution_mode: TerminalStartExecutionMode,
+    timeouts: ForegroundTerminalTimeouts,
 ) -> Result<ToolResult> {
     let started = Instant::now();
-    let timeout_after = Duration::from_secs(ctx.timeout_secs.max(1));
+    let mut last_activity = started;
     let task_id = entry.handle.task_id.clone();
     let read_limit =
         FOREGROUND_TERMINAL_PROGRESS_LIMIT_BYTES.clamp(1, HARD_TERMINAL_READ_LIMIT_BYTES);
@@ -712,9 +803,8 @@ async fn wait_for_foreground_terminal(
         &latest,
         analysis,
         execution_mode,
-        None,
-        None,
-        None,
+        timeouts,
+        ForegroundTerminalProgress::default(),
     )?;
 
     loop {
@@ -726,12 +816,14 @@ async fn wait_for_foreground_terminal(
                 analysis,
                 execution_mode,
                 elapsed_millis(started),
+                timeouts,
+                None,
                 None,
                 None,
             ));
         }
 
-        if started.elapsed() >= timeout_after {
+        if started.elapsed() >= timeouts.total {
             let cancelled = manager
                 .cancel(&task_id)
                 .await
@@ -746,9 +838,12 @@ async fn wait_for_foreground_terminal(
                 &cancelled,
                 analysis,
                 execution_mode,
-                None,
-                None,
-                Some("timed_out"),
+                timeouts,
+                ForegroundTerminalProgress {
+                    verdict_override: Some("timed_out"),
+                    timeout_kind: Some(ForegroundTerminalTimeoutKind::Total),
+                    ..ForegroundTerminalProgress::default()
+                },
             )?;
             return Ok(terminal_foreground_result(
                 call_id,
@@ -757,12 +852,55 @@ async fn wait_for_foreground_terminal(
                 analysis,
                 execution_mode,
                 duration_ms,
+                timeouts,
                 Some("timed_out"),
+                Some(ForegroundTerminalTimeoutKind::Total),
                 Some(ToolErrorKind::Timeout),
             ));
         }
 
-        sleep(Duration::from_millis(FOREGROUND_TERMINAL_POLL_INTERVAL_MS)).await;
+        if last_activity.elapsed() >= timeouts.inactivity {
+            let cancelled = manager
+                .cancel(&task_id)
+                .await
+                .unwrap_or_else(|_| latest.clone());
+            sequence = sequence.saturating_add(1);
+            let duration_ms = elapsed_millis(started);
+            emit_terminal_progress(
+                ctx,
+                &call_id,
+                &tool_name,
+                sequence,
+                &cancelled,
+                analysis,
+                execution_mode,
+                timeouts,
+                ForegroundTerminalProgress {
+                    verdict_override: Some("inactive_timeout"),
+                    timeout_kind: Some(ForegroundTerminalTimeoutKind::Inactivity),
+                    ..ForegroundTerminalProgress::default()
+                },
+            )?;
+            return Ok(terminal_foreground_result(
+                call_id,
+                tool_name,
+                cancelled,
+                analysis,
+                execution_mode,
+                duration_ms,
+                timeouts,
+                Some("inactive_timeout"),
+                Some(ForegroundTerminalTimeoutKind::Inactivity),
+                Some(ToolErrorKind::Timeout),
+            ));
+        }
+
+        let poll_delay = Duration::from_millis(FOREGROUND_TERMINAL_POLL_INTERVAL_MS)
+            .min(timeouts.total.saturating_sub(started.elapsed()))
+            .min(timeouts.inactivity.saturating_sub(last_activity.elapsed()));
+        if !poll_delay.is_zero() {
+            sleep(poll_delay).await;
+        }
         let previous_status = latest.status.clone();
         let read = manager.read(&task_id, next_offset, read_limit).await?;
         next_offset = read.next_offset.unwrap_or(read.total_bytes);
@@ -773,6 +911,7 @@ async fn wait_for_foreground_terminal(
             || latest.status != previous_status
             || latest.status.is_terminal()
         {
+            last_activity = Instant::now();
             sequence = sequence.saturating_add(1);
             emit_terminal_progress(
                 ctx,
@@ -782,9 +921,12 @@ async fn wait_for_foreground_terminal(
                 &latest,
                 analysis,
                 execution_mode,
-                (!read.content.is_empty()).then_some(read.content.as_str()),
-                Some(read.total_bytes),
-                None,
+                timeouts,
+                ForegroundTerminalProgress {
+                    output_preview: (!read.content.is_empty()).then_some(read.content.as_str()),
+                    total_bytes: Some(read.total_bytes),
+                    ..ForegroundTerminalProgress::default()
+                },
             )?;
         }
     }
@@ -798,9 +940,8 @@ fn emit_terminal_progress(
     entry: &TerminalTaskEntry,
     analysis: &ShellCommandAnalysis,
     execution_mode: TerminalStartExecutionMode,
-    output_preview: Option<&str>,
-    total_bytes: Option<u64>,
-    verdict_override: Option<&str>,
+    timeouts: ForegroundTerminalTimeouts,
+    progress: ForegroundTerminalProgress<'_>,
 ) -> Result<()> {
     ctx.emit_progress(ToolProgressEvent {
         execution_id: entry.handle.task_id.as_str().to_owned(),
@@ -813,15 +954,17 @@ fn emit_terminal_progress(
             entry.handle.task_id.as_str(),
             entry.status.as_str()
         )),
-        output_preview: output_preview.map(str::to_owned),
+        output_preview: progress.output_preview.map(str::to_owned),
         output_log_ref: Some(entry.handle.log_path.clone()),
-        total_bytes,
+        total_bytes: progress.total_bytes,
         updated_at_ms: Some(entry.updated_at_ms),
         details: terminal_entry_details_with_execution_mode(
             entry,
             Some(analysis),
             execution_mode,
-            verdict_override,
+            Some(timeouts),
+            progress.verdict_override,
+            progress.timeout_kind,
         ),
     })
 }
@@ -833,21 +976,29 @@ fn terminal_foreground_result(
     analysis: &ShellCommandAnalysis,
     execution_mode: TerminalStartExecutionMode,
     duration_ms: u64,
+    timeouts: ForegroundTerminalTimeouts,
     verdict_override: Option<&str>,
+    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
     error_kind_override: Option<ToolErrorKind>,
 ) -> ToolResult {
     let exit_code = terminal_exit_code(&entry.status);
     let verdict = verdict_override.unwrap_or_else(|| terminal_verdict(&entry.status));
     let rerun_not_needed = matches!(verdict, "passed" | "failed");
-    let mut details =
-        terminal_entry_details_with_execution_mode(&entry, Some(analysis), execution_mode, None);
+    let mut details = terminal_entry_details_with_execution_mode(
+        &entry,
+        Some(analysis),
+        execution_mode,
+        Some(timeouts),
+        None,
+        timeout_kind,
+    );
     set_terminal_details_verdict(&mut details, verdict, rerun_not_needed);
     if let Some(object) = details.as_object_mut() {
         object.insert("duration_ms".to_owned(), json!(duration_ms));
         object.insert("output_log_ref".to_owned(), json!(&entry.handle.log_path));
     }
 
-    let content = terminal_foreground_content(&entry, verdict, duration_ms);
+    let content = terminal_foreground_content(&entry, verdict, duration_ms, timeout_kind);
     let metadata = ToolResultMeta {
         duration_ms: Some(duration_ms),
         exit_code,
@@ -872,6 +1023,7 @@ fn terminal_foreground_content(
     entry: &TerminalTaskEntry,
     verdict: &str,
     duration_ms: u64,
+    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
 ) -> String {
     let mut lines = vec![format!(
         "terminal task {} {} · verdict {} · {} ms",
@@ -883,17 +1035,22 @@ fn terminal_foreground_content(
     if let Some(code) = terminal_exit_code(&entry.status) {
         lines.push(format!("exit_code: {code}"));
     }
+    if let Some(timeout_kind) = timeout_kind {
+        lines.push(format!("timeout_kind: {}", timeout_kind.as_str()));
+    }
     lines.push(format!("log: {}", entry.handle.log_path.display()));
     if entry.output_truncated {
         lines.push("output_truncated: true".to_owned());
     }
-    if let Some(preview) = entry
+    if entry
         .output_preview
         .as_deref()
-        .filter(|preview| !preview.is_empty())
+        .is_some_and(|preview| !preview.is_empty())
     {
-        lines.push(String::new());
-        lines.push(preview.to_owned());
+        lines.push(
+            "output_preview: omitted from model context; inspect the log artifact if needed"
+                .to_owned(),
+        );
     }
     lines.join("\n")
 }
@@ -996,7 +1153,9 @@ fn terminal_entry_details_with_execution_mode(
     entry: &TerminalTaskEntry,
     analysis: Option<&ShellCommandAnalysis>,
     execution_mode: TerminalStartExecutionMode,
+    foreground_timeouts: Option<ForegroundTerminalTimeouts>,
     verdict_override: Option<&str>,
+    timeout_kind: Option<ForegroundTerminalTimeoutKind>,
 ) -> Value {
     let mut details = terminal_entry_details(entry, analysis);
     let verdict = verdict_override.unwrap_or_else(|| terminal_verdict(&entry.status));
@@ -1015,6 +1174,19 @@ fn terminal_entry_details_with_execution_mode(
         object.insert("output_log_ref".to_owned(), json!(&entry.handle.log_path));
         object.insert("tail_available".to_owned(), json!(false));
         object.insert("rerun_not_needed".to_owned(), json!(rerun_not_needed));
+        if let Some(timeouts) = foreground_timeouts {
+            object.insert(
+                "foreground_timeout_secs".to_owned(),
+                json!(timeouts.total_secs()),
+            );
+            object.insert(
+                "foreground_inactivity_timeout_secs".to_owned(),
+                json!(timeouts.inactivity_secs()),
+            );
+            if let Some(timeout_kind) = timeout_kind {
+                object.insert("timeout_kind".to_owned(), json!(timeout_kind.as_str()));
+            }
+        }
         if let Some(shell) = object
             .get_mut("shell_analysis")
             .and_then(serde_json::Value::as_object_mut)
@@ -1023,6 +1195,19 @@ fn terminal_entry_details_with_execution_mode(
                 "exit_code".to_owned(),
                 json!(terminal_exit_code(&entry.status)),
             );
+            if let Some(timeouts) = foreground_timeouts {
+                shell.insert(
+                    "foreground_timeout_secs".to_owned(),
+                    json!(timeouts.total_secs()),
+                );
+                shell.insert(
+                    "foreground_inactivity_timeout_secs".to_owned(),
+                    json!(timeouts.inactivity_secs()),
+                );
+                if let Some(timeout_kind) = timeout_kind {
+                    shell.insert("timeout_kind".to_owned(), json!(timeout_kind.as_str()));
+                }
+            }
         }
     }
     set_terminal_details_verdict(&mut details, verdict, rerun_not_needed);
@@ -1104,7 +1289,11 @@ pub(crate) fn is_terminal_backend_unsupported(error: &anyhow::Error) -> bool {
         || message.contains("backend does not support resize")
 }
 
-pub(crate) fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usize) -> Value {
+pub(crate) fn terminal_read_details(
+    read: &TerminalReadResult,
+    limit_bytes: usize,
+    include_content: bool,
+) -> Value {
     let mut details = json!({
         "task_id": read.task_id.as_str(),
         "offset": read.offset,
@@ -1112,7 +1301,9 @@ pub(crate) fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usiz
         "returned_bytes": read.returned_bytes,
         "total_bytes": read.total_bytes,
         "limit_bytes": limit_bytes,
-        "truncated": read.truncated
+        "truncated": read.truncated,
+        "content_returned": include_content,
+        "content_omitted": !include_content
     });
     if let Some(entry) = &read.latest_entry
         && let Some(object) = details.as_object_mut()
@@ -1123,4 +1314,31 @@ pub(crate) fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usiz
         );
     }
     details
+}
+
+pub(crate) fn terminal_read_content(read: &TerminalReadResult, include_content: bool) -> String {
+    if include_content {
+        return read.content.clone();
+    }
+    let mut lines = vec![format!(
+        "terminal task {} read omitted from model context",
+        read.task_id.as_str()
+    )];
+    lines.push(format!("offset: {}", read.offset));
+    if let Some(next_offset) = read.next_offset {
+        lines.push(format!("next_offset: {next_offset}"));
+    }
+    lines.push(format!("returned_bytes: {}", read.returned_bytes));
+    lines.push(format!("total_bytes: {}", read.total_bytes));
+    if read.truncated {
+        lines.push("truncated: true".to_owned());
+    }
+    if let Some(entry) = &read.latest_entry {
+        lines.push(format!("status: {}", entry.status.as_str()));
+        lines.push(format!("log: {}", entry.handle.log_path.display()));
+    }
+    lines.push(
+        "pass include_content=true to read a bounded raw output page for diagnosis".to_owned(),
+    );
+    lines.join("\n")
 }

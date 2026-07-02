@@ -1134,7 +1134,8 @@ async fn wait_for_terminal_output(
                     name: "terminal_read".to_owned(),
                     args_json: serde_json::json!({
                         "task_id": task_id,
-                        "limit_bytes": 1024
+                        "limit_bytes": 1024,
+                        "include_content": true
                     })
                     .to_string(),
                 },

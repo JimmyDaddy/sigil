@@ -186,7 +186,7 @@ pub(super) fn legacy_tool_preview_kind(value: &serde_json::Value) -> ToolPreview
 
 pub(super) fn legacy_tool_preview(
     value: Option<&serde_json::Value>,
-    preview_kind: ToolPreviewKind,
+    _preview_kind: ToolPreviewKind,
 ) -> (Vec<String>, usize) {
     let Some(value) = value else {
         return (Vec::new(), 0);
@@ -198,15 +198,8 @@ pub(super) fn legacy_tool_preview(
         serde_json::Value::String(text) => text.clone(),
         _ => value.to_string(),
     };
-    let limit = match preview_kind {
-        ToolPreviewKind::Markdown => 18,
-        ToolPreviewKind::Json | ToolPreviewKind::Code => 12,
-        ToolPreviewKind::Text => 12,
-    };
     let lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
-    let hidden_lines = lines.len().saturating_sub(limit);
-    let preview_lines = lines.into_iter().take(limit).collect::<Vec<_>>();
-    (preview_lines, hidden_lines)
+    (lines, 0)
 }
 
 pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {

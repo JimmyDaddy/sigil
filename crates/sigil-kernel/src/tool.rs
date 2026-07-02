@@ -593,7 +593,7 @@ impl ToolError {
         object.insert("message".to_owned(), Value::String(self.message.clone()));
         object.insert("retryable".to_owned(), Value::Bool(self.retryable));
         if !value_is_empty(&self.details) {
-            object.insert("details".to_owned(), self.details.clone());
+            object.insert("details".to_owned(), model_visible_details(&self.details));
         }
         Value::Object(object)
     }
@@ -1034,10 +1034,63 @@ impl ToolResultMeta {
             );
         }
         if !value_is_empty(&self.details) {
-            object.insert("details".to_owned(), self.details.clone());
+            object.insert("details".to_owned(), model_visible_details(&self.details));
         }
         (!object.is_empty()).then_some(Value::Object(object))
     }
+}
+
+fn model_visible_details(value: &Value) -> Value {
+    const MODEL_DETAIL_STRING_LIMIT: usize = 4096;
+    const MODEL_DETAIL_STRING_PREVIEW: usize = 240;
+
+    fn omitted_string_metadata(text: &str, reason: &str, include_preview: bool) -> Value {
+        let mut object = Map::new();
+        object.insert("omitted".to_owned(), Value::Bool(true));
+        object.insert("reason".to_owned(), Value::String(reason.to_owned()));
+        object.insert(
+            "bytes".to_owned(),
+            Value::Number((text.len() as u64).into()),
+        );
+        object.insert(
+            "chars".to_owned(),
+            Value::Number((text.chars().count() as u64).into()),
+        );
+        object.insert(
+            "lines".to_owned(),
+            Value::Number((text.lines().count() as u64).into()),
+        );
+        if include_preview {
+            object.insert(
+                "preview".to_owned(),
+                Value::String(text.chars().take(MODEL_DETAIL_STRING_PREVIEW).collect()),
+            );
+        }
+        Value::Object(object)
+    }
+
+    fn sanitize(key: Option<&str>, value: &Value) -> Value {
+        match value {
+            Value::String(text) if key == Some("output_preview") => {
+                omitted_string_metadata(text, "ui_artifact_only", false)
+            }
+            Value::String(text) if text.len() > MODEL_DETAIL_STRING_LIMIT => {
+                omitted_string_metadata(text, "model_context_limit", true)
+            }
+            Value::Array(values) => {
+                Value::Array(values.iter().map(|value| sanitize(None, value)).collect())
+            }
+            Value::Object(values) => Value::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), sanitize(Some(key.as_str()), value)))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+
+    sanitize(None, value)
 }
 
 fn insert_i32(object: &mut Map<String, Value>, key: &str, value: Option<i32>) {
