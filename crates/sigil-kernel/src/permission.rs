@@ -306,7 +306,10 @@ impl PermissionDecision {
     ) -> Self {
         let risk = derive_permission_risk(access, operation, &subject_zones);
         let mode = apply_operation_risk_overlay(mode, operation, risk);
-        let confirmation = confirmation_for_risk(risk, &subject_zones);
+        let confirmation = confirmation_for_risk(risk, &subject_zones).or_else(|| {
+            (access == ToolAccess::Write && subject_zones.contains(&PathTrustZone::External))
+                .then_some(PermissionConfirmation::TypePath)
+        });
         let snapshot_required = matches!(risk, PermissionRisk::Destructive);
         Self {
             mode,
@@ -784,6 +787,75 @@ pub fn derive_permission_risk(
 /// Applies safety overlays that no allow source can bypass.
 pub fn apply_risk_overlay(mode: ApprovalMode, risk: PermissionRisk) -> ApprovalMode {
     apply_operation_risk_overlay(mode, ToolOperation::Read, risk)
+}
+
+/// Returns true when an interactive approval can safely be widened to a session-local grant.
+pub fn tool_approval_session_grant_available(decision: &PermissionDecision) -> bool {
+    tool_approval_session_grant_available_for_parts(
+        decision.access,
+        decision.operation,
+        decision.risk,
+        &decision.subjects,
+        &decision.subject_zones,
+        decision.confirmation.as_ref(),
+        decision.snapshot_required,
+    )
+}
+
+/// Returns true when the supplied approval metadata can safely be widened to a session-local
+/// grant. This helper is shared by the kernel executor and TUI so the UI does not advertise
+/// a grant action that the executor would reject.
+pub fn tool_approval_session_grant_available_for_parts(
+    access: ToolAccess,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    subjects: &[ToolSubject],
+    zones: &[PathTrustZone],
+    confirmation: Option<&PermissionConfirmation>,
+    snapshot_required: bool,
+) -> bool {
+    if confirmation.is_some() || snapshot_required || subjects.is_empty() {
+        return false;
+    }
+    if !matches!(risk, PermissionRisk::Low | PermissionRisk::Medium) {
+        return false;
+    }
+    if zones.contains(&PathTrustZone::External) && access != ToolAccess::Read {
+        return false;
+    }
+    if !matches!(
+        operation,
+        ToolOperation::Read
+            | ToolOperation::Search
+            | ToolOperation::CreateFile
+            | ToolOperation::EditFile
+            | ToolOperation::OverwriteFile
+            | ToolOperation::CreateDirectory
+            | ToolOperation::ExecuteReadOnlyCommand
+    ) {
+        return false;
+    }
+    subjects
+        .iter()
+        .all(|subject| subject_has_stable_session_grant_scope(subject, operation))
+}
+
+fn subject_has_stable_session_grant_scope(subject: &ToolSubject, operation: ToolOperation) -> bool {
+    match subject.kind {
+        ToolSubjectKind::Path => match subject.scope {
+            ToolSubjectScope::Workspace => !subject.normalized.trim().is_empty(),
+            ToolSubjectScope::External => subject
+                .canonical_path
+                .as_ref()
+                .is_some_and(|path| !path.as_os_str().is_empty()),
+            ToolSubjectScope::Unknown => false,
+        },
+        ToolSubjectKind::Command => {
+            operation == ToolOperation::ExecuteReadOnlyCommand
+                && !subject.normalized.trim().is_empty()
+        }
+        _ => false,
+    }
 }
 
 fn apply_operation_risk_overlay(

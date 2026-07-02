@@ -39,7 +39,7 @@ use sigil_kernel::{
     MutationArtifactInventoryItem, MutationArtifactRetentionReport, PlanApprovalPermission,
     PlanDraftCreatedEntry, PlanTaskStartMode, ReasoningEffort, RootConfig, SecretRedactor, Session,
     SessionConfig, SessionLogEntry, SessionStats, StorageConfig, TaskStateProjection,
-    TerminalKeyboardEnhancement, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
+    TerminalKeyboardEnhancement, ToolPreviewSnapshot, resolve_workspace_root,
 };
 use sigil_runtime::{
     BalanceSnapshot, ContextWindowSource, SigilPaths, effective_compaction_config,
@@ -221,6 +221,9 @@ pub(crate) struct PendingPlanApproval {
     pub(crate) plan_text: String,
     pub(crate) plan_hash: String,
     pub(crate) summary: String,
+    pub(crate) steps: Vec<String>,
+    pub(crate) target_paths: Vec<String>,
+    pub(crate) suggested_checks: Vec<String>,
     pub(crate) target_path_count: usize,
     pub(crate) suggested_check_count: usize,
 }
@@ -374,6 +377,9 @@ pub enum AppAction {
     ApprovalDecision {
         call_id: String,
         approved: bool,
+    },
+    ApprovalSessionDecision {
+        call_id: String,
     },
     ApprovalDecisionWithArgs {
         call_id: String,
@@ -1134,6 +1140,9 @@ impl AppState {
             KeyCode::Left if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 self.cycle_composer_queue_action(false);
             }
+            KeyCode::Tab if self.active_pane == PaneFocus::Composer && key.modifiers.is_empty() => {
+                self.focus_composer_queue_panel();
+            }
             KeyCode::Tab => {}
             KeyCode::BackTab if self.approval.pending.is_none() => {
                 return self.toggle_runtime_permission_mode();
@@ -1159,18 +1168,10 @@ impl AppState {
                 return Ok(self.move_selected_queue_item(QueueMoveDirection::Down));
             }
             KeyCode::Up if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                if self.selected_composer_queue_is_first() {
-                    self.blur_composer_queue_panel();
-                } else {
-                    self.move_composer_queue_selection(false);
-                }
+                self.move_composer_queue_selection(false);
             }
             KeyCode::Down if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
-                if self.selected_composer_queue_is_last() && self.focus_composer_agent_panel() {
-                    self.blur_composer_queue_panel();
-                } else {
-                    self.move_composer_queue_selection(true);
-                }
+                self.move_composer_queue_selection(true);
             }
             KeyCode::Esc if self.composer.queue_panel_focused && key.modifiers.is_empty() => {
                 self.blur_composer_queue_panel();
@@ -1243,12 +1244,7 @@ impl AppState {
             }
             KeyCode::Down if self.active_pane == PaneFocus::Composer => {
                 if self.input_cursor_visual_row() == self.input_last_visual_row() {
-                    if self.composer.input_history_index.is_some()
-                        || (!self.focus_composer_queue_panel()
-                            && !self.focus_composer_agent_panel())
-                    {
-                        self.navigate_input_history(false);
-                    }
+                    self.navigate_input_history(false);
                 } else {
                     self.move_input_cursor_vertical(false);
                 }
@@ -1555,9 +1551,6 @@ impl AppState {
             self.composer.input_cursor = 0;
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
-            self.push_timeline(TimelineRole::User, prompt.clone());
-            self.push_timeline(TimelineRole::Notice, "follow-up will run next");
-            self.push_event("follow-up", format!("queued busy input {prompt}"));
             self.last_notice = Some("follow-up will run next".to_owned());
             return Ok(Some(AppAction::QueueConversationInput {
                 prompt,
@@ -2115,33 +2108,43 @@ impl AppState {
         self.composer.pending_plan_approval.as_ref()
     }
 
-    pub(crate) fn set_pending_plan_approval_from_text(&mut self, plan_text: &str) {
+    pub(crate) fn set_pending_plan_approval_from_draft(&mut self, draft: &PlanDraftCreatedEntry) {
+        if draft.steps.is_empty() {
+            self.composer.pending_plan_approval = None;
+            return;
+        }
+        let plan_text = draft
+            .inline_text
+            .clone()
+            .unwrap_or_else(|| draft.summary.clone());
         let plan_text = plan_text.trim();
         if plan_text.is_empty() {
             self.composer.pending_plan_approval = None;
             return;
         }
-        self.composer.pending_plan_approval = Some(PendingPlanApproval {
-            plan_id: None,
-            plan_text: plan_text.to_owned(),
-            plan_hash: plan_text_hash(plan_text),
-            summary: first_nonempty_plan_line(plan_text)
-                .unwrap_or_else(|| "approved plan scope".to_owned()),
-            target_path_count: 0,
-            suggested_check_count: 0,
-        });
-    }
-
-    pub(crate) fn set_pending_plan_approval_from_draft(&mut self, draft: &PlanDraftCreatedEntry) {
-        let plan_text = draft
-            .inline_text
-            .clone()
-            .unwrap_or_else(|| draft.summary.clone());
+        let steps = draft
+            .steps
+            .iter()
+            .map(|step| step.title.clone())
+            .collect::<Vec<_>>();
+        let suggested_checks = draft
+            .suggested_checks
+            .iter()
+            .map(|check| {
+                std::iter::once(check.command.command.as_str())
+                    .chain(check.command.args.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>();
         self.composer.pending_plan_approval = Some(PendingPlanApproval {
             plan_id: Some(draft.plan_id.as_str().to_owned()),
-            plan_text,
+            plan_text: plan_text.to_owned(),
             plan_hash: draft.plan_hash.clone(),
             summary: draft.summary.clone(),
+            steps,
+            target_paths: draft.target_paths.clone(),
+            suggested_checks,
             target_path_count: draft.target_paths.len(),
             suggested_check_count: draft.suggested_checks.len(),
         });
@@ -2594,14 +2597,6 @@ fn context_window_source_label(source: ContextWindowSource) -> &'static str {
         ContextWindowSource::Config => "fallback",
         ContextWindowSource::None => "n/a",
     }
-}
-
-fn first_nonempty_plan_line(plan_text: &str) -> Option<String> {
-    plan_text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| truncate_session_view_text(line, 80))
 }
 
 fn threshold_token_count(cap: u32, ratio: f32) -> u64 {

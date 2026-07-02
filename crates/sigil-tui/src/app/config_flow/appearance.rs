@@ -1,5 +1,64 @@
 use super::*;
 
+pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState) {
+    lines.push("[theme]".to_owned());
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::AppearanceTheme,
+    ));
+    lines.push(render_config_readonly_row(
+        "Name",
+        config_state.draft.appearance_theme.display_label(),
+    ));
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::AppearanceSyntaxTheme,
+    ));
+    lines.push(render_config_readonly_row(
+        "Syntax source",
+        &render_syntax_theme_source(config_state),
+    ));
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::AppearanceUsageCostCurrency,
+    ));
+    lines.push(render_config_readonly_row(
+        "Cost source",
+        &render_usage_cost_currency_source(config_state),
+    ));
+    let available = ThemeId::all()
+        .iter()
+        .map(|theme| theme.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    lines.push(render_config_readonly_row("Built-ins", &available));
+    lines.push(render_config_readonly_row(
+        "Overrides",
+        &format!(
+            "{} colors",
+            config_state.draft.base_root_config.appearance.colors.len()
+        ),
+    ));
+    lines.push(render_config_hint_row(
+        "Fine-grained color token overrides are edited in sigil.toml",
+    ));
+    lines.push(String::new());
+    lines.push("[diagnostics]".to_owned());
+    lines.extend(render_appearance_diagnostic_lines(config_state));
+    lines.push(String::new());
+    lines.push("[preview]".to_owned());
+    lines.extend(render_appearance_preview_lines(config_state));
+    lines.push(String::new());
+    lines.push("[scope]".to_owned());
+    lines.push(render_config_hint_row(
+        "Theme choices affect only the TUI and are not written to session history",
+    ));
+    lines.push(render_config_hint_row(
+        "Theme draft previews immediately; Ctrl-S persists it",
+    ));
+    lines.extend(render_config_selection_details(config_state));
+}
+
 pub(super) fn draft_appearance_config(config_state: &ConfigState) -> AppearanceConfig {
     let mut appearance = config_state.draft.base_root_config.appearance.clone();
     appearance.theme = config_state.draft.appearance_theme;

@@ -446,8 +446,6 @@ impl AppState {
                 );
                 if let Some(draft) = plan_projection.latest_pending_plan() {
                     self.set_pending_plan_approval_from_draft(draft);
-                } else {
-                    self.set_pending_plan_approval_from_text(&result.final_text);
                 }
                 self.last_notice = if self.pending_plan_approval().is_some() {
                     Some("plan ready".to_owned())
@@ -913,6 +911,9 @@ impl AppState {
             AppAction::ApprovalDecision { call_id, approved } => {
                 self.approval_worker_command(WorkerApprovalCommand::Decision { call_id, approved })
             }
+            AppAction::ApprovalSessionDecision { call_id } => {
+                self.approval_worker_command(WorkerApprovalCommand::DecisionForSession { call_id })
+            }
             AppAction::ApprovalDecisionWithArgs { call_id, args_json } => self
                 .approval_worker_command(WorkerApprovalCommand::DecisionWithArgs {
                     call_id,
@@ -1080,6 +1081,10 @@ fn stable_approval_command_id(session_id: &str, payload: &WorkerApprovalCommand)
             hasher.update(b"\0");
             let decision_label: &[u8] = if *approved { b"approve" } else { b"deny" };
             hasher.update(decision_label);
+        }
+        WorkerApprovalCommand::DecisionForSession { call_id } => {
+            hasher.update(b"decision_for_session\0");
+            hasher.update(call_id.as_bytes());
         }
         WorkerApprovalCommand::DecisionWithArgs { call_id, args_json } => {
             hasher.update(b"decision_with_args\0");
@@ -1388,6 +1393,16 @@ impl EventHandler for AppState {
                 }
                 self.approval.pending = Some(PendingApproval {
                     call: call.clone(),
+                    session_grant_available:
+                        sigil_kernel::tool_approval_session_grant_available_for_parts(
+                            spec.access,
+                            operation,
+                            risk,
+                            &subjects,
+                            &subject_zones,
+                            confirmation.as_ref(),
+                            snapshot_required,
+                        ),
                     spec,
                     subjects,
                     operation,
@@ -1407,7 +1422,7 @@ impl EventHandler for AppState {
                 self.push_event("approval:request", format!("{} {}", call.name, call.id));
                 self.push_timeline(
                     TimelineRole::Notice,
-                    format!("Approve {}? Y allow, N deny.", call.name),
+                    format!("Approve {}? Y allow once, N deny.", call.name),
                 );
             }
             RunEvent::ToolApprovalResolved {

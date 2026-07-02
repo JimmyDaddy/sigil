@@ -1336,7 +1336,9 @@ where
             }))?;
         let approval = self.inner.approve_tool_call(call, spec)?;
         let (task_status, agent_status) = match approval {
-            ToolApproval::Approve | ToolApproval::ApproveWithArgs { .. } => {
+            ToolApproval::Approve
+            | ToolApproval::ApproveForSession
+            | ToolApproval::ApproveWithArgs { .. } => {
                 (TaskRouteStatus::Resolved, AgentRouteStatus::Resolved)
             }
             ToolApproval::Deny { .. } => (TaskRouteStatus::Rejected, AgentRouteStatus::Rejected),

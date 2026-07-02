@@ -12,6 +12,7 @@ use super::{
     PathTrustZone, PermissionAccessConfig, PermissionConfig, PermissionConfirmation,
     PermissionEvaluationContext, PermissionPolicy, PermissionPreset, PermissionRisk,
     PermissionRule, ToolOperation, classify_path_trust_zone, classify_path_trust_zone_with_context,
+    tool_approval_session_grant_available,
 };
 
 fn spec(access: ToolAccess) -> ToolSpec {
@@ -638,6 +639,44 @@ fn permission_external_directory_enabled_defaults_to_ask() -> Result<()> {
 
     assert_eq!(decision.mode, ApprovalMode::Ask);
     assert!(!decision.external_directory_required);
+    Ok(())
+}
+
+#[test]
+fn session_grant_availability_requires_stable_low_or_medium_risk_scope() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_path = temp.path().canonicalize()?.join("note.txt");
+    let config = PermissionConfig {
+        external_directory: ExternalDirectoryConfig {
+            enabled: true,
+            ..ExternalDirectoryConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let external_read = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Read),
+        "read_file",
+        vec![external_path_subject(external_path.clone())],
+    )?;
+    assert!(tool_approval_session_grant_available(&external_read));
+
+    let external_write = PermissionPolicy::new(&PermissionConfig::default()).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![external_path_subject(external_path)],
+    )?;
+    assert_eq!(
+        external_write.confirmation,
+        Some(PermissionConfirmation::TypePath)
+    );
+    assert!(!tool_approval_session_grant_available(&external_write));
+
+    let destructive = PermissionPolicy::new(&PermissionConfig::default()).decide(
+        &spec(ToolAccess::Write),
+        "delete_file",
+        vec![path_subject("src/main.rs")],
+    )?;
+    assert!(!tool_approval_session_grant_available(&destructive));
     Ok(())
 }
 

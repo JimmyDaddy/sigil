@@ -1509,6 +1509,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ContextAssemblySkipped(_) => "context_assembly_skipped",
         ControlEntry::UsageSnapshot(_) => "usage_snapshot",
         ControlEntry::ToolApproval(_) => "tool_approval",
+        ControlEntry::ToolApprovalSessionGrant(_) => "tool_approval_session_grant",
         ControlEntry::ToolExecution(_) => "tool_execution",
         ControlEntry::ToolEgress(_) => "tool_egress",
         ControlEntry::McpElicitation(_) => "mcp_elicitation",

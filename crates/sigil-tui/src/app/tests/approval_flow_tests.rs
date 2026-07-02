@@ -573,7 +573,7 @@ fn approval_enter_chooses_selected_action() -> Result<()> {
     ));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.approval.selected_action, ApprovalAction::Allow);
+    assert_eq!(app.approval.selected_action, ApprovalAction::AllowOnce);
     let allow = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         allow,
@@ -583,8 +583,31 @@ fn approval_enter_chooses_selected_action() -> Result<()> {
     assert!(
         app.events
             .iter()
-            .any(|event| event.label == "approval:action" && event.detail == "allow")
+            .any(|event| event.label == "approval:action" && event.detail == "Allow once")
     );
+    Ok(())
+}
+
+#[test]
+fn approval_enter_can_choose_session_grant_when_available() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.approval
+        .pending
+        .as_mut()
+        .expect("pending approval")
+        .session_grant_available = true;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.approval.selected_action, ApprovalAction::AllowOnce);
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.approval.selected_action, ApprovalAction::AllowSession);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::ApprovalSessionDecision { call_id }) if call_id == "call-1"
+    ));
     Ok(())
 }
 

@@ -57,6 +57,34 @@ fn test_child_session_skill(agent: Option<&str>) -> SkillDescriptor {
     }
 }
 
+fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
+    format!(
+        r#"Plan:
+
+```sigil-plan-v1
+{{
+  "summary": "{summary}",
+  "steps": [
+    {{
+      "id": "step-1",
+      "title": "{title}",
+      "target_paths": ["{path}"]
+    }}
+  ],
+  "target_paths": ["{path}"],
+  "suggested_checks": [
+    {{
+      "check_spec_id": "cargo-test",
+      "command": "cargo",
+      "args": ["test", "-p", "sigil-kernel", "plan"]
+    }}
+  ]
+}}
+```
+"#
+    )
+}
+
 fn write_fake_server_script(path: &std::path::Path) -> Result<()> {
     fs::write(
         path,
@@ -192,7 +220,11 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
             ProviderChunk::Done,
         ]),
         StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta("plan after blocked write".to_owned()),
+            ProviderChunk::TextDelta(structured_plan_text(
+                "plan after blocked write",
+                "Inspect README.md after blocked write",
+                "README.md",
+            )),
             ProviderChunk::Done,
         ]),
     ]);
@@ -235,7 +267,7 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
     let WorkerMessage::PlanRunFinished { result, entries } = finished else {
         unreachable!("recv_until only returns PlanRunFinished");
     };
-    assert_eq!(result.final_text, "plan after blocked write");
+    assert!(result.final_text.contains("plan after blocked write"));
     assert!(entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
@@ -264,10 +296,11 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     let session_log_path = temp.path().join(".sigil/sessions/session-plan-task.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta(
-            "1. Inspect README.md\n2. Update README.md\n3. Run cargo test -p sigil-kernel plan"
-                .to_owned(),
-        ),
+        ProviderChunk::TextDelta(structured_plan_text(
+            "Update README",
+            "Update README.md",
+            "README.md",
+        )),
         ProviderChunk::Done,
     ])]);
     let agent = Agent::new(provider, ToolRegistry::new());
@@ -321,9 +354,9 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     )));
     assert!(entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::TaskRun(run))
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
             if run.status == TaskRunStatus::Paused
-                && run.objective.contains("Execute the following user-approved plan")
+                && run.objective.contains("Execute the following user-approved structured plan")
     )));
     assert!(
         !entries
@@ -353,7 +386,11 @@ fn reject_plan_command_appends_rejected_decision_and_clears_pending_projection()
         .join(".sigil/sessions/session-plan-reject.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta("1. Inspect README.md\n2. Update README.md".to_owned()),
+        ProviderChunk::TextDelta(structured_plan_text(
+            "Update README",
+            "Update README.md",
+            "README.md",
+        )),
         ProviderChunk::Done,
     ])]);
     let agent = Agent::new(provider, ToolRegistry::new());
@@ -413,9 +450,11 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![
         StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta(
-                "Inspect README.md, then update the approved typo and verify it.".to_owned(),
-            ),
+            ProviderChunk::TextDelta(structured_plan_text(
+                "Fix README typo",
+                "Update the approved README typo",
+                "README.md",
+            )),
             ProviderChunk::Done,
         ]),
         StreamPlan::Pending,
@@ -469,8 +508,8 @@ fn create_task_from_plan_run_now_starts_normal_task_planner_without_prebuilt_pla
     assert!(matches!(
         started,
         WorkerMessage::TaskRunStarted { ref objective, .. }
-            if objective.contains("Execute the following user-approved plan")
-                && objective.contains("Inspect README.md")
+            if objective.contains("Execute the following user-approved structured plan")
+                && objective.contains("Update the approved README typo")
     ));
 
     worker.shutdown()?;
@@ -487,7 +526,11 @@ fn create_task_from_plan_records_stale_reason_after_workspace_change() -> Result
         .join(".sigil/sessions/session-plan-task-stale.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta("1. Inspect README.md\n2. Update README.md".to_owned()),
+        ProviderChunk::TextDelta(structured_plan_text(
+            "Update README",
+            "Update README.md",
+            "README.md",
+        )),
         ProviderChunk::Done,
     ])]);
     let agent = Agent::new(provider, ToolRegistry::new());
@@ -553,7 +596,11 @@ fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<
         .join(".sigil/sessions/session-plan-task-grant.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
-        ProviderChunk::TextDelta("1. Update README.md".to_owned()),
+        ProviderChunk::TextDelta(structured_plan_text(
+            "Update README",
+            "Update README.md",
+            "README.md",
+        )),
         ProviderChunk::Done,
     ])]);
     let agent = Agent::new(provider, ToolRegistry::new());

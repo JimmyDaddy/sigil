@@ -1980,7 +1980,7 @@ fn mouse_scroll_stale_approval_action_target_without_pending_is_noop() -> Result
         .approval_modal_hit_areas
         .as_ref()
         .expect("expected approval hit areas")
-        .allow_action;
+        .allow_once_action;
     app.approval.pending = None;
     let (column, row) = point_in(allow_action);
 
@@ -2001,7 +2001,7 @@ fn mouse_click_approval_action_returns_decision() -> Result<()> {
         .approval_modal_hit_areas
         .as_ref()
         .expect("expected approval hit areas")
-        .allow_action;
+        .allow_once_action;
     let (column, row) = point_in(allow_action);
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;

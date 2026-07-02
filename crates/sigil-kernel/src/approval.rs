@@ -7,6 +7,8 @@ use crate::{ToolCall, ToolSpec};
 pub enum ToolApproval {
     /// Allow the tool call to execute.
     Approve,
+    /// Allow the tool call and grant the same normalized approval scope for this session.
+    ApproveForSession,
     /// Allow the tool call to execute with approved argument overrides.
     ///
     /// This is intended for UI-mediated safety transforms that preserve the requested tool but

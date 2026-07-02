@@ -8,7 +8,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     ));
     lines.push(String::new());
     lines.push("[workspace]".to_owned());
-    lines.extend(app.render_verification_trust_summary(config_state));
+    lines.extend(verification::render_trust_summary(app, config_state));
     lines.push(String::new());
     lines.push("[advanced]".to_owned());
     lines.extend(render_permission_rule_summary(config_state));

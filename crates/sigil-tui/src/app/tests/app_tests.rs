@@ -15,9 +15,29 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     assert_eq!(app.composer_mode_label(), "Build");
     assert_eq!(app.last_notice(), Some("build mode"));
 
-    app.set_pending_plan_approval_from_text("  ");
-    assert!(app.pending_plan_approval().is_none());
-    app.set_pending_plan_approval_from_text("1. inspect");
+    let draft = sigil_kernel::plan_draft_created_entry(
+        r#"Plan:
+
+```sigil-plan-v1
+{
+  "summary": "Inspect README",
+  "steps": [
+    {
+      "id": "inspect-readme",
+      "title": "Inspect README.md",
+      "target_paths": ["README.md"]
+    }
+  ],
+  "target_paths": ["README.md"]
+}
+```
+"#,
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("structured plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft);
     let ignored = app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
     assert!(ignored.is_none());
     assert!(app.pending_plan_approval().is_some());
@@ -26,9 +46,15 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     assert!(app.pending_plan_approval().is_some());
     assert_eq!(app.composer.input, "z");
     let discard = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-    assert!(discard.is_none());
-    assert!(app.pending_plan_approval().is_none());
-    assert_eq!(app.composer_mode_label(), "Build");
+    assert!(matches!(
+        discard,
+        Some(AppAction::RejectPlan {
+            plan_id,
+            expected_plan_hash,
+        }) if plan_id == draft.plan_id.as_str() && expected_plan_hash == draft.plan_hash
+    ));
+    assert!(app.pending_plan_approval().is_some());
+    assert_eq!(app.composer_mode_label(), "Plan");
 
     app.runtime.is_busy = true;
     app.composer.input = "@review inspect".to_owned();

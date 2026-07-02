@@ -1007,7 +1007,29 @@ fn footer_hints_track_slash_selector_state() -> anyhow::Result<()> {
 #[test]
 fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Result<()> {
     let mut plan_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
-    plan_app.set_pending_plan_approval_from_text("1. inspect\n2. implement");
+    let draft = sigil_kernel::plan_draft_created_entry(
+        r#"Plan:
+
+```sigil-plan-v1
+{
+  "summary": "Inspect then implement",
+  "steps": [
+    {
+      "id": "inspect",
+      "title": "Inspect README.md",
+      "target_paths": ["README.md"]
+    }
+  ],
+  "target_paths": ["README.md"]
+}
+```
+"#,
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("structured plan should create draft");
+    plan_app.set_pending_plan_approval_from_draft(&draft);
     let plan_view = UiViewModel::from_app(&plan_app);
     assert!(plan_view.footer.hints.contains("Enter create and run task"));
     assert!(plan_view.footer.hints.contains("Esc discard"));
@@ -1017,8 +1039,9 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     let approval = live_view
         .plan_approval
         .expect("pending plan approval should project");
-    assert_eq!(approval.summary, "1. inspect");
-    assert_eq!(approval.target_path_count, 0);
+    assert_eq!(approval.summary, "Inspect then implement");
+    assert_eq!(approval.steps, vec!["Inspect README.md"]);
+    assert_eq!(approval.target_path_count, 1);
     assert_eq!(approval.suggested_check_count, 0);
 
     let mut mention_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
@@ -1071,7 +1094,7 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
         status: TaskRunStatus::Running,
         entries,
     })?;
-    panel_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    panel_app.composer.agent_panel_focused = true;
     let panel_view = UiViewModel::from_app(&panel_app);
     assert!(panel_view.composer.agent_panel_focused);
     assert!(panel_view.footer.hints.contains("Enter switch"));
@@ -1105,13 +1128,8 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
             .hints
             .contains("1 follow-up pending · next main: queued prompt")
     );
-    assert!(
-        unfocused_queue_view
-            .footer
-            .hints
-            .contains("Down follow-ups")
-    );
-    queue_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(unfocused_queue_view.footer.hints.contains("Tab follow-ups"));
+    queue_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let queue_view = UiViewModel::from_app(&queue_app);
     assert!(queue_view.footer.hints.contains("Follow-ups"));
     assert!(queue_view.footer.hints.contains("Tab action"));
@@ -1211,7 +1229,7 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
 
     let view_model = UiViewModel::from_app(&app);
 
-    assert!(view_model.footer.hints.contains("Y allow"));
+    assert!(view_model.footer.hints.contains("Y once"));
     assert!(!view_model.footer.hints.contains("Esc interrupt"));
     assert!(
         !view_model
@@ -1313,7 +1331,7 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Y allow · N deny · V diff"
+        "agent: main · Y once · N deny · V diff"
     );
     Ok(())
 }

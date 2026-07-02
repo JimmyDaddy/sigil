@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Result, bail};
@@ -67,6 +67,24 @@ pub struct PlanSuggestedCheck {
     pub source_line: Option<String>,
 }
 
+/// One structured executable step produced by `/plan`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanDraftStep {
+    pub step_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_checks: Vec<PlanSuggestedCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
 /// Append-only record created when `/plan` produces a durable artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -78,9 +96,15 @@ pub struct PlanDraftCreatedEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<PlanDraftStep>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggested_checks: Vec<PlanSuggestedCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_id: Option<String>,
     pub created_at_ms: u64,
@@ -384,17 +408,25 @@ pub fn plan_draft_created_entry(
     if plan_text.is_empty() {
         return Ok(None);
     }
+    let Some(structured) = structured_plan_draft(plan_text) else {
+        return Ok(None);
+    };
     let plan_hash = plan_text_hash(plan_text);
     let plan_id = plan_id_from_hash(&plan_hash)?;
-    let inline_text = (plan_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then(|| plan_text.to_owned());
+    let inline_plan_text = render_structured_plan_text(&structured);
+    let inline_text =
+        (inline_plan_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then_some(inline_plan_text);
     Ok(Some(PlanDraftCreatedEntry {
         plan_id,
         source,
         plan_hash,
-        summary: plan_summary(plan_text),
+        summary: structured.summary,
         inline_text,
-        target_paths: plan_workspace_paths(plan_text),
-        suggested_checks: plan_suggested_checks(plan_text),
+        steps: structured.steps,
+        target_paths: structured.target_paths,
+        suggested_checks: structured.suggested_checks,
+        risk: structured.risk,
+        notes: structured.notes,
         workspace_snapshot_id,
         created_at_ms,
     }))
@@ -402,17 +434,22 @@ pub fn plan_draft_created_entry(
 
 /// Builds the objective passed to the normal `/task` planner after a user approves a plan.
 ///
-/// The approved plan remains human-authored/model-authored task input; it is not parsed into task
-/// steps by the plan handoff layer. The `/task` planner is still responsible for creating the
-/// executable task plan and verification-aware steps.
+/// The approved plan remains model-authored task input, but it must come from the structured
+/// `/plan` draft contract so the handoff does not infer scope from arbitrary prose.
 pub fn plan_task_input_from_draft(entry: &PlanDraftCreatedEntry) -> String {
-    let plan_text = entry
-        .inline_text
-        .as_deref()
-        .unwrap_or(&entry.summary)
-        .trim();
+    let plan_text = entry.inline_text.clone().unwrap_or_else(|| {
+        render_structured_plan_text(&StructuredPlanDraft {
+            summary: entry.summary.clone(),
+            steps: entry.steps.clone(),
+            target_paths: entry.target_paths.clone(),
+            suggested_checks: entry.suggested_checks.clone(),
+            risk: entry.risk.clone(),
+            notes: entry.notes.clone(),
+        })
+    });
     format!(
-        "Execute the following user-approved plan. Treat it as the authoritative task input; first create the normal task execution plan, then carry it out with the configured approval and verification requirements. Preserve the approved plan's scope and order unless a change is necessary for correctness; if you must add, remove, or reorder executable steps, include a concise reason in the task step detail.\n\nApproved plan:\n\n{plan_text}"
+        "Execute the following user-approved structured plan. Treat the listed steps as the authoritative task input; first create the normal task execution plan, then carry it out with the configured approval and verification requirements. Preserve the approved plan's scope and order unless a change is necessary for correctness; if you must add, remove, or reorder executable steps, include a concise reason in the task step detail.\n\nApproved structured plan:\n\n{}",
+        plan_text.trim()
     )
 }
 
@@ -505,6 +542,420 @@ fn collapse_plan_workspace_paths(paths: BTreeSet<String>) -> Vec<String> {
     collapsed
 }
 
+#[derive(Debug, Clone)]
+struct StructuredPlanDraft {
+    summary: String,
+    steps: Vec<PlanDraftStep>,
+    target_paths: Vec<String>,
+    suggested_checks: Vec<PlanSuggestedCheck>,
+    risk: Option<String>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RawStructuredPlanDraft {
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    steps: Vec<RawPlanDraftStep>,
+    #[serde(default)]
+    target_paths: Vec<String>,
+    #[serde(default)]
+    suggested_checks: Vec<RawPlanSuggestedCheck>,
+    #[serde(default)]
+    risk: Option<String>,
+    #[serde(default)]
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RawPlanDraftStep {
+    #[serde(default, alias = "id")]
+    step_id: Option<String>,
+    title: String,
+    #[serde(default, alias = "description")]
+    detail: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    target_paths: Vec<String>,
+    #[serde(default)]
+    suggested_checks: Vec<RawPlanSuggestedCheck>,
+    #[serde(default)]
+    risk: Option<String>,
+    #[serde(default)]
+    notes: Vec<String>,
+    #[serde(default)]
+    acceptance: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawPlanSuggestedCheck {
+    CommandLine(String),
+    Object(RawPlanSuggestedCheckObject),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RawPlanSuggestedCheckObject {
+    #[serde(default)]
+    check_spec_id: Option<String>,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    effect: Option<ToolEffect>,
+    #[serde(default)]
+    source_line: Option<String>,
+}
+
+fn structured_plan_draft(plan_text: &str) -> Option<StructuredPlanDraft> {
+    for block in structured_plan_blocks(plan_text) {
+        let Ok(raw) = serde_json::from_str::<RawStructuredPlanDraft>(&block) else {
+            continue;
+        };
+        let structured = materialize_structured_plan(raw);
+        if !structured.steps.is_empty() {
+            return Some(structured);
+        }
+    }
+    None
+}
+
+fn structured_plan_blocks(plan_text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut active_fence: Option<&str> = None;
+    let mut collecting = false;
+    let mut buffer = String::new();
+
+    for line in plan_text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(fence) = active_fence {
+            if trimmed.starts_with(fence) {
+                if collecting {
+                    blocks.push(buffer.trim().to_owned());
+                }
+                active_fence = None;
+                collecting = false;
+                buffer.clear();
+                continue;
+            }
+            if collecting {
+                buffer.push_str(line);
+                buffer.push('\n');
+            }
+            continue;
+        }
+
+        let Some((fence, info)) = parse_fence_start(trimmed) else {
+            continue;
+        };
+        active_fence = Some(fence);
+        collecting = fence_info_has_structured_plan_schema(info);
+        buffer.clear();
+    }
+
+    blocks
+}
+
+fn parse_fence_start(line: &str) -> Option<(&'static str, &str)> {
+    if let Some(info) = line.strip_prefix("```") {
+        Some(("```", info.trim()))
+    } else if let Some(info) = line.strip_prefix("~~~") {
+        Some(("~~~", info.trim()))
+    } else {
+        None
+    }
+}
+
+fn fence_info_has_structured_plan_schema(info: &str) -> bool {
+    info.split_whitespace().any(|part| part == "sigil-plan-v1")
+}
+
+fn materialize_structured_plan(raw: RawStructuredPlanDraft) -> StructuredPlanDraft {
+    let mut step_ids = BTreeSet::new();
+    let steps = raw
+        .steps
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, raw_step)| materialize_plan_step(index, raw_step, &mut step_ids))
+        .collect::<Vec<_>>();
+
+    let mut target_paths = BTreeSet::new();
+    for path in raw.target_paths {
+        if let Some(path) = normalize_plan_workspace_path(&path) {
+            target_paths.insert(path);
+        }
+    }
+    for step in &steps {
+        for path in &step.target_paths {
+            target_paths.insert(path.clone());
+        }
+    }
+
+    let mut suggested_checks = BTreeMap::<String, PlanSuggestedCheck>::new();
+    for check in raw.suggested_checks {
+        if let Some(check) = materialize_plan_suggested_check(check) {
+            suggested_checks.insert(check.check_spec_id.clone(), check);
+        }
+    }
+    for step in &steps {
+        for check in &step.suggested_checks {
+            suggested_checks.insert(check.check_spec_id.clone(), check.clone());
+        }
+    }
+
+    let summary = nonempty_trimmed(raw.summary)
+        .or_else(|| steps.first().map(|step| step.title.clone()))
+        .unwrap_or_else(|| "plan".to_owned())
+        .chars()
+        .take(PLAN_SUMMARY_MAX_CHARS)
+        .collect();
+
+    StructuredPlanDraft {
+        summary,
+        steps,
+        target_paths: collapse_plan_workspace_paths(target_paths),
+        suggested_checks: suggested_checks.into_values().collect(),
+        risk: raw.risk.and_then(nonempty_trimmed),
+        notes: raw.notes.into_iter().filter_map(nonempty_trimmed).collect(),
+    }
+}
+
+fn materialize_plan_step(
+    index: usize,
+    raw_step: RawPlanDraftStep,
+    step_ids: &mut BTreeSet<String>,
+) -> Option<PlanDraftStep> {
+    let title = nonempty_trimmed(raw_step.title)?;
+    let mut target_paths = BTreeSet::new();
+    for path in raw_step.target_paths {
+        if let Some(path) = normalize_plan_workspace_path(&path) {
+            target_paths.insert(path);
+        }
+    }
+    let suggested_checks = raw_step
+        .suggested_checks
+        .into_iter()
+        .filter_map(materialize_plan_suggested_check)
+        .collect::<Vec<_>>();
+    let mut notes = raw_step
+        .notes
+        .into_iter()
+        .filter_map(nonempty_trimmed)
+        .collect::<Vec<_>>();
+    notes.extend(
+        raw_step
+            .acceptance
+            .into_iter()
+            .filter_map(nonempty_trimmed)
+            .map(|acceptance| format!("acceptance: {acceptance}")),
+    );
+    if let Some(mode) = raw_step.mode.and_then(nonempty_trimmed) {
+        notes.insert(0, format!("mode: {mode}"));
+    }
+    let step_id = unique_plan_step_id(
+        raw_step.step_id.as_deref().unwrap_or(&title),
+        index,
+        step_ids,
+    );
+    Some(PlanDraftStep {
+        step_id,
+        title,
+        detail: raw_step.detail.and_then(nonempty_trimmed),
+        target_paths: collapse_plan_workspace_paths(target_paths),
+        suggested_checks,
+        risk: raw_step.risk.and_then(nonempty_trimmed),
+        notes,
+    })
+}
+
+fn materialize_plan_suggested_check(raw: RawPlanSuggestedCheck) -> Option<PlanSuggestedCheck> {
+    match raw {
+        RawPlanSuggestedCheck::CommandLine(command_line) => {
+            let mut parts = command_line
+                .split_whitespace()
+                .filter(|part| !part.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if parts.is_empty() {
+                return None;
+            }
+            let command = parts.remove(0);
+            let check_spec_id = check_spec_id_from_command(&command, &parts);
+            Some(PlanSuggestedCheck {
+                check_spec_id,
+                command: CheckCommand {
+                    command,
+                    args: parts,
+                    cwd: None,
+                },
+                effect: ToolEffect::ReadOnly,
+                source_line: Some(command_line),
+            })
+        }
+        RawPlanSuggestedCheck::Object(raw) => {
+            let command = nonempty_trimmed(raw.command)?;
+            let args = raw
+                .args
+                .into_iter()
+                .filter_map(nonempty_trimmed)
+                .collect::<Vec<_>>();
+            let check_spec_id = raw
+                .check_spec_id
+                .and_then(nonempty_trimmed)
+                .unwrap_or_else(|| check_spec_id_from_command(&command, &args));
+            Some(PlanSuggestedCheck {
+                check_spec_id,
+                command: CheckCommand {
+                    command,
+                    args,
+                    cwd: raw.cwd,
+                },
+                effect: raw.effect.unwrap_or(ToolEffect::ReadOnly),
+                source_line: raw.source_line.and_then(nonempty_trimmed),
+            })
+        }
+    }
+}
+
+fn check_spec_id_from_command(command: &str, args: &[String]) -> String {
+    let mut raw = std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("-");
+    if raw.is_empty() {
+        raw = "check".to_owned();
+    }
+    let mut id = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    id = id.trim_matches('-').chars().take(72).collect();
+    if id.is_empty() {
+        "check".to_owned()
+    } else {
+        id
+    }
+}
+
+fn unique_plan_step_id(raw: &str, index: usize, step_ids: &mut BTreeSet<String>) -> String {
+    let mut id = raw
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else if matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while id.contains("__") {
+        id = id.replace("__", "_");
+    }
+    id = id.trim_matches('_').chars().take(64).collect();
+    if validate_plan_stable_id("plan step id", &id).is_err() {
+        id = format!("step_{}", index + 1);
+    }
+    if step_ids.insert(id.clone()) {
+        return id;
+    }
+    let base = id;
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base}_{suffix}");
+        if step_ids.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
+    }
+}
+
+fn render_structured_plan_text(plan: &StructuredPlanDraft) -> String {
+    let mut lines = vec![
+        format!("Summary: {}", plan.summary),
+        String::new(),
+        "Steps:".to_owned(),
+    ];
+    for (index, step) in plan.steps.iter().enumerate() {
+        lines.push(format!("{}. {} [{}]", index + 1, step.title, step.step_id));
+        if let Some(detail) = &step.detail {
+            lines.push(format!("   Detail: {detail}"));
+        }
+        if !step.target_paths.is_empty() {
+            lines.push(format!("   Paths: {}", step.target_paths.join(", ")));
+        }
+        if !step.suggested_checks.is_empty() {
+            lines.push(format!(
+                "   Checks: {}",
+                step.suggested_checks
+                    .iter()
+                    .map(render_plan_check_command)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        if let Some(risk) = &step.risk {
+            lines.push(format!("   Risk: {risk}"));
+        }
+        for note in &step.notes {
+            lines.push(format!("   Note: {note}"));
+        }
+    }
+    if !plan.target_paths.is_empty() {
+        lines.push(String::new());
+        lines.push("Target paths:".to_owned());
+        lines.extend(plan.target_paths.iter().map(|path| format!("- {path}")));
+    }
+    if !plan.suggested_checks.is_empty() {
+        lines.push(String::new());
+        lines.push("Suggested checks:".to_owned());
+        lines.extend(
+            plan.suggested_checks
+                .iter()
+                .map(|check| format!("- {}", render_plan_check_command(check))),
+        );
+    }
+    if let Some(risk) = &plan.risk {
+        lines.push(String::new());
+        lines.push(format!("Risk: {risk}"));
+    }
+    if !plan.notes.is_empty() {
+        lines.push(String::new());
+        lines.push("Notes:".to_owned());
+        lines.extend(plan.notes.iter().map(|note| format!("- {note}")));
+    }
+    lines.join("\n")
+}
+
+fn render_plan_check_command(check: &PlanSuggestedCheck) -> String {
+    std::iter::once(check.command.command.as_str())
+        .chain(check.command.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn nonempty_trimmed(value: impl AsRef<str>) -> Option<String> {
+    let value = value.as_ref().trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 fn plan_id_from_hash(plan_hash: &str) -> Result<PlanId> {
     let digest = plan_hash
         .strip_prefix(PLAN_HASH_PREFIX)
@@ -513,100 +964,6 @@ fn plan_id_from_hash(plan_hash: &str) -> Result<PlanId> {
         .take(16)
         .collect::<String>();
     PlanId::new(format!("plan_{digest}"))
-}
-
-fn plan_summary(plan_text: &str) -> String {
-    first_nonempty_plan_line(plan_text)
-        .unwrap_or_else(|| "plan".to_owned())
-        .chars()
-        .take(PLAN_SUMMARY_MAX_CHARS)
-        .collect()
-}
-
-fn first_nonempty_plan_line(plan_text: &str) -> Option<String> {
-    plan_text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(clean_plan_marker)
-        .find(|line| !line.is_empty())
-}
-
-fn plan_lines_outside_fenced_code(plan_text: &str) -> Vec<&str> {
-    let mut in_fence = false;
-    let mut lines = Vec::new();
-    for line in plan_text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if !in_fence {
-            lines.push(line);
-        }
-    }
-    lines
-}
-
-fn clean_plan_marker(line: &str) -> String {
-    let line = line.trim();
-    let line = line.trim_start_matches('#').trim();
-    if let Some((prefix, title)) = line.split_once('.')
-        && !prefix.is_empty()
-        && prefix.chars().all(|character| character.is_ascii_digit())
-    {
-        return title.trim().to_owned();
-    }
-    for marker in ["- ", "* ", "• "] {
-        if let Some(title) = line.strip_prefix(marker) {
-            return title.trim().to_owned();
-        }
-    }
-    line.to_owned()
-}
-
-fn plan_suggested_checks(plan_text: &str) -> Vec<PlanSuggestedCheck> {
-    let mut checks = BTreeMap::<String, PlanSuggestedCheck>::new();
-    for line in plan_lines_outside_fenced_code(plan_text)
-        .into_iter()
-        .map(str::trim)
-    {
-        let lower = line.to_ascii_lowercase();
-        let candidates = [
-            ("cargo-test", "cargo", &["test"][..], ToolEffect::ReadOnly),
-            ("cargo-check", "cargo", &["check"][..], ToolEffect::ReadOnly),
-            (
-                "cargo-clippy",
-                "cargo",
-                &["clippy", "--all-targets"][..],
-                ToolEffect::ReadOnly,
-            ),
-            ("npm-test", "npm", &["test"][..], ToolEffect::ReadOnly),
-            ("pnpm-test", "pnpm", &["test"][..], ToolEffect::ReadOnly),
-            ("make-test", "make", &["test"][..], ToolEffect::ReadOnly),
-        ];
-        for (id, command, args, effect) in candidates {
-            let needle = std::iter::once(command)
-                .chain(args.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if lower.contains(&needle) {
-                checks
-                    .entry(id.to_owned())
-                    .or_insert_with(|| PlanSuggestedCheck {
-                        check_spec_id: id.to_owned(),
-                        command: CheckCommand {
-                            command: command.to_owned(),
-                            args: args.iter().map(|value| (*value).to_owned()).collect(),
-                            cwd: None,
-                        },
-                        effect,
-                        source_line: Some(line.to_owned()),
-                    });
-            }
-        }
-    }
-    checks.into_values().collect()
 }
 
 fn validate_plan_stable_id(label: &str, value: &str) -> Result<()> {

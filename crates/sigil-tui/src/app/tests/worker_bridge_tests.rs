@@ -1,6 +1,27 @@
 use super::*;
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
+fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
+    format!(
+        r#"Plan:
+
+```sigil-plan-v1
+{{
+  "summary": "{summary}",
+  "steps": [
+    {{
+      "id": "step-1",
+      "title": "{title}",
+      "target_paths": ["{path}"]
+    }}
+  ],
+  "target_paths": ["{path}"]
+}}
+```
+"#
+    )
+}
+
 #[test]
 fn normal_input_creates_user_and_running_state() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -176,7 +197,11 @@ fn plan_actions_map_to_worker_commands() {
 fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
-        "Inspect and edit README.md\n\n1. Read README.md\n2. Apply the approved copy edit\n3. Verify the result",
+        &structured_plan_text(
+            "Inspect and edit README.md",
+            "Apply the approved copy edit",
+            "README.md",
+        ),
         sigil_kernel::PlanSourceRef::default(),
         1,
         None,
@@ -202,6 +227,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
     assert_eq!(pending.summary, "Inspect and edit README.md");
     assert_eq!(pending.target_path_count, 1);
     assert_eq!(pending.suggested_check_count, 0);
+    assert_eq!(pending.steps, vec!["Apply the approved copy edit"]);
     assert_eq!(app.composer_mode_label(), "Plan");
     assert_eq!(app.last_notice(), Some("plan ready"));
 
@@ -234,7 +260,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
 fn plan_ready_bare_letters_stay_composer_input() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
-        "1. Update README.md",
+        &structured_plan_text("Update README", "Update README.md", "README.md"),
         sigil_kernel::PlanSourceRef::default(),
         1,
         Some("snapshot-1".to_owned()),
@@ -262,6 +288,7 @@ fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
         },
         entries: Vec::new(),
     })?;
+    assert!(app.pending_plan_approval().is_none());
     app.composer.input = "/plan revise this plan".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
 
@@ -279,7 +306,7 @@ fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
 fn pending_durable_plan_discard_requests_worker_rejection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
-        "1. Update README.md",
+        &structured_plan_text("Update README", "Update README.md", "README.md"),
         sigil_kernel::PlanSourceRef::default(),
         1,
         Some("snapshot-1".to_owned()),
@@ -307,7 +334,7 @@ fn pending_durable_plan_discard_requests_worker_rejection() -> Result<()> {
 }
 
 #[test]
-fn pending_text_plan_discard_clears_surface_without_worker_action() -> Result<()> {
+fn unstructured_plan_finished_does_not_create_pending_surface() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::PlanRunFinished {
         result: sigil_kernel::AgentRunResult {
@@ -317,18 +344,14 @@ fn pending_text_plan_discard_clears_surface_without_worker_action() -> Result<()
         },
         entries: Vec::new(),
     })?;
+    assert!(app.pending_plan_approval().is_none());
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
     assert!(app.pending_plan_approval().is_none());
     assert_eq!(app.composer_mode_label(), "Build");
-    assert_eq!(app.last_notice(), Some("plan dismissed"));
-    assert!(
-        app.events
-            .iter()
-            .any(|event| { event.label == "plan" && event.detail == "dismissed" })
-    );
+    assert_eq!(app.last_notice(), Some("plan finished"));
     Ok(())
 }
 
@@ -336,7 +359,7 @@ fn pending_text_plan_discard_clears_surface_without_worker_action() -> Result<()
 fn plan_rejected_message_syncs_session_and_clears_pending_surface() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
-        "1. Update README.md",
+        &structured_plan_text("Update README", "Update README.md", "README.md"),
         sigil_kernel::PlanSourceRef::default(),
         1,
         Some("snapshot-1".to_owned()),
@@ -373,7 +396,14 @@ fn plan_rejected_message_syncs_session_and_clears_pending_surface() -> Result<()
 #[test]
 fn plan_approved_message_syncs_session_and_clears_pending_surface() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_pending_plan_approval_from_text("approved plan");
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &structured_plan_text("Approved plan", "Inspect README.md", "README.md"),
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("structured plan should create draft");
+    app.set_pending_plan_approval_from_draft(&draft);
     let entry = sigil_kernel::PlanApprovedEntry {
         plan_version: 1,
         plan_hash: sigil_kernel::plan_text_hash("approved plan"),
@@ -1078,6 +1108,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        session_grant_available: false,
         preview: None,
     });
     app.modal_state = Some(ModalState::KeyboardHelp);

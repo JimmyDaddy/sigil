@@ -143,14 +143,15 @@ pub use permission::{
     PermissionConfirmation, PermissionDecision, PermissionEvaluationContext, PermissionPolicy,
     PermissionPreset, PermissionRisk, PermissionRule, ToolOperation, apply_risk_overlay,
     classify_path_trust_zone, derive_permission_risk, infer_tool_operation,
+    tool_approval_session_grant_available, tool_approval_session_grant_available_for_parts,
 };
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,
     PlanApprovalScope, PlanApprovedEntry, PlanArtifactProjection, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
-    PlanSourceRef, PlanSuggestedCheck, PlanTaskStartMode, PlanToTaskStepMapping,
-    TaskCreatedFromPlanEntry, plan_draft_created_entry, plan_task_input_from_draft, plan_text_hash,
-    plan_workspace_paths,
+    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanDraftStep, PlanId,
+    PlanPermissionGrantedEntry, PlanSourceRef, PlanSuggestedCheck, PlanTaskStartMode,
+    PlanToTaskStepMapping, TaskCreatedFromPlanEntry, plan_draft_created_entry,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
 };
 pub use plugin::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_PLUGIN_HOOK_TIMEOUT_MS,
@@ -198,9 +199,9 @@ pub use session::{
     CompactionPreview, CompactionRecord, ContextAssemblySkippedEntry, ControlEntry,
     DomainEventRecord, JsonlSessionStore, McpElicitationDecision, McpElicitationEntry,
     MemorySnapshot, Session, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolSubjectAudit, TypedDomainEventRecord, latest_compaction_record,
-    session_stats_from_entries,
+    ToolApprovalEntry, ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry,
+    ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolSubjectAudit, TypedDomainEventRecord, latest_compaction_record, session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,

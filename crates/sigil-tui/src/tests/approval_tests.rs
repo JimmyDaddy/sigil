@@ -1,14 +1,38 @@
 use super::*;
 
 #[test]
-fn approval_action_toggling_covers_all_variants() {
-    assert_eq!(ApprovalAction::Allow.toggled(), ApprovalAction::Deny);
-    assert_eq!(ApprovalAction::Deny.toggled(), ApprovalAction::Allow);
+fn approval_action_cycles_available_variants() {
+    assert_eq!(
+        ApprovalAction::AllowOnce.next(false, true),
+        ApprovalAction::Deny
+    );
+    assert_eq!(
+        ApprovalAction::Deny.next(false, true),
+        ApprovalAction::AllowOnce
+    );
+    assert_eq!(
+        ApprovalAction::AllowOnce.next(true, true),
+        ApprovalAction::AllowSession
+    );
+    assert_eq!(
+        ApprovalAction::AllowSession.next(true, true),
+        ApprovalAction::Deny
+    );
+    assert_eq!(
+        ApprovalAction::Deny.next(true, false),
+        ApprovalAction::AllowSession
+    );
+    assert_eq!(
+        ApprovalAction::AllowSession.normalized(false),
+        ApprovalAction::AllowOnce
+    );
 }
 
 #[test]
 fn approval_action_approval_flag_matches_allow_variant() {
-    assert!(ApprovalAction::Allow.approved());
+    assert!(ApprovalAction::AllowOnce.approved());
+    assert!(ApprovalAction::AllowSession.approved());
+    assert!(ApprovalAction::AllowSession.grants_session());
     assert!(!ApprovalAction::Deny.approved());
 }
 

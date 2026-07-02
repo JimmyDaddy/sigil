@@ -50,6 +50,7 @@ impl<T> WorkerCommandEnvelope<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerApprovalCommand {
     Decision { call_id: String, approved: bool },
+    DecisionForSession { call_id: String },
     DecisionWithArgs { call_id: String, args_json: String },
 }
 
@@ -136,6 +137,9 @@ pub enum WorkerCommand {
     ApprovalDecision {
         call_id: String,
         approved: bool,
+    },
+    ApprovalSessionDecision {
+        call_id: String,
     },
     ApprovalDecisionWithArgs {
         call_id: String,

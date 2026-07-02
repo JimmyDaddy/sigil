@@ -876,6 +876,8 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
 
     assert!(registry.specs().iter().any(|spec| spec.name == "read_file"));
     assert!(registry.specs().iter().any(|spec| spec.name == "bash"));
+    assert!(registry.spec_for("terminal_start").is_some());
+    assert!(registry.spec_for("mcp_activate_server").is_none());
     Ok(())
 }
 

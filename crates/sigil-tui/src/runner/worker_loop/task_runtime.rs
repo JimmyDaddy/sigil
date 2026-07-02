@@ -1514,7 +1514,7 @@ pub(in crate::runner) fn session_ref_for_log_path(
 pub(in crate::runner) fn plan_mode_transient_context(prompt: String) -> Vec<ModelMessage> {
     vec![
         ModelMessage::system(
-            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. End with a concise human-readable plan that the user can approve as the input to a normal /task run. Do not include hidden machine-readable blocks.",
+            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. If and only if you have a concrete executable plan, end with a fenced ```sigil-plan-v1 JSON block containing summary, steps, target_paths, suggested_checks, risk, and notes. The steps array must contain at least one object with id, title, optional detail, target_paths, suggested_checks, risk, notes, and acceptance. If you are only summarizing, reviewing, or cannot produce executable steps, do not include the sigil-plan-v1 block.",
         ),
         ModelMessage::user(prompt),
     ]

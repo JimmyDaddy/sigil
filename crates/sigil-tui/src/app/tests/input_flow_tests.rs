@@ -619,21 +619,25 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.role == TimelineRole::User
-                && entry.text == "follow up after this finishes")
+            .all(|entry| !(entry.role == TimelineRole::User
+                && entry.text == "follow up after this finishes"))
     );
     Ok(())
 }
 
 #[test]
-fn composer_down_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Result<()> {
+fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.sync_current_session_state(vec![
         queued_conversation_input_entry("queue_1", "first queued prompt")?,
         queued_conversation_input_entry("queue_2", "second queued prompt")?,
     ]);
 
-    let focus_action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let down_action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(down_action.is_none());
+    assert!(!app.is_composer_queue_panel_focused());
+
+    let focus_action = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
 
     assert!(focus_action.is_none());
     assert!(app.is_composer_queue_panel_focused());
@@ -674,7 +678,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
         queued_conversation_input_entry("queue_2", "second queued prompt")?,
     ]);
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert!(app.is_composer_queue_panel_focused());
     assert_eq!(
         app.selected_composer_queue_action(),
@@ -742,25 +746,30 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(!app.is_composer_queue_panel_focused());
 
-    let mut blur_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    blur_app.sync_current_session_state(vec![queued_conversation_input_entry(
+    let mut clamp_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    clamp_app.sync_current_session_state(vec![queued_conversation_input_entry(
         "queue_1",
         "first queued prompt",
     )?]);
-    blur_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    blur_app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert!(!blur_app.is_composer_queue_panel_focused());
+    clamp_app.active_pane = PaneFocus::Composer;
+    clamp_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    clamp_app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert!(clamp_app.is_composer_queue_panel_focused());
+    assert!(clamp_app.composer_queue_rows()[0].selected);
 
     let mut adjacent_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    adjacent_app.sync_current_session_state(vec![queued_conversation_input_entry(
+    sync_child_agent(&mut adjacent_app)?;
+    let mut adjacent_entries = adjacent_app.session_browser.current_entries.clone();
+    adjacent_entries.push(queued_conversation_input_entry(
         "queue_1",
         "first queued prompt",
-    )?]);
-    sync_child_agent(&mut adjacent_app)?;
+    )?);
+    adjacent_app.sync_current_session_state(adjacent_entries);
+    adjacent_app.active_pane = PaneFocus::Composer;
+    adjacent_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     adjacent_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    adjacent_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert!(!adjacent_app.is_composer_queue_panel_focused());
-    assert!(adjacent_app.is_composer_agent_panel_focused());
+    assert!(adjacent_app.is_composer_queue_panel_focused());
+    assert!(!adjacent_app.is_composer_agent_panel_focused());
     Ok(())
 }
 
@@ -1265,7 +1274,8 @@ fn composer_down_prefers_history_navigation_before_agent_panel_focus() -> Result
     assert!(!app.is_composer_agent_panel_focused());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert!(app.is_composer_agent_panel_focused());
+    assert!(!app.is_composer_agent_panel_focused());
+    assert_eq!(app.composer.input, "draft");
     Ok(())
 }
 
@@ -1277,7 +1287,8 @@ fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
     app.composer.input.clear();
     app.composer.input_cursor = 0;
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.composer.agent_panel_focused = true;
+    app.sidebar_agent_selected = 0;
 
     assert!(app.is_composer_agent_panel_focused());
     assert_eq!(app.sidebar_agent_selected, 0);
@@ -1303,7 +1314,8 @@ fn composer_agent_panel_message_key_prefills_agent_message_command() -> Result<(
     app.composer.input.clear();
     app.composer.input_cursor = 0;
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.composer.agent_panel_focused = true;
+    app.sidebar_agent_selected = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_agent_selected, 1);
 
@@ -1328,7 +1340,8 @@ fn composer_agent_panel_main_row_rejects_close_and_message_actions() -> Result<(
     app.composer.input.clear();
     app.composer.input_cursor = 0;
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.composer.agent_panel_focused = true;
+    app.sidebar_agent_selected = 0;
     assert_eq!(app.sidebar_agent_selected, 0);
 
     let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
@@ -1354,7 +1367,8 @@ fn composer_agent_panel_close_key_requests_selected_terminal_agent_close() -> Re
     app.composer.input.clear();
     app.composer.input_cursor = 0;
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.composer.agent_panel_focused = true;
+    app.sidebar_agent_selected = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
@@ -1382,7 +1396,7 @@ fn composer_agent_panel_down_wraps_from_last_agent_to_first() -> Result<()> {
     sync_child_agent(&mut app)?;
     app.active_pane = PaneFocus::Composer;
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(app.focus_composer_agent_panel());
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_agent_selected, 1);
 
@@ -1413,13 +1427,13 @@ fn composer_down_moves_wrapped_input_before_agent_panel_focus() -> Result<()> {
 fn composer_agent_panel_up_and_escape_return_to_input() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(app.focus_composer_agent_panel());
     assert!(app.is_composer_agent_panel_focused());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert!(!app.is_composer_agent_panel_focused());
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(app.focus_composer_agent_panel());
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(!app.is_composer_agent_panel_focused());
     assert!(app.composer.input.is_empty());
@@ -1446,15 +1460,12 @@ fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .any(|entry| { entry.role == TimelineRole::User && entry.text == "queued" })
+            .all(|entry| !(entry.role == TimelineRole::User && entry.text == "queued"))
     );
-    assert!(app.timeline.iter().any(|entry| {
-        entry.role == TimelineRole::Notice && entry.text == "follow-up will run next"
-    }));
     assert!(
-        app.events
-            .iter()
-            .any(|event| event.label == "follow-up" && event.detail == "queued busy input queued")
+        app.events.iter().all(
+            |event| !(event.label == "follow-up" && event.detail == "queued busy input queued")
+        )
     );
     Ok(())
 }

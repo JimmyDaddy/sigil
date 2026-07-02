@@ -891,7 +891,17 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · Enter create and run task · Esc discard");
     }
     if app.approval.pending.is_some() {
-        return format!("{agent} · Y allow · N deny · V diff");
+        let session = app
+            .approval
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.session_grant_available);
+        let action_hint = if session {
+            "Tab action · Y once · N deny"
+        } else {
+            "Y once · N deny"
+        };
+        return format!("{agent} · {action_hint} · V diff");
     }
     if app.is_composer_queue_panel_focused() {
         return format!("{agent} · Follow-ups ↑↓ item · Tab action · Enter selected · Esc input");
@@ -922,7 +932,7 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · ↑↓ agent · Enter switch · C close · M message · Esc input");
     }
     if let Some(queue) = queue {
-        return format!("{agent} · {queue} · Down follow-ups");
+        return format!("{agent} · {queue} · Tab follow-ups");
     }
     let newline_hint = if app.terminal_keyboard_enhancement_enabled() {
         "Shift-Enter newline"
@@ -982,6 +992,9 @@ fn queue_action_buttons(selected: ComposerQueueAction) -> Vec<QueueActionButtonV
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanApprovalViewModel {
     pub summary: String,
+    pub steps: Vec<String>,
+    pub target_paths: Vec<String>,
+    pub suggested_checks: Vec<String>,
     pub target_path_count: usize,
     pub suggested_check_count: usize,
 }
@@ -990,6 +1003,9 @@ impl PlanApprovalViewModel {
     fn from_pending(pending: &crate::app::PendingPlanApproval) -> Self {
         Self {
             summary: pending.summary.clone(),
+            steps: pending.steps.clone(),
+            target_paths: pending.target_paths.clone(),
+            suggested_checks: pending.suggested_checks.clone(),
             target_path_count: pending.target_path_count,
             suggested_check_count: pending.suggested_check_count,
         }

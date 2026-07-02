@@ -1886,6 +1886,9 @@ fn mcp_runtime_notification_helpers_parse_edge_payloads() {
         super::mcp_list_changed_kind("notifications/tools/list_changed"),
         Some(McpListChangedKind::Tools)
     );
+    assert_eq!(McpListChangedKind::Tools.as_str(), "tools");
+    assert_eq!(McpListChangedKind::Resources.as_str(), "resources");
+    assert_eq!(McpListChangedKind::Prompts.as_str(), "prompts");
     assert_eq!(
         super::mcp_list_changed_kind("notifications/resources/list_changed"),
         Some(McpListChangedKind::Resources)

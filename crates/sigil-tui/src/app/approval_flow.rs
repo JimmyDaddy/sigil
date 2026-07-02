@@ -124,9 +124,11 @@ impl AppState {
 
         lines.push(String::new());
         if spawn_agent_background_args_json(&pending.call.name, &pending.call.args_json).is_some() {
-            lines.push("Y allow  B background  N deny".to_owned());
+            lines.push("Y allow once  B background  N deny".to_owned());
+        } else if pending.session_grant_available {
+            lines.push("Y allow once  Tab/←/→ action  Enter choose  N deny".to_owned());
         } else {
-            lines.push("Y allow  N deny".to_owned());
+            lines.push("Y allow once  N deny".to_owned());
         }
         lines
     }
@@ -161,9 +163,22 @@ impl AppState {
                     }
                 }
                 KeyCode::Enter if key.modifiers.is_empty() => {
-                    return Some(Some(AppAction::ApprovalDecision {
-                        call_id: pending.call.id.clone(),
-                        approved: self.approval.selected_action.approved(),
+                    let selected = self
+                        .approval
+                        .selected_action
+                        .normalized(pending.session_grant_available);
+                    return Some(Some(match selected {
+                        super::ApprovalAction::AllowOnce => AppAction::ApprovalDecision {
+                            call_id: pending.call.id.clone(),
+                            approved: true,
+                        },
+                        super::ApprovalAction::AllowSession => AppAction::ApprovalSessionDecision {
+                            call_id: pending.call.id.clone(),
+                        },
+                        super::ApprovalAction::Deny => AppAction::ApprovalDecision {
+                            call_id: pending.call.id.clone(),
+                            approved: false,
+                        },
                     }));
                 }
                 _ => {}
@@ -206,16 +221,18 @@ impl AppState {
                 self.cycle_approval_diff_mode();
                 Some(None)
             }
-            KeyCode::Left | KeyCode::Right => {
-                self.approval.selected_action = self.approval.selected_action.toggled();
-                self.push_event(
-                    "approval:action",
-                    if self.approval.selected_action.approved() {
-                        "allow"
-                    } else {
-                        "deny"
-                    },
-                );
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                let forward = matches!(key.code, KeyCode::Right | KeyCode::Tab);
+                let session_grant_available = self
+                    .approval
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.session_grant_available);
+                self.approval.selected_action = self
+                    .approval
+                    .selected_action
+                    .next(session_grant_available, forward);
+                self.push_event("approval:action", self.approval.selected_action.label());
                 Some(None)
             }
             KeyCode::Up => {
@@ -246,7 +263,7 @@ impl AppState {
                 self.active_pane = PaneFocus::Activity;
                 Some(None)
             }
-            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Tab | KeyCode::BackTab => Some(None),
+            KeyCode::Char(_) | KeyCode::Backspace => Some(None),
             _ => None,
         }
     }
@@ -277,7 +294,11 @@ impl AppState {
                     kind: ApprovalDiffLineKind::Context,
                     active_hunk: false,
                 }],
-                selected_action: self.approval.selected_action,
+                selected_action: self
+                    .approval
+                    .selected_action
+                    .normalized(pending.session_grant_available),
+                session_grant_available: pending.session_grant_available,
             });
         };
 
@@ -385,7 +406,11 @@ impl AppState {
             hunk_total: hunk_positions.len(),
             diff_label,
             diff_lines,
-            selected_action: self.approval.selected_action,
+            selected_action: self
+                .approval
+                .selected_action
+                .normalized(pending.session_grant_available),
+            session_grant_available: pending.session_grant_available,
         })
     }
 

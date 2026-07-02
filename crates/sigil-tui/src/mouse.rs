@@ -1,6 +1,6 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::app::AppAction;
+use crate::app::{AppAction, ApprovalAction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseInput {
@@ -34,7 +34,7 @@ pub enum HitTarget {
     ApprovalModal,
     ApprovalDiffArea,
     ApprovalFileRow { index: usize },
-    ApprovalAction { approved: bool },
+    ApprovalAction { action: ApprovalAction },
     ApprovalHunkPrevious,
     ApprovalHunkNext,
     ApprovalDiffViewToggle,

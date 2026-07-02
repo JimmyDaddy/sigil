@@ -105,7 +105,8 @@ pub struct ApprovalModalHitAreas {
     pub diff_view_toggle: Rect,
     pub metadata_toggle: Rect,
     pub file_rows: Vec<ApprovalFileRowHitArea>,
-    pub allow_action: Rect,
+    pub allow_once_action: Rect,
+    pub allow_session_action: Rect,
     pub deny_action: Rect,
 }
 
@@ -242,11 +243,20 @@ impl LayoutSnapshot {
                     };
                 }
             }
-            if contains(areas.allow_action, column, row) {
-                return HitTarget::ApprovalAction { approved: true };
+            if contains(areas.allow_once_action, column, row) {
+                return HitTarget::ApprovalAction {
+                    action: ApprovalAction::AllowOnce,
+                };
+            }
+            if contains(areas.allow_session_action, column, row) {
+                return HitTarget::ApprovalAction {
+                    action: ApprovalAction::AllowSession,
+                };
             }
             if contains(areas.deny_action, column, row) {
-                return HitTarget::ApprovalAction { approved: false };
+                return HitTarget::ApprovalAction {
+                    action: ApprovalAction::Deny,
+                };
             }
             if contains(areas.diff_area, column, row) {
                 return HitTarget::ApprovalDiffArea;
@@ -913,7 +923,8 @@ fn approval_modal_hit_areas(
     );
     let footer_area = Rect::new(inner.x, footer_y, inner.width, footer_height);
     let footer_inner = inset_rect(footer_area, 1, 1);
-    let (allow_action, deny_action) = approval_action_hit_areas(footer_inner, view.selected_action);
+    let (allow_once_action, allow_session_action, deny_action) =
+        approval_action_hit_areas(footer_inner, view);
     let diff_area = approval_diff_area(body_area, view);
     let diff_inner = inset_rect(diff_area, 1, 1);
     let diff_status = Rect::new(diff_inner.x, diff_inner.y, diff_inner.width, 1);
@@ -927,7 +938,8 @@ fn approval_modal_hit_areas(
         diff_view_toggle: diff_controls.diff_view_toggle,
         metadata_toggle: diff_controls.metadata_toggle,
         file_rows: approval_file_row_hit_areas(body_area, view),
-        allow_action,
+        allow_once_action,
+        allow_session_action,
         deny_action,
     })
 }
@@ -1074,33 +1086,35 @@ fn approval_status_badge_rect(y: u16, cursor: &mut u16, end: u16, label: &str) -
     rect
 }
 
-fn approval_action_hit_areas(footer_inner: Rect, selected_action: ApprovalAction) -> (Rect, Rect) {
+fn approval_action_hit_areas(footer_inner: Rect, view: &ApprovalModalView) -> (Rect, Rect, Rect) {
     if footer_inner.width == 0 || footer_inner.height == 0 {
-        return (Rect::default(), Rect::default());
+        return (Rect::default(), Rect::default(), Rect::default());
     }
 
-    let allow_width =
-        approval_action_badge_width("Allow", selected_action == ApprovalAction::Allow);
-    let deny_width = approval_action_badge_width("Deny", selected_action == ApprovalAction::Deny);
-    let allow = Rect::new(
-        footer_inner.x,
-        footer_inner.y,
-        allow_width.min(footer_inner.width),
-        1,
-    );
-    let deny_x = allow.x.saturating_add(allow.width).saturating_add(1);
-    let deny = Rect::new(
-        deny_x,
-        footer_inner.y,
-        deny_width.min(
-            footer_inner
-                .x
-                .saturating_add(footer_inner.width)
-                .saturating_sub(deny_x),
-        ),
-        1,
-    );
-    (allow, deny)
+    let mut cursor = footer_inner.x;
+    let end = footer_inner.x.saturating_add(footer_inner.width);
+    let mut allow_once = Rect::default();
+    let mut allow_session = Rect::default();
+    let mut deny = Rect::default();
+    for action in ApprovalAction::order(view.session_grant_available) {
+        if cursor >= end {
+            break;
+        }
+        let width = approval_action_badge_width(action.label(), view.selected_action == *action);
+        let rect = Rect::new(
+            cursor,
+            footer_inner.y,
+            width.min(end.saturating_sub(cursor)),
+            1,
+        );
+        match action {
+            ApprovalAction::AllowOnce => allow_once = rect,
+            ApprovalAction::AllowSession => allow_session = rect,
+            ApprovalAction::Deny => deny = rect,
+        }
+        cursor = cursor.saturating_add(width).saturating_add(1);
+    }
+    (allow_once, allow_session, deny)
 }
 
 fn approval_action_badge_width(label: &str, selected: bool) -> u16 {

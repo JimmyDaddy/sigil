@@ -175,7 +175,7 @@ impl AppState {
                 self.toggle_approval_metadata();
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
-            crate::mouse::HitTarget::ApprovalAction { approved }
+            crate::mouse::HitTarget::ApprovalAction { action }
                 if self.approval.pending.is_some() =>
             {
                 let call_id = self
@@ -184,9 +184,21 @@ impl AppState {
                     .as_ref()
                     .map(|pending| pending.call.id.clone())
                     .expect("approval action target requires pending approval");
-                Ok(crate::mouse::AppMouseOutcome::Action(
-                    crate::app::AppAction::ApprovalDecision { call_id, approved },
-                ))
+                Ok(crate::mouse::AppMouseOutcome::Action(match action {
+                    crate::app::ApprovalAction::AllowOnce => {
+                        crate::app::AppAction::ApprovalDecision {
+                            call_id,
+                            approved: true,
+                        }
+                    }
+                    crate::app::ApprovalAction::AllowSession => {
+                        crate::app::AppAction::ApprovalSessionDecision { call_id }
+                    }
+                    crate::app::ApprovalAction::Deny => crate::app::AppAction::ApprovalDecision {
+                        call_id,
+                        approved: false,
+                    },
+                }))
             }
             crate::mouse::HitTarget::SlashCandidate { index }
                 if self.approval.pending.is_none() =>

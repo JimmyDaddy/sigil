@@ -1,0 +1,495 @@
+use super::*;
+
+impl AgentToolRuntime {
+    pub(super) async fn wait_agent(
+        &mut self,
+        session: &mut Session,
+        call: &ToolCall,
+        args: &Value,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> ToolResult {
+        let thread_id = match thread_id_arg(args) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        if let Some(background) = self.background_runs.remove_if_finished(&thread_id)
+            && let Err(error) = self
+                .record_finished_background_run(session, handler, background)
+                .await
+        {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
+        if self.background_runs.contains(&thread_id) {
+            if let Some(retry_after) = self.wait_throttle_remaining(&thread_id) {
+                let projection = session.agent_thread_state_projection();
+                let Some(thread) = projection.threads.get(&thread_id) else {
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::NotFound,
+                        format!("agent thread {} was not found", thread_id.as_str()),
+                    );
+                };
+                return agent_wait_throttled_tool_result(call, thread, retry_after);
+            }
+            let wait_started = Instant::now();
+            loop {
+                if let Some(background) = self.background_runs.remove_if_finished(&thread_id) {
+                    if let Err(error) = self
+                        .record_finished_background_run(session, handler, background)
+                        .await
+                    {
+                        return ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::Internal,
+                            error.to_string(),
+                        );
+                    }
+                    break;
+                }
+                if !self.background_runs.is_running(&thread_id)
+                    || saturating_elapsed(wait_started) >= WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT
+                {
+                    break;
+                }
+                tokio::time::sleep(WAIT_AGENT_BACKGROUND_POLL_INTERVAL).await;
+            }
+        }
+        if let Some(background) = self.background_runs.remove_if_finished(&thread_id)
+            && let Err(error) = self
+                .record_finished_background_run(session, handler, background)
+                .await
+        {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
+        let projection = session.agent_thread_state_projection();
+        let Some(thread) = projection.threads.get(&thread_id) else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::NotFound,
+                format!("agent thread {} was not found", thread_id.as_str()),
+            );
+        };
+        if thread.status.is_terminal() {
+            self.pending_waits.remove(&thread_id);
+        } else {
+            if let Some(retry_after) = self.wait_throttle_remaining(&thread_id) {
+                return agent_wait_throttled_tool_result(call, thread, retry_after);
+            }
+            self.record_pending_wait(&thread_id);
+        }
+        agent_status_tool_result(call, thread)
+    }
+
+    fn wait_throttle_remaining(&self, thread_id: &AgentThreadId) -> Option<Duration> {
+        let last_wait = self.pending_waits.get(thread_id)?;
+        wait_throttle_remaining_since(*last_wait)
+    }
+
+    fn record_pending_wait(&mut self, thread_id: &AgentThreadId) {
+        self.pending_waits.insert(thread_id.clone(), Instant::now());
+    }
+
+    pub(super) async fn record_finished_background_run(
+        &self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+        background: BackgroundChatAgentHandle,
+    ) -> Result<AgentThreadId> {
+        let thread = background.thread.to_runtime_thread();
+        let thread_id = thread.thread_id.clone();
+        match background.handle.await {
+            Ok(Ok(output)) => {
+                let budget_warning = self
+                    .supervisor
+                    .validate_usage_budget(&thread.budget_scope_id, &output.usage)
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                self.supervisor.record_chat_child_result(
+                    session,
+                    handler,
+                    &thread,
+                    output.status,
+                    &output.final_text,
+                    &output.outcome,
+                    Some(output.usage),
+                    output.final_answer_ref,
+                )?;
+                self.supervisor.record_chat_mailbox_consumed(
+                    session,
+                    handler,
+                    &thread,
+                    &output.consumed_mailbox_route_ids,
+                )?;
+                if let Some(warning) = budget_warning {
+                    let _ = handler.handle(RunEvent::Notice(format!(
+                        "agent budget warning after child completion: {warning}"
+                    )));
+                }
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} finished",
+                    thread_id.as_str()
+                )));
+            }
+            Ok(Err(error)) => {
+                let reason = format!("{error:#}");
+                self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &thread,
+                    reason.clone(),
+                )?;
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} failed: {reason}",
+                    thread_id.as_str()
+                )));
+            }
+            Err(error) => {
+                let reason = format!("background child agent join failed: {error}");
+                self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &thread,
+                    reason.clone(),
+                )?;
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} failed: {reason}",
+                    thread_id.as_str()
+                )));
+            }
+        }
+        Ok(thread_id)
+    }
+
+    pub(super) fn read_agent_result(
+        &self,
+        session: &Session,
+        call: &ToolCall,
+        args: &Value,
+    ) -> ToolResult {
+        let thread_id = match thread_id_arg(args) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let result_page_request = match required_result_page_request_arg(args) {
+            Ok(request) => request,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let projection = session.agent_thread_state_projection();
+        let Some(thread) = projection.threads.get(&thread_id) else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::NotFound,
+                format!("agent thread {} was not found", thread_id.as_str()),
+            );
+        };
+        let Some(result) = thread.result.as_ref() else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Unsupported,
+                format!(
+                    "agent thread {} has no terminal result yet",
+                    thread_id.as_str()
+                ),
+            );
+        };
+        let result_page = match read_agent_result_page(session, result, result_page_request) {
+            Ok(page) => page,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        agent_result_page_tool_result(call, result, &result_page)
+    }
+
+    pub(super) fn message_agent(
+        &self,
+        session: &Session,
+        call: &ToolCall,
+        args: &Value,
+    ) -> ToolResult {
+        let thread_id = match thread_id_arg(args) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let prompt = match required_string(args, "prompt") {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let projection = session.agent_thread_state_projection();
+        let Some(thread) = projection.threads.get(&thread_id) else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::NotFound,
+                format!("agent thread {} was not found", thread_id.as_str()),
+            );
+        };
+        let route_id = match agent_route_id_for_call(&thread_id, &call.id) {
+            Ok(route_id) => route_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        let source_thread_id = match AgentThreadId::new(MAIN_THREAD_ID) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        let prompt_hash = hash_text(&prompt);
+        let requested = AgentThreadMessageRoutedEntry {
+            route_id: route_id.clone(),
+            source_thread_id: source_thread_id.clone(),
+            target_thread_id: thread_id.clone(),
+            prompt_hash: prompt_hash.clone(),
+            prompt: Some(prompt.clone()),
+            status: AgentRouteStatus::Requested,
+        };
+        let mailbox_queued = AgentMailboxMessageEntry {
+            route_id: route_id.clone(),
+            source_thread_id: source_thread_id.clone(),
+            target_thread_id: thread_id.clone(),
+            prompt_hash: prompt_hash.clone(),
+            prompt: Some(prompt.clone()),
+            status: AgentMailboxStatus::Queued,
+            reason: None,
+            updated_at_ms: None,
+        };
+        let delivery = if thread.status.is_terminal() {
+            Err(format!(
+                "agent thread {} is {}",
+                thread_id.as_str(),
+                thread_status_label(thread.status)
+            ))
+        } else {
+            self.supervisor.send_agent_message(
+                &thread_id,
+                AgentMailboxMessage {
+                    route_id: route_id.clone(),
+                    prompt: prompt.clone(),
+                },
+            )
+        };
+        match delivery {
+            Ok(()) => ToolResult::ok(
+                call.id.clone(),
+                call.name.clone(),
+                serde_json::to_string(&json!({
+                    "thread_id": thread_id.as_str(),
+                    "route_id": route_id.as_str(),
+                    "status": "resolved",
+                    "delivery": "delivered_to_mailbox",
+                    "delivered_to_mailbox": true,
+                    "safe_point": "after_current_turn",
+                    "will_apply_after_current_turn": true,
+                    "interrupt_requested": false,
+                    "interrupts_in_flight_provider_stream": false,
+                    "next_action": "call wait_agent to collect terminal results; the child applies this message at its next safe point"
+                }))
+                .unwrap_or_else(|error| format!("failed to serialize agent message route: {error}")),
+                ToolResultMeta {
+                    details: json!({
+                        "thread_id": thread_id.as_str(),
+                        "route_id": route_id.as_str(),
+                        "status": "resolved",
+                        "delivery": "delivered_to_mailbox",
+                        "delivered_to_mailbox": true,
+                        "safe_point": "after_current_turn",
+                        "will_apply_after_current_turn": true,
+                        "interrupt_requested": false,
+                        "interrupts_in_flight_provider_stream": false
+                    }),
+                    ..ToolResultMeta::default()
+                },
+            )
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(requested))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(mailbox_queued))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(
+                AgentMailboxMessageEntry {
+                    route_id: route_id.clone(),
+                    source_thread_id: source_thread_id.clone(),
+                    target_thread_id: thread_id.clone(),
+                    prompt_hash: String::new(),
+                    prompt: None,
+                    status: AgentMailboxStatus::Delivered,
+                    reason: None,
+                    updated_at_ms: None,
+                },
+            ))
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(
+                AgentThreadMessageRoutedEntry {
+                    route_id,
+                    source_thread_id,
+                    target_thread_id: thread_id,
+                    prompt_hash,
+                    prompt: None,
+                    status: AgentRouteStatus::Resolved,
+                },
+            )),
+            Err(reason) => ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Unsupported,
+                format!(
+                    "agent thread {} cannot accept safe-point messages: {}",
+                    thread_id.as_str(),
+                    reason
+                ),
+            )
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(requested))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(mailbox_queued))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(
+                AgentMailboxMessageEntry {
+                    route_id: route_id.clone(),
+                    source_thread_id: source_thread_id.clone(),
+                    target_thread_id: thread_id.clone(),
+                    prompt_hash: String::new(),
+                    prompt: None,
+                    status: AgentMailboxStatus::Rejected,
+                    reason: Some(reason),
+                    updated_at_ms: None,
+                },
+            ))
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(
+                AgentThreadMessageRoutedEntry {
+                    route_id,
+                    source_thread_id,
+                    target_thread_id: thread_id,
+                    prompt_hash,
+                    prompt: None,
+                    status: AgentRouteStatus::Rejected,
+                },
+            )),
+        }
+    }
+
+    pub(super) fn close_agent(
+        &self,
+        session: &Session,
+        call: &ToolCall,
+        args: &Value,
+    ) -> ToolResult {
+        close_agent_from_args(session, call, args)
+    }
+}
+
+pub(super) fn wait_throttle_remaining_since(last_wait: Instant) -> Option<Duration> {
+    WAIT_AGENT_MIN_REPOLL_INTERVAL
+        .checked_sub(saturating_elapsed(last_wait))
+        .filter(|remaining| !remaining.is_zero())
+}
+
+pub(super) fn close_agent_from_args(
+    session: &Session,
+    call: &ToolCall,
+    args: &Value,
+) -> ToolResult {
+    let thread_id = match thread_id_arg(args) {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::InvalidInput,
+                error.to_string(),
+            );
+        }
+    };
+    let projection = session.agent_thread_state_projection();
+    let Some(thread) = projection.threads.get(&thread_id) else {
+        return ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::NotFound,
+            format!("agent thread {} was not found", thread_id.as_str()),
+        );
+    };
+    if !thread.status.is_terminal() {
+        return ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::Unsupported,
+            format!(
+                "agent thread {} is {}; close_agent only closes terminal threads",
+                thread_id.as_str(),
+                thread_status_label(thread.status)
+            ),
+        );
+    }
+    let reason = optional_string(args, "reason");
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        format!("agent thread {} closed", thread_id.as_str()),
+        ToolResultMeta::default(),
+    )
+    .with_control_entry(ControlEntry::AgentThreadClosed(AgentThreadClosedEntry {
+        thread_id,
+        reason,
+    }))
+}

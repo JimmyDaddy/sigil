@@ -346,6 +346,9 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         progress: None,
         plan_approval: Some(PlanApprovalViewModel {
             summary: "inspect and edit with preview".to_owned(),
+            steps: vec!["inspect and edit with preview".to_owned()],
+            target_paths: vec!["src/lib.rs".to_owned(), "README.md".to_owned()],
+            suggested_checks: vec!["cargo test".to_owned()],
             target_path_count: 2,
             suggested_check_count: 1,
         }),
@@ -366,9 +369,9 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
         .collect::<String>();
     assert!(rendered.contains("Plan"));
     assert!(rendered.contains("ready"));
-    assert!(rendered.contains("execution plan"));
+    assert!(rendered.contains("structured plan"));
     assert!(rendered.contains("2 paths"));
-    assert!(rendered.contains("1 checks suggested"));
+    assert!(rendered.contains("1 check"));
     assert!(rendered.contains("inspect and edit"));
     assert!(rendered.contains("Enter"));
     assert!(rendered.contains("create and run task"));

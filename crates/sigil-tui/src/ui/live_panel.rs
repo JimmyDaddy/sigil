@@ -27,6 +27,7 @@ use super::{
 pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
 pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_BASE_ROWS: u16 = 2;
+const LIVE_PLAN_APPROVAL_STEP_LIMIT: usize = 3;
 const LIVE_QUEUE_ROW_LIMIT: usize = 4;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
 
@@ -121,7 +122,7 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
     };
     let plan_rows = app
         .pending_plan_approval()
-        .map(|_| live_plan_approval_rows())
+        .map(live_plan_approval_rows)
         .unwrap_or(0);
     let task_rows = app
         .task_strip_view()
@@ -145,7 +146,7 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
     let plan_rows = view_model
         .plan_approval
         .as_ref()
-        .map(|_| live_plan_approval_rows())
+        .map(live_plan_approval_view_rows)
         .unwrap_or(0);
     let task_rows = view_model
         .task_strip
@@ -181,8 +182,24 @@ fn live_queue_strip_rows(row_count: usize) -> u16 {
     2 + row_count.min(LIVE_QUEUE_ROW_LIMIT) as u16
 }
 
-fn live_plan_approval_rows() -> u16 {
+fn live_plan_approval_rows(plan: &crate::app::PendingPlanApproval) -> u16 {
+    let detail_rows =
+        usize::from(!plan.target_paths.is_empty()) + usize::from(!plan.suggested_checks.is_empty());
+    let overflow_rows = usize::from(plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT);
     LIVE_PLAN_APPROVAL_BASE_ROWS
+        + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT) as u16
+        + u16::try_from(overflow_rows).unwrap_or(0)
+        + u16::try_from(detail_rows).unwrap_or(0)
+}
+
+fn live_plan_approval_view_rows(plan: &PlanApprovalViewModel) -> u16 {
+    let detail_rows =
+        usize::from(!plan.target_paths.is_empty()) + usize::from(!plan.suggested_checks.is_empty());
+    let overflow_rows = usize::from(plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT);
+    LIVE_PLAN_APPROVAL_BASE_ROWS
+        + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT) as u16
+        + u16::try_from(overflow_rows).unwrap_or(0)
+        + u16::try_from(detail_rows).unwrap_or(0)
 }
 
 fn render_live_status_band(
@@ -358,7 +375,7 @@ fn render_queue_header(
     let detail = if view_model.queue_panel_focused {
         "Up/Down item · Tab action · Enter selected"
     } else {
-        "Down focus · /queue advanced"
+        "Tab focus · /queue advanced"
     };
     Line::from(vec![
         Span::styled(
@@ -477,9 +494,19 @@ fn render_plan_approval_lines(
 ) -> Vec<Line<'static>> {
     let palette = &theme.palette;
     let bg = palette.surface_panel_alt;
+    let path_label = if plan.target_path_count == 1 {
+        "path"
+    } else {
+        "paths"
+    };
+    let check_label = if plan.suggested_check_count == 1 {
+        "check"
+    } else {
+        "checks"
+    };
     let counts = format!(
-        "execution plan · {} paths · {} checks suggested",
-        plan.target_path_count, plan.suggested_check_count
+        "structured plan · {} {} · {} {}",
+        plan.target_path_count, path_label, plan.suggested_check_count, check_label
     );
     let reserved_width =
         UnicodeWidthStr::width("Plan ready") + UnicodeWidthStr::width(counts.as_str()) + 10;
@@ -506,6 +533,63 @@ fn render_plan_approval_lines(
             Style::default().fg(palette.text_secondary).bg(bg),
         ),
     ])];
+    for (index, step) in plan
+        .steps
+        .iter()
+        .take(LIVE_PLAN_APPROVAL_STEP_LIMIT)
+        .enumerate()
+    {
+        let prefix = format!("{}. ", index + 1);
+        let available = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(palette.text_secondary).bg(bg)),
+            Span::styled(
+                truncate_display_width(step, available),
+                Style::default().fg(palette.text_primary).bg(bg),
+            ),
+        ]));
+    }
+    if plan.steps.len() > LIVE_PLAN_APPROVAL_STEP_LIMIT {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "... {} more steps",
+                plan.steps.len() - LIVE_PLAN_APPROVAL_STEP_LIMIT
+            ),
+            Style::default().fg(palette.text_muted).bg(bg),
+        )]));
+    }
+    let path_summary = if plan.target_paths.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Paths: {}",
+            plan.target_paths
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    };
+    let check_summary = if plan.suggested_checks.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Checks: {}",
+            plan.suggested_checks
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    };
+    for detail in [path_summary, check_summary].into_iter().flatten() {
+        lines.push(Line::from(vec![Span::styled(
+            truncate_display_width(&detail, width),
+            Style::default().fg(palette.text_secondary).bg(bg),
+        )]));
+    }
     lines.push(Line::from(vec![
         Span::styled("Enter", Style::default().fg(palette.text_primary).bg(bg)),
         Span::styled(

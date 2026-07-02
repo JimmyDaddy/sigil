@@ -393,6 +393,9 @@ struct RecorderAwareEchoTool {
 struct WriteTool {
     executed: Arc<AtomicBool>,
 }
+struct ReadPathTool {
+    executions: Arc<AtomicUsize>,
+}
 struct DefaultAllowWriteTool {
     executed: Arc<AtomicBool>,
 }
@@ -453,6 +456,53 @@ impl Tool for RecorderAwareEchoTool {
             call_id,
             "echo",
             args["value"].as_str().unwrap_or_default(),
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for ReadPathTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "read_path".to_owned(),
+            description: "read path".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        Ok(vec![ToolSubject::path(path, path)])
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "read_path",
+            args["path"].as_str().unwrap_or_default(),
             ToolResultMeta::default(),
         ))
     }
@@ -959,6 +1009,10 @@ impl Tool for ExternalWriteTool {
 
 struct DenyWritesHandler;
 
+struct ApproveForSessionHandler {
+    approvals: Arc<AtomicUsize>,
+}
+
 struct PanicApprovalHandler;
 
 impl ApprovalHandler for DenyWritesHandler {
@@ -970,6 +1024,17 @@ impl ApprovalHandler for DenyWritesHandler {
         Ok(ToolApproval::Deny {
             reason: format!("denied {}", call.name),
         })
+    }
+}
+
+impl ApprovalHandler for ApproveForSessionHandler {
+    fn approve_tool_call(
+        &mut self,
+        _call: &ToolCall,
+        _spec: &crate::ToolSpec,
+    ) -> Result<ToolApproval> {
+        self.approvals.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolApproval::ApproveForSession)
     }
 }
 
@@ -3067,6 +3132,9 @@ async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Re
 }
 
 struct WriteMockProvider;
+struct SessionGrantReadProvider {
+    calls: Arc<AtomicUsize>,
+}
 struct InvalidWriteArgsProvider;
 struct LoopingToolProvider;
 struct PlanUpdateProvider {
@@ -3132,6 +3200,49 @@ impl Provider for WriteMockProvider {
                 })),
                 Ok(ProviderChunk::Done),
             ])))
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for SessionGrantReadProvider {
+    fn name(&self) -> &str {
+        "mock-session-grant-read"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        WriteMockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        match call_index {
+            0 | 2 => {
+                let call_id = format!("call-read-{}", (call_index / 2) + 1);
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderChunk::ToolCallStart {
+                        id: call_id.clone(),
+                        name: "read_path".to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallArgsDelta {
+                        id: call_id.clone(),
+                        delta: r#"{"path":"file.txt"}"#.to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                        id: call_id,
+                        name: "read_path".to_owned(),
+                        args_json: r#"{"path":"file.txt"}"#.to_owned(),
+                    })),
+                    Ok(ProviderChunk::Done),
+                ])))
+            }
+            _ => Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ]))),
         }
     }
 }
@@ -3574,6 +3685,119 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
                 if execution.call_id == "call-write-1"
                     && execution.status == ToolExecutionStatus::Started
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> Result<()> {
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let executions = Arc::new(AtomicUsize::new(0));
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadPathTool {
+        executions: Arc::clone(&executions),
+    }));
+    let agent = Agent::new(
+        SessionGrantReadProvider {
+            calls: Arc::clone(&provider_calls),
+        },
+        registry,
+    );
+    let workspace = tempfile::tempdir()?;
+    let run_options = || AgentRunOptions {
+        workspace_root: workspace.path().to_path_buf(),
+        max_turns: Some(4),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig {
+            access: crate::PermissionAccessConfig {
+                read: Some(ApprovalMode::Ask),
+                ..crate::PermissionAccessConfig::default()
+            },
+            ..PermissionConfig::default()
+        },
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig { enabled: false },
+        compaction_config: CompactionConfig::default(),
+    };
+    let mut session = Session::new("mock-session-grant-read", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = ApproveForSessionHandler {
+        approvals: Arc::clone(&approvals),
+    };
+
+    let first = agent
+        .run_with_approval(
+            &mut session,
+            "read file once",
+            run_options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+    let second = agent
+        .run_with_approval(
+            &mut session,
+            "read file again",
+            run_options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(first.final_text, "done");
+    assert_eq!(second.final_text, "done");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(executions.load(Ordering::SeqCst), 2);
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
+            .count(),
+        1
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-read-1"
+                    && approval.action == ToolApprovalAuditAction::Resolved
+                    && approval.user_decision
+                        == Some(ToolApprovalUserDecision::ApprovedForSession)
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
+                if grant.call_id == "call-read-1"
+                    && grant.tool_name == "read_path"
+                    && grant.access == ToolAccess::Read
+                    && grant.subjects.len() == 1
+                    && grant.subjects[0].normalized == "file.txt"
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-read-2"
+                    && approval.action == ToolApprovalAuditAction::Requested
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-read-2"
+                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
+                    && approval.policy_decision == ApprovalMode::Allow
         )
     }));
     Ok(())
@@ -4144,7 +4368,63 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
 }
 
 #[tokio::test]
-async fn agent_returns_external_directory_required_when_disabled() -> Result<()> {
+async fn agent_requests_approval_for_external_directory_when_disabled_interactive() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_path = temp.path().canonicalize()?.join("outside.txt");
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExternalWriteTool {
+        executed: Arc::clone(&executed),
+        external_path,
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write outside",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(executed.load(Ordering::SeqCst));
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolApprovalRequested {
+            subjects,
+            confirmation: Some(crate::PermissionConfirmation::TypePath),
+            preview: Some(preview),
+            ..
+        } if subjects.iter().any(|subject| subject.scope == ToolSubjectScope::External)
+            && preview.title.contains("External directory access"))
+    }));
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+            if approval.action == ToolApprovalAuditAction::Requested
+                && approval.external_directory_required
+                && approval.confirmation == Some(crate::PermissionConfirmation::TypePath)
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_returns_external_directory_required_when_disabled_headless() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let external_path = temp.path().canonicalize()?.join("outside.txt");
     let executed = Arc::new(AtomicBool::new(false));
@@ -4167,7 +4447,7 @@ async fn agent_returns_external_directory_required_when_disabled() -> Result<()>
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
+                interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },

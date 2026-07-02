@@ -19,11 +19,13 @@ use crate::{
     permission::{
         ApprovalMode, InteractionMode, PermissionConfig, PermissionDecision,
         PermissionEvaluationContext, PermissionPolicy, PermissionRisk,
+        tool_approval_session_grant_available,
     },
     provider::{ModelMessage, Provider, ProviderChunk, ProviderContinuationState, ToolCall},
     session::{
         ControlEntry, JsonlSessionStore, Session, SessionLogEntry, SessionStreamRecord,
-        ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry,
+        ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalSessionGrantEntry,
+        ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision, ToolEgressEntry,
         ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
     },
     task::{
@@ -834,7 +836,11 @@ where
                             subjects.clone(),
                             tool_default_mode,
                         )?;
+                        let decision =
+                            interactive_external_directory_approval_override(&options, decision);
                         let decision = plan_approval_decision_override(session, spec, decision);
+                        let decision =
+                            tool_session_grant_decision_override(session, &call.name, decision);
                         let subject_label = if decision.subjects.is_empty() {
                             "-".to_owned()
                         } else {
@@ -964,41 +970,6 @@ where
                                     snapshot_required: decision.snapshot_required,
                                     preview,
                                 })?;
-                                if let Some(confirmation) = decision.confirmation.as_ref() {
-                                    let reason = format!(
-                                        "tool {} requires typed confirmation ({confirmation:?}) before execution",
-                                        call.name
-                                    );
-                                    append_tool_approval_audit(
-                                        session,
-                                        &call,
-                                        &decision,
-                                        ToolApprovalAuditAction::Resolved,
-                                        Some(ToolApprovalUserDecision::Denied),
-                                        Some(reason.clone()),
-                                        preview_hash,
-                                    )?;
-                                    let mut result = ToolResult::error(
-                                        call.id.clone(),
-                                        call.name.clone(),
-                                        ToolErrorKind::ApprovalRequired,
-                                        reason.clone(),
-                                    );
-                                    attach_tool_call_context(
-                                        &mut result,
-                                        &call,
-                                        &decision.subjects,
-                                    );
-                                    record_tool_run_outcome(&mut outcome, &result);
-                                    session.append_tool_message(result.to_model_message())?;
-                                    handler.handle(RunEvent::ToolApprovalResolved {
-                                        call_id: call.id.clone(),
-                                        approved: false,
-                                        reason: Some(reason),
-                                    })?;
-                                    handler.handle(RunEvent::ToolResult(result))?;
-                                    continue;
-                                }
                                 let approval = approval_handler.approve_tool_call(&call, spec)?;
                                 match approval {
                                     ToolApproval::Approve => {
@@ -1015,6 +986,60 @@ where
                                             call_id: call.id.clone(),
                                             approved: true,
                                             reason: None,
+                                        })?;
+                                    }
+                                    ToolApproval::ApproveForSession => {
+                                        if !tool_approval_session_grant_available(&decision) {
+                                            let reason =
+                                                "session approval grant is not available for this tool call"
+                                                    .to_owned();
+                                            append_tool_approval_audit(
+                                                session,
+                                                &call,
+                                                &decision,
+                                                ToolApprovalAuditAction::Resolved,
+                                                Some(ToolApprovalUserDecision::Denied),
+                                                Some(reason.clone()),
+                                                preview_hash,
+                                            )?;
+                                            handler.handle(RunEvent::ToolApprovalResolved {
+                                                call_id: call.id.clone(),
+                                                approved: false,
+                                                reason: Some(reason.clone()),
+                                            })?;
+                                            let mut result = ToolResult::error(
+                                                call.id.clone(),
+                                                call.name.clone(),
+                                                ToolErrorKind::ApprovalDenied,
+                                                format!("tool execution denied by user: {reason}"),
+                                            );
+                                            attach_tool_call_context(
+                                                &mut result,
+                                                &call,
+                                                &decision.subjects,
+                                            );
+                                            record_tool_run_outcome(&mut outcome, &result);
+                                            session
+                                                .append_tool_message(result.to_model_message())?;
+                                            handler.handle(RunEvent::ToolResult(result))?;
+                                            continue;
+                                        }
+                                        append_tool_approval_audit(
+                                            session,
+                                            &call,
+                                            &decision,
+                                            ToolApprovalAuditAction::Resolved,
+                                            Some(ToolApprovalUserDecision::ApprovedForSession),
+                                            None,
+                                            preview_hash,
+                                        )?;
+                                        append_tool_approval_session_grant(
+                                            session, handler, &call, &decision,
+                                        )?;
+                                        handler.handle(RunEvent::ToolApprovalResolved {
+                                            call_id: call.id.clone(),
+                                            approved: true,
+                                            reason: Some("allowed for this session".to_owned()),
                                         })?;
                                     }
                                     ToolApproval::ApproveWithArgs { args_json } => {
@@ -1427,6 +1452,111 @@ fn plan_approval_decision_override(
         decision.mode = ApprovalMode::Allow;
     }
     decision
+}
+
+fn interactive_external_directory_approval_override(
+    options: &AgentRunOptions,
+    mut decision: PermissionDecision,
+) -> PermissionDecision {
+    if decision.external_directory_required
+        && decision.mode == ApprovalMode::Deny
+        && options.interaction_mode == InteractionMode::Interactive
+    {
+        decision.mode = ApprovalMode::Ask;
+    }
+    decision
+}
+
+fn tool_session_grant_decision_override(
+    session: &Session,
+    tool_name: &str,
+    mut decision: PermissionDecision,
+) -> PermissionDecision {
+    if decision.mode != ApprovalMode::Ask || !tool_approval_session_grant_available(&decision) {
+        return decision;
+    }
+    if session.entries().iter().rev().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
+                if session_grant_covers_decision(grant, tool_name, &decision)
+        )
+    }) {
+        decision.mode = ApprovalMode::Allow;
+    }
+    decision
+}
+
+fn session_grant_covers_decision(
+    grant: &ToolApprovalSessionGrantEntry,
+    tool_name: &str,
+    decision: &PermissionDecision,
+) -> bool {
+    grant.expires == ToolApprovalSessionGrantExpiry::Session
+        && grant.tool_name == tool_name
+        && grant.access == decision.access
+        && grant.operation == decision.operation
+        && grant_subjects_match_decision(&grant.subjects, &decision.subjects)
+}
+
+fn grant_subjects_match_decision(
+    grant_subjects: &[ToolSubjectAudit],
+    subjects: &[ToolSubject],
+) -> bool {
+    let mut left = grant_subjects
+        .iter()
+        .filter_map(grant_subject_key)
+        .collect::<Vec<_>>();
+    let mut right = subjects
+        .iter()
+        .filter_map(decision_subject_key)
+        .collect::<Vec<_>>();
+    if left.len() != grant_subjects.len() || right.len() != subjects.len() {
+        return false;
+    }
+    left.sort();
+    right.sort();
+    left == right
+}
+
+fn grant_subject_key(subject: &ToolSubjectAudit) -> Option<(String, String, String)> {
+    let value = match subject.scope {
+        ToolSubjectScope::External => subject.canonical_path.as_deref().or_else(|| {
+            let normalized = subject.normalized.trim();
+            (!normalized.is_empty()).then_some(normalized)
+        })?,
+        ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
+            let normalized = subject.normalized.trim();
+            (!normalized.is_empty()).then_some(normalized)?
+        }
+    };
+    Some((
+        subject.kind.as_str().to_owned(),
+        subject.scope.as_str().to_owned(),
+        value.to_owned(),
+    ))
+}
+
+fn decision_subject_key(subject: &ToolSubject) -> Option<(String, String, String)> {
+    let value = match subject.scope {
+        ToolSubjectScope::External => subject
+            .canonical_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .or_else(|| {
+                let normalized = subject.normalized.trim();
+                (!normalized.is_empty()).then(|| normalized.to_owned())
+            })?,
+        ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
+            let normalized = subject.normalized.trim();
+            (!normalized.is_empty()).then(|| normalized.to_owned())?
+        }
+    };
+    Some((
+        subject.kind.as_str().to_owned(),
+        subject.scope.as_str().to_owned(),
+        value,
+    ))
 }
 
 fn plan_approval_can_auto_allow_decision(decision: &PermissionDecision) -> bool {
@@ -1857,6 +1987,27 @@ fn append_tool_approval_audit(
         reason,
         preview_hash,
     }))
+}
+
+fn append_tool_approval_session_grant<H: EventHandler>(
+    session: &mut Session,
+    handler: &mut H,
+    call: &ToolCall,
+    decision: &PermissionDecision,
+) -> Result<()> {
+    let control = ControlEntry::ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry {
+        call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        access: decision.access,
+        operation: decision.operation,
+        risk: decision.risk,
+        subjects: audit_subjects(&decision.subjects),
+        subject_zones: decision.subject_zones.clone(),
+        expires: ToolApprovalSessionGrantExpiry::Session,
+        granted_at_ms: unix_time_ms(),
+    });
+    session.append_control(control.clone())?;
+    handler.handle(RunEvent::Control(control))
 }
 
 fn append_run_lifecycle_events(

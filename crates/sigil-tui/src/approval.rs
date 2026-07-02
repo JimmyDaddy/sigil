@@ -4,21 +4,60 @@ use sigil_kernel::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ApprovalAction {
-    Allow,
+pub enum ApprovalAction {
+    AllowOnce,
+    AllowSession,
     Deny,
 }
 
 impl ApprovalAction {
-    pub(crate) fn toggled(self) -> Self {
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Allow => Self::Deny,
-            Self::Deny => Self::Allow,
+            Self::AllowOnce => "Allow once",
+            Self::AllowSession => "Allow session",
+            Self::Deny => "Deny",
         }
     }
 
+    pub(crate) fn order(session_grant_available: bool) -> &'static [Self] {
+        if session_grant_available {
+            &[Self::AllowOnce, Self::AllowSession, Self::Deny]
+        } else {
+            &[Self::AllowOnce, Self::Deny]
+        }
+    }
+
+    pub(crate) fn normalized(self, session_grant_available: bool) -> Self {
+        if self == Self::AllowSession && !session_grant_available {
+            Self::AllowOnce
+        } else {
+            self
+        }
+    }
+
+    pub(crate) fn next(self, session_grant_available: bool, forward: bool) -> Self {
+        let order = Self::order(session_grant_available);
+        let current = order
+            .iter()
+            .position(|action| *action == self.normalized(session_grant_available))
+            .unwrap_or(0);
+        let len = order.len();
+        let next = if forward {
+            (current + 1) % len
+        } else {
+            current.checked_sub(1).unwrap_or(len - 1)
+        };
+        order[next]
+    }
+
+    #[cfg(test)]
     pub(crate) fn approved(self) -> bool {
-        matches!(self, Self::Allow)
+        matches!(self, Self::AllowOnce | Self::AllowSession)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grants_session(self) -> bool {
+        matches!(self, Self::AllowSession)
     }
 }
 
@@ -84,6 +123,7 @@ pub(crate) struct ApprovalModalView {
     pub diff_label: String,
     pub diff_lines: Vec<ApprovalDiffLine>,
     pub selected_action: ApprovalAction,
+    pub session_grant_available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +136,7 @@ pub struct PendingApproval {
     pub subject_zones: Vec<PathTrustZone>,
     pub confirmation: Option<PermissionConfirmation>,
     pub snapshot_required: bool,
+    pub session_grant_available: bool,
     pub preview: Option<ToolPreview>,
 }
 

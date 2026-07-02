@@ -1192,6 +1192,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     ));
                 }
             }
+            Ok(WorkerCommand::ApprovalSessionDecision { call_id }) => {
+                if let Some(active_run) = &active_run {
+                    let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
+                        call_id,
+                        approval: ToolApproval::ApproveForSession,
+                    });
+                } else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "received stray approval decision without pending approval".to_owned(),
+                    ));
+                }
+            }
             Ok(WorkerCommand::ApprovalCommand(command)) => {
                 if processed_worker_command_ids.contains(&command.command_id) {
                     let _ = message_tx.send(WorkerMessage::Notice(format!(
@@ -1210,6 +1222,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             }
                         };
                         ApprovalSignal::Decision { call_id, approval }
+                    }
+                    WorkerApprovalCommand::DecisionForSession { call_id } => {
+                        ApprovalSignal::Decision {
+                            call_id,
+                            approval: ToolApproval::ApproveForSession,
+                        }
                     }
                     WorkerApprovalCommand::DecisionWithArgs { call_id, args_json } => {
                         ApprovalSignal::Decision {

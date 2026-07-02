@@ -158,6 +158,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        session_grant_available: false,
         preview: None,
     });
     let approval = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &approval_app);
@@ -267,6 +268,7 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        session_grant_available: false,
         preview: Some(sigil_kernel::ToolPreview {
             title: "Update files".to_owned(),
             summary: "summary".to_owned(),
@@ -296,12 +298,16 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
         HitTarget::ApprovalFileRow { index: 1 }
     );
     assert_eq!(
-        approval.hit_target(hit_areas.allow_action.x, hit_areas.allow_action.y),
-        HitTarget::ApprovalAction { approved: true }
+        approval.hit_target(hit_areas.allow_once_action.x, hit_areas.allow_once_action.y),
+        HitTarget::ApprovalAction {
+            action: ApprovalAction::AllowOnce
+        }
     );
     assert_eq!(
         approval.hit_target(hit_areas.deny_action.x, hit_areas.deny_action.y),
-        HitTarget::ApprovalAction { approved: false }
+        HitTarget::ApprovalAction {
+            action: ApprovalAction::Deny
+        }
     );
     assert_eq!(
         approval.hit_target(
@@ -351,6 +357,7 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
             active_hunk: false,
         }],
         selected_action: ApprovalAction::Deny,
+        session_grant_available: false,
     };
 
     let area = approval_modal_area(Rect::new(0, 0, 90, 24), &view);
@@ -537,6 +544,7 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        session_grant_available: false,
         preview: None,
     });
 
@@ -575,7 +583,8 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
             kind: ApprovalDiffLineKind::Context,
             active_hunk: false,
         }],
-        selected_action: ApprovalAction::Allow,
+        selected_action: ApprovalAction::AllowOnce,
+        session_grant_available: false,
     };
 
     assert_eq!(approval_header_line_count(&view), 4);
@@ -599,8 +608,8 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     );
     assert!(approval_file_row_hit_areas(Rect::new(0, 0, 20, 1), &view).is_empty());
     assert_eq!(
-        approval_action_hit_areas(Rect::new(0, 0, 0, 0), ApprovalAction::Allow),
-        (Rect::default(), Rect::default())
+        approval_action_hit_areas(Rect::new(0, 0, 0, 0), &view),
+        (Rect::default(), Rect::default(), Rect::default())
     );
     assert_eq!(
         approval_diff_control_hit_areas(Rect::new(0, 0, 0, 0), &view),

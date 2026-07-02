@@ -58,6 +58,9 @@ fn module_split_facade_registers_tools_paths_and_backend_contracts() -> Result<(
         "apply_changeset",
         "bash",
         "terminal_start",
+        "terminal_read",
+        "terminal_input",
+        "terminal_cancel",
     ] {
         assert!(
             names.iter().any(|name| name == expected),

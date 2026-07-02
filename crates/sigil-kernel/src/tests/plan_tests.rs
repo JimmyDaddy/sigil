@@ -40,6 +40,34 @@ fn approved_entry(plan_text: &str, plan_version: u32) -> PlanApprovedEntry {
     }
 }
 
+fn simple_structured_plan(summary: &str, title: &str, path: &str) -> String {
+    format!(
+        r#"Plan:
+
+```sigil-plan-v1
+{{
+  "summary": "{summary}",
+  "steps": [
+    {{
+      "id": "step-1",
+      "title": "{title}",
+      "target_paths": ["{path}"]
+    }}
+  ],
+  "target_paths": ["{path}"],
+  "suggested_checks": [
+    {{
+      "check_spec_id": "cargo-test",
+      "command": "cargo",
+      "args": ["test", "-p", "sigil-kernel", "plan"]
+    }}
+  ]
+}}
+```
+"#
+    )
+}
+
 #[test]
 fn plan_text_hash_is_stable_and_prefixed() {
     let left = plan_text_hash("inspect then edit");
@@ -79,9 +107,22 @@ fn plan_workspace_paths_returns_empty_for_plan_without_paths() {
 #[test]
 fn plan_draft_created_entry_skips_blank_and_preserves_metadata() -> Result<()> {
     assert!(plan_draft_created_entry("   \n\t", PlanSourceRef::default(), 42, None)?.is_none());
+    assert!(
+        plan_draft_created_entry(
+            "1. Inspect README.md\n2. Update crates/sigil-tui/src/app.rs",
+            PlanSourceRef::default(),
+            42,
+            None
+        )?
+        .is_none()
+    );
 
     let draft = plan_draft_created_entry(
-        "1. Inspect README.md\n2. Update crates/sigil-tui/src/app.rs\n3. Run cargo test -p sigil-kernel plan",
+        &simple_structured_plan(
+            "Inspect and update TUI docs",
+            "Update crates/sigil-tui/src/app.rs",
+            "crates/sigil-tui/src/app.rs",
+        ),
         PlanSourceRef {
             session_ref: Some("session.jsonl".to_owned()),
             run_id: Some("run_1".to_owned()),
@@ -94,17 +135,16 @@ fn plan_draft_created_entry_skips_blank_and_preserves_metadata() -> Result<()> {
 
     assert!(draft.plan_id.as_str().starts_with("plan_"));
     assert!(draft.plan_hash.starts_with("sha256:"));
-    assert_eq!(draft.summary, "Inspect README.md");
-    assert_eq!(
+    assert_eq!(draft.summary, "Inspect and update TUI docs");
+    assert_eq!(draft.steps.len(), 1);
+    assert_eq!(draft.steps[0].title, "Update crates/sigil-tui/src/app.rs");
+    assert!(
         draft
             .inline_text
             .as_deref()
             .unwrap_or_default()
-            .lines()
-            .count(),
-        3
+            .contains("Steps:")
     );
-    assert!(draft.target_paths.iter().any(|path| path == "README.md"));
     assert!(
         draft
             .target_paths
@@ -126,15 +166,22 @@ fn plan_draft_created_entry_skips_blank_and_preserves_metadata() -> Result<()> {
 #[test]
 fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result<()> {
     let draft = plan_draft_created_entry(
-        r#"# 计划
+        r#"计划如下。
 
-文件: README.md
-问题: 第 3 行 "This docs has typoo." 中 "typoo" 拼写错误。
-修复: 将 typoo 改为 typo。
-
-```diff
-- This docs has typoo.
-+ This docs has typo.
+```sigil-plan-v1
+{
+  "summary": "Fix README typo",
+  "steps": [
+    {
+      "id": "fix-readme-typo",
+      "title": "Fix README.md line 3 typo",
+      "detail": "第 3 行 \"This docs has typoo.\" 中 \"typoo\" 拼写错误，修复为 typo。",
+      "target_paths": ["README.md"],
+      "acceptance": ["README.md line 3 no longer contains typoo"]
+    }
+  ],
+  "target_paths": ["README.md"]
+}
 ```
 
 是否需要我执行这个修改？
@@ -146,17 +193,17 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
     .expect("non-empty plan should create a durable draft");
     let task_input = plan_task_input_from_draft(&draft);
 
-    assert!(task_input.contains("Execute the following user-approved plan"));
+    assert!(task_input.contains("Execute the following user-approved structured plan"));
     assert!(task_input.contains("authoritative task input"));
     assert!(task_input.contains("Preserve the approved plan's scope and order"));
-    assert!(task_input.contains("Approved plan:"));
+    assert!(task_input.contains("Approved structured plan:"));
     assert!(task_input.contains("This docs has typoo"));
     assert_eq!(draft.target_paths, vec!["README.md"]);
     Ok(())
 }
 
 #[test]
-fn sigil_plan_v1_block_is_treated_as_plain_plan_text() -> Result<()> {
+fn sigil_plan_v1_block_creates_structured_executable_plan() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"计划如下。
 
@@ -189,9 +236,11 @@ fn sigil_plan_v1_block_is_treated_as_plain_plan_text() -> Result<()> {
     .expect("non-empty plan should create a durable draft");
     let task_input = plan_task_input_from_draft(&draft);
 
-    assert_eq!(draft.summary, "计划如下。");
-    assert!(draft.target_paths.iter().any(|path| path == "README.md"));
-    assert!(task_input.contains("sigil-plan-v1"));
+    assert_eq!(draft.summary, "Fix README typo");
+    assert_eq!(draft.target_paths, vec!["README.md"]);
+    assert_eq!(draft.steps.len(), 2);
+    assert!(task_input.contains("Fix README.md line 3 typo"));
+    assert!(!task_input.contains("sigil-plan-v1"));
     assert!(task_input.contains("fix-readme-typo"));
     Ok(())
 }
@@ -199,7 +248,7 @@ fn sigil_plan_v1_block_is_treated_as_plain_plan_text() -> Result<()> {
 #[test]
 fn plan_artifact_projection_tracks_pending_decision_and_created_task() -> Result<()> {
     let draft = plan_draft_created_entry(
-        "1. Inspect README.md\n2. Update README.md",
+        &simple_structured_plan("Update README", "Update README.md", "README.md"),
         PlanSourceRef::default(),
         1,
         None,
@@ -283,6 +332,7 @@ Plan:
     assert!(left.contains("Update docs/en/quickstart.md copy"));
     assert!(left.contains("task execution plan"));
     assert!(left.contains("include a concise reason in the task step detail"));
+    assert!(!left.contains("sigil-plan-v1"));
     Ok(())
 }
 

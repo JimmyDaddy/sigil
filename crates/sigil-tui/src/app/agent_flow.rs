@@ -89,6 +89,7 @@ impl AppState {
         self.composer.agent_panel_focused
     }
 
+    #[allow(dead_code)] // Kept for the composer agent panel path while queue focus is being revised.
     pub(super) fn focus_composer_agent_panel(&mut self) -> bool {
         if !self.composer_agent_panel_available() {
             self.composer.agent_panel_focused = false;
@@ -685,6 +686,7 @@ impl AppState {
         self.composer_agent_rows().len() > 1
     }
 
+    #[allow(dead_code)] // Used by focus_composer_agent_panel when that focus path is enabled.
     fn select_active_agent_sidebar_item(&mut self) {
         if let Some(index) = self.agent_sidebar_items().iter().position(|item| {
             item.target

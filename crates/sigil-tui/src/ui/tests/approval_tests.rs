@@ -91,6 +91,7 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
         diff_label: "src/lib.rs".to_owned(),
         diff_lines: Vec::new(),
         selected_action: ApprovalAction::Deny,
+        session_grant_available: false,
     };
 
     let text = plain_line_text(&approval_diff_status_line(&view));
@@ -117,7 +118,8 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
         hunk_total: 0,
         diff_label: "src/lib.rs".to_owned(),
         diff_lines: Vec::new(),
-        selected_action: ApprovalAction::Allow,
+        selected_action: ApprovalAction::AllowOnce,
+        session_grant_available: false,
     };
 
     let hidden = approval_header_lines(
@@ -230,7 +232,8 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
         hunk_total: 0,
         diff_label: "src/lib.rs".to_owned(),
         diff_lines: Vec::new(),
-        selected_action: ApprovalAction::Allow,
+        selected_action: ApprovalAction::AllowOnce,
+        session_grant_available: false,
     };
     let multiple = ApprovalModalView {
         file_rows: vec![
@@ -723,6 +726,7 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
             active_hunk: true,
         }],
         selected_action: ApprovalAction::Deny,
+        session_grant_available: false,
     }
 }
 

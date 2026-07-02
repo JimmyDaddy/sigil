@@ -378,31 +378,49 @@ fn approval_footer_lines_with_palette(
     } else {
         ""
     };
+    let mut action_line = approval_action_badges(view, palette);
+    action_line.push(Span::raw(" "));
+    action_line.push(approval_badge_with_palette(
+        "Enter choose",
+        palette.accent_warning,
+        palette,
+    ));
+    action_line.push(Span::raw(" "));
+    action_line.push(approval_badge_with_palette(
+        "Y once / N deny",
+        palette.text_muted,
+        palette,
+    ));
     vec![
-        Line::from(vec![
-            approval_action_badge_with_palette(
-                "Allow",
-                palette.approval_allow_bg,
-                view.selected_action == ApprovalAction::Allow,
-                palette,
-            ),
-            Span::raw(" "),
-            approval_action_badge_with_palette(
-                "Deny",
-                palette.approval_deny_bg,
-                view.selected_action == ApprovalAction::Deny,
-                palette,
-            ),
-            Span::raw(" "),
-            approval_badge_with_palette("Enter choose", palette.accent_warning, palette),
-            Span::raw(" "),
-            approval_badge_with_palette("Y/N direct", palette.text_muted, palette),
-        ]),
+        Line::from(action_line),
         Line::styled(
-            format!("Left/Right action  M meta  V view  [,] hunk{file_hint}  Up/Down scroll"),
+            format!("Tab/Left/Right action  M meta  V view  [,] hunk{file_hint}  Up/Down scroll"),
             Style::default().fg(palette.text_muted),
         ),
     ]
+}
+
+fn approval_action_badges(view: &ApprovalModalView, palette: &ThemePalette) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, action) in ApprovalAction::order(view.session_grant_available)
+        .iter()
+        .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let color = match action {
+            ApprovalAction::AllowOnce | ApprovalAction::AllowSession => palette.approval_allow_bg,
+            ApprovalAction::Deny => palette.approval_deny_bg,
+        };
+        spans.push(approval_action_badge_with_palette(
+            action.label(),
+            color,
+            view.selected_action == *action,
+            palette,
+        ));
+    }
+    spans
 }
 
 #[cfg(test)]

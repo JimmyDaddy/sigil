@@ -44,6 +44,27 @@ use super::{
     session_stats_from_entries,
 };
 
+fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
+    format!(
+        r#"Plan:
+
+```sigil-plan-v1
+{{
+  "summary": "{summary}",
+  "steps": [
+    {{
+      "id": "step-1",
+      "title": "{title}",
+      "target_paths": ["{path}"]
+    }}
+  ],
+  "target_paths": ["{path}"]
+}}
+```
+"#
+    )
+}
+
 fn request_memory_text(request: &crate::CompletionRequest) -> String {
     request
         .messages
@@ -3388,7 +3409,7 @@ fn plan_artifact_projection_replays_mixed_durable_stream_records() -> Result<()>
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let first = plan_draft_created_entry(
-        "1. Inspect README.md",
+        &structured_plan_text("Inspect README", "Inspect README.md", "README.md"),
         PlanSourceRef {
             session_ref: Some("legacy.jsonl".to_owned()),
             run_id: Some("run_legacy".to_owned()),
@@ -3409,7 +3430,11 @@ fn plan_artifact_projection_replays_mixed_durable_stream_records() -> Result<()>
     )?;
     let store = JsonlSessionStore::new(&path)?;
     let second = plan_draft_created_entry(
-        "1. Inspect README.md\n2. Update docs/en/quickstart.md",
+        &structured_plan_text(
+            "Update quickstart docs",
+            "Update docs/en/quickstart.md",
+            "docs/en/quickstart.md",
+        ),
         PlanSourceRef {
             session_ref: Some("session.jsonl".to_owned()),
             run_id: Some("run_v2".to_owned()),

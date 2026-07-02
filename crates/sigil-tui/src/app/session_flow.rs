@@ -1011,6 +1011,12 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             tool_approval_action_label(approval.action),
             approval.policy_decision.as_str()
         ),
+        ControlEntry::ToolApprovalSessionGrant(grant) => format!(
+            "[ctl] approval grant {} {} scope=session subjects={}",
+            grant.call_id,
+            grant.tool_name,
+            grant.subjects.len()
+        ),
         ControlEntry::ToolExecution(execution) => render_tool_execution_line(execution),
         ControlEntry::ToolEgress(egress) => render_tool_egress_line(egress),
         ControlEntry::McpElicitation(elicitation) => format!(

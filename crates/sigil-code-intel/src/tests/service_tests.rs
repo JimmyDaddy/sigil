@@ -1355,6 +1355,10 @@ async fn service_basic_accessors_status_and_shutdown_cover_idle_paths() {
     assert!(service.enabled());
     assert_eq!(service.config().servers.len(), 1);
     assert_eq!(service.workspace_root(), temp.path());
+    let plan = service.server_plan_snapshot();
+    assert_eq!(plan.servers.len(), 1);
+    assert_eq!(plan.servers[0].name, "missing-rust-analyzer");
+    assert!(plan.discovery_loaded);
     assert_eq!(
         service
             .resolve_file("src.rs")

@@ -41,7 +41,28 @@ fn plan_handoff_run_now_uses_normal_task_planner_and_executes_resulting_plan() -
     }"#;
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
         ProviderChunk::TextDelta(
-            "1. Inspect README.md\n2. Report whether the approved typo fix is needed".to_owned(),
+            r#"Plan:
+
+```sigil-plan-v1
+{
+  "summary": "Inspect approved README plan",
+  "steps": [
+    {
+      "id": "inspect-approved-plan",
+      "title": "Inspect README.md",
+      "target_paths": ["README.md"]
+    },
+    {
+      "id": "report-typo-status",
+      "title": "Report whether the approved typo fix is needed",
+      "target_paths": ["README.md"]
+    }
+  ],
+  "target_paths": ["README.md"]
+}
+```
+"#
+            .to_owned(),
         ),
         ProviderChunk::Done,
     ])]);
@@ -134,7 +155,7 @@ fn plan_handoff_run_now_uses_normal_task_planner_and_executes_resulting_plan() -
     assert!(matches!(
         started,
         WorkerMessage::TaskRunStarted { ref objective, .. }
-            if objective.contains("Execute the following user-approved plan")
+            if objective.contains("Execute the following user-approved structured plan")
                 && objective.contains("Inspect README.md")
     ));
 
