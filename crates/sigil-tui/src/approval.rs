@@ -50,6 +50,18 @@ impl ApprovalAction {
         order[next]
     }
 
+    pub(crate) fn default_for(risk: PermissionRisk, session_grant_available: bool) -> Self {
+        match risk {
+            PermissionRisk::Low | PermissionRisk::Medium => {
+                Self::AllowOnce.normalized(session_grant_available)
+            }
+            PermissionRisk::High if session_grant_available => Self::AllowOnce,
+            PermissionRisk::High | PermissionRisk::Destructive | PermissionRisk::Protected => {
+                Self::Deny
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn approved(self) -> bool {
         matches!(self, Self::AllowOnce | Self::AllowSession)

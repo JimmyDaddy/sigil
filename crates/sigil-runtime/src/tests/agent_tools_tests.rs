@@ -764,7 +764,7 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     );
     assert!(spec.description.contains("must delegate"));
     assert!(spec.description.contains("mode=background"));
-    assert!(spec.description.contains("mode=join_before_final only"));
+    assert!(spec.description.contains("mode=join_before_final when"));
     assert!(!spec.description.contains("worker:"));
     assert!(spec.input_schema["properties"].get("profile_id").is_some());
     assert!(
@@ -1530,11 +1530,9 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
             .as_u64()
             .is_some_and(|value| value > 0)
     );
-    assert!(
-        payload["next_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("do not call wait_agent again immediately"))
-    );
+    assert!(payload["next_action"].as_str().is_some_and(|action| {
+        action.contains("do not call wait_agent again until retry_after_ms")
+    }));
     let projection = session.agent_thread_state_projection();
     let thread_id = chat_agent_thread_id_for_call(
         "call-background",
@@ -1606,7 +1604,7 @@ async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
     assert_eq!(payload["backgrounded"], true);
     assert_eq!(payload["do_not_describe_as_finished"], true);
     assert!(payload["next_action"].as_str().is_some_and(|action| {
-        action.contains("continue independent parent work") && action.contains("wait_agent")
+        action.contains("non-overlapping parent work") && action.contains("wait_agent")
     }));
     let projection = session.agent_thread_state_projection();
     let thread = projection

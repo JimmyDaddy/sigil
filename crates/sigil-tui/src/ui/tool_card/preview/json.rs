@@ -20,7 +20,11 @@ pub(in crate::ui::tool_card) fn push_json_tree_lines(
             if let Some(key) = key {
                 lines.push(format!("{prefix}{key}: {{}}"));
             } else if prefix.is_empty() {
-                lines.push("{object}".to_owned());
+                lines.push(if object.is_empty() {
+                    "{empty object}".to_owned()
+                } else {
+                    "{object}".to_owned()
+                });
             }
             let len = object.len();
             for (index, (child_key, child_value)) in object.iter().enumerate() {
@@ -52,7 +56,11 @@ pub(in crate::ui::tool_card) fn push_json_tree_lines(
             if let Some(key) = key {
                 lines.push(format!("{prefix}{key}: [{}]", items.len()));
             } else if prefix.is_empty() {
-                lines.push(format!("[array] {}", items.len()));
+                lines.push(if items.is_empty() {
+                    "[empty array]".to_owned()
+                } else {
+                    format!("[array] {}", items.len())
+                });
             }
             for (index, item) in items.iter().enumerate() {
                 let branch = if index + 1 == items.len() {

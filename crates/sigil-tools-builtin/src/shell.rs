@@ -593,7 +593,7 @@ pub(crate) fn redirection_target(word: &str) -> Option<&str> {
     for prefix in [">>", ">", "<", "2>>", "2>", "&>>", "&>", "1>>", "1>"] {
         if let Some(target) = word
             .strip_prefix(prefix)
-            .filter(|target| !target.is_empty())
+            .filter(|target| !target.is_empty() && !target.starts_with('&'))
         {
             return Some(target);
         }

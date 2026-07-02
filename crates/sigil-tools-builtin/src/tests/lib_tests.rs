@@ -2657,6 +2657,16 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
         subject.scope == ToolSubjectScope::External
             && subject.canonical_path.as_deref() == Some(outside_output.as_path())
     }));
+
+    let fd_redirect_subjects = bash_tool(workspace.path())
+        .permission_subjects(&ctx, &json!({ "command": "cargo check 2>&1" }))?;
+    assert!(
+        fd_redirect_subjects
+            .iter()
+            .filter(|subject| subject.kind == ToolSubjectKind::Path)
+            .all(|subject| !subject.normalized.contains("&1"))
+    );
+
     Ok(())
 }
 

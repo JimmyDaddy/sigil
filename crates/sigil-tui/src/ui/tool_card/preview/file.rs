@@ -87,8 +87,7 @@ pub(in crate::ui::tool_card) fn render_path_list_preview_with_palette(
         .preview_value
         .as_ref()
         .and_then(json_string_list)
-        .or_else(|| Some(infer_string_list_preview(&summary.preview_lines)))
-        .filter(|entries| !entries.is_empty())?;
+        .or_else(|| Some(infer_string_list_preview(&summary.preview_lines)))?;
 
     let mut lines = vec![timeline_section_line_with_palette(
         accent,
@@ -104,6 +103,20 @@ pub(in crate::ui::tool_card) fn render_path_list_preview_with_palette(
         )],
         palette,
     )];
+    if entries.is_empty() {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                if tool_name_matches(&summary.tool_name, "glob") {
+                    "no matches"
+                } else {
+                    "no files"
+                },
+                Style::default().fg(palette.text_muted),
+            )],
+        ));
+        return Some(lines);
+    }
     for path in entries {
         lines.push(timeline_content_line(
             accent,

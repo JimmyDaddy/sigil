@@ -36,6 +36,35 @@ fn markdown_timeline_lines_render_code_blocks() {
 }
 
 #[test]
+fn markdown_timeline_lines_render_sigil_plan_blocks_as_summary() {
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        r#"```sigil-plan-v1
+{
+  "summary": "Clean up workspace and run checks",
+  "steps": [
+    {"id": "one", "title": "Clean git state"},
+    {"id": "two", "title": "Run quality gates"}
+  ],
+  "target_paths": ["crates/sigil-tui"],
+  "suggested_checks": ["cargo check"],
+  "risk": "medium"
+}
+```"#,
+        MarkdownRenderOptions::timeline(80),
+    );
+    let plain = plain_text(&lines);
+
+    assert!(plain.contains("sigil-plan-v1"));
+    assert!(plain.contains("Clean up workspace and run checks"));
+    assert!(plain.contains("2 steps"));
+    assert!(plain.contains("Clean git state"));
+    assert!(!plain.contains("\"summary\""));
+    assert!(!plain.contains("{"));
+}
+
+#[test]
 fn markdown_default_wrappers_use_default_theme_palette() {
     let palette = crate::ui::theme::default_palette();
     let code = render_code_line_spans("let x = 1;", Color::Cyan, Style::default());

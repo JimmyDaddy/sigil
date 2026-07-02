@@ -681,6 +681,57 @@ fn session_grant_availability_requires_stable_low_or_medium_risk_scope() -> Resu
 }
 
 #[test]
+fn session_grant_availability_allows_exact_high_risk_commands_only() -> Result<()> {
+    let exact_command = PermissionPolicy::new(&PermissionConfig::default()).decide(
+        &spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command("cargo check 2>&1", "cargo check 2>&1")],
+    )?;
+    assert_eq!(
+        exact_command.operation,
+        ToolOperation::ExecuteUnknownCommand
+    );
+    assert_eq!(exact_command.risk, PermissionRisk::High);
+    assert!(tool_approval_session_grant_available(&exact_command));
+
+    let truncated_command = PermissionPolicy::new(&PermissionConfig::default()).decide(
+        &spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "cargo check --workspace --all-targets --features really-long-feature-name",
+            "cargo check --workspace --all-targets...",
+        )],
+    )?;
+    assert!(!tool_approval_session_grant_available(&truncated_command));
+
+    let external_path = tempfile::tempdir()?
+        .path()
+        .canonicalize()?
+        .join("input.txt");
+    let external_command = PermissionPolicy::new(&PermissionConfig {
+        external_directory: ExternalDirectoryConfig {
+            enabled: true,
+            ..ExternalDirectoryConfig::default()
+        },
+        ..PermissionConfig::default()
+    })
+    .decide(
+        &spec(ToolAccess::Execute),
+        "bash",
+        vec![
+            ToolSubject::command(
+                "python script.py /tmp/input.txt",
+                "python script.py /tmp/input.txt",
+            ),
+            external_path_subject(external_path),
+        ],
+    )?;
+    assert!(!tool_approval_session_grant_available(&external_command));
+
+    Ok(())
+}
+
+#[test]
 fn permission_external_directory_rules_can_allow_matching_paths() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let external_root = temp.path().canonicalize()?;

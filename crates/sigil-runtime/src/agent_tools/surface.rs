@@ -236,7 +236,7 @@ impl AgentTool {
     fn description(&self) -> String {
         match self.kind {
             AgentToolKind::Spawn => format!(
-                "Spawn a child agent when the user explicitly asks for delegated, parallel, sub-agent, or child-agent work. You must delegate the requested non-overlapping scope instead of completing that same scope yourself. Default to mode=background when the parent can continue independent work while the child runs; then continue the parent work and call wait_agent before the final answer. Use mode=join_before_final only when the parent cannot make useful progress until the child result is available; foreground users may move that run to background before execution. Use stable profile_id values, not display names.\n{}",
+                "Spawn a child agent when the user explicitly asks for delegated, parallel, sub-agent, or child-agent work. You must delegate the requested non-overlapping scope instead of completing that same scope yourself. Use mode=join_before_final when the final answer or next step depends on the child result. Use mode=background only when the parent has truly non-overlapping work; after spawning in background, continue only that non-overlapping work and call wait_agent before the final answer. Foreground users may move that run to background before execution. Use stable profile_id values, not display names.\n{}",
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {

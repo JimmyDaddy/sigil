@@ -2,6 +2,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use serde_json::Value;
 use sigil_kernel::SyntaxThemeId;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -140,6 +141,13 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
                 block_lines.push(source_lines[index]);
                 index += 1;
             }
+            if label == "sigil-plan-v1"
+                && let Some(plan_lines) =
+                    render_sigil_plan_block_with_palette(accent, &block_lines, palette)
+            {
+                rendered.extend(plan_lines);
+                continue;
+            }
             rendered.push(timeline_section_line_with_palette(
                 accent,
                 "code",
@@ -230,6 +238,99 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
         index += 1;
     }
     rendered
+}
+
+fn render_sigil_plan_block_with_palette(
+    accent: Color,
+    block_lines: &[&str],
+    palette: &ThemePalette,
+) -> Option<Vec<Line<'static>>> {
+    let value = serde_json::from_str::<Value>(&block_lines.join("\n")).ok()?;
+    let object = value.as_object()?;
+    let mut lines = vec![timeline_section_line_with_palette(
+        accent,
+        "plan",
+        palette.accent_info,
+        vec![Span::styled(
+            "sigil-plan-v1",
+            Style::default().fg(palette.text_muted),
+        )],
+        palette,
+    )];
+
+    if let Some(summary) = object.get("summary").and_then(Value::as_str) {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                truncate_display_width(summary, 140),
+                Style::default().fg(palette.text_primary),
+            )],
+        ));
+    }
+
+    let steps = object
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let risk = object.get("risk").and_then(Value::as_str);
+    let target_count = json_array_len(object.get("target_paths"));
+    let check_count = json_array_len(object.get("suggested_checks"));
+    let mut meta = vec![format!("{} steps", steps.len())];
+    if let Some(risk) = risk.filter(|risk| !risk.trim().is_empty()) {
+        meta.push(format!("risk {risk}"));
+    }
+    if target_count > 0 {
+        meta.push(format!("{target_count} paths"));
+    }
+    if check_count > 0 {
+        meta.push(format!("{check_count} checks"));
+    }
+    lines.push(timeline_content_line(
+        accent,
+        vec![Span::styled(
+            meta.join(" · "),
+            Style::default().fg(palette.text_muted),
+        )],
+    ));
+
+    for (index, step) in steps.iter().take(6).enumerate() {
+        let title = step
+            .get("title")
+            .and_then(Value::as_str)
+            .or_else(|| step.get("id").and_then(Value::as_str))
+            .unwrap_or("step");
+        lines.push(timeline_content_line(
+            accent,
+            vec![
+                Span::styled(
+                    format!("{}. ", index + 1),
+                    Style::default()
+                        .fg(palette.accent_warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    truncate_display_width(title, 120),
+                    Style::default().fg(palette.text_primary),
+                ),
+            ],
+        ));
+    }
+    if steps.len() > 6 {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                format!("{} more steps hidden", steps.len() - 6),
+                Style::default().fg(palette.text_muted),
+            )],
+        ));
+    }
+
+    Some(lines)
+}
+
+fn json_array_len(value: Option<&Value>) -> usize {
+    value.and_then(Value::as_array).map(Vec::len).unwrap_or(0)
 }
 
 fn code_block_render_rows(line: &str, options: MarkdownRenderOptions) -> Vec<String> {

@@ -420,7 +420,7 @@ impl AgentToolRuntime {
                         "backgrounded": true,
                         "reason": "agent moved to background",
                         "retry_after_ms": 5_000_u64,
-                        "next_action": "continue independent parent work; use wait_agent later when a result is needed",
+                        "next_action": "continue only non-overlapping parent work; use wait_agent before the final answer",
                         "do_not_describe_as_finished": true
                     }))
                     .unwrap_or_else(|error| {

@@ -16,7 +16,25 @@ pub(in crate::ui::tool_card) fn render_grep_preview_with_palette(
 ) -> Option<Vec<Line<'static>>> {
     let matches = summary.preview_value.as_ref().and_then(json_grep_matches)?;
     if matches.is_empty() {
-        return None;
+        return Some(vec![
+            timeline_section_line_with_palette(
+                accent,
+                "matches",
+                palette.accent_info,
+                vec![Span::styled(
+                    "0 files",
+                    Style::default().fg(palette.text_muted),
+                )],
+                palette,
+            ),
+            timeline_content_line(
+                accent,
+                vec![Span::styled(
+                    "no matches",
+                    Style::default().fg(palette.text_muted),
+                )],
+            ),
+        ]);
     }
 
     let mut grouped = Vec::<(String, Vec<(u64, String)>)>::new();

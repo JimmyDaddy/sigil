@@ -558,32 +558,32 @@ fn approval_enter_chooses_selected_action() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
 
-    assert_eq!(app.approval.selected_action, ApprovalAction::Deny);
+    assert_eq!(app.approval.selected_action, ApprovalAction::AllowOnce);
     assert_eq!(
         app.approval_modal_view()
             .expect("approval modal should exist")
             .selected_action,
-        ApprovalAction::Deny
+        ApprovalAction::AllowOnce
     );
-    let deny = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(matches!(
-        deny,
-        Some(AppAction::ApprovalDecision { call_id, approved })
-            if call_id == "call-1" && !approved
-    ));
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.approval.selected_action, ApprovalAction::AllowOnce);
     let allow = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         allow,
         Some(AppAction::ApprovalDecision { call_id, approved })
             if call_id == "call-1" && approved
     ));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.approval.selected_action, ApprovalAction::Deny);
+    let deny = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        deny,
+        Some(AppAction::ApprovalDecision { call_id, approved })
+            if call_id == "call-1" && !approved
+    ));
     assert!(
         app.events
             .iter()
-            .any(|event| event.label == "approval:action" && event.detail == "Allow once")
+            .any(|event| event.label == "approval:action" && event.detail == "Deny")
     );
     Ok(())
 }
@@ -598,8 +598,6 @@ fn approval_enter_can_choose_session_grant_when_available() -> Result<()> {
         .expect("pending approval")
         .session_grant_available = true;
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    assert_eq!(app.approval.selected_action, ApprovalAction::AllowOnce);
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.approval.selected_action, ApprovalAction::AllowSession);
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;

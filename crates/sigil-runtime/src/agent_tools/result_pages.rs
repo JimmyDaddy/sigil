@@ -261,7 +261,7 @@ pub(super) fn agent_status_tool_result(
         "next_action": if thread.status.is_terminal() {
             "use result_ref/read_args when more detail is needed"
         } else {
-            "continue independent parent work; do not call wait_agent again immediately"
+            "continue only non-overlapping parent work; do not call wait_agent again until retry_after_ms; wait before the final answer"
         },
         "result_ref": result.map(|result| json!({
             "thread_id": result.thread_id.as_str(),
@@ -326,7 +326,7 @@ pub(super) fn agent_backgrounded_tool_result(
         "retry_after_ms": retry_after_ms,
         "next_poll_after_ms": retry_after_ms,
         "next_poll_after_unix_ms": next_poll_after_unix_ms,
-        "next_action": "continue independent parent work; use wait_agent later when a result is needed",
+        "next_action": "continue only non-overlapping parent work; use wait_agent before the final answer",
         "do_not_describe_as_finished": true
     });
     ToolResult::ok(
@@ -372,7 +372,7 @@ pub(super) fn agent_wait_throttled_tool_result(
         "coalesced": true,
         "polling_throttled": true,
         "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
-        "next_action": "wait_agent was called too soon for the same running thread; continue independent parent work and retry after retry_after_ms"
+        "next_action": "wait_agent was called too soon for the same running thread; continue only non-overlapping parent work and retry after retry_after_ms before the final answer"
     });
     ToolResult::ok(
         call.id.clone(),

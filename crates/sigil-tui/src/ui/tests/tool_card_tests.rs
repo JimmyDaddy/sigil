@@ -303,7 +303,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
         "preview_lines": [
             "{",
             "  \"coalescing_key\": \"wait_agent:agent_chat_1\",",
-            "  \"next_action\": \"continue independent parent work\"",
+            "  \"next_action\": \"continue only non-overlapping parent work\"",
             "}"
         ],
         "preview_value": {
@@ -313,7 +313,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
             "terminal": false,
             "reason": "agent tool spawned child session",
             "result_available": false,
-            "next_action": "continue independent parent work"
+            "next_action": "continue only non-overlapping parent work"
         }
     }));
     let wait_ready = parsed_summary(json!({
@@ -441,7 +441,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     );
     assert!(running_spawn_text.contains("running · mailbox audit"));
     assert!(running_spawn_text.contains("agent tool spawned child session"));
-    assert!(running_spawn_text.contains("action continue independent parent work"));
+    assert!(running_spawn_text.contains("action continue only non-overlapping parent work"));
     assert!(!running_spawn_text.contains("coalescing_key"));
 
     assert_eq!(wait_ready_display.status.label, "DONE");
@@ -1033,10 +1033,7 @@ fn tool_card_preview_renderers_cover_text_bash_and_file_change_variants() {
     assert!(plain_text(&file_change_lines).contains("1 changed"));
     assert!(plain_text(&file_change_lines).contains("write summary"));
     assert!(plain_text(&generic_code_lines).contains("captured output"));
-    assert_eq!(
-        render_grep_preview(&base_summary("grep"), accent_rose()),
-        None
-    );
+    assert!(render_grep_preview(&base_summary("grep"), accent_rose()).is_none());
     assert_eq!(
         render_file_change_preview(&base_summary("write_file"), accent_rose()),
         None
@@ -1342,8 +1339,8 @@ fn tool_card_json_tree_and_parser_helpers_cover_empty_and_leaf_cases() {
     let leaf_lines = render_json_tree_preview(&Value::Null);
 
     assert!(keyed_lines.iter().any(|line| line.contains("root: {}")));
-    assert_eq!(object_lines[0], "{object}");
-    assert_eq!(array_lines[0], "[array] 0");
+    assert_eq!(object_lines[0], "{empty object}");
+    assert_eq!(array_lines[0], "[empty array]");
     assert_eq!(leaf_lines[0], "null");
     assert_eq!(json_tree_leaf_text(&json!(true)), "true");
     assert_eq!(json_tree_leaf_text(&json!([1, 2])), "[2]");
@@ -1626,7 +1623,10 @@ fn tool_card_grep_bash_and_file_change_helpers_cover_remaining_labels() {
         preview_value: Some(json!([])),
         ..base_summary("grep")
     };
-    assert!(render_grep_preview(&grep_summary, accent_rose()).is_none());
+    let grep_text =
+        plain_text(&render_grep_preview(&grep_summary, accent_rose()).expect("empty grep preview"));
+    assert!(grep_text.contains("0 files"));
+    assert!(grep_text.contains("no matches"));
 
     let bash_summary = ToolCardRender {
         is_error: true,

@@ -1391,18 +1391,19 @@ impl EventHandler for AppState {
                             )
                         });
                 }
+                let session_grant_available =
+                    sigil_kernel::tool_approval_session_grant_available_for_parts(
+                        spec.access,
+                        operation,
+                        risk,
+                        &subjects,
+                        &subject_zones,
+                        confirmation.as_ref(),
+                        snapshot_required,
+                    );
                 self.approval.pending = Some(PendingApproval {
                     call: call.clone(),
-                    session_grant_available:
-                        sigil_kernel::tool_approval_session_grant_available_for_parts(
-                            spec.access,
-                            operation,
-                            risk,
-                            &subjects,
-                            &subject_zones,
-                            confirmation.as_ref(),
-                            snapshot_required,
-                        ),
+                    session_grant_available,
                     spec,
                     subjects,
                     operation,
@@ -1417,7 +1418,8 @@ impl EventHandler for AppState {
                 self.approval.metadata_collapsed = false;
                 self.approval.selected_file_index = 0;
                 self.approval.selected_hunk_index = 0;
-                self.approval.selected_action = ApprovalAction::Deny;
+                self.approval.selected_action =
+                    ApprovalAction::default_for(risk, session_grant_available);
                 self.last_notice = Some(format!("approve {}", call.name));
                 self.push_event("approval:request", format!("{} {}", call.name, call.id));
                 self.push_timeline(

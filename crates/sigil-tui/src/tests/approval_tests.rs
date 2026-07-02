@@ -37,6 +37,30 @@ fn approval_action_approval_flag_matches_allow_variant() {
 }
 
 #[test]
+fn approval_action_default_tracks_risk() {
+    assert_eq!(
+        ApprovalAction::default_for(sigil_kernel::PermissionRisk::Low, false),
+        ApprovalAction::AllowOnce
+    );
+    assert_eq!(
+        ApprovalAction::default_for(sigil_kernel::PermissionRisk::Medium, true),
+        ApprovalAction::AllowOnce
+    );
+    assert_eq!(
+        ApprovalAction::default_for(sigil_kernel::PermissionRisk::High, true),
+        ApprovalAction::AllowOnce
+    );
+    assert_eq!(
+        ApprovalAction::default_for(sigil_kernel::PermissionRisk::High, false),
+        ApprovalAction::Deny
+    );
+    assert_eq!(
+        ApprovalAction::default_for(sigil_kernel::PermissionRisk::Destructive, false),
+        ApprovalAction::Deny
+    );
+}
+
+#[test]
 fn approval_diff_mode_cycles_and_labels_cover_all_variants() {
     assert_eq!(ApprovalDiffMode::Full.next(), ApprovalDiffMode::CurrentHunk);
     assert_eq!(

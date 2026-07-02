@@ -817,7 +817,11 @@ pub fn tool_approval_session_grant_available_for_parts(
     if confirmation.is_some() || snapshot_required || subjects.is_empty() {
         return false;
     }
-    if !matches!(risk, PermissionRisk::Low | PermissionRisk::Medium) {
+    let exact_command_grant_available =
+        exact_command_session_grant_available(access, operation, risk, subjects, zones);
+    if !matches!(risk, PermissionRisk::Low | PermissionRisk::Medium)
+        && !exact_command_grant_available
+    {
         return false;
     }
     if zones.contains(&PathTrustZone::External) && access != ToolAccess::Read {
@@ -832,15 +836,56 @@ pub fn tool_approval_session_grant_available_for_parts(
             | ToolOperation::OverwriteFile
             | ToolOperation::CreateDirectory
             | ToolOperation::ExecuteReadOnlyCommand
+            | ToolOperation::ExecuteUnknownCommand
     ) {
         return false;
     }
-    subjects
-        .iter()
-        .all(|subject| subject_has_stable_session_grant_scope(subject, operation))
+    subjects.iter().all(|subject| {
+        subject_has_stable_session_grant_scope(subject, operation, exact_command_grant_available)
+    })
 }
 
-fn subject_has_stable_session_grant_scope(subject: &ToolSubject, operation: ToolOperation) -> bool {
+fn exact_command_session_grant_available(
+    access: ToolAccess,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    subjects: &[ToolSubject],
+    zones: &[PathTrustZone],
+) -> bool {
+    let mut command_subjects = subjects
+        .iter()
+        .filter(|subject| subject.kind == ToolSubjectKind::Command);
+    access == ToolAccess::Execute
+        && operation == ToolOperation::ExecuteUnknownCommand
+        && risk == PermissionRisk::High
+        && zones
+            .iter()
+            .all(|zone| !matches!(zone, PathTrustZone::External))
+        && command_subjects
+            .next()
+            .is_some_and(command_subject_is_stable_and_exact)
+        && command_subjects.all(command_subject_is_stable_and_exact)
+}
+
+fn command_subject_is_stable_and_exact(subject: &ToolSubject) -> bool {
+    if subject.kind != ToolSubjectKind::Command {
+        return false;
+    }
+    let normalized = subject.normalized.trim();
+    !normalized.is_empty()
+        && normalized
+            == subject
+                .original
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+}
+
+fn subject_has_stable_session_grant_scope(
+    subject: &ToolSubject,
+    operation: ToolOperation,
+    exact_command_grant_available: bool,
+) -> bool {
     match subject.kind {
         ToolSubjectKind::Path => match subject.scope {
             ToolSubjectScope::Workspace => !subject.normalized.trim().is_empty(),
@@ -851,7 +896,7 @@ fn subject_has_stable_session_grant_scope(subject: &ToolSubject, operation: Tool
             ToolSubjectScope::Unknown => false,
         },
         ToolSubjectKind::Command => {
-            operation == ToolOperation::ExecuteReadOnlyCommand
+            (operation == ToolOperation::ExecuteReadOnlyCommand || exact_command_grant_available)
                 && !subject.normalized.trim().is_empty()
         }
         _ => false,

@@ -1824,7 +1824,7 @@ fn repeated_pending_wait_agent_results_replace_previous_tool_card() -> Result<()
             "result_available": false,
             "retry_after_ms": 5000,
             "coalescing_key": "wait_agent:agent_chat_1",
-            "next_action": "continue independent parent work"
+            "next_action": "continue only non-overlapping parent work"
         })
         .to_string(),
         sigil_kernel::ToolResultMeta {
@@ -1849,7 +1849,7 @@ fn repeated_pending_wait_agent_results_replace_previous_tool_card() -> Result<()
             "coalesced": true,
             "polling_throttled": true,
             "coalescing_key": "wait_agent:agent_chat_1",
-            "next_action": "wait_agent was called too soon"
+            "next_action": "wait_agent was called too soon; continue only non-overlapping parent work"
         })
         .to_string(),
         sigil_kernel::ToolResultMeta {

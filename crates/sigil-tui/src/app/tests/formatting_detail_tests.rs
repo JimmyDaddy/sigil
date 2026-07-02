@@ -319,7 +319,7 @@ fn agent_result_tools_use_agent_preview_sources() -> anyhow::Result<()> {
         "result_available": false,
         "coalescing_key": "wait_agent:agent_chat_1",
         "retry_after_ms": 5000,
-        "next_action": "continue independent parent work"
+        "next_action": "continue only non-overlapping parent work"
     });
     let running_result = ToolResult::ok(
         "call-wait-agent",
