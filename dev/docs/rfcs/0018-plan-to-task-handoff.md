@@ -77,7 +77,7 @@ Recommended TUI flow:
   -> Sigil researches with read-only tools
   -> Plan ready card appears
 
-Plan ready · execution plan · 3 paths · checks suggested
+Plan ready · structured plan · 3 paths · 1 check
 
 Enter       create and run task
 Esc         discard
@@ -180,14 +180,15 @@ Implementation may keep these as `ControlEntry` variants first, while RFC-0001 d
 
 ## 7. Plan Draft Text and Metadata
 
-Plan output is a user-readable execution plan, not a hidden machine-readable task schema.
+Plan output is user-readable text plus an explicit fenced `sigil-plan-v1` structured draft when, and only when, the planner has at least one executable step. Plain review or summary text must not create a task handoff.
 
 The durable plan record should preserve:
 
 - bounded inline plan text or an artifact reference
 - summary text for compact surfaces
-- target paths extracted conservatively for scoped approval and drift hints
-- suggested check candidates extracted conservatively
+- structured steps, target paths, suggested checks, risk, and notes
+- target paths declared by the structured draft for scoped approval and drift hints
+- suggested check candidates declared by the structured draft
 - source session/run and workspace snapshot metadata
 - plan hash for stale decision protection
 
