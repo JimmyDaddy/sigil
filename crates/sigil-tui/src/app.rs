@@ -1,7 +1,6 @@
 use std::{
     cell::Ref,
     collections::{BTreeMap, BTreeSet, HashMap},
-    ops::Range,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -26,6 +25,7 @@ mod slash_flow;
 mod state;
 pub(crate) mod task_sidebar;
 mod timeline_flow;
+mod timeline_render_store;
 mod tool_card_interaction;
 mod worker_bridge;
 mod workspace_trust_flow;
@@ -77,6 +77,7 @@ pub(crate) use self::runtime_status::{
 };
 use self::session_flow::{current_focus_label, short_session_token};
 use self::state::{ApprovalState, ComposerState, RuntimeStatusState, SessionBrowserState};
+use self::timeline_render_store::TimelineRenderStore;
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 pub(crate) const SCRATCH_DIR_LABEL: &str = "cache/tmp";
@@ -291,10 +292,7 @@ pub struct AppState {
     last_notice: Option<String>,
     streaming_assistant_index: Option<usize>,
     streaming_reasoning_index: Option<usize>,
-    timeline_render_cache: Vec<Line<'static>>,
-    timeline_plain_cache: Vec<String>,
-    timeline_prefix_hashes: Vec<u64>,
-    timeline_render_ranges: Vec<Range<usize>>,
+    timeline_render_store: TimelineRenderStore,
     timeline_text_selection: Option<TimelineTextSelection>,
     timeline_text_selection_anchor: Option<usize>,
     timeline_text_selection_anchor_column: Option<usize>,
@@ -534,10 +532,7 @@ impl AppState {
             last_notice: None,
             streaming_assistant_index: None,
             streaming_reasoning_index: None,
-            timeline_render_cache: Vec::new(),
-            timeline_plain_cache: Vec::new(),
-            timeline_prefix_hashes: Vec::new(),
-            timeline_render_ranges: Vec::new(),
+            timeline_render_store: TimelineRenderStore::default(),
             timeline_text_selection: None,
             timeline_text_selection_anchor: None,
             timeline_text_selection_anchor_column: None,
@@ -651,10 +646,7 @@ impl AppState {
             last_notice: startup_error,
             streaming_assistant_index: None,
             streaming_reasoning_index: None,
-            timeline_render_cache: Vec::new(),
-            timeline_plain_cache: Vec::new(),
-            timeline_prefix_hashes: Vec::new(),
-            timeline_render_ranges: Vec::new(),
+            timeline_render_store: TimelineRenderStore::default(),
             timeline_text_selection: None,
             timeline_text_selection_anchor: None,
             timeline_text_selection_anchor_column: None,
@@ -1409,7 +1401,7 @@ impl AppState {
         self.terminal_height = next_height;
         self.clamp_input_cursor();
         if width_changed {
-            self.rebuild_timeline_render_cache();
+            self.rebuild_timeline_render_store();
             self.rerender_active_agent_child_transcript();
         }
         self.timeline_scroll_back = self

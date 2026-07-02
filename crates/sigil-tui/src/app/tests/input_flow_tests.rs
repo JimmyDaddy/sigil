@@ -989,11 +989,11 @@ fn composer_agent_panel_missing_selection_rejects_message_and_close() -> Result<
     app.composer.agent_panel_focused = true;
     app.sidebar_agent_selected = usize::MAX;
 
-    let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+    let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT))?;
     assert!(close.is_none());
     assert_eq!(app.last_notice(), Some("no agent selected"));
 
-    let message = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    let message = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))?;
     assert!(message.is_none());
     assert_eq!(app.last_notice(), Some("no agent selected"));
     Ok(())
@@ -1299,6 +1299,51 @@ fn composer_empty_down_focuses_visible_agent_list_and_selects_child() -> Result<
 }
 
 #[test]
+fn composer_empty_text_input_is_not_swallowed_by_implicit_agent_panel() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.active_pane = PaneFocus::Composer;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
+    app.composer.agent_panel_focused = false;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.composer.input, "h");
+    assert_eq!(app.composer.input_cursor, 1);
+    assert!(!app.is_composer_agent_panel_focused());
+    Ok(())
+}
+
+#[test]
+fn composer_agent_panel_text_input_returns_to_composer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.active_pane = PaneFocus::Composer;
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
+    assert!(app.focus_composer_agent_panel());
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.composer.input, "c");
+    assert_eq!(app.composer.input_cursor, 1);
+    assert!(!app.is_composer_agent_panel_focused());
+
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
+    assert!(app.focus_composer_agent_panel());
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+
+    assert_eq!(app.composer.input, "m");
+    assert_eq!(app.composer.input_cursor, 1);
+    assert!(!app.is_composer_agent_panel_focused());
+    Ok(())
+}
+
+#[test]
 fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
@@ -1338,7 +1383,7 @@ fn composer_agent_panel_message_key_prefills_agent_message_command() -> Result<(
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_agent_selected, 1);
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))?;
 
     assert!(action.is_none());
     assert_eq!(app.composer.input, "/agent message child_1 ");
@@ -1363,11 +1408,11 @@ fn composer_agent_panel_main_row_rejects_close_and_message_actions() -> Result<(
     app.sidebar_agent_selected = 0;
     assert_eq!(app.sidebar_agent_selected, 0);
 
-    let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+    let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT))?;
     assert!(close.is_none());
     assert_eq!(app.last_notice(), Some("agent close unavailable for main"));
 
-    let message = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    let message = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))?;
     assert!(message.is_none());
     assert_eq!(
         app.last_notice(),
@@ -1390,7 +1435,7 @@ fn composer_agent_panel_close_key_requests_selected_terminal_agent_close() -> Re
     app.sidebar_agent_selected = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT))?;
 
     assert!(matches!(
         action,

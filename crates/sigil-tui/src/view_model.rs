@@ -929,7 +929,9 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · ↑↓ choose · Tab accept · Enter run · Esc close");
     }
     if app.is_composer_agent_panel_focused() {
-        return format!("{agent} · ↑↓ agent · Enter switch · C close · M message · Esc input");
+        return format!(
+            "{agent} · ↑↓ agent · Enter switch · Alt-C close · Alt-M message · Esc input"
+        );
     }
     if let Some(queue) = queue {
         return format!("{agent} · {queue} · Tab follow-ups");

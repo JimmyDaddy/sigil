@@ -29,6 +29,8 @@ mod slash_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod timeline_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod timeline_render_store_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod tool_card_interaction_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod worker_bridge_tests;

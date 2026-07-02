@@ -14,8 +14,8 @@ use ratatui::{
 };
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, MemoryConfig, ModelMessage, PermissionConfig, RootConfig,
-    SessionConfig, SessionLogEntry, WorkspaceConfig,
+    AgentConfig, CompactionConfig, EventHandler, MemoryConfig, ModelMessage, PermissionConfig,
+    RootConfig, RunEvent, SessionConfig, SessionLogEntry, WorkspaceConfig,
 };
 
 use super::{
@@ -897,6 +897,62 @@ fn prepare_scrollback_sync_appends_non_empty_batches_from_shared_prefix() {
 
     assert!(!prepared.line_batches.is_empty());
     assert_eq!(prepared.next_state.line_count, app.scrollback_line_count());
+}
+
+#[test]
+fn prepare_scrollback_sync_survives_rerender_width_changes_and_append() {
+    let mut app = app_with_scrollback();
+    let mut state = ScrollbackSyncState {
+        session_id: Some(app.session_id.clone()),
+        revision: app.timeline_revision(),
+        line_count: app.scrollback_line_count(),
+        sequence_hash: app.scrollback_prefix_hash(app.scrollback_line_count()),
+        pending_seed: None,
+    };
+
+    assert!(app.set_terminal_size(32, 8));
+    let after_narrow = prepare_scrollback_sync(&app, &state)
+        .expect("narrow rerender should produce a scrollback sync plan");
+    assert_eq!(
+        after_narrow.next_state.line_count,
+        app.scrollback_line_count()
+    );
+    assert_eq!(
+        after_narrow.next_state.sequence_hash,
+        app.scrollback_prefix_hash(app.scrollback_line_count())
+    );
+    state = after_narrow.next_state;
+
+    assert!(app.set_terminal_size(90, 8));
+    let after_wide = prepare_scrollback_sync(&app, &state)
+        .expect("wide rerender should produce a scrollback sync plan");
+    assert_eq!(
+        after_wide.next_state.line_count,
+        app.scrollback_line_count()
+    );
+    assert_eq!(
+        after_wide.next_state.sequence_hash,
+        app.scrollback_prefix_hash(app.scrollback_line_count())
+    );
+    state = after_wide.next_state;
+
+    for index in 0..12 {
+        app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+            Some(format!("after resize {index}")),
+            Vec::new(),
+        )))
+        .expect("assistant message should append timeline entry");
+    }
+    let after_append =
+        prepare_scrollback_sync_with_chunk_size(&app, &state, 2).expect("append should sync");
+    assert_eq!(
+        after_append.next_state.line_count,
+        app.scrollback_line_count()
+    );
+    assert_eq!(
+        after_append.next_state.sequence_hash,
+        app.scrollback_prefix_hash(app.scrollback_line_count())
+    );
 }
 
 #[test]

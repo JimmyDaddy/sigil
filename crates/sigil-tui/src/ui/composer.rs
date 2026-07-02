@@ -353,7 +353,7 @@ fn render_agent_actions(
         .is_some_and(|row| row.label != "main");
     let mut text = "Actions  Enter switch".to_owned();
     if child_selected {
-        text.push_str("  C close  M message");
+        text.push_str("  Alt-C close  Alt-M message");
     }
     text.push_str("  Esc input");
     Line::from(vec![Span::styled(

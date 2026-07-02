@@ -193,8 +193,7 @@ fn live_text_point_containing(
         .live_text_rows
         .iter()
         .find(|hit| {
-            app.timeline_plain_cache
-                .get(hit.line_index)
+            app.timeline_plain_line(hit.line_index)
                 .is_some_and(|line| line.contains(expected_text))
         })
         .expect("expected visible live text row containing text");
@@ -211,14 +210,12 @@ fn live_text_point_at_text_offset(
         .live_text_rows
         .iter()
         .find(|hit| {
-            app.timeline_plain_cache
-                .get(hit.line_index)
+            app.timeline_plain_line(hit.line_index)
                 .is_some_and(|line| line.contains(expected_text))
         })
         .expect("expected visible live text row containing text");
     let line = app
-        .timeline_plain_cache
-        .get(hit_area.line_index)
+        .timeline_plain_line(hit_area.line_index)
         .expect("expected plain timeline line");
     let text_start = line.find(expected_text).expect("expected text in line");
     let text_start_width = UnicodeWidthStr::width(&line[..text_start]);
@@ -803,7 +800,8 @@ fn timeline_text_selection_helpers_cover_invalid_and_empty_states() {
 
     assert!(!app.update_timeline_text_selection(0));
     assert!(!app.update_timeline_text_selection_at(0, 0));
-    app.timeline_plain_cache.clear();
+    app.timeline.clear();
+    app.rebuild_timeline_render_store();
     app.timeline_text_selection_anchor = Some(0);
     assert!(!app.update_timeline_text_selection(0));
     assert!(!app.update_timeline_text_selection_at(0, 0));
@@ -1683,7 +1681,8 @@ fn mouse_tool_card_anchor_edges_ignore_stale_state() -> Result<()> {
     };
     app.restore_tool_card_mouse_anchor(indices[0], None);
     app.restore_tool_card_mouse_anchor(usize::MAX, Some(anchor));
-    app.timeline_render_cache.clear();
+    app.timeline.clear();
+    app.rebuild_timeline_render_store();
     app.restore_tool_card_mouse_anchor(indices[0], Some(anchor));
     Ok(())
 }

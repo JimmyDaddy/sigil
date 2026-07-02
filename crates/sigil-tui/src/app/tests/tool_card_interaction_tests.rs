@@ -367,10 +367,9 @@ fn tool_card_interaction_private_helpers_cover_stale_selection_and_reveal_guards
         (5, "second".to_owned())
     );
 
-    app.timeline_render_ranges.clear();
     app.reveal_timeline_entry(99);
     assert_eq!(app.timeline_scroll_back, 0);
 
     app.rerender_tool_selection_change(Some(0), 0);
-    assert!(!app.timeline_render_cache.is_empty());
+    assert!(!app.timeline_render_lines().is_empty());
 }

@@ -71,7 +71,7 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> anyhow::Result<Option<Option<AppAction>>> {
-        let context = resolve_input_context(self);
+        let context = resolve_input_context(self, key);
         let Some(command) = resolve_binding(context, key) else {
             return Ok(None);
         };
@@ -294,7 +294,7 @@ impl AppState {
     }
 }
 
-pub(crate) fn resolve_input_context(app: &AppState) -> InputContext {
+pub(crate) fn resolve_input_context(app: &AppState, key: KeyEvent) -> InputContext {
     if app.approval.pending.is_some() {
         return InputContext::ApprovalModal;
     }
@@ -308,6 +308,7 @@ pub(crate) fn resolve_input_context(app: &AppState) -> InputContext {
         && app.composer.input.trim().is_empty()
         && !app.has_slash_selector()
         && app.composer_agent_rows().len() > 1
+        && is_implicit_composer_agent_panel_key(key)
     {
         return InputContext::ComposerAgentPanel;
     }
@@ -321,6 +322,13 @@ pub(crate) fn resolve_input_context(app: &AppState) -> InputContext {
         return InputContext::ActivitySidebar;
     }
     InputContext::Composer
+}
+
+fn is_implicit_composer_agent_panel_key(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc
+    ) && key.modifiers.is_empty()
 }
 
 pub(crate) fn resolve_binding(context: InputContext, key: KeyEvent) -> Option<RoutedKeyCommand> {
@@ -389,16 +397,12 @@ fn resolve_agent_panel_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
         KeyCode::Down if key.modifiers.is_empty() => Some(RoutedKeyCommand::AgentSelectionNext),
         KeyCode::Esc if key.modifiers.is_empty() => Some(RoutedKeyCommand::AgentBlur),
         KeyCode::Enter if key.modifiers.is_empty() => Some(RoutedKeyCommand::AgentActivate),
-        KeyCode::Char('c' | 'C') if key.modifiers.is_empty() => Some(RoutedKeyCommand::AgentClose),
-        KeyCode::Char('m' | 'M') if key.modifiers.is_empty() => {
+        KeyCode::Char('c' | 'C') if has_alt_without_control(key) => {
+            Some(RoutedKeyCommand::AgentClose)
+        }
+        KeyCode::Char('m' | 'M') if has_alt_without_control(key) => {
             Some(RoutedKeyCommand::AgentMessage)
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Backspace | KeyCode::Delete
-            if key.modifiers.is_empty() =>
-        {
-            Some(RoutedKeyCommand::Noop)
-        }
-        KeyCode::Char(_) if key.modifiers.is_empty() => Some(RoutedKeyCommand::Noop),
         _ => None,
     }
 }

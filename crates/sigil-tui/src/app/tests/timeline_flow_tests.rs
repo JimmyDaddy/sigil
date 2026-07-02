@@ -134,10 +134,65 @@ fn long_transcript_keeps_render_cache_consistent_without_front_trim() {
     }
 
     assert!(app.timeline.len() >= 450);
-    assert_eq!(app.timeline_render_ranges.len(), app.timeline.len());
-    let rendered = app.timeline_plain_cache.join("\n");
+    assert!((0..app.timeline.len()).all(|index| app.timeline_entry_render_range(index).is_some()));
+    let rendered = app.timeline_plain_lines().join("\n");
     assert!(rendered.contains("notice 0"));
     assert!(rendered.contains("notice 449"));
+}
+
+#[test]
+fn layout_snapshot_live_text_rows_stay_in_bounds_after_resize_and_append() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    assert!(app.set_terminal_size(44, 14));
+    for index in 0..12 {
+        app.push_timeline(
+            TimelineRole::Assistant,
+            format!("long assistant message {index} that wraps differently by width"),
+        );
+    }
+
+    let narrow = LayoutSnapshot::from_app(Rect::new(0, 0, 44, 14), &app);
+    assert!(!narrow.live_text_rows.is_empty());
+    assert!(
+        narrow
+            .live_text_rows
+            .iter()
+            .all(|row| app.timeline_plain_line(row.line_index).is_some())
+    );
+
+    assert!(app.set_terminal_size(120, 14));
+    app.push_timeline(TimelineRole::Notice, "after resize append");
+    let wide = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 14), &app);
+    assert!(!wide.live_text_rows.is_empty());
+    assert!(
+        wide.live_text_rows
+            .iter()
+            .all(|row| app.timeline_plain_line(row.line_index).is_some())
+    );
+}
+
+#[test]
+fn timeline_selection_clears_on_resize_rerender_to_avoid_stale_lines() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    assert!(app.set_terminal_size(90, 12));
+    app.push_timeline(
+        TimelineRole::Assistant,
+        "long assistant message that will wrap differently after resize",
+    );
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 90, 12), &app);
+
+    let line_index = layout
+        .live_text_rows
+        .first()
+        .expect("expected live text row")
+        .line_index;
+    assert!(!app.begin_timeline_text_selection_at(line_index, 0));
+    assert!(app.update_timeline_text_selection(line_index));
+    assert!(app.selected_timeline_line_range().is_some());
+
+    assert!(app.set_terminal_size(36, 12));
+    assert!(app.selected_timeline_line_range().is_none());
+    assert!(app.selected_timeline_text().is_none());
 }
 
 #[test]
@@ -585,13 +640,13 @@ fn batched_streaming_text_deltas_rerender_once_after_drain() -> Result<()> {
     app.handle(RunEvent::TextDelta("fn main() {}\n".to_owned()))?;
     app.handle(RunEvent::TextDelta("```\n".to_owned()))?;
 
-    let rendered_before_flush = app.timeline_plain_cache.join("\n");
+    let rendered_before_flush = app.timeline_plain_lines().join("\n");
     assert!(!rendered_before_flush.contains("fn main"));
     assert_eq!(app.timeline_revision(), revision_after_first_delta);
 
     assert!(app.flush_timeline_render_batch());
 
-    let rendered_after_flush = app.timeline_plain_cache.join("\n");
+    let rendered_after_flush = app.timeline_plain_lines().join("\n");
     assert!(rendered_after_flush.contains("fn main"));
     assert!(app.timeline_revision() > revision_after_first_delta);
     Ok(())
@@ -744,10 +799,7 @@ fn streaming_deltas_do_not_fill_ui_event_log() -> Result<()> {
 fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.timeline.clear();
-    app.timeline_render_cache.clear();
-    app.timeline_plain_cache.clear();
-    app.timeline_prefix_hashes.clear();
-    app.timeline_render_ranges.clear();
+    app.rebuild_timeline_render_store();
 
     assert_eq!(app.effective_timeline_render_len(), 0);
     assert_eq!(app.scrollback_prefix_hash(0), 0);
@@ -768,47 +820,22 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
     );
 
     app.rerender_timeline_entry(99);
-    app.append_timeline_render_cache_entry(0);
-    app.extend_last_render_block_range_by_one_line();
+    app.append_timeline_render_store_entry(0);
 
     app.timeline.push(crate::timeline::TimelineEntry {
         role: TimelineRole::Notice,
         text: "manual notice".to_owned(),
     });
-    app.append_timeline_render_cache_entry(2);
-    assert_eq!(app.timeline_render_ranges.len(), app.timeline.len());
-
-    app.timeline_render_cache = vec![Line::raw("visible")];
-    app.timeline_plain_cache = vec!["visible".to_owned()];
-    app.timeline_prefix_hashes = vec![99];
-    app.rebuild_timeline_prefix_hashes_from(0);
-    assert_ne!(app.timeline_prefix_hashes[0], 99);
-    let hash_after_zero_rebuild = app.timeline_prefix_hashes[0];
-    app.rebuild_timeline_prefix_hashes_from(1);
-    assert_eq!(app.timeline_prefix_hashes[0], hash_after_zero_rebuild);
-
-    app.timeline_render_cache.push(Line::default());
-    app.timeline_plain_cache.push(String::new());
-    app.timeline_prefix_hashes.push(0);
-    app.timeline_render_ranges = std::iter::once(0..2).collect();
-    app.trim_trailing_timeline_blanks();
+    app.append_timeline_render_store_entry(0);
+    assert!(app.timeline_entry_render_range(0).is_some());
+    assert!(app.visible_timeline_render_range(10).end <= app.timeline_render_line_count());
     assert_eq!(
-        app.timeline_render_ranges,
-        std::iter::once(0..1).collect::<Vec<_>>()
+        app.scrollback_prefix_hash(app.scrollback_line_count()),
+        app.scrollback_prefix_hash(usize::MAX)
     );
 
-    app.timeline_render_cache.push(Line::default());
-    app.timeline_plain_cache.push(String::new());
-    app.timeline_prefix_hashes.push(0);
-    app.timeline_render_ranges = std::iter::once(1..1).collect();
-    app.trim_trailing_timeline_blanks();
-    assert!(app.timeline_render_ranges.is_empty());
-
     app.timeline.clear();
-    app.timeline_render_cache.clear();
-    app.timeline_plain_cache.clear();
-    app.timeline_prefix_hashes.clear();
-    app.timeline_render_ranges.clear();
+    app.rebuild_timeline_render_store();
     app.push_timeline(TimelineRole::Assistant, "streaming answer");
     app.streaming_assistant_index = Some(0);
     app.runtime.is_busy = true;
@@ -825,10 +852,7 @@ fn parent_scrollback_clamps_stale_parent_cache_while_child_view_is_active() -> R
         role: TimelineRole::User,
         text: "parent prompt".to_owned(),
     }];
-    app.timeline_render_cache = vec![Line::raw("parent prompt")];
-    app.timeline_plain_cache = vec!["parent prompt".to_owned()];
-    app.timeline_prefix_hashes = vec![1];
-    app.timeline_render_ranges = std::iter::once(0..2).collect();
+    app.rebuild_timeline_render_store();
     app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
@@ -843,13 +867,13 @@ fn parent_scrollback_clamps_stale_parent_cache_while_child_view_is_active() -> R
 
     assert_eq!(
         app.scrollback_cutoff_line(),
-        app.timeline_render_cache.len()
+        app.timeline_render_line_count()
     );
     assert_eq!(
         app.scrollback_lines().len(),
-        app.timeline_render_cache.len()
+        app.timeline_render_line_count()
     );
-    assert!(app.visible_timeline_render_range(4).end <= app.timeline_render_cache.len());
+    assert!(app.visible_timeline_render_range(4).end <= app.timeline_render_line_count());
     assert!(transcript_plain(app.transcript_lines(12)).contains("child line"));
     Ok(())
 }
@@ -1128,7 +1152,7 @@ fn timeline_scroll_and_live_summary_edges_cover_pending_and_busy_states() -> Res
 }
 
 fn timeline_span_style_containing(app: &AppState, text: &str) -> Option<Style> {
-    app.timeline_render_cache
+    app.timeline_render_lines()
         .iter()
         .flat_map(|line| line.spans.iter())
         .find(|span| span.content.contains(text))
@@ -1408,13 +1432,16 @@ fn inspection_tool_entries_render_as_individual_activities() {
 }"#,
     );
 
-    let rendered = app.timeline_plain_cache.join("\n");
+    let rendered = app.timeline_plain_lines().join("\n");
     let indices = app
         .tool_timeline_entry_indices()
         .expect("expected tool entries");
     let ranges = indices
         .iter()
-        .map(|index| app.timeline_render_ranges[*index].clone())
+        .map(|index| {
+            app.timeline_entry_render_range(*index)
+                .expect("expected render range")
+        })
         .collect::<Vec<_>>();
 
     assert_eq!(ranges.len(), 3);
@@ -1463,7 +1490,7 @@ fn permission_notices_between_inspection_tools_remain_visible() {
 }"#,
     );
 
-    let rendered = app.timeline_plain_cache.join("\n");
+    let rendered = app.timeline_plain_lines().join("\n");
     let live = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
 
     assert!(!rendered.contains("Inspected"));
@@ -1532,7 +1559,7 @@ fn file_changes_and_complex_bash_do_not_create_inspected_group() {
 }"#,
     );
 
-    let rendered = app.timeline_plain_cache.join("\n");
+    let rendered = app.timeline_plain_lines().join("\n");
 
     assert!(!rendered.contains("Inspected"));
     assert!(rendered.contains("Listed crates"));
@@ -1614,7 +1641,7 @@ fn default_open_large_diff_stays_stable_when_new_output_arrives() -> Result<()> 
     app.handle(RunEvent::TextDelta("stream one".to_owned()))?;
     app.handle(RunEvent::TextDelta("\nstream two".to_owned()))?;
 
-    let rendered = app.timeline_plain_cache.join("\n");
+    let rendered = app.timeline_plain_lines().join("\n");
     assert_eq!(rendered.matches("--- current/note.txt").count(), 1);
     assert_eq!(rendered.matches("-alpha").count(), 1);
     assert_eq!(rendered.matches("Deleted note.txt").count(), 1);

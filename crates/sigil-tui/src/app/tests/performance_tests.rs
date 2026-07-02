@@ -12,13 +12,13 @@ fn streaming_batch_defers_rerender_until_drain() -> Result<()> {
     }
     app.handle(RunEvent::TextDelta("```\n".to_owned()))?;
 
-    let rendered_before_flush = app.timeline_plain_cache.join("\n");
+    let rendered_before_flush = app.timeline_plain_lines().join("\n");
     assert!(!rendered_before_flush.contains("fn main"));
     assert_eq!(app.timeline_revision(), revision_after_first_delta);
 
     assert!(app.flush_timeline_render_batch());
 
-    let rendered_after_flush = app.timeline_plain_cache.join("\n");
+    let rendered_after_flush = app.timeline_plain_lines().join("\n");
     assert!(rendered_after_flush.contains("fn main"));
     assert!(app.timeline_revision() > revision_after_first_delta);
     Ok(())

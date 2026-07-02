@@ -12,8 +12,7 @@ use super::{
     TimelineEntry, TimelineRole, TimelineTextSelection,
     agent_flow::agent_thread_sidebar_detail,
     formatting::{
-        hash_timeline_line, line_has_visible_content, plain_line_text, sidebar_width_for_terminal,
-        truncate_session_view_text,
+        line_has_visible_content, sidebar_width_for_terminal, truncate_session_view_text,
     },
     task_sidebar::task_child_session_status_label,
 };
@@ -73,7 +72,9 @@ impl AppState {
                 .map(|index| index + 1)
                 .unwrap_or(0);
         }
-        self.timeline_render_cache
+        let snapshot = self.timeline_render_store.snapshot();
+        snapshot
+            .lines_range(0..snapshot.total_lines())
             .iter()
             .rposition(line_has_visible_content)
             .map(|index| index + 1)
@@ -88,17 +89,18 @@ impl AppState {
         let durable_cutoff_line = if durable_cutoff_entry == 0 {
             0
         } else {
-            self.timeline_render_ranges
-                .get(durable_cutoff_entry - 1)
+            let snapshot = self.timeline_render_store.snapshot();
+            snapshot
+                .range_for_entry(durable_cutoff_entry - 1)
                 .map(|range| range.end)
-                .unwrap_or(self.timeline_render_cache.len())
+                .unwrap_or(snapshot.total_lines())
         };
         let live_tail_start = self
             .effective_timeline_render_len()
             .saturating_sub(self.timeline_viewport_rows().max(1));
         durable_cutoff_line
             .min(live_tail_start)
-            .min(self.timeline_render_cache.len())
+            .min(self.timeline_render_store.snapshot().total_lines())
     }
 
     pub(super) fn transcript_page_step(&self) -> usize {
@@ -141,7 +143,7 @@ impl AppState {
         }
         // Default-open file diffs can be large, so new output should not force
         // every historical activity through JSON parsing and diff rendering.
-        self.append_timeline_render_cache_entry(self.timeline.len().saturating_sub(1));
+        self.append_timeline_render_store_entry(self.timeline.len().saturating_sub(1));
     }
 
     pub(super) fn push_event(&mut self, label: impl Into<String>, detail: impl Into<String>) {
@@ -223,7 +225,7 @@ impl AppState {
         };
         self.expanded_thinking_entry_indices.clear();
         self.collapsed_thinking_entry_indices.clear();
-        self.rebuild_timeline_render_cache();
+        self.rebuild_timeline_render_store();
         self.last_notice = Some(format!("thinking {}", self.thinking_block_mode.as_str()));
         self.push_event("thinking:view", self.thinking_block_mode.as_str());
     }
@@ -284,59 +286,20 @@ impl AppState {
                 && !self.collapsed_thinking_entry_indices.contains(&entry_index))
     }
 
-    pub(super) fn rebuild_timeline_render_cache(&mut self) {
+    pub(super) fn rebuild_timeline_render_store(&mut self) {
         self.clear_timeline_text_selection_state();
         self.deferred_timeline_render_indexes.clear();
         let options = self.timeline_render_options();
-        self.timeline_render_cache.clear();
-        self.timeline_plain_cache.clear();
-        self.timeline_prefix_hashes.clear();
-        self.timeline_render_ranges.clear();
-        for index in 0..self.timeline.len() {
-            let start = self.timeline_render_cache.len();
-            let rendered = {
-                let entry = &self.timeline[index];
-                crate::ui::render_timeline_entry_lines_with_options(entry, &options, index)
-            };
-            self.extend_timeline_render_buffers(rendered);
-            let end = self.timeline_render_cache.len();
-            self.timeline_render_ranges.push(start..end);
-        }
-        self.trim_trailing_timeline_blanks();
+        self.timeline_render_store.rebuild(&self.timeline, &options);
         self.timeline_revision = self.timeline_revision.saturating_add(1);
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
         self.clear_timeline_text_selection_state();
         self.deferred_timeline_render_indexes.remove(&index);
-        let Some(existing_range) = self.timeline_render_ranges.get(index).cloned() else {
-            self.rebuild_timeline_render_cache();
-            return;
-        };
-        let Some(entry) = self.timeline.get(index) else {
-            self.rebuild_timeline_render_cache();
-            return;
-        };
         let options = self.timeline_render_options();
-        let new_lines = crate::ui::render_timeline_entry_lines_with_options(entry, &options, index);
-        let new_plain = new_lines.iter().map(plain_line_text).collect::<Vec<_>>();
-        let old_len = existing_range.end.saturating_sub(existing_range.start);
-        let new_len = new_lines.len();
-        self.timeline_render_cache
-            .splice(existing_range.clone(), new_lines);
-        self.timeline_plain_cache
-            .splice(existing_range.clone(), new_plain);
-        self.timeline_render_ranges[index] =
-            existing_range.start..existing_range.start.saturating_add(new_len);
-        if new_len != old_len {
-            let delta = new_len as isize - old_len as isize;
-            for range in self.timeline_render_ranges.iter_mut().skip(index + 1) {
-                range.start = range.start.saturating_add_signed(delta);
-                range.end = range.end.saturating_add_signed(delta);
-            }
-        }
-        self.rebuild_timeline_prefix_hashes_from(existing_range.start);
-        self.trim_trailing_timeline_blanks();
+        self.timeline_render_store
+            .rerender_entry(&self.timeline, index, &options);
         self.timeline_revision = self.timeline_revision.saturating_add(1);
     }
 
@@ -391,94 +354,12 @@ impl AppState {
         true
     }
 
-    pub(super) fn append_timeline_render_cache_entry(&mut self, index: usize) {
+    pub(super) fn append_timeline_render_store_entry(&mut self, index: usize) {
         self.clear_timeline_text_selection_state();
-        if index != self.timeline_render_ranges.len() {
-            self.rebuild_timeline_render_cache();
-            return;
-        }
-        let Some(entry) = self.timeline.get(index) else {
-            self.rebuild_timeline_render_cache();
-            return;
-        };
         let options = self.timeline_render_options();
-        let new_lines = crate::ui::render_timeline_entry_lines_with_options(entry, &options, index);
-        if !new_lines.is_empty() && !self.timeline_render_cache.is_empty() {
-            self.extend_timeline_render_buffers(vec![Line::raw(String::new())]);
-            self.extend_last_render_block_range_by_one_line();
-        }
-        let start = self.timeline_render_cache.len();
-        self.extend_timeline_render_buffers(new_lines);
-        let end = self.timeline_render_cache.len();
-        self.timeline_render_ranges.push(start..end);
-        self.trim_trailing_timeline_blanks();
+        self.timeline_render_store
+            .append_entry(&self.timeline, index, &options);
         self.timeline_revision = self.timeline_revision.saturating_add(1);
-    }
-
-    pub(super) fn extend_last_render_block_range_by_one_line(&mut self) {
-        let Some(old_range) = self.timeline_render_ranges.last().cloned() else {
-            return;
-        };
-        let new_range = old_range.start..old_range.end.saturating_add(1);
-        for range in &mut self.timeline_render_ranges {
-            if *range == old_range {
-                *range = new_range.clone();
-            }
-        }
-    }
-
-    fn extend_timeline_render_buffers(&mut self, lines: Vec<Line<'static>>) {
-        for line in lines {
-            let plain = plain_line_text(&line);
-            self.timeline_render_cache.push(line);
-            self.timeline_plain_cache.push(plain.clone());
-            let hash = hash_timeline_line(
-                self.timeline_prefix_hashes.last().copied().unwrap_or(0),
-                &plain,
-            );
-            self.timeline_prefix_hashes.push(hash);
-        }
-    }
-
-    pub(super) fn rebuild_timeline_prefix_hashes_from(&mut self, start_line: usize) {
-        let truncate_to = start_line.min(self.timeline_plain_cache.len());
-        self.timeline_prefix_hashes.truncate(truncate_to);
-        let mut hash = if truncate_to == 0 {
-            0
-        } else {
-            self.timeline_prefix_hashes.last().copied().unwrap_or(0)
-        };
-        for line in self.timeline_plain_cache.iter().skip(truncate_to) {
-            hash = hash_timeline_line(hash, line);
-            self.timeline_prefix_hashes.push(hash);
-        }
-    }
-
-    pub(super) fn trim_trailing_timeline_blanks(&mut self) {
-        while self
-            .timeline_render_cache
-            .last()
-            .map(|line| line.spans.is_empty())
-            .unwrap_or(false)
-        {
-            let _ = self.timeline_render_cache.pop();
-            let _ = self.timeline_plain_cache.pop();
-            let _ = self.timeline_prefix_hashes.pop();
-            if let Some(last_index) = self.timeline_render_ranges.len().checked_sub(1) {
-                let old_range = self.timeline_render_ranges[last_index].clone();
-                if old_range.end > old_range.start {
-                    let new_range = old_range.start..old_range.end - 1;
-                    self.timeline_render_ranges[last_index] = new_range.clone();
-                    for range in self.timeline_render_ranges.iter_mut().take(last_index) {
-                        if *range == old_range {
-                            *range = new_range.clone();
-                        }
-                    }
-                } else {
-                    let _ = self.timeline_render_ranges.pop();
-                }
-            }
-        }
     }
 
     pub(super) fn reset_scroll(&mut self) {
@@ -558,7 +439,10 @@ impl AppState {
         let cutoff_line = self.scrollback_cutoff_line();
         let start = from_index.min(cutoff_line);
         let end = to_index.min(cutoff_line).max(start);
-        let mut lines = self.timeline_render_cache[start..end].to_vec();
+        let mut lines = self
+            .timeline_render_store
+            .snapshot()
+            .lines_range(start..end);
         if end >= cutoff_line {
             while lines
                 .last()
@@ -580,7 +464,9 @@ impl AppState {
         if count == 0 {
             return 0;
         }
-        self.timeline_prefix_hashes
+        self.timeline_render_store
+            .snapshot()
+            .prefix_hashes()
             .get(count - 1)
             .copied()
             .unwrap_or(0)
@@ -589,7 +475,7 @@ impl AppState {
     pub(crate) fn visible_timeline_render_range(&self, max_lines: usize) -> Range<usize> {
         let effective_len = self
             .effective_timeline_render_len()
-            .min(self.timeline_render_cache.len());
+            .min(self.timeline_render_store.snapshot().total_lines());
         if effective_len == 0 {
             return 0..0;
         }
@@ -603,13 +489,30 @@ impl AppState {
     }
 
     pub(crate) fn timeline_entry_render_range(&self, entry_index: usize) -> Option<Range<usize>> {
-        self.timeline_render_ranges.get(entry_index).cloned()
+        self.timeline_render_store
+            .snapshot()
+            .range_for_entry(entry_index)
     }
 
     pub(crate) fn timeline_plain_line(&self, line_index: usize) -> Option<&str> {
-        self.timeline_plain_cache
-            .get(line_index)
-            .map(String::as_str)
+        self.timeline_render_store.snapshot().plain_line(line_index)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn timeline_render_line_count(&self) -> usize {
+        self.timeline_render_store.snapshot().total_lines()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn timeline_render_lines(&self) -> Vec<Line<'static>> {
+        let snapshot = self.timeline_render_store.snapshot();
+        snapshot.lines_range(0..snapshot.total_lines())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn timeline_plain_lines(&self) -> Vec<String> {
+        let snapshot = self.timeline_render_store.snapshot();
+        snapshot.plain_lines_range(0..snapshot.total_lines())
     }
 
     pub(crate) fn transcript_lines(&self, max_lines: usize) -> Vec<Line<'static>> {
@@ -633,7 +536,9 @@ impl AppState {
             let options = self.timeline_render_options();
             timeline_selection_style(&options.theme.palette)
         };
-        self.timeline_render_cache[visible_range.clone()]
+        self.timeline_render_store
+            .snapshot()
+            .lines_range(visible_range.clone())
             .iter()
             .enumerate()
             .map(|(offset, line)| {
@@ -815,7 +720,9 @@ impl AppState {
 
     pub(crate) fn selected_timeline_line_range(&self) -> Option<Range<usize>> {
         let range = self.timeline_text_selection?.normalized_range();
-        let end = range.end.min(self.timeline_plain_cache.len());
+        let end = range
+            .end
+            .min(self.timeline_render_store.snapshot().total_lines());
         (range.start < end).then_some(range.start..end)
     }
 
@@ -829,7 +736,10 @@ impl AppState {
             return Some(
                 range
                     .filter_map(|line_index| {
-                        let line = self.timeline_plain_cache.get(line_index)?;
+                        let line = self
+                            .timeline_render_store
+                            .snapshot()
+                            .plain_line(line_index)?;
                         let columns = self.selected_timeline_column_range(line_index)?;
                         Some(text_by_display_columns(line, columns.start, columns.end))
                     })
@@ -838,7 +748,13 @@ impl AppState {
             )
             .filter(|text| !text.is_empty());
         }
-        Some(self.timeline_plain_cache[range].join("\n")).filter(|text| !text.is_empty())
+        Some(
+            self.timeline_render_store
+                .snapshot()
+                .plain_lines_range(range)
+                .join("\n"),
+        )
+        .filter(|text| !text.is_empty())
     }
 
     pub(crate) fn begin_timeline_text_selection_at(
@@ -846,7 +762,7 @@ impl AppState {
         line_index: usize,
         column: usize,
     ) -> bool {
-        if line_index >= self.timeline_plain_cache.len() {
+        if line_index >= self.timeline_render_store.snapshot().total_lines() {
             return self.clear_timeline_text_selection();
         }
         self.timeline_text_selection_anchor = Some(line_index);
@@ -858,7 +774,7 @@ impl AppState {
         let Some(anchor) = self.timeline_text_selection_anchor else {
             return false;
         };
-        let len = self.timeline_plain_cache.len();
+        let len = self.timeline_render_store.snapshot().total_lines();
         if len == 0 {
             return false;
         }
@@ -880,7 +796,7 @@ impl AppState {
         let Some(anchor_column) = self.timeline_text_selection_anchor_column else {
             return self.update_timeline_text_selection(line_index);
         };
-        let len = self.timeline_plain_cache.len();
+        let len = self.timeline_render_store.snapshot().total_lines();
         if len == 0 {
             return false;
         }
@@ -921,8 +837,11 @@ impl AppState {
         if line_index < start_line || line_index > end_line {
             return None;
         }
-        let line = self.timeline_plain_cache.get(line_index)?;
-        let line_width = UnicodeWidthStr::width(line.as_str());
+        let line = self
+            .timeline_render_store
+            .snapshot()
+            .plain_line(line_index)?;
+        let line_width = UnicodeWidthStr::width(line);
         let start = if line_index == start_line {
             start_column.min(line_width)
         } else {
@@ -948,6 +867,7 @@ impl AppState {
 
     pub fn timeline_revision(&self) -> u64 {
         self.timeline_revision
+            .max(self.timeline_render_store.snapshot().revision())
     }
 
     fn timeline_render_options(&self) -> crate::ui::TimelineRenderOptions {

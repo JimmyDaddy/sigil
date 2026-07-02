@@ -301,7 +301,7 @@ impl AppState {
     }
 
     pub(super) fn reveal_timeline_entry(&mut self, entry_index: usize) {
-        let Some(range) = self.timeline_render_ranges.get(entry_index) else {
+        let Some(range) = self.timeline_entry_render_range(entry_index) else {
             return;
         };
         let effective_len = self.effective_timeline_render_len();

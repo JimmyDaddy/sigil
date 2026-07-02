@@ -457,8 +457,8 @@ fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
             });
     assert!(rendered.contains("Actions"));
     assert!(rendered.contains("Enter switch"));
-    assert!(rendered.contains("C close"));
-    assert!(rendered.contains("M message"));
+    assert!(rendered.contains("Alt-C close"));
+    assert!(rendered.contains("Alt-M message"));
     assert!(rendered.contains("Esc input"));
     assert!(rendered.contains("▸ repo audit"));
     assert!(rendered.contains("◉ main"));

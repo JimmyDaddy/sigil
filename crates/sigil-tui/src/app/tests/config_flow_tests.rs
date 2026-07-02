@@ -1521,7 +1521,7 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
     let mut app = AppState::from_root_config(&config_path, &config);
     app.push_timeline(TimelineRole::User, "hello theme");
     let initial_theme_bg = app
-        .timeline_render_cache
+        .timeline_render_lines()
         .iter()
         .flat_map(|line| line.spans.iter())
         .find_map(|span| span.style.bg)
@@ -1570,7 +1570,7 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
         sigil_kernel::ThemeId::SolarizedDark
     );
     let updated_theme_bg = app
-        .timeline_render_cache
+        .timeline_render_lines()
         .iter()
         .flat_map(|line| line.spans.iter())
         .find_map(|span| span.style.bg)
