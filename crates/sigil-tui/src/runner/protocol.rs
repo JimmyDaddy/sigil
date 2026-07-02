@@ -206,6 +206,10 @@ pub enum WorkerMessage {
     RunStarted {
         prompt: String,
     },
+    SkillRunStarted {
+        skill_id: String,
+        prompt: String,
+    },
     PlanRunStarted {
         prompt: String,
     },

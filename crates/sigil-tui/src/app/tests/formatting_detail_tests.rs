@@ -106,7 +106,7 @@ fn preview_helpers_cover_json_markdown_and_limits() {
         None,
         Some(&rust_metadata),
     );
-    assert_eq!(rust_kind, "text");
+    assert_eq!(rust_kind, "code");
     assert!(rust_source.as_str().contains("struct Example"));
 
     let markdown_metadata = ToolResultMeta {

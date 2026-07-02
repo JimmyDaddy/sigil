@@ -2089,6 +2089,28 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         error: None,
         model_content_hash: None,
     })))?;
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-check-touched".to_owned(),
+        tool_name: "bash".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(240),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta {
+            exit_code: Some(0),
+            truncated: true,
+            details: json!({
+                "shell_analysis": {
+                    "command": "./scripts/check-touched.sh --tier quick",
+                    "command_family": "check_touched",
+                    "verdict": "passed"
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+        error: None,
+        model_content_hash: None,
+    })))?;
 
     assert!(
         runtime.final_answer_blocker(&mut session)?.is_none(),
@@ -2117,7 +2139,27 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         payload["session_facts"]["commands"][0]["rerun_not_needed"],
         true
     );
+    assert_eq!(
+        payload["session_facts"]["commands"][1]["command"],
+        "./scripts/check-touched.sh --tier quick"
+    );
+    assert_eq!(
+        payload["session_facts"]["commands"][1]["command_family"],
+        "check_touched"
+    );
+    assert_eq!(
+        payload["session_facts"]["commands"][1]["output_truncated"],
+        true
+    );
+    assert_eq!(
+        payload["session_facts"]["commands"][1]["rerun_not_needed"],
+        true
+    );
     assert_eq!(payload["session_facts"]["gates"][0]["verdict"], "passed");
+    assert_eq!(
+        payload["session_facts"]["gates"][1]["command_family"],
+        "check_touched"
+    );
     assert!(!payload["session_facts"]["readiness"].is_null());
     assert!(!payload["session_facts"]["readiness"]["visible_state"].is_null());
     assert!(!context.key.is_empty());

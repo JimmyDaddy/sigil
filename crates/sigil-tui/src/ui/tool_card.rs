@@ -349,6 +349,7 @@ struct ToolCardDiffFile {
 enum ToolPreviewKind {
     Markdown,
     Json,
+    Code,
     #[default]
     Text,
 }
@@ -358,6 +359,7 @@ impl ToolPreviewKind {
         match self {
             Self::Markdown => "md",
             Self::Json => "json",
+            Self::Code => "code",
             Self::Text => "text",
         }
     }
@@ -366,6 +368,7 @@ impl ToolPreviewKind {
         match self {
             Self::Markdown => "formatted preview",
             Self::Json => "structured preview",
+            Self::Code => "code excerpt",
             Self::Text => "captured output",
         }
     }
@@ -374,6 +377,7 @@ impl ToolPreviewKind {
         match value {
             "markdown" => Self::Markdown,
             "json" => Self::Json,
+            "code" => Self::Code,
             _ => Self::Text,
         }
     }

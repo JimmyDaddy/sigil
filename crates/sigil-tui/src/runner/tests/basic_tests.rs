@@ -715,7 +715,8 @@ disallowed-tools: [write_file]
         arguments: "target".to_owned(),
         reasoning_effort: ReasoningEffort::Medium,
     })?;
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let _ =
+        worker.recv_until(|message| matches!(message, WorkerMessage::SkillRunStarted { .. }))?;
     let tool_error = worker.recv_until(|message| {
         matches!(
             message,

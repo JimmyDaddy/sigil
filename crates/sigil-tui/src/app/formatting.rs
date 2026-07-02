@@ -808,7 +808,7 @@ fn read_file_tool_preview_source(
                     serde_json::to_string_pretty(value).unwrap_or_else(|_| content.to_owned());
                 return ("json", pretty);
             }
-            return ("text", content.to_owned());
+            return ("code", content.to_owned());
         }
     }
     if let Some(value) = preview_value {

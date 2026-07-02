@@ -1280,6 +1280,33 @@ fn composer_down_prefers_history_navigation_before_agent_panel_focus() -> Result
 }
 
 #[test]
+fn composer_history_reaches_newest_before_down_focuses_agent_panel() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.active_pane = PaneFocus::Composer;
+    app.composer.input_history = vec!["first".to_owned(), "second".to_owned()];
+    app.composer.input.clear();
+    app.composer.input_cursor = 0;
+    app.composer.agent_panel_focused = false;
+    app.sidebar_agent_selected = 0;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input, "second");
+    assert_eq!(app.composer.input_history_index, Some(1));
+    assert!(!app.is_composer_agent_panel_focused());
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.input, "");
+    assert_eq!(app.composer.input_history_index, None);
+    assert!(!app.is_composer_agent_panel_focused());
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(app.is_composer_agent_panel_focused());
+    assert_eq!(app.sidebar_agent_selected, 1);
+    Ok(())
+}
+
+#[test]
 fn composer_empty_down_focuses_visible_agent_list_and_selects_child() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;

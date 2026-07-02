@@ -173,6 +173,7 @@ pub enum ToolOperation {
     RecursiveDelete,
     ApplyChangeSet,
     ExecuteReadOnlyCommand,
+    ExecuteWorkspaceCheckCommand,
     ExecuteMutatingCommand,
     ExecuteUnknownCommand,
     ExecuteDestructiveCommand,
@@ -778,6 +779,10 @@ pub fn derive_permission_risk(
         return PermissionRisk::High;
     }
 
+    if operation == ToolOperation::ExecuteWorkspaceCheckCommand {
+        return PermissionRisk::Medium;
+    }
+
     match access {
         ToolAccess::Read => PermissionRisk::Low,
         ToolAccess::Write => PermissionRisk::Medium,
@@ -837,6 +842,7 @@ pub fn tool_approval_session_grant_available_for_parts(
             | ToolOperation::OverwriteFile
             | ToolOperation::CreateDirectory
             | ToolOperation::ExecuteReadOnlyCommand
+            | ToolOperation::ExecuteWorkspaceCheckCommand
             | ToolOperation::ExecuteUnknownCommand
     ) {
         return false;
@@ -897,7 +903,10 @@ fn subject_has_stable_session_grant_scope(
             ToolSubjectScope::Unknown => false,
         },
         ToolSubjectKind::Command => {
-            (operation == ToolOperation::ExecuteReadOnlyCommand || exact_command_grant_available)
+            (matches!(
+                operation,
+                ToolOperation::ExecuteReadOnlyCommand | ToolOperation::ExecuteWorkspaceCheckCommand
+            ) || exact_command_grant_available)
                 && !subject.normalized.trim().is_empty()
         }
         _ => false,

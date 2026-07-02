@@ -214,19 +214,22 @@ fn wait_agent_pending_key_helpers_cover_pending_and_terminal_boundaries() {
     );
 
     let pending_result = ToolResult::ok("call-wait", "wait_agent", "", ToolResultMeta::default());
-    assert!(!should_replace_last_wait_agent_pending(
-        &[],
-        &pending_result,
-        &json!({
-            "tool_name": "wait_agent",
-            "status": "ok",
-            "preview_value": {
-                "retry_after_ms": 100,
-                "coalescing_key": "wait_agent:agent_chat_pending"
-            }
-        })
-        .to_string()
-    ));
+    assert!(
+        wait_agent_pending_replacement_index(
+            &[],
+            &pending_result,
+            &json!({
+                "tool_name": "wait_agent",
+                "status": "ok",
+                "preview_value": {
+                    "retry_after_ms": 100,
+                    "coalescing_key": "wait_agent:agent_chat_pending"
+                }
+            })
+            .to_string()
+        )
+        .is_none()
+    );
 
     let errored = ToolResult::error("call-wait", "wait_agent", ToolErrorKind::Protocol, "failed");
     assert!(wait_agent_pending_key_from_result(&errored, "{}").is_none());

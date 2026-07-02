@@ -200,7 +200,7 @@ pub(super) fn legacy_tool_preview(
     };
     let limit = match preview_kind {
         ToolPreviewKind::Markdown => 18,
-        ToolPreviewKind::Json => 12,
+        ToolPreviewKind::Json | ToolPreviewKind::Code => 12,
         ToolPreviewKind::Text => 12,
     };
     let lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
@@ -220,6 +220,9 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
     let terminal_context = details
         .and_then(|details| details.get("terminal_task"))
         .or(details);
+    let shell_context = details
+        .and_then(|details| details.get("shell_analysis"))
+        .or_else(|| details.and_then(|details| details.get("shell")));
     ToolCardMetadata {
         exit_code: object.get("exit_code").and_then(Value::as_i64),
         stdout_bytes: object.get("stdout_bytes").and_then(Value::as_u64),
@@ -323,13 +326,11 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|cleanup| cleanup.get("status"))
             .and_then(Value::as_str)
             .map(str::to_owned),
-        shell_command_family: details
-            .and_then(|details| details.get("shell"))
+        shell_command_family: shell_context
             .and_then(|shell| shell.get("command_family"))
             .and_then(Value::as_str)
             .map(str::to_owned),
-        shell_verdict: details
-            .and_then(|details| details.get("shell"))
+        shell_verdict: shell_context
             .and_then(|shell| shell.get("verdict"))
             .and_then(Value::as_str)
             .map(str::to_owned),

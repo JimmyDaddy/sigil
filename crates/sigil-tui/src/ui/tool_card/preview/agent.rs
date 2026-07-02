@@ -252,6 +252,9 @@ pub(in crate::ui::tool_card) fn agent_status_detail(summary: &ToolCardRender) ->
 pub(in crate::ui::tool_card) fn agent_result_page_summary(
     summary: &ToolCardRender,
 ) -> Option<String> {
+    if agent_payload_bool(summary, "already_delivered").unwrap_or(false) {
+        return Some("already delivered · rerun not needed".to_owned());
+    }
     let page = agent_payload_value(summary)?.get("page")?;
     let offset = page.get("offset_chars").and_then(Value::as_u64)?;
     let returned = page.get("returned_chars").and_then(Value::as_u64)?;

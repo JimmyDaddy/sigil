@@ -2960,6 +2960,72 @@ async fn agent_run_input_transient_context_does_not_append_user_message() -> Res
 }
 
 #[tokio::test]
+async fn agent_run_input_does_not_append_duplicate_tail_user_message() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    session.append_user_message(ModelMessage::user("same prompt"))?;
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("same prompt"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "captured");
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    SessionLogEntry::User(message)
+                        if message.content.as_deref() == Some("same prompt")
+                )
+            })
+            .count(),
+        1
+    );
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::User
+                    && message.content.as_deref() == Some("same prompt")
+            })
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_run_output_reports_approval_denials() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
@@ -4089,11 +4155,13 @@ async fn approved_plan_workspace_edits_allows_required_preview_write_without_pro
                     && approval.action == ToolApprovalAuditAction::Requested
         )
     }));
-    assert!(!session.entries().iter().any(|entry| {
+    assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))
                 if snapshot.call_id == "call-write-1"
+                    && snapshot.tool_name == "write_file"
+                    && snapshot.file_diffs.len() == 1
         )
     }));
     Ok(())

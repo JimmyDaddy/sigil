@@ -332,6 +332,18 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
             }
         }
     }));
+    let delivered_result = parsed_summary(json!({
+        "tool_name": "read_agent_result",
+        "status": "ok",
+        "preview_kind": "json",
+        "preview_value": {
+            "thread_id": "thread_1",
+            "status": "completed",
+            "already_delivered": true,
+            "rerun_not_needed": true,
+            "next_action": "Use previously delivered result; do not call read_agent_result again."
+        }
+    }));
     let message_result = parsed_summary(json!({
         "tool_name": "message_agent",
         "status": "ok",
@@ -384,6 +396,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     let spawn_display = build_tool_card_display(&spawn_result);
     let running_spawn_display = build_tool_card_display(&running_spawn_result);
     let wait_ready_display = build_tool_card_display(&wait_ready);
+    let delivered_display = build_tool_card_display(&delivered_result);
     let message_display = build_tool_card_display(&message_result);
     let close_display = build_tool_card_display(&close_result);
     let fallback_display = build_tool_card_display(&fallback_result);
@@ -397,6 +410,11 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
         96,
     ));
     let wait_ready_text = plain_text(&render_tool_preview_body(&wait_ready, accent_rose(), 96));
+    let delivered_text = plain_text(&render_tool_preview_body(
+        &delivered_result,
+        accent_rose(),
+        96,
+    ));
     let missing_payload_text = plain_text(&render_tool_preview_body(
         &missing_payload,
         accent_rose(),
@@ -450,6 +468,17 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     assert!(wait_ready_text.contains("result ready"));
     assert!(wait_ready_text.contains("finished cleanly"));
     assert!(wait_ready_text.contains("read_agent_result"));
+    assert_eq!(
+        delivered_display.title.plain(),
+        "Read agent result thread_1"
+    );
+    assert_eq!(delivered_display.status.label, "DONE");
+    assert_eq!(
+        delivered_display.summary.as_deref(),
+        Some("already delivered · rerun not needed")
+    );
+    assert!(delivered_text.contains("already delivered"));
+    assert!(delivered_text.contains("rerun not needed"));
 
     assert_eq!(message_display.title.plain(), "Messaged agent thread_msg");
     assert_eq!(message_display.status.label, "FAILED");
@@ -1420,6 +1449,10 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
                 "enforcement_backend": "local",
                 "sandbox_profile": "unconfined",
                 "cleanup": {"status": "completed"}
+            },
+            "shell_analysis": {
+                "command_family": "cargo_check",
+                "verdict": "running"
             }
         }
     }));
@@ -1474,9 +1507,17 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
         metadata.terminal_cleanup_status.as_deref(),
         Some("completed")
     );
+    assert_eq!(
+        metadata.shell_command_family.as_deref(),
+        Some("cargo_check")
+    );
+    assert_eq!(metadata.shell_verdict.as_deref(), Some("running"));
     assert_eq!(subjects, (None, None, None));
     assert_eq!(ToolPreviewKind::Markdown.label(), "md");
     assert_eq!(ToolPreviewKind::Json.description(), "structured preview");
+    assert_eq!(ToolPreviewKind::Code.label(), "code");
+    assert_eq!(ToolPreviewKind::Code.description(), "code excerpt");
+    assert!(ToolPreviewKind::from_value("code") == ToolPreviewKind::Code);
     assert!(ToolPreviewKind::from_value("other") == ToolPreviewKind::Text);
 }
 
@@ -1617,9 +1658,14 @@ fn tool_card_read_file_preview_uses_document_and_file_sections() {
         preview_lines: vec!["# Title".to_owned()],
         ..base_summary("read_file")
     };
+    let code_summary = ToolCardRender {
+        preview_kind: ToolPreviewKind::Code,
+        preview_lines: vec!["fn main() {}".to_owned()],
+        ..base_summary("read_file")
+    };
     let text_summary = ToolCardRender {
         preview_kind: ToolPreviewKind::Text,
-        preview_lines: vec!["fn main() {}".to_owned()],
+        preview_lines: vec!["plain text".to_owned()],
         ..base_summary("read_file")
     };
 
@@ -1628,9 +1674,11 @@ fn tool_card_read_file_preview_uses_document_and_file_sections() {
         accent_rose(),
         80,
     ));
+    let code_text = plain_text(&render_read_file_preview(&code_summary, accent_rose(), 80));
     let text = plain_text(&render_read_file_preview(&text_summary, accent_rose(), 80));
 
     assert!(markdown_text.contains("document excerpt"));
+    assert!(code_text.contains("code excerpt"));
     assert!(text.contains("file excerpt"));
 }
 

@@ -23,20 +23,17 @@ pub(in crate::ui::tool_card) fn render_read_file_preview_with_palette(
     syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    let (section_label, section_description) = match summary.preview_kind {
+        ToolPreviewKind::Markdown => ("doc", "document excerpt"),
+        ToolPreviewKind::Code => ("code", "code excerpt"),
+        ToolPreviewKind::Json | ToolPreviewKind::Text => ("file", "file excerpt"),
+    };
     let mut lines = vec![timeline_section_line_with_palette(
         accent,
-        if summary.preview_kind == ToolPreviewKind::Markdown {
-            "doc"
-        } else {
-            "file"
-        },
+        section_label,
         palette.accent_info,
         vec![Span::styled(
-            if summary.preview_kind == ToolPreviewKind::Markdown {
-                "document excerpt"
-            } else {
-                "file excerpt"
-            },
+            section_description,
             Style::default().fg(palette.text_muted),
         )],
         palette,
@@ -52,7 +49,7 @@ pub(in crate::ui::tool_card) fn render_read_file_preview_with_palette(
                 palette,
             ));
         }
-        ToolPreviewKind::Json | ToolPreviewKind::Text => {
+        ToolPreviewKind::Json | ToolPreviewKind::Code | ToolPreviewKind::Text => {
             lines.extend(render_code_preview_lines_with_palette(
                 accent,
                 &summary.preview_lines,

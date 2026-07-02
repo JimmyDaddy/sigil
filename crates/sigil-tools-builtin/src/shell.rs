@@ -112,7 +112,7 @@ pub(crate) enum CommandFamily {
 }
 
 impl CommandFamily {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::CargoCheck => "cargo_check",
             Self::CargoFmtCheck => "cargo_fmt_check",
@@ -159,7 +159,7 @@ pub(crate) enum CommandGrantScope {
 }
 
 impl CommandGrantScope {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::ExactCommand => "exact_command",
             Self::WorkspaceCheckFamily => "workspace_check_family",
@@ -178,7 +178,7 @@ pub(crate) enum ShellApprovalReason {
 }
 
 impl ShellApprovalReason {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::WorkspaceCheck => "workspace_check",
             Self::WorkspaceReadOnly => "workspace_read_only",
@@ -212,7 +212,7 @@ pub(crate) fn analyze_shell_command(
         subjects.extend(bash_path_subjects(workspace_root, command)?);
     } else if family.is_workspace_check() {
         access = ToolAccess::Execute;
-        operation = ToolOperation::ExecuteUnknownCommand;
+        operation = ToolOperation::ExecuteWorkspaceCheckCommand;
         grant_scope = workspace_check_grant_scope(&family);
         explanation = ShellApprovalReason::WorkspaceCheck;
         let stable_subject = family.stable_subject();
@@ -410,7 +410,7 @@ pub(crate) fn execution_receipt_details(
     details
 }
 
-fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Value {
+pub(crate) fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Value {
     match scope {
         Some(CommandGrantScope::WorkspaceScript { path, args_family }) => json!({
             "path": path,
@@ -618,6 +618,7 @@ fn external_shell_path_subjects(workspace_root: &Path, command: &str) -> Result<
         .collect())
 }
 
+#[cfg(test)]
 pub(crate) fn shell_command_permission_operation(command: &str) -> ToolOperation {
     if shell_command_is_destructive(command) {
         ToolOperation::ExecuteDestructiveCommand

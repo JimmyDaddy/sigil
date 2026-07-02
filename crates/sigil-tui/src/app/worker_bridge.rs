@@ -38,6 +38,36 @@ impl AppState {
         self.push_phase_marker(format!("agent|{profile_id}"));
     }
 
+    fn replace_or_push_terminal_task_card(&mut self, rendered: String) {
+        if let Some(index) = terminal_task_replacement_index(&self.timeline, &rendered) {
+            self.replace_tool_timeline_entry(index, rendered);
+        } else {
+            self.push_timeline(TimelineRole::Tool, rendered);
+        }
+    }
+
+    fn replace_tool_timeline_entry(&mut self, index: usize, rendered: String) {
+        let Some(entry) = self.timeline.get_mut(index) else {
+            return;
+        };
+        entry.text = rendered;
+
+        if let Some(entry) = self.timeline.get(index)
+            && let Some(activity) = self.tool_activity_cache_entry(index, entry)
+        {
+            if let Some(cached) = self
+                .tool_activity_cache
+                .iter_mut()
+                .find(|cached| cached.index == index)
+            {
+                *cached = activity;
+            } else {
+                self.tool_activity_cache.push(activity);
+            }
+        }
+        self.rerender_timeline_entry(index);
+    }
+
     pub fn poll_background_tasks(&mut self) -> bool {
         self.reload_active_agent_child_transcript()
     }
@@ -290,6 +320,15 @@ impl AppState {
                 self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
                 self.push_event("run:start", prompt);
             }
+            WorkerMessage::SkillRunStarted { skill_id, prompt } => {
+                self.runtime.is_busy = true;
+                self.runtime.run_phase = RunPhase::Thinking;
+                self.runtime.mcp_progress = None;
+                self.last_notice = Some(format!("skill {skill_id} running"));
+                self.push_phase_marker(format!("skill|{skill_id}"));
+                self.push_timeline(TimelineRole::Notice, format!("skill {skill_id} started"));
+                self.push_event("skill:start", prompt);
+            }
             WorkerMessage::PlanRunStarted { prompt } => {
                 self.runtime.is_busy = true;
                 self.runtime.run_phase = RunPhase::Thinking;
@@ -385,13 +424,7 @@ impl AppState {
                 self.last_notice = Some(notice.clone());
                 self.push_event("notice", notice);
                 let final_text = result.final_text.trim();
-                if !final_text.is_empty()
-                    && !self.timeline.last().is_some_and(|entry| {
-                        entry.role == TimelineRole::Assistant && entry.text == final_text
-                    })
-                {
-                    self.push_timeline(TimelineRole::Assistant, final_text.to_owned());
-                }
+                self.push_assistant_message_once(final_text.to_owned());
                 self.push_event(
                     "agent:finish",
                     format!(
@@ -569,10 +602,10 @@ impl AppState {
                     entry.handle.task_id.as_str(),
                     entry.status.as_str()
                 ));
-                self.push_timeline(
-                    TimelineRole::Tool,
-                    format_terminal_task_block_redacted(&entry, &self.secret_redactor),
-                );
+                self.replace_or_push_terminal_task_card(format_terminal_task_block_redacted(
+                    &entry,
+                    &self.secret_redactor,
+                ));
                 self.push_event(
                     "terminal",
                     format!(
@@ -1488,10 +1521,14 @@ impl EventHandler for AppState {
                 let preview = self.tool_preview_snapshots.get(&result.call_id);
                 let rendered =
                     format_tool_result_block_redacted(&result, preview, &self.secret_redactor);
-                if should_replace_last_wait_agent_pending(&self.timeline, &result, &rendered) {
-                    if let Some(entry) = self.timeline.last_mut() {
-                        entry.text = rendered;
-                    }
+                if let Some(index) =
+                    wait_agent_pending_replacement_index(&self.timeline, &result, &rendered)
+                {
+                    self.replace_tool_timeline_entry(index, rendered);
+                } else if let Some(index) =
+                    terminal_task_replacement_index(&self.timeline, &rendered)
+                {
+                    self.replace_tool_timeline_entry(index, rendered);
                 } else {
                     self.push_timeline(TimelineRole::Tool, rendered);
                 }
@@ -1540,10 +1577,10 @@ impl EventHandler for AppState {
                             task.status.as_str()
                         ),
                     );
-                    self.push_timeline(
-                        TimelineRole::Tool,
-                        format_terminal_task_block_redacted(&task, &self.secret_redactor),
-                    );
+                    self.replace_or_push_terminal_task_card(format_terminal_task_block_redacted(
+                        &task,
+                        &self.secret_redactor,
+                    ));
                     self.append_current_session_control(ControlEntry::TerminalTask(task));
                 }
                 ControlEntry::ToolExecution(execution) => {
@@ -1639,20 +1676,61 @@ fn agent_tool_name(name: &str) -> bool {
     )
 }
 
-fn should_replace_last_wait_agent_pending(
+fn terminal_task_replacement_index(timeline: &[TimelineEntry], rendered: &str) -> Option<usize> {
+    let current_key = terminal_task_key_from_tool_block(rendered)?;
+    const RECENT_TERMINAL_TASK_SCAN: usize = 96;
+    timeline
+        .iter()
+        .enumerate()
+        .rev()
+        .take(RECENT_TERMINAL_TASK_SCAN)
+        .find_map(|(index, previous)| {
+            (previous.role == TimelineRole::Tool
+                && terminal_task_key_from_tool_block(&previous.text)
+                    .is_some_and(|previous_key| previous_key == current_key))
+            .then_some(index)
+        })
+}
+
+fn terminal_task_key_from_tool_block(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let tool_name = value.get("tool_name")?.as_str()?;
+    if !matches!(
+        tool_name,
+        "terminal_task" | "terminal_start" | "terminal_read" | "terminal_cancel"
+    ) {
+        return None;
+    }
+    let details = value.get("metadata")?.get("details")?;
+    let terminal_task = details.get("terminal_task").unwrap_or(details);
+    terminal_task
+        .get("status")
+        .and_then(serde_json::Value::as_str)?;
+    let task_id = terminal_task
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    (!task_id.is_empty()).then(|| format!("terminal_task:{task_id}"))
+}
+
+fn wait_agent_pending_replacement_index(
     timeline: &[TimelineEntry],
     result: &ToolResult,
     rendered: &str,
-) -> bool {
-    let Some(current_key) = wait_agent_pending_key_from_result(result, rendered) else {
-        return false;
-    };
-    let Some(previous) = timeline.last() else {
-        return false;
-    };
-    previous.role == TimelineRole::Tool
-        && wait_agent_pending_key_from_tool_block(&previous.text)
-            .is_some_and(|previous_key| previous_key == current_key)
+) -> Option<usize> {
+    let current_key = wait_agent_pending_key_from_result(result, rendered)?;
+    const RECENT_PENDING_WAIT_AGENT_SCAN: usize = 64;
+    timeline
+        .iter()
+        .enumerate()
+        .rev()
+        .take(RECENT_PENDING_WAIT_AGENT_SCAN)
+        .find_map(|(index, previous)| {
+            (previous.role == TimelineRole::Tool
+                && wait_agent_pending_key_from_tool_block(&previous.text)
+                    .is_some_and(|previous_key| previous_key == current_key))
+            .then_some(index)
+        })
 }
 
 fn wait_agent_pending_key_from_result(result: &ToolResult, rendered: &str) -> Option<String> {

@@ -39,8 +39,9 @@ use crate::{
     time::saturating_elapsed,
     tool::{
         ToolCategory, ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
-        ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec,
-        ToolSubject, ToolSubjectScope, execution_mutation_profile_for_tool,
+        ToolPreviewCapability, ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta,
+        ToolResultStatus, ToolSpec, ToolSubject, ToolSubjectScope,
+        execution_mutation_profile_for_tool,
     },
     verification::{
         DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope, ReadinessEvaluatedEntry,
@@ -499,7 +500,9 @@ where
         session.reconcile_prepared_mutations(&options.workspace_root)?;
         session.reconcile_unfinished_write_tool_executions(&options.workspace_root)?;
 
-        if let Some(message) = persisted_user_message {
+        if let Some(message) = persisted_user_message
+            && !last_provider_visible_user_message_matches(session, &message)
+        {
             session.append_user_message(ModelMessage::user(message))?;
         }
 
@@ -904,6 +907,16 @@ where
                             &decision,
                             session_grant_source.as_ref(),
                         )?;
+                        let preview_capture = capture_tool_preview_for_decision(
+                            session,
+                            handler,
+                            tools,
+                            tool_ctx.clone(),
+                            &call,
+                            spec,
+                            &decision,
+                        )
+                        .await?;
                         execution_subjects = decision.subjects.clone();
 
                         match decision.mode {
@@ -937,57 +950,8 @@ where
                                 continue;
                             }
                             ApprovalMode::Ask => {
-                                let mut preview_error = None;
-                                let preview = if has_external_subject(&decision.subjects) {
-                                    Some(external_directory_preview(&call.name, &decision.subjects))
-                                } else {
-                                    match tools.preview(tool_ctx.clone(), call.clone()).await {
-                                        Ok(preview) => preview,
-                                        Err(error) => {
-                                            let error = error.to_string();
-                                            preview_error = Some(error.clone());
-                                            Some(ToolPreview {
-                                                title: format!(
-                                                    "Preview unavailable for {}",
-                                                    call.name
-                                                ),
-                                                summary: "The tool preview could not be generated automatically."
-                                                    .to_owned(),
-                                                body: error,
-                                                changed_files: Vec::new(),
-                                                file_diffs: Vec::new(),
-                                            })
-                                        }
-                                    }
-                                };
-                                if let Some(error) = preview_error.as_ref() {
-                                    append_tool_approval_audit(
-                                        session,
-                                        &call,
-                                        &decision,
-                                        ToolApprovalAuditAction::PreviewFailed,
-                                        None,
-                                        Some(error.clone()),
-                                        None,
-                                    )?;
-                                }
-                                let preview_hash =
-                                    preview.as_ref().map(stable_json_hash).transpose()?;
-                                if preview_error.is_none()
-                                    && let Some(preview) = preview.as_ref()
-                                {
-                                    let control = ControlEntry::ToolPreviewCaptured(
-                                        ToolPreviewSnapshot::from_preview(
-                                            call.id.clone(),
-                                            call.name.clone(),
-                                            preview,
-                                            ToolDiffBudget::default(),
-                                            preview_hash.clone(),
-                                        ),
-                                    );
-                                    session.append_control(control.clone())?;
-                                    handler.handle(RunEvent::Control(control))?;
-                                }
+                                let preview = preview_capture.preview.clone();
+                                let preview_hash = preview_capture.preview_hash.clone();
                                 append_tool_approval_audit(
                                     session,
                                     &call,
@@ -1928,6 +1892,19 @@ fn attach_tool_call_context(result: &mut ToolResult, call: &ToolCall, subjects: 
     }
 }
 
+fn last_provider_visible_user_message_matches(session: &Session, message: &str) -> bool {
+    session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::User(user) => Some(user.content.as_deref() == Some(message)),
+            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResult(_) => Some(false),
+            SessionLogEntry::Control(_) => None,
+        })
+        .unwrap_or(false)
+}
+
 fn tool_call_context(call: &ToolCall, subjects: &[ToolSubject]) -> Option<Value> {
     let args = serde_json::from_str::<Value>(&call.args_json).ok();
     let object = args.as_ref().and_then(Value::as_object);
@@ -2032,6 +2009,86 @@ fn external_directory_preview(tool_name: &str, subjects: &[ToolSubject]) -> Tool
         changed_files: Vec::new(),
         file_diffs: Vec::new(),
     }
+}
+
+#[derive(Debug, Clone)]
+struct ToolPreviewCapture {
+    preview: Option<ToolPreview>,
+    preview_hash: Option<String>,
+}
+
+async fn capture_tool_preview_for_decision<H>(
+    session: &mut Session,
+    handler: &mut H,
+    tools: &ToolRegistry,
+    tool_ctx: ToolContext,
+    call: &ToolCall,
+    spec: &ToolSpec,
+    decision: &PermissionDecision,
+) -> Result<ToolPreviewCapture>
+where
+    H: EventHandler + Send,
+{
+    let should_capture = matches!(decision.mode, ApprovalMode::Ask)
+        || matches!(spec.preview, ToolPreviewCapability::Required);
+    if !should_capture {
+        return Ok(ToolPreviewCapture {
+            preview: None,
+            preview_hash: None,
+        });
+    }
+
+    let mut preview_error = None;
+    let preview = if has_external_subject(&decision.subjects) {
+        Some(external_directory_preview(&call.name, &decision.subjects))
+    } else {
+        match tools.preview(tool_ctx, call.clone()).await {
+            Ok(preview) => preview,
+            Err(error) => {
+                let error = error.to_string();
+                preview_error = Some(error.clone());
+                matches!(decision.mode, ApprovalMode::Ask).then(|| ToolPreview {
+                    title: format!("Preview unavailable for {}", call.name),
+                    summary: "The tool preview could not be generated automatically.".to_owned(),
+                    body: error,
+                    changed_files: Vec::new(),
+                    file_diffs: Vec::new(),
+                })
+            }
+        }
+    };
+
+    if let Some(error) = preview_error.as_ref() {
+        append_tool_approval_audit(
+            session,
+            call,
+            decision,
+            ToolApprovalAuditAction::PreviewFailed,
+            None,
+            Some(error.clone()),
+            None,
+        )?;
+    }
+
+    let preview_hash = preview.as_ref().map(stable_json_hash).transpose()?;
+    if preview_error.is_none()
+        && let Some(preview) = preview.as_ref()
+    {
+        let control = ControlEntry::ToolPreviewCaptured(ToolPreviewSnapshot::from_preview(
+            call.id.clone(),
+            call.name.clone(),
+            preview,
+            ToolDiffBudget::default(),
+            preview_hash.clone(),
+        ));
+        session.append_control(control.clone())?;
+        handler.handle(RunEvent::Control(control))?;
+    }
+
+    Ok(ToolPreviewCapture {
+        preview,
+        preview_hash,
+    })
 }
 
 fn append_tool_approval_audit(

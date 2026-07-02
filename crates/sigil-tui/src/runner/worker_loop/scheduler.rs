@@ -826,7 +826,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
 
                 let prompt = skill_invocation_prompt(&skill_id, &arguments);
-                let _ = message_tx.send(WorkerMessage::RunStarted {
+                let _ = message_tx.send(WorkerMessage::SkillRunStarted {
+                    skill_id: skill_id.clone(),
                     prompt: prompt.clone(),
                 });
 

@@ -475,7 +475,11 @@ fn collect_session_facts(
                     for file in &execution.changed_files {
                         changed_files.insert(file.clone());
                     }
-                    let shell = execution.metadata.details.get("shell");
+                    let shell = execution
+                        .metadata
+                        .details
+                        .get("shell_analysis")
+                        .or_else(|| execution.metadata.details.get("shell"));
                     let command = shell
                         .and_then(|shell| shell.get("command"))
                         .and_then(Value::as_str)

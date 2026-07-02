@@ -23,7 +23,7 @@ impl AppState {
                     "tool={}  id={}  mode={}",
                     pending.call.name,
                     pending.call.id,
-                    approval_access_label(&pending.spec)
+                    approval_pending_access_label(pending)
                 ));
                 if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
                     lines.push(format!("source_agent={source_agent}"));
@@ -106,7 +106,7 @@ impl AppState {
                 "tool={}  id={}  mode={}",
                 pending.call.name,
                 pending.call.id,
-                approval_access_label(&pending.spec)
+                approval_pending_access_label(pending)
             ));
             if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
                 lines.push(format!("source_agent={source_agent}"));
@@ -119,7 +119,14 @@ impl AppState {
                 pending.snapshot_required,
             ));
             lines.extend(approval_subject_lines(&pending.subjects));
-            lines.push(format!("args={}", pending.call.args_json));
+            if let Some(preview) =
+                approval_shell_preview(pending).or_else(|| approval_terminal_input_preview(pending))
+            {
+                lines.push(format!("preview={}", preview.title));
+                lines.push(preview.summary);
+            } else {
+                lines.push(format!("args={}", pending.call.args_json));
+            }
         }
 
         lines.push(String::new());
@@ -270,9 +277,10 @@ impl AppState {
 
     pub(crate) fn approval_modal_view(&self) -> Option<ApprovalModalView> {
         let pending = self.approval.pending.as_ref()?;
-        let access_label = approval_access_label(&pending.spec);
+        let access_label = approval_pending_access_label(pending);
         let source_agent = self.pending_approval_source_agent(&pending.call.id);
-        let shell_preview = approval_shell_preview(pending);
+        let shell_preview =
+            approval_shell_preview(pending).or_else(|| approval_terminal_input_preview(pending));
         let Some(preview) = pending.preview.as_ref() else {
             return Some(ApprovalModalView {
                 tool_name: pending.call.name.clone(),
@@ -609,6 +617,13 @@ fn approval_access_label(spec: &sigil_kernel::ToolSpec) -> String {
     format!("{} {}", spec.category.as_str(), spec.access.as_str())
 }
 
+fn approval_pending_access_label(pending: &PendingApproval) -> String {
+    if pending.operation == ToolOperation::SendTerminalInput {
+        return "terminal input".to_owned();
+    }
+    approval_access_label(&pending.spec)
+}
+
 #[derive(Debug, Clone)]
 struct ShellApprovalPreview {
     title: String,
@@ -672,12 +687,49 @@ fn approval_shell_preview(pending: &PendingApproval) -> Option<ShellApprovalPrev
     })
 }
 
+fn approval_terminal_input_preview(pending: &PendingApproval) -> Option<ShellApprovalPreview> {
+    if pending.operation != ToolOperation::SendTerminalInput
+        || pending.call.name != "terminal_input"
+    {
+        return None;
+    }
+    let args: Value = serde_json::from_str(&pending.call.args_json).ok()?;
+    let task_id = args.get("task_id")?.as_str()?;
+    let input_bytes = args
+        .get("input")
+        .and_then(Value::as_str)
+        .map(str::len)
+        .or_else(|| {
+            pending.subjects.iter().find_map(|subject| {
+                subject
+                    .normalized
+                    .strip_prefix("terminal_input_bytes:")
+                    .and_then(|bytes| bytes.parse::<usize>().ok())
+            })
+        })
+        .unwrap_or(0);
+    let access = approval_shell_access_summary(pending);
+    let grant_line = if pending.session_grant_available {
+        "Session grant: allow input to this terminal task for this session."
+    } else {
+        "Session grant: not available for this call."
+    };
+    Some(ShellApprovalPreview {
+        title: "Send terminal input".to_owned(),
+        summary: format!(
+            "Terminal task: {task_id}\nInput: {input_bytes} bytes\nReason: Sends stdin to a running terminal task.\nAccess: {access}\n{grant_line}"
+        ),
+    })
+}
+
 fn approval_shell_access_summary(pending: &PendingApproval) -> &'static str {
     if pending.subject_zones.contains(&PathTrustZone::External) {
         return "touches an external path";
     }
     match pending.operation {
         ToolOperation::ExecuteReadOnlyCommand => "workspace read · no external writes",
+        ToolOperation::ExecuteWorkspaceCheckCommand => "workspace check · no external writes",
+        ToolOperation::SendTerminalInput => "terminal stdin · no external writes",
         ToolOperation::ExecuteUnknownCommand => "workspace command · no external writes",
         ToolOperation::ExecuteDestructiveCommand => "destructive command",
         _ => "workspace command",
@@ -731,6 +783,7 @@ fn approval_operation_label(operation: ToolOperation) -> &'static str {
         ToolOperation::RecursiveDelete => "recursive delete",
         ToolOperation::ApplyChangeSet => "apply change set",
         ToolOperation::ExecuteReadOnlyCommand => "run read-only command",
+        ToolOperation::ExecuteWorkspaceCheckCommand => "run workspace check",
         ToolOperation::ExecuteMutatingCommand => "run mutating command",
         ToolOperation::ExecuteUnknownCommand => "run command",
         ToolOperation::ExecuteDestructiveCommand => "run destructive command",

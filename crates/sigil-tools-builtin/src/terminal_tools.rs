@@ -21,8 +21,8 @@ use crate::{
         tool_path_subject,
     },
     shell::{
-        bash_path_subjects_from_cwd, command_permission_subject,
-        shell_command_permission_operation, terminal_input_permission_operation,
+        ShellCommandAnalysis, analyze_shell_command, bash_path_subjects_from_cwd,
+        command_permission_subject, shell_grant_scope_detail, terminal_input_permission_operation,
     },
     support::{optional_string, optional_usize, required_string},
     terminal_process::{
@@ -136,10 +136,7 @@ impl Tool for TerminalStartTool {
         let command = required_string(args, "command")?;
         let cwd = optional_string(args, "cwd");
         let shell = optional_string(args, "shell");
-        let mut subjects = vec![ToolSubject::command(
-            command.to_owned(),
-            command_permission_subject(command),
-        )];
+        let mut subjects = analyze_shell_command(&ctx.workspace_root, command)?.subjects;
         if let Some(shell) = shell {
             subjects.push(ToolSubject::command(
                 shell.to_owned(),
@@ -155,9 +152,14 @@ impl Tool for TerminalStartTool {
         Ok(subjects)
     }
 
-    fn permission_operation(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+    fn permission_access(&self, ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
         let command = required_string(args, "command")?;
-        Ok(shell_command_permission_operation(command))
+        Ok(analyze_shell_command(&ctx.workspace_root, command)?.access)
+    }
+
+    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+        let command = required_string(args, "command")?;
+        Ok(analyze_shell_command(&ctx.workspace_root, command)?.operation)
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -171,6 +173,7 @@ impl Tool for TerminalStartTool {
         tokio::fs::create_dir_all(&scratch_root)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
+        let analysis = analyze_shell_command(&ctx.workspace_root, &args.command)?;
         let mut env = BTreeMap::new();
         env.insert(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),
@@ -188,11 +191,12 @@ impl Tool for TerminalStartTool {
         } else {
             manager.start(request).await?
         };
-        Ok(terminal_entry_result(
+        Ok(terminal_entry_result_with_shell_analysis(
             call_id,
             self.spec().name,
             "started",
             entry,
+            Some(&analysis),
         ))
     }
 }
@@ -575,6 +579,16 @@ pub(crate) fn terminal_entry_result(
     action: &'static str,
     entry: TerminalTaskEntry,
 ) -> ToolResult {
+    terminal_entry_result_with_shell_analysis(call_id, tool_name, action, entry, None)
+}
+
+pub(crate) fn terminal_entry_result_with_shell_analysis(
+    call_id: String,
+    tool_name: String,
+    action: &'static str,
+    entry: TerminalTaskEntry,
+    analysis: Option<&ShellCommandAnalysis>,
+) -> ToolResult {
     let content = format!(
         "{action} terminal task {}\nstatus: {}\nlog: {}",
         entry.handle.task_id.as_str(),
@@ -587,13 +601,16 @@ pub(crate) fn terminal_entry_result(
         content,
         ToolResultMeta {
             truncated: entry.output_truncated,
-            details: terminal_entry_details(&entry),
+            details: terminal_entry_details(&entry, analysis),
             ..ToolResultMeta::default()
         },
     )
 }
 
-pub(crate) fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
+pub(crate) fn terminal_entry_details(
+    entry: &TerminalTaskEntry,
+    analysis: Option<&ShellCommandAnalysis>,
+) -> Value {
     let mut details = json!({
         "task_id": entry.handle.task_id.as_str(),
         "status": entry.status.as_str(),
@@ -632,6 +649,23 @@ pub(crate) fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
         json!(entry.handle.sandbox_profile),
     );
     details_object.insert("cleanup".to_owned(), json!(entry.cleanup));
+    if let Some(analysis) = analysis {
+        details_object.insert(
+            "shell_analysis".to_owned(),
+            json!({
+                "command": analysis.command.as_str(),
+                "command_family": analysis.command_family.as_str(),
+                "grant_scope": analysis.grant_scope.as_ref().map(|scope| scope.as_str()),
+                "grant_scope_detail": shell_grant_scope_detail(analysis.grant_scope.as_ref()),
+                "approval_reason": analysis.explanation.as_str(),
+                "exit_code": Value::Null,
+                "verdict": "running",
+                "output_truncated": entry.output_truncated,
+                "tail_available": false,
+                "rerun_not_needed": false,
+            }),
+        );
+    }
     details
 }
 
@@ -707,7 +741,10 @@ pub(crate) fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usiz
     if let Some(entry) = &read.latest_entry
         && let Some(object) = details.as_object_mut()
     {
-        object.insert("terminal_task".to_owned(), terminal_entry_details(entry));
+        object.insert(
+            "terminal_task".to_owned(),
+            terminal_entry_details(entry, None),
+        );
     }
     details
 }

@@ -309,6 +309,7 @@ pub(crate) fn resolve_input_context(app: &AppState, key: KeyEvent) -> InputConte
         && !app.has_slash_selector()
         && app.composer_agent_rows().len() > 1
         && is_implicit_composer_agent_panel_key(key)
+        && !composer_history_should_handle_key(app, key)
     {
         return InputContext::ComposerAgentPanel;
     }
@@ -329,6 +330,17 @@ fn is_implicit_composer_agent_panel_key(key: KeyEvent) -> bool {
         key.code,
         KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc
     ) && key.modifiers.is_empty()
+}
+
+fn composer_history_should_handle_key(app: &AppState, key: KeyEvent) -> bool {
+    if !key.modifiers.is_empty() {
+        return false;
+    }
+    match key.code {
+        KeyCode::Up => true,
+        KeyCode::Down => app.composer.input_history_index.is_some(),
+        _ => false,
+    }
 }
 
 pub(crate) fn resolve_binding(context: InputContext, key: KeyEvent) -> Option<RoutedKeyCommand> {

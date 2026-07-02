@@ -195,7 +195,10 @@ fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> 
         updated_at_ms: 120,
     };
 
-    let details = super::terminal_entry_details(&entry);
+    let details = super::terminal_entry_details(&entry, None);
+    let workspace = tempfile::tempdir()?;
+    let analysis = super::analyze_shell_command(workspace.path(), "cargo check 2>&1 | tail -20")?;
+    let shell_details = super::terminal_entry_details(&entry, Some(&analysis));
 
     assert_eq!(details["execution_backend"], json!("local_pty"));
     assert_eq!(details["enforcement_backend"], json!("local"));
@@ -208,6 +211,15 @@ fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> 
         details["execution_backend_capabilities"]["input"],
         json!(true)
     );
+    assert_eq!(
+        shell_details["shell_analysis"]["command_family"],
+        json!("cargo_check")
+    );
+    assert_eq!(
+        shell_details["shell_analysis"]["grant_scope"],
+        json!("workspace_check_family")
+    );
+    assert_eq!(shell_details["shell_analysis"]["verdict"], json!("running"));
     Ok(())
 }
 
@@ -1720,6 +1732,23 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
             && subject.scope == ToolSubjectScope::Workspace
     }));
 
+    let cargo_check_call = tool_call(
+        "terminal_start",
+        json!({ "command": "cd . && cargo check 2>&1 | tail -20" }),
+    );
+    assert_eq!(
+        registry.permission_access(&ctx, &cargo_check_call)?,
+        ToolAccess::Execute
+    );
+    assert_eq!(
+        registry.permission_operation(&ctx, &cargo_check_call)?,
+        ToolOperation::ExecuteWorkspaceCheckCommand
+    );
+    let cargo_check_subjects = registry.permission_subjects(&ctx, &cargo_check_call)?;
+    assert!(cargo_check_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Command && subject.normalized == "family:cargo_check"
+    }));
+
     let read_call = tool_call("terminal_read", json!({ "task_id": "terminal-perm" }));
     let input_call = tool_call(
         "terminal_input",
@@ -2692,13 +2721,13 @@ async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Res
     );
     assert_eq!(
         tool.permission_operation(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?,
-        ToolOperation::ExecuteUnknownCommand
+        ToolOperation::ExecuteWorkspaceCheckCommand
     );
     assert!(
         sigil_kernel::tool_approval_session_grant_available_for_parts(
             ToolAccess::Execute,
-            ToolOperation::ExecuteUnknownCommand,
-            PermissionRisk::High,
+            ToolOperation::ExecuteWorkspaceCheckCommand,
+            PermissionRisk::Medium,
             &first,
             &[PathTrustZone::Unknown],
             None,
@@ -2732,7 +2761,7 @@ async fn bash_shell_analysis_allows_safe_search_and_devices_without_external_app
     );
     assert_eq!(
         tool.permission_operation(&ctx, &json!({ "command": "cargo check > /dev/null 2>&1" }))?,
-        ToolOperation::ExecuteUnknownCommand
+        ToolOperation::ExecuteWorkspaceCheckCommand
     );
     Ok(())
 }

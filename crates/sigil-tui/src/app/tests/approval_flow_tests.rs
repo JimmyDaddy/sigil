@@ -115,6 +115,54 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
 }
 
 #[test]
+fn terminal_input_approval_modal_explains_task_without_echoing_input() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-terminal-input".to_owned(),
+            name: "terminal_input".to_owned(),
+            args_json: r#"{"task_id":"terminal-1","input":"xy"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "terminal_input".to_owned(),
+            description: "Send input to a terminal task".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: vec![
+            ToolSubject::command("terminal task terminal-1", "terminal_task:terminal-1"),
+            ToolSubject::command("terminal input bytes=2", "terminal_input_bytes:2"),
+        ],
+        operation: sigil_kernel::ToolOperation::SendTerminalInput,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
+        preview: None,
+    })?;
+
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("mode=terminal input"));
+    assert!(lines.contains("preview=Send terminal input"));
+    assert!(lines.contains("Terminal task: terminal-1"));
+    assert!(lines.contains("Input: 2 bytes"));
+    assert!(!lines.contains(r#""input":"xy""#));
+
+    let view = app
+        .approval_modal_view()
+        .expect("approval modal view should exist");
+    assert_eq!(view.access_label, "terminal input");
+    assert_eq!(view.preview_title, "Send terminal input");
+    assert!(view.preview_summary.contains("Terminal task: terminal-1"));
+    assert!(view.preview_summary.contains("Input: 2 bytes"));
+    assert!(!view.preview_summary.contains("xy"));
+    Ok(())
+}
+
+#[test]
 fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
     let operations = [
         (sigil_kernel::ToolOperation::Read, "operation=read"),
@@ -155,6 +203,10 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
         (
             sigil_kernel::ToolOperation::ExecuteReadOnlyCommand,
             "operation=run read-only command",
+        ),
+        (
+            sigil_kernel::ToolOperation::ExecuteWorkspaceCheckCommand,
+            "operation=run workspace check",
         ),
         (
             sigil_kernel::ToolOperation::ExecuteMutatingCommand,

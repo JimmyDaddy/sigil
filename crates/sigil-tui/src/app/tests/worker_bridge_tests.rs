@@ -845,6 +845,20 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             .iter()
             .any(|event| event.label == "run:start" && event.detail == "draft plan")
     );
+    app.handle_worker_message(WorkerMessage::SkillRunStarted {
+        skill_id: "repo-review".to_owned(),
+        prompt: "load and apply skill".to_owned(),
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.last_notice(), Some("skill repo-review running"));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text == "skill repo-review started"
+    }));
+    assert!(
+        app.events.iter().any(|event| {
+            event.label == "skill:start" && event.detail == "load and apply skill"
+        })
+    );
     app.handle_worker_message(WorkerMessage::PlanRunStarted {
         prompt: "inspect before editing".to_owned(),
     })?;
@@ -918,6 +932,37 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
                 .detail
                 .contains("review tool_calls=0 final_text_bytes=22")
     }));
+
+    let mut duplicate_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    duplicate_app.handle_worker_message(WorkerMessage::AgentRunFinished {
+        profile_id: "review".to_owned(),
+        result: sigil_kernel::AgentRunResult {
+            final_text: "restored final".to_owned(),
+            tool_calls: 1,
+            final_message_id: None,
+        },
+        entries: vec![
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                provider_name: "restored-provider".to_owned(),
+                model_name: "restored-model".to_owned(),
+            }),
+            SessionLogEntry::User(ModelMessage::user("prompt")),
+            SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+                Some("restored final".to_owned()),
+                Vec::new(),
+                sigil_kernel::AssistantMessageKind::FinalAnswer,
+            )),
+            SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "post-final fact")),
+        ],
+    })?;
+    assert_eq!(
+        duplicate_app
+            .timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant && entry.text == "restored final")
+            .count(),
+        1
+    );
 
     app.handle_worker_message(WorkerMessage::McpActivationStatus {
         server_name: None,
@@ -1890,6 +1935,73 @@ fn repeated_pending_wait_agent_results_replace_previous_tool_card() -> Result<()
 }
 
 #[test]
+fn interleaved_pending_wait_agent_results_replace_matching_thread_card() -> Result<()> {
+    fn pending_wait(call_id: &str, thread_id: &str, retry_after_ms: u64) -> ToolResult {
+        let key = format!("wait_agent:{thread_id}");
+        ToolResult::ok(
+            call_id.to_owned(),
+            "wait_agent".to_owned(),
+            serde_json::json!({
+                "thread_id": thread_id,
+                "status": "running",
+                "terminal": false,
+                "result_available": false,
+                "retry_after_ms": retry_after_ms,
+                "coalescing_key": key,
+                "next_action": "continue only non-overlapping parent work"
+            })
+            .to_string(),
+            sigil_kernel::ToolResultMeta {
+                details: serde_json::json!({
+                    "thread_id": thread_id,
+                    "status": "running",
+                    "retry_after_ms": retry_after_ms,
+                    "coalescing_key": key
+                }),
+                ..sigil_kernel::ToolResultMeta::default()
+            },
+        )
+    }
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ToolResult(pending_wait(
+        "call-wait-a-1",
+        "agent_chat_a",
+        5000,
+    )))?;
+    app.handle(RunEvent::ToolResult(pending_wait(
+        "call-wait-b-1",
+        "agent_chat_b",
+        5000,
+    )))?;
+    app.handle(RunEvent::ToolResult(pending_wait(
+        "call-wait-a-2",
+        "agent_chat_a",
+        4200,
+    )))?;
+
+    let wait_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("wait_agent"))
+        .collect::<Vec<_>>();
+    assert_eq!(wait_cards.len(), 2);
+    assert!(wait_cards.iter().any(|entry| {
+        entry.text.contains("call-wait-a-2") && entry.text.contains("agent_chat_a")
+    }));
+    assert!(wait_cards.iter().any(|entry| {
+        entry.text.contains("call-wait-b-1") && entry.text.contains("agent_chat_b")
+    }));
+    assert!(
+        !wait_cards
+            .iter()
+            .any(|entry| entry.text.contains("call-wait-a-1"))
+    );
+    Ok(())
+}
+
+#[test]
 fn ctrl_b_during_agent_wait_requests_background() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::AgentRunStarted {
@@ -2194,6 +2306,15 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
 fn terminal_task_updated_syncs_session_and_pushes_tool_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.pending_terminal_cancel_confirmation = Some("terminal-1".to_owned());
+    let running = worker_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Running)?;
+    let running_entries = vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
+        running.clone(),
+    ))];
+    app.handle_worker_message(WorkerMessage::TerminalTaskUpdated {
+        entry: running,
+        entries: running_entries,
+    })?;
+
     let entry = worker_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Cancelled)?;
     let entries = vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
         entry.clone(),
@@ -2207,11 +2328,15 @@ fn terminal_task_updated_syncs_session_and_pushes_tool_card() -> Result<()> {
         Some("terminal task terminal-1 cancelled")
     );
     assert!(app.task_sidebar_lines().is_empty());
-    let tool_entry = app
+    let tool_entries = app
         .timeline
         .iter()
-        .find(|entry| entry.role == TimelineRole::Tool)
-        .expect("expected terminal task card");
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("terminal_task"))
+        .collect::<Vec<_>>();
+    assert_eq!(tool_entries.len(), 1);
+    let tool_entry = tool_entries
+        .first()
+        .expect("expected terminal task card after replacement");
     let payload: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
     assert_eq!(payload["tool_name"], "terminal_task");
     assert_eq!(
@@ -2221,6 +2346,87 @@ fn terminal_task_updated_syncs_session_and_pushes_tool_card() -> Result<()> {
     assert!(app.events.iter().any(|event| {
         event.label == "terminal" && event.detail == "terminal-1 status=cancelled"
     }));
+    Ok(())
+}
+
+#[test]
+fn terminal_tool_results_replace_existing_task_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-terminal-start",
+        "terminal_start",
+        "started terminal task terminal-1",
+        ToolResultMeta {
+            details: json!({
+                "task_id": "terminal-1",
+                "status": "running",
+                "command": "./scripts/check-touched.sh --tier quick",
+                "cwd": ".",
+                "shell": "sh",
+                "log_path": ".sigil/tasks/terminal-1/output.log",
+                "created_at_ms": 10,
+                "updated_at_ms": 10,
+                "output_preview": null,
+                "output_hash": null,
+                "output_truncated": false
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-terminal-read",
+        "terminal_read",
+        "read terminal task terminal-1",
+        ToolResultMeta {
+            details: json!({
+                "task_id": "terminal-1",
+                "offset": 0,
+                "next_offset": 20,
+                "returned_bytes": 20,
+                "total_bytes": 20,
+                "limit_bytes": 4096,
+                "truncated": false,
+                "terminal_task": {
+                    "task_id": "terminal-1",
+                    "status": "exited",
+                    "status_detail": {"exited": {"exit_code": 0}},
+                    "command": "./scripts/check-touched.sh --tier quick",
+                    "cwd": ".",
+                    "shell": "sh",
+                    "log_path": ".sigil/tasks/terminal-1/output.log",
+                    "created_at_ms": 10,
+                    "updated_at_ms": 30,
+                    "output_preview": "ok",
+                    "output_hash": "hash",
+                    "output_truncated": false
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let terminal_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| {
+            entry.role == TimelineRole::Tool
+                && (entry.text.contains("terminal_start")
+                    || entry.text.contains("terminal_read")
+                    || entry.text.contains("terminal_task"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_cards.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&terminal_cards[0].text)?;
+    assert_eq!(payload["tool_name"], "terminal_read");
+    assert_eq!(
+        payload["metadata"]["details"]["terminal_task"]["status"],
+        "exited"
+    );
+    assert_eq!(
+        app.selected_tool_activity_key.as_deref(),
+        Some("terminal_task:terminal-1")
+    );
     Ok(())
 }
 
