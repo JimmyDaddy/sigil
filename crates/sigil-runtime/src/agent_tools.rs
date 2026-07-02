@@ -13,14 +13,16 @@ use sigil_kernel::{
     Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource,
     AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId, AgentRole, AgentRouteId,
     AgentRouteStatus, AgentRunOptions, AgentRunOutcome, AgentThreadClosedEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
-    AgentUsageSummary, ApprovalHandler, ApprovalMode, ControlEntry, EventHandler,
-    FinalAnswerContext, JsonlSessionStore, ModelMessage, PermissionConfig, PermissionPreset,
-    Provider, RootConfig, RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus,
-    TaskId, Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction, ToolCall, ToolCategory,
-    ToolContext, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, saturating_elapsed,
+    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
+    AgentThreadResultDeliveredEntry, AgentThreadStatus, AgentThreadTerminalStatus,
+    AgentToolDelegate, AgentTrustState, AgentUsageSummary, ApprovalHandler, ApprovalMode,
+    ControlEntry, EventHandler, FinalAnswerContext, JsonlSessionStore, ModelMessage,
+    PermissionConfig, PermissionPreset, Provider, RootConfig, RunEvent, Session, SessionLogEntry,
+    SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolErrorKind, ToolExecutionStatus, ToolPreview,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    saturating_elapsed,
 };
 
 use crate::{
@@ -77,9 +79,9 @@ use permissions::{
     tool_scope_summary,
 };
 use result_pages::{
-    agent_backgrounded_tool_result, agent_result_page_tool_result, agent_result_tool_result,
-    agent_spawn_denied_tool_result, agent_status_tool_result, agent_wait_throttled_tool_result,
-    read_agent_result_page, required_result_page_request_arg,
+    agent_result_already_delivered_tool_result, agent_result_page_tool_result,
+    agent_result_tool_result, agent_spawn_denied_tool_result, agent_status_tool_result,
+    agent_wait_throttled_tool_result, read_agent_result_page, required_result_page_request_arg,
 };
 use shared::{
     agent_child_session_ref, agent_profile_system_prompt, agent_route_id_for_call, bounded_summary,

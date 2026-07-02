@@ -158,6 +158,23 @@ impl AgentToolRuntime {
         let thread_id = self
             .run_chat_agent(session, &call, request, options, handler, approval_handler)
             .await?;
+        let wait_started = Instant::now();
+        loop {
+            self.collect_finished_background_runs(session, handler)
+                .await?;
+            let projection = session.agent_thread_state_projection();
+            if projection
+                .threads
+                .get(&thread_id)
+                .is_some_and(|thread| thread.status.is_terminal())
+            {
+                break;
+            }
+            if saturating_elapsed(wait_started) >= WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT {
+                break;
+            }
+            tokio::time::sleep(WAIT_AGENT_BACKGROUND_POLL_INTERVAL).await;
+        }
         let projection = session.agent_thread_state_projection();
         let thread = projection.threads.get(&thread_id);
         let status = thread.map(|thread| thread.status);
@@ -253,7 +270,7 @@ impl AgentToolDelegate for AgentToolRuntime {
                     .await
             }
             AgentToolKind::Wait => self.wait_agent(session, call, &args, handler).await,
-            AgentToolKind::ReadResult => self.read_agent_result(session, call, &args),
+            AgentToolKind::ReadResult => self.read_agent_result(session, call, &args, handler),
             AgentToolKind::Message => self.message_agent(session, call, &args),
             AgentToolKind::Close => self.close_agent(session, call, &args),
         };
@@ -294,11 +311,50 @@ impl AgentToolDelegate for AgentToolRuntime {
                 .to_string(),
             ));
         }
+        let unread_results = projection
+            .threads
+            .values()
+            .filter(|thread| {
+                thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
+                    && thread.status.is_terminal()
+                    && thread.result.is_some()
+                    && !thread.result_delivered
+                    && !agent_thread_is_backgrounded(thread)
+            })
+            .map(|thread| {
+                json!({
+                    "thread_id": thread.thread_id.as_str(),
+                    "display_name": thread.display_name.as_deref(),
+                    "status": thread_status_label(thread.status),
+                    "objective": &thread.objective,
+                    "required_action": {
+                        "tool": READ_AGENT_RESULT_TOOL_NAME,
+                        "args": { "thread_id": thread.thread_id.as_str() }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if !unread_results.is_empty() {
+            return Ok(Some(
+                json!({
+                    "error": "join_before_final_agent_result_unread",
+                    "message": "A join-before-final child agent finished, but its result has not been read yet. Do not give the final answer until read_agent_result has delivered the child result.",
+                    "unread_threads": unread_results,
+                    "session_facts": session_facts_summary(session)
+                })
+                .to_string(),
+            ));
+        }
         Ok(None)
     }
 
-    fn final_answer_context(&mut self, session: &Session) -> Result<Option<FinalAnswerContext>> {
-        let facts = collect_session_facts(session);
+    fn final_answer_context(
+        &mut self,
+        session: &Session,
+        options: &AgentRunOptions,
+        outcome: &AgentRunOutcome,
+    ) -> Result<Option<FinalAnswerContext>> {
+        let facts = collect_session_facts(session, Some((options, outcome)))?;
         if !facts.has_recorded_facts {
             return Ok(None);
         }
@@ -325,14 +381,31 @@ struct SessionFactsSummary {
 }
 
 fn session_facts_summary(session: &Session) -> Value {
-    collect_session_facts(session).value
+    collect_session_facts(session, None)
+        .map(|facts| facts.value)
+        .unwrap_or_else(|error| {
+            json!({
+                "error": "session_facts_unavailable",
+                "message": error.to_string(),
+            })
+        })
 }
 
-fn collect_session_facts(session: &Session) -> SessionFactsSummary {
+fn collect_session_facts(
+    session: &Session,
+    run_context: Option<(&AgentRunOptions, &AgentRunOutcome)>,
+) -> Result<SessionFactsSummary> {
+    let mut approvals_policy_allow = 0_u64;
+    let mut approvals_policy_deny = 0_u64;
     let mut approvals_requested = 0_u64;
     let mut approvals_resolved = 0_u64;
+    let mut approvals_user_allow_once = 0_u64;
+    let mut approvals_user_allow_session = 0_u64;
+    let mut approvals_user_deny = 0_u64;
     let mut approval_session_grants = 0_u64;
+    let mut approval_session_grant_reuses = 0_u64;
     let mut approval_subject_counts = BTreeMap::<String, u64>::new();
+    let mut approval_grant_reuses = Vec::new();
     let mut commands = Vec::new();
     let mut gates = Vec::new();
     let mut changed_files = std::collections::BTreeSet::<String>::new();
@@ -342,8 +415,30 @@ fn collect_session_facts(session: &Session) -> SessionFactsSummary {
             continue;
         };
         match control {
-            ControlEntry::ToolApproval(approval) => {
-                if approval.action == ToolApprovalAuditAction::Requested {
+            ControlEntry::ToolApproval(approval) => match approval.action {
+                ToolApprovalAuditAction::PolicyEvaluated => {
+                    if approval.policy_decision == ApprovalMode::Allow {
+                        approvals_policy_allow += 1;
+                    } else if approval.policy_decision == ApprovalMode::Deny {
+                        approvals_policy_deny += 1;
+                    }
+                    if approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant) {
+                        approval_session_grant_reuses += 1;
+                        approval_grant_reuses.push(json!({
+                            "call_id": approval.call_id.as_str(),
+                            "tool_name": approval.tool_name.as_str(),
+                            "grant_call_id": approval.grant_call_id.as_deref(),
+                            "operation": approval.operation,
+                            "risk": approval.risk,
+                            "subjects": approval
+                                .subjects
+                                .iter()
+                                .map(|subject| subject.normalized.as_str())
+                                .collect::<Vec<_>>(),
+                        }));
+                    }
+                }
+                ToolApprovalAuditAction::Requested => {
                     approvals_requested += 1;
                     let key = approval
                         .subjects
@@ -354,10 +449,24 @@ fn collect_session_facts(session: &Session) -> SessionFactsSummary {
                     if !key.is_empty() {
                         *approval_subject_counts.entry(key).or_default() += 1;
                     }
-                } else if approval.action == ToolApprovalAuditAction::Resolved {
-                    approvals_resolved += 1;
                 }
-            }
+                ToolApprovalAuditAction::Resolved => {
+                    approvals_resolved += 1;
+                    match approval.user_decision {
+                        Some(ToolApprovalUserDecision::Approved) => {
+                            approvals_user_allow_once += 1;
+                        }
+                        Some(ToolApprovalUserDecision::ApprovedForSession) => {
+                            approvals_user_allow_session += 1;
+                        }
+                        Some(ToolApprovalUserDecision::Denied) => {
+                            approvals_user_deny += 1;
+                        }
+                        None => {}
+                    }
+                }
+                ToolApprovalAuditAction::PreviewFailed => {}
+            },
             ControlEntry::ToolApprovalSessionGrant(_) => {
                 approval_session_grants += 1;
             }
@@ -379,6 +488,8 @@ fn collect_session_facts(session: &Session) -> SessionFactsSummary {
                         .and_then(|shell| shell.get("verdict"))
                         .and_then(Value::as_str)
                         .map(str::to_owned);
+                    let rerun_not_needed = execution.metadata.exit_code == Some(0)
+                        && verdict.as_deref() == Some("passed");
                     let command_fact = json!({
                         "tool": execution.tool_name.as_str(),
                         "status": tool_execution_status_label(execution.status),
@@ -386,6 +497,8 @@ fn collect_session_facts(session: &Session) -> SessionFactsSummary {
                         "command_family": command_family,
                         "exit_code": execution.metadata.exit_code,
                         "verdict": verdict,
+                        "output_truncated": execution.metadata.truncated,
+                        "rerun_not_needed": rerun_not_needed,
                         "changed_files": &execution.changed_files,
                     });
                     if let Some(family) = command_fact.get("command_family").and_then(Value::as_str)
@@ -400,6 +513,11 @@ fn collect_session_facts(session: &Session) -> SessionFactsSummary {
                 }
             }
             _ => {}
+        }
+    }
+    if let Some((_, outcome)) = run_context {
+        for file in &outcome.changed_files {
+            changed_files.insert(file.clone());
         }
     }
 
@@ -428,24 +546,61 @@ fn collect_session_facts(session: &Session) -> SessionFactsSummary {
             "status": thread_status_label(thread.status),
             "objective": &thread.objective,
             "mode": thread.invocation_mode.map(invocation_mode_label),
+            "result_available": thread.result.is_some(),
+            "result_read": thread.result_delivered,
+            "result_delivery_call_ids": &thread.result_delivery_call_ids,
         }));
     }
 
-    let has_recorded_facts = approvals_requested > 0
+    let readiness = if let Some((options, outcome)) = run_context {
+        let entry = sigil_kernel::projected_agent_run_readiness(
+            session,
+            options,
+            "pending_final_answer",
+            outcome,
+        )?;
+        Some(json!({
+            "scope": &entry.scope,
+            "run_status": entry.evaluation.run_status,
+            "verification_verdict": entry.evaluation.verification_verdict,
+            "visible_state": entry.evaluation.visible_state,
+            "required_actions": &entry.evaluation.required_actions,
+            "reasons": &entry.evaluation.reasons,
+            "policy_hash": entry.policy_hash,
+            "workspace_snapshot_id": entry.workspace_snapshot_id,
+        }))
+    } else {
+        None
+    };
+
+    let has_recorded_facts = approvals_policy_allow > 0
+        || approvals_policy_deny > 0
+        || approvals_requested > 0
+        || approvals_resolved > 0
+        || approval_session_grants > 0
+        || approval_session_grant_reuses > 0
         || !commands.is_empty()
         || subagents_total > 0
         || !changed_files.is_empty();
-    SessionFactsSummary {
+    Ok(SessionFactsSummary {
         has_recorded_facts,
         value: json!({
             "approvals": {
+                "policy_allow": approvals_policy_allow,
+                "policy_deny": approvals_policy_deny,
                 "requested": approvals_requested,
                 "resolved": approvals_resolved,
+                "user_allow_once": approvals_user_allow_once,
+                "user_allow_session": approvals_user_allow_session,
+                "user_deny": approvals_user_deny,
                 "session_grants": approval_session_grants,
+                "session_grant_reuses": approval_session_grant_reuses,
                 "repeated_approval_count": repeated_approvals,
+                "grant_reuses": approval_grant_reuses,
             },
             "commands": commands,
             "gates": gates,
+            "readiness": readiness,
             "subagents": {
                 "total": subagents_total,
                 "running": subagents_running,
@@ -454,7 +609,7 @@ fn collect_session_facts(session: &Session) -> SessionFactsSummary {
             },
             "files_changed": changed_files.into_iter().collect::<Vec<_>>(),
         }),
-    }
+    })
 }
 
 fn tool_execution_status_label(status: ToolExecutionStatus) -> &'static str {

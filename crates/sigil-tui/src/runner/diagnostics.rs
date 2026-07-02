@@ -416,6 +416,8 @@ fn append_policy_audit(
         snapshot_required: decision.snapshot_required,
         policy_decision: decision.mode,
         external_directory_required: decision.external_directory_required,
+        allow_source: None,
+        grant_call_id: None,
         user_decision,
         reason,
         preview_hash: None,

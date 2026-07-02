@@ -13,14 +13,16 @@ use futures::{Stream, stream};
 use serde_json::json;
 use sigil_kernel::{
     Agent, AgentConfig, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
-    AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentThreadStatus, AgentToolDelegate,
-    AgentTrustState, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
-    ControlEntry, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    PermissionAccessConfig, PermissionConfig, PermissionPolicy, PermissionPreset, Provider,
-    ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig,
-    RunEvent, Session, SessionConfig, SessionLogEntry, ToolAccess, ToolCall, ToolCategory,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResultMeta,
-    ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
+    AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentThreadStatus,
+    AgentToolDelegate, AgentTrustState, ApprovalMode, AutoApproveHandler, CompactionConfig,
+    CompletionRequest, ControlEntry, EventHandler, InteractionMode, JsonlSessionStore,
+    MemoryConfig, MessageRole, PermissionAccessConfig, PermissionConfig, PermissionPolicy,
+    PermissionPreset, PermissionRisk, Provider, ProviderCapabilities, ProviderChunk,
+    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig,
+    SessionLogEntry, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolExecutionEntry, ToolExecutionStatus,
+    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject,
+    UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -294,21 +296,24 @@ impl EventHandler for RecordingEventHandler {
 fn assert_child_transcript_events_not_forwarded(handler: &RecordingEventHandler) {
     assert!(
         handler.events.iter().all(|event| {
-            !matches!(
-                event,
-                RunEvent::TextDelta(_)
-                    | RunEvent::ReasoningDelta(_)
-                    | RunEvent::Usage(_)
-                    | RunEvent::AssistantMessage(_)
-                    | RunEvent::ToolCallStarted(_)
-                    | RunEvent::ToolCallArgsDelta { .. }
-                    | RunEvent::ToolCallCompleted(_)
-                    | RunEvent::ToolResult(_)
-                    | RunEvent::Notice(_)
-                    | RunEvent::ContinuationState(_)
-            )
+            !matches!(event, RunEvent::TextDelta(text) if text.contains("child summary only"))
+                && !matches!(event, RunEvent::TextDelta(text) if text.contains("recorded child done"))
+                && !matches!(
+                    event,
+                    RunEvent::AssistantMessage(message)
+                        if message.content.as_deref().is_some_and(|content| {
+                            content.contains("child summary only")
+                                || content.contains("recorded child done")
+                        })
+                )
+                && !matches!(
+                    event,
+                    RunEvent::ToolResult(result)
+                        if result.content.contains("child summary only")
+                            || result.content.contains("recorded child done")
+                )
         }),
-        "child agent transcript/progress events must not be forwarded to the parent handler"
+        "child agent transcript text must not be forwarded to the parent handler"
     );
 }
 
@@ -486,6 +491,150 @@ impl Provider for RecordingChildProvider {
 
 struct ParentSpawnProvider;
 
+type ProviderChunkStream = Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>;
+
+fn request_contains_user_text(request: &CompletionRequest, needle: &str) -> bool {
+    request.messages.iter().any(|message| {
+        matches!(message.role, MessageRole::User)
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains(needle))
+    })
+}
+
+fn request_contains_tool_result(request: &CompletionRequest, call_id: &str) -> bool {
+    request.messages.iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message.tool_call_id.as_deref() == Some(call_id)
+    })
+}
+
+fn request_tool_result_contains(request: &CompletionRequest, call_id: &str, needle: &str) -> bool {
+    request.messages.iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message.tool_call_id.as_deref() == Some(call_id)
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains(needle))
+    })
+}
+
+fn boxed_provider_chunks(chunks: Vec<ProviderChunk>) -> ProviderChunkStream {
+    Box::pin(stream::iter(chunks.into_iter().map(Ok)))
+}
+
+fn parent_agent_contract_response(
+    request: &CompletionRequest,
+    spawn_call_id: &str,
+    wait_call_id: &str,
+    read_call_id: &str,
+    final_text: &str,
+) -> Result<Option<ProviderChunkStream>> {
+    if request_contains_tool_result(request, read_call_id) {
+        return Ok(Some(boxed_provider_chunks(vec![
+            ProviderChunk::TextDelta(final_text.to_owned()),
+            ProviderChunk::Done,
+        ])));
+    }
+    let thread_id = chat_agent_thread_id_for_call(spawn_call_id, &AgentProfileId::new("explore")?)?;
+    if request_contains_user_text(request, "join_before_final_agent_result_unread") {
+        return Ok(Some(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: read_call_id.to_owned(),
+                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "offset_chars": 0,
+                    "max_chars": 4_000
+                })
+                .to_string(),
+            }),
+            ProviderChunk::Done,
+        ])));
+    }
+    if request_tool_result_contains(request, wait_call_id, r#""result_available":true"#) {
+        return Ok(Some(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: read_call_id.to_owned(),
+                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "offset_chars": 0,
+                    "max_chars": 4_000
+                })
+                .to_string(),
+            }),
+            ProviderChunk::Done,
+        ])));
+    }
+    if request_contains_user_text(request, "join_before_final_agent_pending") {
+        return Ok(Some(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: wait_call_id.to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str()
+                })
+                .to_string(),
+            }),
+            ProviderChunk::Done,
+        ])));
+    }
+    if request_contains_tool_result(request, spawn_call_id)
+        || request_contains_tool_result(request, wait_call_id)
+    {
+        return Ok(Some(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: wait_call_id.to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str()
+                })
+                .to_string(),
+            }),
+            ProviderChunk::Done,
+        ])));
+    }
+    Ok(None)
+}
+
+async fn wait_until_agent_result_available(
+    runtime: &mut AgentToolRuntime,
+    session: &mut Session,
+    thread_id: &sigil_kernel::AgentThreadId,
+    options: &AgentRunOptions,
+    handler: &mut RecordingEventHandler,
+    approval: &mut AutoApproveHandler,
+) -> Result<serde_json::Value> {
+    for index in 0..50 {
+        let wait = runtime
+            .handle_agent_tool_call(
+                session,
+                &ToolCall {
+                    id: format!("call-wait-{}-{index}", thread_id.as_str()),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+                },
+                options,
+                handler,
+                approval,
+            )
+            .await?
+            .expect("wait_agent handled");
+        let payload: serde_json::Value = serde_json::from_str(&wait.content)?;
+        if payload["result_available"] == true {
+            return Ok(payload);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!(
+        "agent thread {} did not produce a result in time",
+        thread_id.as_str()
+    )
+}
+
 #[async_trait]
 impl Provider for ParentSpawnProvider {
     fn name(&self) -> &str {
@@ -500,17 +649,14 @@ impl Provider for ParentSpawnProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let tool_result_seen = request
-            .messages
-            .iter()
-            .any(|message| matches!(message.role, MessageRole::Tool));
-        if tool_result_seen {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta(
-                    "parent final includes child summary".to_owned(),
-                )),
-                Ok(ProviderChunk::Done),
-            ])));
+        if let Some(response) = parent_agent_contract_response(
+            &request,
+            "call-spawn-1",
+            "call-wait-spawn-1",
+            "call-read-spawn-1",
+            "parent final includes child summary",
+        )? {
+            return Ok(response);
         }
         let args = json!({
             "profile_id": "explore",
@@ -520,14 +666,14 @@ impl Provider for ParentSpawnProvider {
             "display_name_hint": "runtime review"
         })
         .to_string();
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
                 id: "call-spawn-1".to_owned(),
                 name: SPAWN_AGENT_TOOL_NAME.to_owned(),
                 args_json: args,
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
+            }),
+            ProviderChunk::Done,
+        ]))
     }
 }
 
@@ -547,17 +693,14 @@ impl Provider for ParentPreToolTextSpawnProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let tool_result_seen = request
-            .messages
-            .iter()
-            .any(|message| matches!(message.role, MessageRole::Tool));
-        if tool_result_seen {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta(
-                    "parent final after child result".to_owned(),
-                )),
-                Ok(ProviderChunk::Done),
-            ])));
+        if let Some(response) = parent_agent_contract_response(
+            &request,
+            "call-spawn-pre-tool",
+            "call-wait-pre-tool",
+            "call-read-pre-tool",
+            "parent final after child result",
+        )? {
+            return Ok(response);
         }
         let args = json!({
             "profile_id": "explore",
@@ -567,17 +710,15 @@ impl Provider for ParentPreToolTextSpawnProvider {
             "display_name_hint": "kernel review"
         })
         .to_string();
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::TextDelta(
-                "parent pre-tool analysis that should not persist".to_owned(),
-            )),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+        Ok(boxed_provider_chunks(vec![
+            ProviderChunk::TextDelta("parent pre-tool analysis that should not persist".to_owned()),
+            ProviderChunk::ToolCallComplete(ToolCall {
                 id: "call-spawn-pre-tool".to_owned(),
                 name: SPAWN_AGENT_TOOL_NAME.to_owned(),
                 args_json: args,
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
+            }),
+            ProviderChunk::Done,
+        ]))
     }
 }
 
@@ -1002,18 +1143,24 @@ async fn spawn_agent_injects_profile_prompt_into_child_request() -> Result<()> {
         .to_string(),
     };
 
+    let options = run_options(std::env::temp_dir());
     let result = runtime
-        .handle_agent_tool_call(
-            &mut session,
-            &call,
-            &run_options(std::env::temp_dir()),
-            &mut handler,
-            &mut approval,
-        )
+        .handle_agent_tool_call(&mut session, &call, &options, &mut handler, &mut approval)
         .await?
         .expect("spawn handled");
 
     assert!(!result.is_error());
+    let thread_id =
+        chat_agent_thread_id_for_call(&call.id, &sigil_kernel::AgentProfileId::new("explore")?)?;
+    wait_until_agent_result_available(
+        &mut runtime,
+        &mut session,
+        &thread_id,
+        &options,
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
     let observation = observed_request
         .lock()
         .expect("child request observation lock should not be poisoned")
@@ -1101,7 +1248,11 @@ async fn ordinary_chat_explicit_subagent_prompt_spawns_child() -> Result<()> {
         .run_with_approval_input_and_agent_delegate(
             &mut session,
             AgentRunInput::user("use a sub agent to inspect runtime"),
-            run_options(std::env::temp_dir()),
+            {
+                let mut options = run_options(std::env::temp_dir());
+                options.max_turns = Some(12);
+                options
+            },
             &mut handler,
             &mut approval,
             &mut agent_delegate,
@@ -1126,10 +1277,26 @@ async fn ordinary_chat_explicit_subagent_prompt_spawns_child() -> Result<()> {
         matches!(message.role, MessageRole::Tool)
             && message.tool_call_id.as_deref() == Some("call-spawn-1")
             && message.content.as_deref().is_some_and(|content| {
-                content.contains("child summary only")
+                content.contains(r#""status":"running""#)
                     && content.contains(r#""display_name":"runtime review""#)
             })
     }));
+    assert!(session.messages().iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message.tool_call_id.as_deref() == Some("call-read-spawn-1")
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains("text_delivery")
+                    && content.contains("transient_context")
+                    && !content.contains("child summary only")
+            })
+    }));
+    let projection = session.agent_thread_state_projection();
+    let thread = projection.latest_thread().expect("child agent projected");
+    assert!(thread.result_delivered);
+    assert_eq!(
+        thread.result_delivery_call_ids,
+        vec!["call-read-spawn-1".to_owned()]
+    );
     Ok(())
 }
 
@@ -1154,7 +1321,11 @@ async fn agent_tool_turn_does_not_persist_parent_pre_tool_text() -> Result<()> {
         .run_with_approval_input_and_agent_delegate(
             &mut session,
             AgentRunInput::user("use a sub agent to inspect kernel"),
-            run_options(std::env::temp_dir()),
+            {
+                let mut options = run_options(std::env::temp_dir());
+                options.max_turns = Some(12);
+                options
+            },
             &mut handler,
             &mut approval,
             &mut agent_delegate,
@@ -1548,12 +1719,11 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
 }
 
 #[tokio::test]
-async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
+async fn join_before_final_agent_returns_running_handle_and_wait_collects_result() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let request_supervisor = supervisor.clone();
     let observed_followup = Arc::new(Mutex::new(false));
     let mut runtime = AgentToolRuntime::with_provider_factory(
         supervisor,
@@ -1578,32 +1748,23 @@ async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
         .to_string(),
     };
 
-    let request_background = async {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        request_supervisor.request_foreground_background()
-    };
-    let options = run_options(std::env::temp_dir());
-    let (spawn, requested_thread_id) = tokio::join!(
-        runtime.handle_agent_tool_call(
+    let spawn = runtime
+        .handle_agent_tool_call(
             &mut session,
             &spawn_call,
-            &options,
+            &run_options(std::env::temp_dir()),
             &mut handler,
             &mut approval,
-        ),
-        request_background,
-    );
-    let requested_thread_id = requested_thread_id.map_err(|error| anyhow::anyhow!(error))?;
-    assert_eq!(requested_thread_id, thread_id);
-    let spawn = spawn?.expect("spawn handled");
+        )
+        .await?;
+    let spawn = spawn.expect("spawn handled");
 
     assert!(!spawn.is_error());
     assert_eq!(spawn.metadata.details["status"], "running");
     let payload: serde_json::Value = serde_json::from_str(&spawn.content)?;
     assert_eq!(payload["terminal"], false);
     assert_eq!(payload["result_available"], false);
-    assert_eq!(payload["backgrounded"], true);
-    assert_eq!(payload["do_not_describe_as_finished"], true);
+    assert!(payload.get("backgrounded").is_none());
     assert!(payload["next_action"].as_str().is_some_and(|action| {
         action.contains("non-overlapping parent work") && action.contains("wait_agent")
     }));
@@ -1613,7 +1774,14 @@ async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
         .get(&thread_id)
         .expect("detached thread should be projected");
     assert_eq!(thread.status, AgentThreadStatus::Running);
-    assert_eq!(thread.reason.as_deref(), Some("agent moved to background"));
+    assert_eq!(
+        thread.reason.as_deref(),
+        Some("agent tool spawned child session")
+    );
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_some(),
+        "join-before-final running handle must still block final"
+    );
 
     let mut collected = None;
     for _ in 0..20 {
@@ -1659,6 +1827,107 @@ async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn join_before_final_spawns_do_not_wait_for_previous_child_completion() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let observed_followup = Arc::new(Mutex::new(false));
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    for call_id in ["call-join-first", "call-join-second"] {
+        let result = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: call_id.to_owned(),
+                    name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({
+                        "profile_id": "explore",
+                        "objective": format!("inspect {call_id}"),
+                        "prompt": "inspect",
+                        "mode": "join_before_final"
+                    })
+                    .to_string(),
+                },
+                &run_options(std::env::temp_dir()),
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("spawn handled");
+        let payload: serde_json::Value = serde_json::from_str(&result.content)?;
+        assert_eq!(payload["status"], "running");
+        assert_eq!(payload["result_available"], false);
+    }
+
+    let first_thread_id =
+        chat_agent_thread_id_for_call("call-join-first", &AgentProfileId::new("explore")?)?;
+    let second_thread_id =
+        chat_agent_thread_id_for_call("call-join-second", &AgentProfileId::new("explore")?)?;
+    {
+        let projection = session.agent_thread_state_projection();
+        let first = projection
+            .threads
+            .get(&first_thread_id)
+            .expect("first child should be projected before completion");
+        let second = projection
+            .threads
+            .get(&second_thread_id)
+            .expect("second child should be projected before completion");
+        assert_eq!(first.status, AgentThreadStatus::Running);
+        assert_eq!(second.status, AgentThreadStatus::Running);
+        assert!(first.result.is_none());
+        assert!(second.result.is_none());
+    }
+
+    for thread_id in [first_thread_id, second_thread_id] {
+        let mut collected = false;
+        for _ in 0..50 {
+            let _ = runtime
+                .handle_agent_tool_call(
+                    &mut session,
+                    &ToolCall {
+                        id: format!("call-wait-{}", thread_id.as_str()),
+                        name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                        args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+                    },
+                    &run_options(std::env::temp_dir()),
+                    &mut handler,
+                    &mut approval,
+                )
+                .await?
+                .expect("wait handled");
+            if session
+                .agent_thread_state_projection()
+                .threads
+                .get(&thread_id)
+                .and_then(|thread| thread.result.as_ref())
+                .is_some()
+            {
+                collected = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            collected,
+            "wait_agent should collect child {} before test exits",
+            thread_id.as_str()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()> {
     let config = root_config();
@@ -1695,6 +1964,75 @@ fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()
 }
 
 #[test]
+fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "agent_completed_unread",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        None,
+    )?;
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        sigil_kernel::AgentThreadResultRecordedEntry {
+            result: sigil_kernel::AgentThreadResult {
+                thread_id: thread_id.clone(),
+                session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/agent_completed_unread.jsonl",
+                )?,
+                status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                summary: "child result summary".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: "sha256:child-result".to_owned(),
+                final_answer_ref: None,
+            },
+        },
+    ))?;
+
+    let blocker = runtime
+        .final_answer_blocker(&mut session)?
+        .expect("completed unread join-before-final result should block final answer");
+    let payload: serde_json::Value = serde_json::from_str(&blocker)?;
+
+    assert_eq!(payload["error"], "join_before_final_agent_result_unread");
+    assert_eq!(
+        payload["unread_threads"][0]["thread_id"],
+        thread_id.as_str()
+    );
+    assert_eq!(
+        payload["unread_threads"][0]["required_action"]["tool"],
+        READ_AGENT_RESULT_TOOL_NAME
+    );
+
+    session.append_control(ControlEntry::AgentThreadResultDelivered(
+        sigil_kernel::AgentThreadResultDeliveredEntry {
+            thread_id: thread_id.clone(),
+            call_id: "call-read-result".to_owned(),
+            output_hash: "sha256:child-result".to_owned(),
+            offset_chars: 0,
+            returned_chars: 20,
+            total_chars: 20,
+            truncated: false,
+            delivered_at_ms: None,
+        },
+    ))?;
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_none(),
+        "delivered child result should unblock final answer"
+    );
+    Ok(())
+}
+
+#[test]
 fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
@@ -1712,8 +2050,11 @@ fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Resu
         runtime.final_answer_blocker(&mut session)?.is_none(),
         "backgrounded agent threads should not hard block final answer"
     );
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome::default();
     let context = runtime
-        .final_answer_context(&session)?
+        .final_answer_context(&session, &options, &outcome)?
         .expect("background agent should be included in final-answer facts");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
     assert_eq!(payload["type"], "run_facts_summary");
@@ -1753,8 +2094,14 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         runtime.final_answer_blocker(&mut session)?.is_none(),
         "recorded facts should not hard block a generic final answer"
     );
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome {
+        changed_files: vec!["crates/sigil-tui/src/app/key_router.rs".to_owned()],
+        ..AgentRunOutcome::default()
+    };
     let context = runtime
-        .final_answer_context(&session)?
+        .final_answer_context(&session, &options, &outcome)?
         .expect("recorded facts should produce final-answer context");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
     assert_eq!(payload["type"], "run_facts_summary");
@@ -1762,8 +2109,140 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         payload["session_facts"]["commands"][0]["command"],
         "cargo check 2>&1"
     );
+    assert_eq!(
+        payload["session_facts"]["commands"][0]["output_truncated"],
+        false
+    );
+    assert_eq!(
+        payload["session_facts"]["commands"][0]["rerun_not_needed"],
+        true
+    );
     assert_eq!(payload["session_facts"]["gates"][0]["verdict"], "passed");
+    assert!(!payload["session_facts"]["readiness"].is_null());
+    assert!(!payload["session_facts"]["readiness"]["visible_state"].is_null());
     assert!(!context.key.is_empty());
+    Ok(())
+}
+
+#[test]
+fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_grant() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    session.append_control(ControlEntry::ToolApproval(
+        sigil_kernel::ToolApprovalEntry {
+            action: ToolApprovalAuditAction::PolicyEvaluated,
+            call_id: "call-policy".to_owned(),
+            tool_name: "bash".to_owned(),
+            access: ToolAccess::Read,
+            operation: Some(ToolOperation::ExecuteReadOnlyCommand),
+            risk: Some(PermissionRisk::Low),
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            policy_decision: ApprovalMode::Allow,
+            external_directory_required: false,
+            confirmation: None,
+            snapshot_required: false,
+            allow_source: None,
+            grant_call_id: None,
+            user_decision: None,
+            reason: None,
+            preview_hash: None,
+        },
+    ))?;
+    session.append_control(ControlEntry::ToolApproval(
+        sigil_kernel::ToolApprovalEntry {
+            action: ToolApprovalAuditAction::Requested,
+            call_id: "call-user".to_owned(),
+            tool_name: "bash".to_owned(),
+            access: ToolAccess::Execute,
+            operation: Some(ToolOperation::ExecuteUnknownCommand),
+            risk: Some(PermissionRisk::Medium),
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            policy_decision: ApprovalMode::Ask,
+            external_directory_required: false,
+            confirmation: None,
+            snapshot_required: false,
+            allow_source: None,
+            grant_call_id: None,
+            user_decision: None,
+            reason: None,
+            preview_hash: None,
+        },
+    ))?;
+    session.append_control(ControlEntry::ToolApproval(
+        sigil_kernel::ToolApprovalEntry {
+            action: ToolApprovalAuditAction::Resolved,
+            call_id: "call-user".to_owned(),
+            tool_name: "bash".to_owned(),
+            access: ToolAccess::Execute,
+            operation: Some(ToolOperation::ExecuteUnknownCommand),
+            risk: Some(PermissionRisk::Medium),
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            policy_decision: ApprovalMode::Ask,
+            external_directory_required: false,
+            confirmation: None,
+            snapshot_required: false,
+            allow_source: None,
+            grant_call_id: None,
+            user_decision: Some(ToolApprovalUserDecision::ApprovedForSession),
+            reason: None,
+            preview_hash: None,
+        },
+    ))?;
+    session.append_control(ControlEntry::ToolApprovalSessionGrant(
+        sigil_kernel::ToolApprovalSessionGrantEntry {
+            call_id: "call-user".to_owned(),
+            tool_name: "bash".to_owned(),
+            access: ToolAccess::Execute,
+            operation: ToolOperation::ExecuteUnknownCommand,
+            risk: PermissionRisk::Medium,
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            expires: sigil_kernel::ToolApprovalSessionGrantExpiry::Session,
+            granted_at_ms: 1,
+        },
+    ))?;
+    session.append_control(ControlEntry::ToolApproval(
+        sigil_kernel::ToolApprovalEntry {
+            action: ToolApprovalAuditAction::PolicyEvaluated,
+            call_id: "call-user-reuse".to_owned(),
+            tool_name: "bash".to_owned(),
+            access: ToolAccess::Execute,
+            operation: Some(ToolOperation::ExecuteUnknownCommand),
+            risk: Some(PermissionRisk::Medium),
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            policy_decision: ApprovalMode::Allow,
+            external_directory_required: false,
+            confirmation: None,
+            snapshot_required: false,
+            allow_source: Some(ToolApprovalAllowSource::SessionGrant),
+            grant_call_id: Some("call-user".to_owned()),
+            user_decision: None,
+            reason: None,
+            preview_hash: None,
+        },
+    ))?;
+
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome::default();
+    let context = runtime
+        .final_answer_context(&session, &options, &outcome)?
+        .expect("approval facts should produce final-answer context");
+    let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
+    let approvals = &payload["session_facts"]["approvals"];
+    assert_eq!(approvals["policy_allow"], 2);
+    assert_eq!(approvals["requested"], 1);
+    assert_eq!(approvals["resolved"], 1);
+    assert_eq!(approvals["user_allow_session"], 1);
+    assert_eq!(approvals["session_grants"], 1);
+    assert_eq!(approvals["session_grant_reuses"], 1);
+    assert_eq!(approvals["grant_reuses"][0]["grant_call_id"], "call-user");
     Ok(())
 }
 
@@ -2298,18 +2777,22 @@ async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result
         })
         .to_string(),
     };
+    let options = run_options(std::env::temp_dir());
     let _ = runtime
-        .handle_agent_tool_call(
-            &mut session,
-            &call,
-            &run_options(std::env::temp_dir()),
-            &mut handler,
-            &mut approval,
-        )
+        .handle_agent_tool_call(&mut session, &call, &options, &mut handler, &mut approval)
         .await?
         .expect("spawn handled");
     let thread_id =
         chat_agent_thread_id_for_call(&call.id, &sigil_kernel::AgentProfileId::new("explore")?)?;
+    wait_until_agent_result_available(
+        &mut runtime,
+        &mut session,
+        &thread_id,
+        &options,
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
     let projection = session.agent_thread_state_projection();
     let result = projection
         .threads
@@ -2394,17 +2877,45 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         .await?
         .expect("spawn handled");
     let spawn_payload: serde_json::Value = serde_json::from_str(&spawn_result.content)?;
-    assert_eq!(spawn_payload["summary_truncated"], true);
-    assert_eq!(spawn_payload["full_result_available"], true);
-    assert_eq!(spawn_payload["artifacts"][0]["kind"], "child_session");
-    assert_eq!(
-        spawn_payload["result_fetch"]["tool"],
-        READ_AGENT_RESULT_TOOL_NAME
-    );
+    assert_eq!(spawn_payload["status"], "running");
+    assert_eq!(spawn_payload["terminal"], false);
+    assert_eq!(spawn_payload["result_available"], false);
     let thread_id = chat_agent_thread_id_for_call(
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
+    let mut wait_payload = None;
+    for _ in 0..50 {
+        let wait_result = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: "call-page-wait".to_owned(),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({
+                        "thread_id": thread_id.as_str()
+                    })
+                    .to_string(),
+                },
+                &run_options(temp.path().to_path_buf()),
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("wait handled");
+        let payload: serde_json::Value = serde_json::from_str(&wait_result.content)?;
+        if payload["result_available"] == true {
+            wait_payload = Some(payload);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let wait_payload = wait_payload.expect("wait_agent should collect child result");
+    assert_eq!(wait_payload["result_ref"]["summary_truncated"], true);
+    assert_eq!(
+        wait_payload["result_ref"]["read_tool"],
+        READ_AGENT_RESULT_TOOL_NAME
+    );
 
     let read_result = runtime
         .handle_agent_tool_call(
@@ -2443,6 +2954,177 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
             .as_deref()
             .is_some_and(|content| content.contains("omega"))
     );
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("thread should remain projected after read_agent_result");
+    assert!(thread.result_delivered);
+    assert_eq!(
+        thread.result_delivery_call_ids,
+        vec!["call-page-read".to_owned()]
+    );
+    assert!(handler.events.iter().any(|event| matches!(
+        event,
+        RunEvent::Control(ControlEntry::AgentThreadResultDelivered(entry))
+            if entry.thread_id == thread_id
+    )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let full_text = "short child result".to_owned();
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(TextProviderFactory {
+            text: full_text.clone(),
+        }),
+    );
+    let temp = tempfile::tempdir()?;
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("parent", "model", parent_store)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let options = run_options(temp.path().to_path_buf());
+    let spawn_call = ToolCall {
+        id: "call-repeat-page".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect",
+            "mode": "join_before_final"
+        })
+        .to_string(),
+    };
+
+    runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &spawn_call,
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn handled");
+    let thread_id = chat_agent_thread_id_for_call(
+        &spawn_call.id,
+        &sigil_kernel::AgentProfileId::new("explore")?,
+    )?;
+    for _ in 0..50 {
+        let wait = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: "call-repeat-wait".to_owned(),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+                },
+                &options,
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("wait handled");
+        let payload: serde_json::Value = serde_json::from_str(&wait.content)?;
+        if payload["result_available"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let first = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-repeat-read-1".to_owned(),
+                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "offset_chars": 0,
+                    "max_chars": 4_000
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("first read handled");
+    assert_eq!(first.transient_context.len(), 1);
+    let first_payload: serde_json::Value = serde_json::from_str(&first.content)?;
+    assert_eq!(first_payload["page"]["truncated"], false);
+    assert_eq!(
+        first_payload["page"]["total_chars"],
+        full_text.chars().count()
+    );
+
+    let delivered_events_before = handler
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RunEvent::Control(ControlEntry::AgentThreadResultDelivered(entry))
+                    if entry.thread_id == thread_id
+            )
+        })
+        .count();
+    assert_eq!(delivered_events_before, 1);
+
+    let second = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-repeat-read-2".to_owned(),
+                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "offset_chars": 0,
+                    "max_chars": 4_000
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("second read handled");
+    let second_payload: serde_json::Value = serde_json::from_str(&second.content)?;
+    assert_eq!(second_payload["already_delivered"], true);
+    assert_eq!(second_payload["rerun_not_needed"], true);
+    assert!(second.transient_context.is_empty());
+    let delivered_events_after = handler
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                RunEvent::Control(ControlEntry::AgentThreadResultDelivered(entry))
+                    if entry.thread_id == thread_id
+            )
+        })
+        .count();
+    assert_eq!(delivered_events_after, delivered_events_before);
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("thread should remain projected");
+    assert_eq!(
+        thread.result_delivery_call_ids,
+        vec!["call-repeat-read-1".to_owned()]
+    );
     Ok(())
 }
 
@@ -2476,11 +3158,12 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
         })
         .to_string(),
     };
+    let options = run_options(temp.path().to_path_buf());
     let _ = runtime
         .handle_agent_tool_call(
             &mut session,
             &spawn_call,
-            &run_options(temp.path().to_path_buf()),
+            &options,
             &mut handler,
             &mut approval,
         )
@@ -2490,6 +3173,15 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
+    wait_until_agent_result_available(
+        &mut runtime,
+        &mut session,
+        &thread_id,
+        &options,
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
     let child_path = {
         let projection = session.agent_thread_state_projection();
         let result = projection
@@ -2522,7 +3214,7 @@ async fn read_agent_result_failure_does_not_overwrite_completed_agent_status() -
                 })
                 .to_string(),
             },
-            &run_options(temp.path().to_path_buf()),
+            &options,
             &mut handler,
             &mut approval,
         )
@@ -2577,11 +3269,12 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         })
         .to_string(),
     };
+    let options = run_options(temp.path().to_path_buf());
     let _ = agent_delegate
         .handle_agent_tool_call(
             &mut session,
             &spawn_call,
-            &run_options(temp.path().to_path_buf()),
+            &options,
             &mut handler,
             &mut approval,
         )
@@ -2591,6 +3284,15 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
+    wait_until_agent_result_available(
+        &mut agent_delegate,
+        &mut session,
+        &thread_id,
+        &options,
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
     let projection = session.agent_thread_state_projection();
     let child_result = projection
         .threads
@@ -2617,7 +3319,7 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         .run_with_approval_input_and_agent_delegate(
             &mut session,
             AgentRunInput::user("read the child page"),
-            run_options(temp.path().to_path_buf()),
+            options,
             &mut handler,
             &mut approval,
             &mut agent_delegate,
@@ -2717,15 +3419,48 @@ async fn spawn_agent_records_budget_warning_without_failing_completed_child() ->
         .expect("spawn handled");
 
     assert!(!result.is_error());
-    assert!(result.content.contains("expensive child done"));
     let thread_id =
         chat_agent_thread_id_for_call(&call.id, &sigil_kernel::AgentProfileId::new("explore")?)?;
+    let mut collected = None;
+    for _ in 0..50 {
+        let wait = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: "call-expensive-wait".to_owned(),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+                },
+                &run_options(std::env::temp_dir()),
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("wait handled");
+        if session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.result.as_ref())
+            .is_some()
+        {
+            collected = Some(wait);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let collected = collected.expect("wait should collect completed child result");
+    assert!(!collected.is_error());
     let projection = session.agent_thread_state_projection();
     let thread = projection
         .threads
         .get(&thread_id)
         .expect("thread projected");
     assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(
+        thread.result.as_ref().map(|result| result.summary.as_str()),
+        Some("expensive child done")
+    );
     assert!(handler.events.iter().any(|event| {
         matches!(event, RunEvent::Notice(message) if message.contains("agent budget warning after child completion"))
     }));

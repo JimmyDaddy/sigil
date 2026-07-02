@@ -1824,6 +1824,8 @@ fn render_session_control_entries_cover_remaining_labels() {
             snapshot_required: false,
             policy_decision: ApprovalMode::Deny,
             external_directory_required: false,
+            allow_source: None,
+            grant_call_id: None,
             user_decision: Some(ToolApprovalUserDecision::Denied),
             reason: Some("denied".to_owned()),
             preview_hash: None,

@@ -21,12 +21,15 @@ use crate::{
         PermissionEvaluationContext, PermissionPolicy, PermissionRisk,
         tool_approval_session_grant_available,
     },
-    provider::{ModelMessage, Provider, ProviderChunk, ProviderContinuationState, ToolCall},
+    provider::{
+        AssistantMessageKind, ModelMessage, Provider, ProviderChunk, ProviderContinuationState,
+        ToolCall,
+    },
     session::{
         ControlEntry, JsonlSessionStore, Session, SessionLogEntry, SessionStreamRecord,
-        ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalSessionGrantEntry,
-        ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision, ToolEgressEntry,
-        ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
+        ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalEntry,
+        ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
+        ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
     },
     task::{
         TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanStatus, TaskPlanUpdateContext, task_plan_update_entry,
@@ -239,7 +242,12 @@ pub trait AgentToolDelegate: Send {
     /// # Errors
     ///
     /// Returns an error if the delegate cannot inspect its durable state.
-    fn final_answer_context(&mut self, _session: &Session) -> Result<Option<FinalAnswerContext>> {
+    fn final_answer_context(
+        &mut self,
+        _session: &Session,
+        _options: &AgentRunOptions,
+        _outcome: &AgentRunOutcome,
+    ) -> Result<Option<FinalAnswerContext>> {
         Ok(None)
     }
 }
@@ -658,8 +666,11 @@ where
                 } else {
                     (!assistant_text.trim().is_empty()).then(|| assistant_text.clone())
                 };
-                let assistant_message =
-                    ModelMessage::assistant(assistant_content, completed_calls.clone());
+                let assistant_message = ModelMessage::assistant_with_kind(
+                    assistant_content,
+                    completed_calls.clone(),
+                    AssistantMessageKind::ToolPreamble,
+                );
                 let assistant_message_id = assistant_message.id.clone();
                 session.append_assistant_message(assistant_message.clone())?;
                 handler.handle(RunEvent::AssistantMessage(assistant_message))?;
@@ -869,7 +880,7 @@ where
                         let decision =
                             interactive_external_directory_approval_override(&options, decision);
                         let decision = plan_approval_decision_override(session, spec, decision);
-                        let decision =
+                        let (decision, session_grant_source) =
                             tool_session_grant_decision_override(session, &call.name, decision);
                         let subject_label = if decision.subjects.is_empty() {
                             "-".to_owned()
@@ -887,14 +898,11 @@ where
                             subject_label,
                             decision.mode.as_str()
                         )))?;
-                        append_tool_approval_audit(
+                        append_tool_approval_policy_audit(
                             session,
                             &call,
                             &decision,
-                            ToolApprovalAuditAction::PolicyEvaluated,
-                            None,
-                            None,
-                            None,
+                            session_grant_source.as_ref(),
                         )?;
                         execution_subjects = decision.subjects.clone();
 
@@ -1371,7 +1379,7 @@ where
             }
             if let Some(context) = agent_delegate
                 .as_deref_mut()
-                .map(|delegate| delegate.final_answer_context(session))
+                .map(|delegate| delegate.final_answer_context(session, &options, &outcome))
                 .transpose()?
                 .flatten()
                 && final_answer_context_key.as_deref() != Some(context.key.as_str())
@@ -1384,8 +1392,11 @@ where
                 continue;
             }
 
-            let assistant_message =
-                ModelMessage::assistant(Some(assistant_text.clone()), Vec::new());
+            let assistant_message = ModelMessage::assistant_with_kind(
+                Some(assistant_text.clone()),
+                Vec::new(),
+                AssistantMessageKind::FinalAnswer,
+            );
             let final_message_id = assistant_message.id.clone();
             session.append_assistant_message(assistant_message.clone())?;
             handler.handle(RunEvent::AssistantMessage(assistant_message))?;
@@ -1469,6 +1480,11 @@ fn agent_tool_result_satisfies_delegation(result: &ToolResult) -> bool {
         return false;
     }
     let details = &result.metadata.details;
+    if details.get("thread_id").and_then(Value::as_str).is_some()
+        && details.get("status").and_then(Value::as_str).is_some()
+    {
+        return true;
+    }
     if details
         .get("result_available")
         .and_then(Value::as_bool)
@@ -1528,20 +1544,20 @@ fn tool_session_grant_decision_override(
     session: &Session,
     tool_name: &str,
     mut decision: PermissionDecision,
-) -> PermissionDecision {
+) -> (PermissionDecision, Option<ToolApprovalSessionGrantEntry>) {
     if decision.mode != ApprovalMode::Ask || !tool_approval_session_grant_available(&decision) {
-        return decision;
+        return (decision, None);
     }
-    if session.entries().iter().rev().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant))
-                if session_grant_covers_decision(grant, tool_name, &decision)
-        )
-    }) {
+    let matching_grant = session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant)) = entry else {
+            return None;
+        };
+        session_grant_covers_decision(grant, tool_name, &decision).then(|| grant.clone())
+    });
+    if matching_grant.is_some() {
         decision.mode = ApprovalMode::Allow;
     }
-    decision
+    (decision, matching_grant)
 }
 
 fn session_grant_covers_decision(
@@ -2027,6 +2043,49 @@ fn append_tool_approval_audit(
     reason: Option<String>,
     preview_hash: Option<String>,
 ) -> Result<()> {
+    append_tool_approval_audit_with_source(
+        session,
+        call,
+        decision,
+        action,
+        None,
+        None,
+        user_decision,
+        reason,
+        preview_hash,
+    )
+}
+
+fn append_tool_approval_policy_audit(
+    session: &mut Session,
+    call: &ToolCall,
+    decision: &PermissionDecision,
+    session_grant_source: Option<&ToolApprovalSessionGrantEntry>,
+) -> Result<()> {
+    append_tool_approval_audit_with_source(
+        session,
+        call,
+        decision,
+        ToolApprovalAuditAction::PolicyEvaluated,
+        session_grant_source.map(|_| ToolApprovalAllowSource::SessionGrant),
+        session_grant_source.map(|grant| grant.call_id.clone()),
+        None,
+        None,
+        None,
+    )
+}
+
+fn append_tool_approval_audit_with_source(
+    session: &mut Session,
+    call: &ToolCall,
+    decision: &PermissionDecision,
+    action: ToolApprovalAuditAction,
+    allow_source: Option<ToolApprovalAllowSource>,
+    grant_call_id: Option<String>,
+    user_decision: Option<ToolApprovalUserDecision>,
+    reason: Option<String>,
+    preview_hash: Option<String>,
+) -> Result<()> {
     session.append_control(ControlEntry::ToolApproval(ToolApprovalEntry {
         action,
         call_id: call.id.clone(),
@@ -2040,6 +2099,8 @@ fn append_tool_approval_audit(
         external_directory_required: decision.external_directory_required,
         confirmation: decision.confirmation.clone(),
         snapshot_required: decision.snapshot_required,
+        allow_source,
+        grant_call_id,
         user_decision,
         reason,
         preview_hash,
@@ -2325,13 +2386,17 @@ fn append_agent_run_readiness(
     final_message_id: &str,
     outcome: &AgentRunOutcome,
 ) -> Result<()> {
-    let entry = agent_run_readiness(session, options, final_message_id, outcome)?;
+    let entry = projected_agent_run_readiness(session, options, final_message_id, outcome)?;
     let control = ControlEntry::ReadinessEvaluated(entry);
     session.append_control(control.clone())?;
     handler.handle(RunEvent::Control(control))
 }
 
-fn agent_run_readiness(
+/// Computes the readiness verdict that would be recorded for a final run answer.
+///
+/// This is provider-neutral and intentionally shares the same reducer used by the durable
+/// post-final readiness entry so pre-final facts do not drift from the persisted verdict.
+pub fn projected_agent_run_readiness(
     session: &Session,
     options: &AgentRunOptions,
     final_message_id: &str,

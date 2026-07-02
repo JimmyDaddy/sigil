@@ -1428,6 +1428,8 @@ mod tests {
             status: AgentThreadStatus::Started,
             reason: None,
             result: None,
+            result_delivered: false,
+            result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
             duplicate_terminal_entries: 0,

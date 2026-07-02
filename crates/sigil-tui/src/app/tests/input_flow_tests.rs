@@ -1358,10 +1358,15 @@ fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
     assert_eq!(app.sidebar_agent_selected, 0);
     let view_model = crate::view_model::UiViewModel::from_app(&app);
     assert!(view_model.footer.hints.contains("Enter switch"));
+    assert!(!view_model.footer.hints.contains("Alt-C close"));
+    assert!(!view_model.footer.hints.contains("Alt-M message"));
     assert!(view_model.composer.agent_panel_focused);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_agent_selected, 1);
+    let child_view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert!(child_view_model.footer.hints.contains("Alt-C close"));
+    assert!(child_view_model.footer.hints.contains("Alt-M message"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 

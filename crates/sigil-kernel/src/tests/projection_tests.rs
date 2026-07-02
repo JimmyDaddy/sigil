@@ -327,6 +327,8 @@ fn sample_tool_approval_entry(action: ToolApprovalAuditAction) -> ToolApprovalEn
         external_directory_required: true,
         confirmation: None,
         snapshot_required: true,
+        allow_source: None,
+        grant_call_id: None,
         user_decision: Some(ToolApprovalUserDecision::Approved),
         reason: Some("approved in test".to_owned()),
         preview_hash: Some("sha256:preview".to_owned()),

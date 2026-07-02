@@ -128,6 +128,8 @@ fn test_tool_approval(action: ToolApprovalAuditAction) -> SessionLogEntry {
         external_directory_required: false,
         confirmation: None,
         snapshot_required: false,
+        allow_source: None,
+        grant_call_id: None,
         user_decision: None,
         reason: None,
         preview_hash: None,
@@ -5203,6 +5205,7 @@ fn session_boundary_summary_and_identity_helpers_cover_tool_edges() {
             content: Some("content".repeat(80)),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            assistant_kind: None,
         },
     ]);
     assert!(summary.contains("01. system system prompt"));

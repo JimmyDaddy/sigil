@@ -43,13 +43,13 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, ControlEntry, EventHandler,
-    JsonlSessionStore, McpServerStartup, MemoryConfig, ModelMessage, PermissionConfig,
-    ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry, ToolAccess, ToolCall,
-    ToolCategory, ToolEgressEntry, ToolError, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewSnapshot, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope,
-    UsageStats, WorkspaceConfig,
+    AgentConfig, ApprovalMode, AssistantMessageKind, CompactionConfig, CompactionRecord,
+    ControlEntry, EventHandler, JsonlSessionStore, McpServerStartup, MemoryConfig, ModelMessage,
+    PermissionConfig, ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
+    ToolAccess, ToolCall, ToolCategory, ToolEgressEntry, ToolError, ToolErrorKind,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
+    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit,
+    ToolSubjectKind, ToolSubjectScope, UsageStats, WorkspaceConfig,
 };
 use sigil_runtime::{McpElicitationAction, McpElicitationRequest};
 use tempfile::tempdir;

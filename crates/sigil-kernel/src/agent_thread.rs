@@ -870,6 +870,25 @@ pub struct AgentThreadResultRecordedEntry {
     pub result: AgentThreadResult,
 }
 
+/// Append-only audit entry recording that the parent read a child agent result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentThreadResultDeliveredEntry {
+    pub thread_id: AgentThreadId,
+    pub call_id: String,
+    pub output_hash: String,
+    #[serde(default)]
+    pub offset_chars: usize,
+    #[serde(default)]
+    pub returned_chars: usize,
+    #[serde(default)]
+    pub total_chars: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at_ms: Option<u64>,
+}
+
 /// Durable parent-continuation state after a child agent result becomes available.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1145,6 +1164,9 @@ impl AgentThreadStateProjection {
             ControlEntry::AgentThreadResultRecorded(entry) => {
                 self.apply_result_recorded(&entry.result);
             }
+            ControlEntry::AgentThreadResultDelivered(entry) => {
+                self.apply_result_delivered(entry);
+            }
             ControlEntry::AgentThreadDisplayName(entry) => self.apply_display_name(entry),
             ControlEntry::AgentApprovalRoute(entry) => {
                 self.approval_routes
@@ -1309,6 +1331,13 @@ impl AgentThreadStateProjection {
         };
     }
 
+    fn apply_result_delivered(&mut self, entry: &AgentThreadResultDeliveredEntry) {
+        self.record_thread_replay(&entry.thread_id);
+        let thread = self.ensure_thread(&entry.thread_id);
+        thread.result_delivered = true;
+        thread.result_delivery_call_ids.push(entry.call_id.clone());
+    }
+
     fn apply_display_name(&mut self, entry: &AgentThreadDisplayNameEntry) {
         self.record_thread_replay(&entry.thread_id);
         let thread = self.ensure_thread(&entry.thread_id);
@@ -1440,6 +1469,10 @@ pub struct AgentThreadProjection {
     pub status: AgentThreadStatus,
     pub reason: Option<String>,
     pub result: Option<AgentThreadResult>,
+    #[serde(default)]
+    pub result_delivered: bool,
+    #[serde(default)]
+    pub result_delivery_call_ids: Vec<String>,
     pub attempts: BTreeMap<AgentRunAttemptId, AgentRunAttemptProjection>,
     pub merge_safe_points: Vec<AgentMergeSafePointEntry>,
     pub duplicate_terminal_entries: usize,
@@ -1468,6 +1501,8 @@ impl AgentThreadProjection {
             status: AgentThreadStatus::Started,
             reason: None,
             result: None,
+            result_delivered: false,
+            result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
             duplicate_terminal_entries: 0,
@@ -1500,6 +1535,8 @@ impl AgentThreadProjection {
             status: AgentThreadStatus::Started,
             reason: None,
             result: None,
+            result_delivered: false,
+            result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
             duplicate_terminal_entries: 0,
@@ -1528,6 +1565,8 @@ impl AgentThreadProjection {
             status: AgentThreadStatus::Unavailable,
             reason: Some("agent thread start entry missing".to_owned()),
             result: None,
+            result_delivered: false,
+            result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
             duplicate_terminal_entries: 0,

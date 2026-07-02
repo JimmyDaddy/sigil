@@ -1345,6 +1345,8 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 snapshot_required: false,
                 policy_decision: ApprovalMode::Ask,
                 external_directory_required: false,
+                allow_source: None,
+                grant_call_id: None,
                 user_decision: None,
                 reason: None,
                 preview_hash: None,

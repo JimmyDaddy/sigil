@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex, mpsc},
 };
@@ -106,7 +106,6 @@ pub struct AgentSupervisor {
 #[derive(Debug, Default)]
 struct AgentSupervisorState {
     active_threads: BTreeMap<AgentThreadId, ActiveAgentThread>,
-    background_requests: BTreeSet<AgentThreadId>,
     spawn_fanout_this_turn: usize,
     task_token_usage: BTreeMap<TaskId, u64>,
 }
@@ -255,15 +254,7 @@ impl AgentSupervisor {
         if let Some(thread) = state.active_threads.get_mut(&thread_id) {
             thread.background = true;
         }
-        state.background_requests.insert(thread_id.clone());
         Ok(thread_id)
-    }
-
-    pub(crate) fn take_background_request(&self, thread_id: &AgentThreadId) -> bool {
-        self.state
-            .lock()
-            .map(|mut state| state.background_requests.remove(thread_id))
-            .unwrap_or(false)
     }
 
     pub fn reset_turn_budget(&self) {

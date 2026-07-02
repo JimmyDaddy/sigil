@@ -209,6 +209,7 @@ pub(super) fn render_runtime_context_v0_message(
         content: Some(content),
         tool_calls: Vec::new(),
         tool_call_id: None,
+        assistant_kind: None,
     }))
 }
 

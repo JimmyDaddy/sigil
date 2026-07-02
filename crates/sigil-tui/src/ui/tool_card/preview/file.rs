@@ -83,11 +83,15 @@ pub(in crate::ui::tool_card) fn render_path_list_preview_with_palette(
     accent: Color,
     palette: &ThemePalette,
 ) -> Option<Vec<Line<'static>>> {
-    let entries = summary
-        .preview_value
-        .as_ref()
-        .and_then(json_string_list)
-        .or_else(|| Some(infer_string_list_preview(&summary.preview_lines)))?;
+    let entries = if let Some(value) = summary.preview_value.as_ref() {
+        json_string_list(value)?
+    } else {
+        let entries = infer_string_list_preview(&summary.preview_lines);
+        if entries.is_empty() {
+            return None;
+        }
+        entries
+    };
 
     let mut lines = vec![timeline_section_line_with_palette(
         accent,

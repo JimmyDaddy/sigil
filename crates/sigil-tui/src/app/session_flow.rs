@@ -7,9 +7,10 @@ use std::{
 };
 
 use sigil_kernel::{
-    CompactionPreview, ControlEntry, JsonlSessionStore, ModelMessage, RootConfig, Session,
-    SessionLogEntry, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
-    inspect_memory_documents, latest_compaction_record, session_stats_from_entries,
+    AssistantMessageKind, CompactionPreview, ControlEntry, JsonlSessionStore, ModelMessage,
+    RootConfig, Session, SessionLogEntry, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreviewSnapshot, inspect_memory_documents, latest_compaction_record,
+    session_stats_from_entries,
 };
 use uuid::Uuid;
 
@@ -474,8 +475,10 @@ impl AppState {
         let restored_tool_executions = restored_tool_execution_index(&entries);
         let restored_tool_previews = restored_tool_preview_snapshot_index(&entries);
         let restored_tool_result_call_ids = restored_tool_result_call_ids(&entries);
+        let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(&entries);
+        let suppressed_assistant_preamble_indices = suppressed_assistant_preamble_indices(&entries);
         self.tool_preview_snapshots = restored_tool_previews.clone();
-        for entry in entries {
+        for (entry_index, entry) in entries.into_iter().enumerate() {
             match entry {
                 SessionLogEntry::User(message) => {
                     if let Some(content) = message.content {
@@ -483,7 +486,8 @@ impl AppState {
                     }
                 }
                 SessionLogEntry::Assistant(message) => {
-                    if let Some(content) = message.content
+                    if !suppressed_assistant_preamble_indices.contains(&entry_index)
+                        && let Some(content) = message.content
                         && !content.is_empty()
                     {
                         self.push_timeline(TimelineRole::Assistant, content);
@@ -515,7 +519,9 @@ impl AppState {
                     ControlEntry::Note { kind, data }
                         if kind == "reasoning_delta" || kind == "reasoning_trace" =>
                     {
-                        if let Some(delta) = restored_reasoning_note(&kind, &data) {
+                        if !suppressed_reasoning_trace_indices.contains(&entry_index)
+                            && let Some(delta) = restored_reasoning_note(&kind, &data)
+                        {
                             self.push_restored_reasoning_delta(&delta);
                         }
                     }
@@ -642,8 +648,10 @@ fn restored_timeline_entries_from_session_entries(
     let restored_tool_executions = restored_tool_execution_index(entries);
     let restored_tool_previews = restored_tool_preview_snapshot_index(entries);
     let restored_tool_result_call_ids = restored_tool_result_call_ids(entries);
+    let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(entries);
+    let suppressed_assistant_preamble_indices = suppressed_assistant_preamble_indices(entries);
     let mut timeline = Vec::new();
-    for entry in entries {
+    for (entry_index, entry) in entries.iter().enumerate() {
         match entry {
             SessionLogEntry::User(message) => {
                 if let Some(content) = message.content.as_ref() {
@@ -654,7 +662,8 @@ fn restored_timeline_entries_from_session_entries(
                 }
             }
             SessionLogEntry::Assistant(message) => {
-                if let Some(content) = message.content.as_ref()
+                if !suppressed_assistant_preamble_indices.contains(&entry_index)
+                    && let Some(content) = message.content.as_ref()
                     && !content.is_empty()
                 {
                     timeline.push(crate::timeline::TimelineEntry {
@@ -688,7 +697,9 @@ fn restored_timeline_entries_from_session_entries(
             SessionLogEntry::Control(ControlEntry::Note { kind, data })
                 if kind == "reasoning_delta" || kind == "reasoning_trace" =>
             {
-                if let Some(delta) = restored_reasoning_note(kind, data) {
+                if !suppressed_reasoning_trace_indices.contains(&entry_index)
+                    && let Some(delta) = restored_reasoning_note(kind, data)
+                {
                     push_restored_reasoning_timeline_entry(&mut timeline, &delta);
                 }
             }
@@ -732,6 +743,98 @@ fn restored_timeline_entries_from_session_entries(
         }
     }
     timeline
+}
+
+fn suppressed_reasoning_trace_indices(entries: &[SessionLogEntry]) -> HashSet<usize> {
+    let final_answer_indices = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            SessionLogEntry::Assistant(message) if assistant_message_is_final_answer(message) => {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if final_answer_indices.is_empty() {
+        return HashSet::new();
+    }
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            restored_reasoning_trace_entry(entry)
+                .filter(|_| {
+                    final_answer_indices
+                        .iter()
+                        .any(|final_index| *final_index > index)
+                })
+                .map(|_| index)
+        })
+        .collect()
+}
+
+fn suppressed_assistant_preamble_indices(entries: &[SessionLogEntry]) -> HashSet<usize> {
+    let final_answer_indices = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            SessionLogEntry::Assistant(message) if assistant_message_is_final_answer(message) => {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if final_answer_indices.is_empty() {
+        return HashSet::new();
+    }
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let SessionLogEntry::Assistant(message) = entry else {
+                return None;
+            };
+            let has_preamble = assistant_message_is_tool_preamble(message)
+                || !message.tool_calls.is_empty()
+                    && message
+                        .content
+                        .as_ref()
+                        .is_some_and(|content| !content.trim().is_empty());
+            (has_preamble
+                && final_answer_indices
+                    .iter()
+                    .any(|final_index| *final_index > index))
+            .then_some(index)
+        })
+        .collect()
+}
+
+fn restored_reasoning_trace_entry(entry: &SessionLogEntry) -> Option<()> {
+    match entry {
+        SessionLogEntry::Control(ControlEntry::Note { kind, .. }) if kind == "reasoning_trace" => {
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn assistant_message_is_final_answer(message: &ModelMessage) -> bool {
+    if message.assistant_kind == Some(AssistantMessageKind::FinalAnswer) {
+        return true;
+    }
+    if message.assistant_kind.is_some() {
+        return false;
+    }
+    message.tool_calls.is_empty()
+        && message
+            .content
+            .as_ref()
+            .is_some_and(|content| !content.trim().is_empty())
+}
+
+fn assistant_message_is_tool_preamble(message: &ModelMessage) -> bool {
+    message.assistant_kind == Some(AssistantMessageKind::ToolPreamble)
 }
 
 fn push_restored_reasoning_timeline_entry(
@@ -1360,6 +1463,11 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             "[ctl] agent result {} status={}",
             entry.result.thread_id.as_str(),
             agent_terminal_status_label(entry.result.status)
+        ),
+        ControlEntry::AgentThreadResultDelivered(entry) => format!(
+            "[ctl] agent result delivered {} call={}",
+            entry.thread_id.as_str(),
+            entry.call_id
         ),
         ControlEntry::AgentResultContinuation(entry) => format!(
             "[ctl] agent continuation {} status={:?}",

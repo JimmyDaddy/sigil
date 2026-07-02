@@ -22,6 +22,7 @@ pub(super) fn compaction_summary_message(record: &CompactionRecord) -> ModelMess
         content: Some(record.summary.clone()),
         tool_calls: Vec::new(),
         tool_call_id: None,
+        assistant_kind: Some(crate::AssistantMessageKind::Progress),
     }
 }
 

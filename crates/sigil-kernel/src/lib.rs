@@ -32,6 +32,7 @@ pub mod write_isolation;
 pub use agent::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
+    projected_agent_run_readiness,
 };
 pub use agent_thread::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentFinalAnswerRef,
@@ -46,10 +47,10 @@ pub use agent_thread::{
     AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
     AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
     AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
-    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
-    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
-    AgentUsageSummary, WorkspaceRootSnapshot, closed_agent_routes, interrupted_agent_attempts,
-    interrupted_agent_mailbox_messages,
+    AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
+    AgentThreadStateProjection, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, WorkspaceRootSnapshot,
+    closed_agent_routes, interrupted_agent_attempts, interrupted_agent_mailbox_messages,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
 pub use changeset::{
@@ -181,10 +182,11 @@ pub use projection::{
     session_list_projection_from_records,
 };
 pub use provider::{
-    BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
-    PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
-    ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, SessionStats,
-    ToolCall, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+    AssistantMessageKind, BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest,
+    MessageRole, ModelMessage, PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
+    ResponseHandle, SessionStats, ToolCall, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator,
+    UsageStats,
 };
 pub use provider_timeout::{
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
@@ -198,10 +200,11 @@ pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
     CompactionPreview, CompactionRecord, ContextAssemblySkippedEntry, ControlEntry,
     DomainEventRecord, JsonlSessionStore, McpElicitationDecision, McpElicitationEntry,
-    MemorySnapshot, Session, SessionLogEntry, SessionStreamRecord, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry,
-    ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolSubjectAudit, TypedDomainEventRecord, latest_compaction_record, session_stats_from_entries,
+    MemorySnapshot, Session, SessionLogEntry, SessionStreamRecord, ToolApprovalAllowSource,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalSessionGrantEntry,
+    ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolSubjectAudit, TypedDomainEventRecord, latest_compaction_record,
+    session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,

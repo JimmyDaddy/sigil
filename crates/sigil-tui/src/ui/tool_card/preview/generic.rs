@@ -25,6 +25,12 @@ pub(in crate::ui::tool_card) fn render_generic_tool_preview_with_palette(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(value) = &summary.preview_value {
+        if let Some(lines) = render_grep_preview_with_palette(summary, accent, palette) {
+            return lines;
+        }
+        if let Some(lines) = render_path_list_preview_with_palette(summary, accent, palette) {
+            return lines;
+        }
         lines.push(timeline_section_line_with_palette(
             accent,
             "tree",

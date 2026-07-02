@@ -268,6 +268,8 @@ pub struct ModelMessage {
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_kind: Option<AssistantMessageKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,6 +279,19 @@ pub enum MessageRole {
     User,
     Assistant,
     Tool,
+}
+
+/// UI-facing phase for assistant messages recorded in the durable session log.
+///
+/// Provider request mappers ignore this field; it exists to keep transcript rendering and
+/// restore behavior from treating tool preambles as final user-visible replies.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMessageKind {
+    ToolPreamble,
+    Progress,
+    ReasoningTrace,
+    FinalAnswer,
 }
 
 /// Usage accounting emitted by a provider for a single request.
@@ -455,6 +470,17 @@ impl ModelMessage {
         message
     }
 
+    /// Creates an assistant-role message with an explicit transcript phase.
+    pub fn assistant_with_kind(
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        assistant_kind: AssistantMessageKind,
+    ) -> Self {
+        let mut message = Self::assistant(content, tool_calls);
+        message.assistant_kind = Some(assistant_kind);
+        message
+    }
+
     /// Creates a tool-role message bound to a prior tool call id.
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         let mut message = Self::new(MessageRole::Tool, Some(content.into()));
@@ -470,6 +496,7 @@ impl ModelMessage {
             content,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            assistant_kind: None,
         }
     }
 }

@@ -1357,11 +1357,11 @@ fn tool_card_json_tree_and_parser_helpers_cover_empty_and_leaf_cases() {
 
     assert!(keyed_lines.iter().any(|line| line.contains("root: {}")));
     assert_eq!(object_lines[0], "{empty object}");
-    assert_eq!(array_lines[0], "[empty array]");
+    assert_eq!(array_lines[0], "0 items");
     assert_eq!(leaf_lines[0], "null");
     assert_eq!(json_tree_leaf_text(&json!(true)), "true");
     assert_eq!(json_tree_leaf_text(&json!([1, 2])), "[2]");
-    assert_eq!(json_tree_container_label(&json!({"a": 1})), "{1 keys}");
+    assert_eq!(json_tree_container_label(&json!({"a": 1})), "1 keys");
     assert_eq!(
         json_string_list(&json!(["a", 1, "b"])),
         Some(vec!["a".to_owned(), "b".to_owned()])
@@ -1645,6 +1645,34 @@ fn tool_card_grep_bash_and_file_change_helpers_cover_remaining_labels() {
     assert!(grep_text.contains("0 files"));
     assert!(grep_text.contains("no matches"));
 
+    let generic_empty_search = ToolCardRender {
+        preview_value: Some(json!([])),
+        ..base_summary("search")
+    };
+    let generic_empty_text = plain_text(&render_generic_tool_preview(
+        &generic_empty_search,
+        accent_rose(),
+        80,
+    ));
+    assert!(generic_empty_text.contains("0 files"));
+    assert!(generic_empty_text.contains("no matches"));
+    assert!(!generic_empty_text.contains("[array]"));
+
+    let generic_search = ToolCardRender {
+        preview_value: Some(json!([
+            { "path": "src/lib.rs", "line": 7, "text": "fn main() {}" }
+        ])),
+        ..base_summary("search")
+    };
+    let generic_search_text = plain_text(&render_generic_tool_preview(
+        &generic_search,
+        accent_rose(),
+        80,
+    ));
+    assert!(generic_search_text.contains("src/lib.rs"));
+    assert!(generic_search_text.contains("L7"));
+    assert!(!generic_search_text.contains("{3 keys}"));
+
     let bash_summary = ToolCardRender {
         is_error: true,
         metadata: ToolCardMetadata {
@@ -1755,9 +1783,9 @@ fn tool_card_diff_and_json_helpers_cover_deleted_lines_and_nested_arrays() {
 
     let tree = render_json_tree_preview(&json!([{ "nested": [1, { "leaf": true }] }]));
     let tree_text = tree.join("\n");
-    assert!(tree_text.contains("[array] 1"));
-    assert!(tree_text.contains("[0] {1 keys}"));
-    assert!(tree_text.contains("nested: [2 items]"));
+    assert!(tree_text.contains("1 items"));
+    assert!(tree_text.contains("[0] 1 keys"));
+    assert!(tree_text.contains("nested: 2 items"));
     assert!(tree_text.contains("leaf: true"));
 
     assert_eq!(

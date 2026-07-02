@@ -929,9 +929,12 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · ↑↓ choose · Tab accept · Enter run · Esc close");
     }
     if app.is_composer_agent_panel_focused() {
-        return format!(
-            "{agent} · ↑↓ agent · Enter switch · Alt-C close · Alt-M message · Esc input"
-        );
+        let mut hints = format!("{agent} · ↑↓ agent · Enter switch");
+        if composer_agent_panel_child_selected(app) {
+            hints.push_str(" · Alt-C close · Alt-M message");
+        }
+        hints.push_str(" · Esc input");
+        return hints;
     }
     if let Some(queue) = queue {
         return format!("{agent} · {queue} · Tab follow-ups");
@@ -942,6 +945,13 @@ fn footer_hints(app: &AppState) -> String {
         "Ctrl-J newline"
     };
     format!("{agent} · Enter send · {newline_hint} · Alt-A agent · / commands")
+}
+
+fn composer_agent_panel_child_selected(app: &AppState) -> bool {
+    app.composer_agent_rows()
+        .iter()
+        .find(|row| row.selected)
+        .is_some_and(|row| row.label != "main")
 }
 
 #[derive(Debug, Clone)]

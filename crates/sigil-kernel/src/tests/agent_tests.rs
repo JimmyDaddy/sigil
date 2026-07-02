@@ -15,21 +15,21 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 
 use crate::{
-    ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
-    CompactionConfig, CompletionRequest, ControlEntry, DurableEventType, EventHandler,
-    ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode, JsonlSessionStore,
-    MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
-    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
-    PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderContinuationState, ReasoningArtifact, ReasoningEffort,
-    ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
+    ApprovalHandler, ApprovalMode, AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle,
+    BackgroundTaskStatus, CompactionConfig, CompletionRequest, ControlEntry, DurableEventType,
+    EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
+    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
+    PermissionConfig, PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission,
+    PlanApprovalScope, PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ReasoningArtifact,
+    ReasoningEffort, ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
     SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
     TaskRunEntry, TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope,
-    UsageStats, VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected,
-    plan_text_hash,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject,
+    ToolSubjectScope, UsageStats, VerificationVerdict, VisibleCompletionState,
+    WorkspaceMutationDetected, plan_text_hash,
 };
 
 use super::{
@@ -2767,8 +2767,21 @@ async fn agent_persists_text_before_tool_call_on_assistant_message() -> Result<(
         assistant_tool_message.content.as_deref(),
         Some("checking provider shape")
     );
+    assert_eq!(
+        assistant_tool_message.assistant_kind,
+        Some(AssistantMessageKind::ToolPreamble)
+    );
     assert_eq!(assistant_tool_message.tool_calls.len(), 1);
     assert_eq!(assistant_tool_message.tool_calls[0].name, "echo");
+    let final_message = entries.iter().rev().find_map(|entry| match entry {
+        SessionLogEntry::Assistant(message) if message.tool_calls.is_empty() => Some(message),
+        _ => None,
+    });
+    let final_message = final_message.expect("final assistant answer should be persisted");
+    assert_eq!(
+        final_message.assistant_kind,
+        Some(AssistantMessageKind::FinalAnswer)
+    );
     Ok(())
 }
 
@@ -3908,6 +3921,8 @@ async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> R
                 if approval.call_id == "call-read-2"
                     && approval.action == ToolApprovalAuditAction::PolicyEvaluated
                     && approval.policy_decision == ApprovalMode::Allow
+                    && approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant)
+                    && approval.grant_call_id.as_deref() == Some("call-read-1")
         )
     }));
     Ok(())
@@ -4011,6 +4026,8 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
                 if approval.call_id == "call-cargo-2"
                     && approval.action == ToolApprovalAuditAction::PolicyEvaluated
                     && approval.policy_decision == ApprovalMode::Allow
+                    && approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant)
+                    && approval.grant_call_id.as_deref() == Some("call-cargo-1")
         )
     }));
     Ok(())

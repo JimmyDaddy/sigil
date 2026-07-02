@@ -54,12 +54,12 @@ pub(in crate::ui::tool_card) fn push_json_tree_lines(
         }
         Value::Array(items) => {
             if let Some(key) = key {
-                lines.push(format!("{prefix}{key}: [{}]", items.len()));
+                lines.push(format!("{prefix}{key}: {} items", items.len()));
             } else if prefix.is_empty() {
                 lines.push(if items.is_empty() {
-                    "[empty array]".to_owned()
+                    "0 items".to_owned()
                 } else {
-                    format!("[array] {}", items.len())
+                    format!("{} items", items.len())
                 });
             }
             for (index, item) in items.iter().enumerate() {
@@ -115,8 +115,8 @@ pub(in crate::ui::tool_card) fn json_tree_leaf_text(value: &Value) -> String {
 
 pub(in crate::ui::tool_card) fn json_tree_container_label(value: &Value) -> String {
     match value {
-        Value::Array(items) => format!("[{} items]", items.len()),
-        Value::Object(object) => format!("{{{} keys}}", object.len()),
+        Value::Array(items) => format!("{} items", items.len()),
+        Value::Object(object) => format!("{} keys", object.len()),
         _ => json_tree_leaf_text(value),
     }
 }

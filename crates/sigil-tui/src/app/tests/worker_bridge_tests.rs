@@ -1280,14 +1280,17 @@ fn assistant_message_with_tool_call_preserves_tool_phase_and_dedupes_text() -> R
         name: "bash".to_owned(),
         args_json: r#"{"command":"cargo check"}"#.to_owned(),
     }))?;
-    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
-        Some(progress_text.to_owned()),
-        vec![ToolCall {
-            id: "call-check".to_owned(),
-            name: "bash".to_owned(),
-            args_json: r#"{"command":"cargo check"}"#.to_owned(),
-        }],
-    )))?;
+    app.handle(RunEvent::AssistantMessage(
+        ModelMessage::assistant_with_kind(
+            Some(progress_text.to_owned()),
+            vec![ToolCall {
+                id: "call-check".to_owned(),
+                name: "bash".to_owned(),
+                args_json: r#"{"command":"cargo check"}"#.to_owned(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        ),
+    ))?;
 
     let matching = app
         .timeline

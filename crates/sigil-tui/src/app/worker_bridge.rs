@@ -79,6 +79,10 @@ impl AppState {
                 self.push_live_child_entry(TimelineRole::Tool, result.content)
             }
             RunEvent::AssistantMessage(message) => {
+                if message.assistant_kind == Some(sigil_kernel::AssistantMessageKind::ToolPreamble)
+                {
+                    return false;
+                }
                 let Some(content) = message.content.filter(|content| !content.is_empty()) else {
                     return false;
                 };
@@ -1601,7 +1605,9 @@ impl EventHandler for AppState {
                 }
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
-                if let Some(content) = message.content {
+                if message.assistant_kind != Some(sigil_kernel::AssistantMessageKind::ToolPreamble)
+                    && let Some(content) = message.content
+                {
                     self.push_assistant_message_once(content);
                 }
             }

@@ -7,12 +7,12 @@ pub(super) struct ResultPageRequest {
 
 #[derive(Debug, Clone)]
 pub(super) struct ResultPage {
-    text: String,
-    offset_chars: usize,
-    returned_chars: usize,
-    total_chars: usize,
-    next_offset_chars: Option<usize>,
-    truncated: bool,
+    pub(super) text: String,
+    pub(super) offset_chars: usize,
+    pub(super) returned_chars: usize,
+    pub(super) total_chars: usize,
+    pub(super) next_offset_chars: Option<usize>,
+    pub(super) truncated: bool,
 }
 
 pub(super) fn required_result_page_request_arg(args: &Value) -> Result<ResultPageRequest> {
@@ -46,9 +46,7 @@ pub(super) fn read_agent_result_page(
     request: ResultPageRequest,
 ) -> Result<ResultPage> {
     let Some(parent_path) = parent_session.store_path() else {
-        return Err(anyhow!(
-            "agent result page unavailable because parent session has no durable store"
-        ));
+        return Ok(slice_result_page(&result.summary, request));
     };
     let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
     let session_ref = result
@@ -308,50 +306,6 @@ pub(super) fn agent_status_tool_result(
     )
 }
 
-pub(super) fn agent_backgrounded_tool_result(
-    call: &ToolCall,
-    thread: &AgentThreadProjection,
-) -> ToolResult {
-    let retry_after_ms = 5_000_u64;
-    let next_poll_after_unix_ms = unix_time_ms().saturating_add(retry_after_ms);
-    let payload = json!({
-        "thread_id": thread.thread_id.as_str(),
-        "display_name": thread.display_name.as_deref(),
-        "status": thread_status_label(thread.status),
-        "terminal": false,
-        "reason": &thread.reason,
-        "result_available": false,
-        "backgrounded": true,
-        "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
-        "retry_after_ms": retry_after_ms,
-        "next_poll_after_ms": retry_after_ms,
-        "next_poll_after_unix_ms": next_poll_after_unix_ms,
-        "next_action": "continue only non-overlapping parent work; use wait_agent before the final answer",
-        "do_not_describe_as_finished": true
-    });
-    ToolResult::ok(
-        call.id.clone(),
-        call.name.clone(),
-        serde_json::to_string(&payload)
-            .unwrap_or_else(|error| format!("failed to serialize agent status: {error}")),
-        ToolResultMeta {
-            details: json!({
-                "thread_id": thread.thread_id.as_str(),
-                "display_name": thread.display_name.as_deref(),
-                "status": thread_status_label(thread.status),
-                "terminal": false,
-                "result_available": false,
-                "backgrounded": true,
-                "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
-                "retry_after_ms": retry_after_ms,
-                "next_poll_after_ms": retry_after_ms,
-                "next_poll_after_unix_ms": next_poll_after_unix_ms,
-            }),
-            ..ToolResultMeta::default()
-        },
-    )
-}
-
 pub(super) fn agent_wait_throttled_tool_result(
     call: &ToolCall,
     thread: &AgentThreadProjection,
@@ -469,6 +423,46 @@ pub(super) fn agent_result_page_tool_result(
             "failed to serialize transient agent result page: {error}"
         ))
     ))])
+}
+
+pub(super) fn agent_result_already_delivered_tool_result(
+    call: &ToolCall,
+    result: &AgentThreadResult,
+    delivered: &AgentThreadResultDeliveredEntry,
+) -> ToolResult {
+    let payload = json!({
+        "thread_id": result.thread_id.as_str(),
+        "status": terminal_status_label(result.status),
+        "session_ref": result.session_ref.as_path().display().to_string(),
+        "output_hash": result.output_hash,
+        "already_delivered": true,
+        "rerun_not_needed": true,
+        "previous_delivery": {
+            "call_id": delivered.call_id,
+            "offset_chars": delivered.offset_chars,
+            "returned_chars": delivered.returned_chars,
+            "total_chars": delivered.total_chars,
+            "truncated": delivered.truncated,
+        },
+        "next_action": "Use the previously delivered child result already in context; do not call read_agent_result again only to re-read the same full result."
+    });
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        serde_json::to_string(&payload)
+            .unwrap_or_else(|error| format!("failed to serialize delivered agent result: {error}")),
+        ToolResultMeta {
+            details: json!({
+                "thread_id": result.thread_id.as_str(),
+                "status": terminal_status_label(result.status),
+                "output_hash": result.output_hash,
+                "already_delivered": true,
+                "previous_call_id": delivered.call_id,
+                "rerun_not_needed": true,
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
 }
 
 pub(super) fn agent_spawn_denied_tool_result(call: &ToolCall, reason: String) -> ToolResult {

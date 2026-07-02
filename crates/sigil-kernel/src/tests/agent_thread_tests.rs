@@ -10,11 +10,12 @@ use crate::{
     AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
     AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
     AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
-    AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, ControlEntry, JsonlSessionStore,
-    ModelMessage, Session, SessionLogEntry, SessionRef, TaskChildSessionDisplayNameEntry,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskStepId, WorkspaceRootSnapshot,
+    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultDeliveredEntry,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
+    ControlEntry, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, SessionRef,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskStepId, WorkspaceRootSnapshot,
 };
 
 fn profile_id(value: &str) -> Result<AgentProfileId> {
@@ -510,6 +511,18 @@ fn agent_thread_projection_replays_lifecycle_and_result() -> Result<()> {
             },
         },
     ))?;
+    session.append_control(ControlEntry::AgentThreadResultDelivered(
+        AgentThreadResultDeliveredEntry {
+            thread_id: thread_id("thread_1")?,
+            call_id: "call-read-result".to_owned(),
+            output_hash: "sha256:done".to_owned(),
+            offset_chars: 0,
+            returned_chars: 4,
+            total_chars: 4,
+            truncated: false,
+            delivered_at_ms: Some(99),
+        },
+    ))?;
 
     let projection = session.agent_thread_state_projection();
     let thread = projection.latest_thread().expect("latest thread");
@@ -521,6 +534,11 @@ fn agent_thread_projection_replays_lifecycle_and_result() -> Result<()> {
     assert_eq!(
         thread.result.as_ref().map(|result| result.summary.as_str()),
         Some("done")
+    );
+    assert!(thread.result_delivered);
+    assert_eq!(
+        thread.result_delivery_call_ids,
+        vec!["call-read-result".to_owned()]
     );
     assert_eq!(
         thread

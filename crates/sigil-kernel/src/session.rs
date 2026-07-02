@@ -22,9 +22,9 @@ use crate::{
         AgentResultContinuationEntry, AgentResultContinuationProjection, AgentRouteClosedEntry,
         AgentRunAttemptStartedEntry, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
         AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry,
-        AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
-        AgentThreadStatusChangedEntry, closed_agent_routes, interrupted_agent_attempts,
-        interrupted_agent_mailbox_messages,
+        AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
+        AgentThreadStateProjection, AgentThreadStatusChangedEntry, closed_agent_routes,
+        interrupted_agent_attempts, interrupted_agent_mailbox_messages,
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     context_engine::{

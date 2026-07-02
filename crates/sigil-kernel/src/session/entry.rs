@@ -289,6 +289,8 @@ pub enum ControlEntry {
     AgentMailboxMessage(AgentMailboxMessageEntry),
     #[serde(alias = "AgentThreadResultRecorded")]
     AgentThreadResultRecorded(AgentThreadResultRecordedEntry),
+    #[serde(alias = "AgentThreadResultDelivered")]
+    AgentThreadResultDelivered(AgentThreadResultDeliveredEntry),
     #[serde(alias = "AgentResultContinuation")]
     AgentResultContinuation(AgentResultContinuationEntry),
     #[serde(alias = "AgentThreadDisplayName")]
@@ -347,9 +349,20 @@ pub struct ToolApprovalEntry {
     pub confirmation: Option<PermissionConfirmation>,
     #[serde(default)]
     pub snapshot_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_source: Option<ToolApprovalAllowSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_call_id: Option<String>,
     pub user_decision: Option<ToolApprovalUserDecision>,
     pub reason: Option<String>,
     pub preview_hash: Option<String>,
+}
+
+/// Source that allowed a tool call after policy evaluation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalAllowSource {
+    SessionGrant,
 }
 
 /// Stable phase marker for one approval audit entry.

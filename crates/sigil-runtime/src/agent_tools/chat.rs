@@ -182,9 +182,10 @@ impl AgentToolRuntime {
 
     pub(super) fn read_agent_result(
         &self,
-        session: &Session,
+        session: &mut Session,
         call: &ToolCall,
         args: &Value,
+        handler: &mut (dyn EventHandler + Send),
     ) -> ToolResult {
         let thread_id = match thread_id_arg(args) {
             Ok(thread_id) => thread_id,
@@ -228,6 +229,11 @@ impl AgentToolRuntime {
                 ),
             );
         };
+        if let Some(delivered) =
+            full_agent_result_delivery(session, &result.thread_id, &result.output_hash)
+        {
+            return agent_result_already_delivered_tool_result(call, result, &delivered);
+        }
         let result_page = match read_agent_result_page(session, result, result_page_request) {
             Ok(page) => page,
             Err(error) => {
@@ -239,6 +245,27 @@ impl AgentToolRuntime {
                 );
             }
         };
+        let delivery = ControlEntry::AgentThreadResultDelivered(AgentThreadResultDeliveredEntry {
+            thread_id: result.thread_id.clone(),
+            call_id: call.id.clone(),
+            output_hash: result.output_hash.clone(),
+            offset_chars: result_page.offset_chars,
+            returned_chars: result_page.returned_chars,
+            total_chars: result_page.total_chars,
+            truncated: result_page.truncated,
+            delivered_at_ms: None,
+        });
+        if let Err(error) = session
+            .append_control(delivery.clone())
+            .and_then(|()| handler.handle(RunEvent::Control(delivery)))
+        {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
         agent_result_page_tool_result(call, result, &result_page)
     }
 
@@ -436,6 +463,25 @@ impl AgentToolRuntime {
     ) -> ToolResult {
         close_agent_from_args(session, call, args)
     }
+}
+
+fn full_agent_result_delivery(
+    session: &Session,
+    thread_id: &AgentThreadId,
+    output_hash: &str,
+) -> Option<AgentThreadResultDeliveredEntry> {
+    session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::AgentThreadResultDelivered(delivered)) = entry
+        else {
+            return None;
+        };
+        (delivered.thread_id == *thread_id
+            && delivered.output_hash == output_hash
+            && delivered.offset_chars == 0
+            && delivered.returned_chars == delivered.total_chars
+            && !delivered.truncated)
+            .then(|| delivered.clone())
+    })
 }
 
 pub(super) fn wait_throttle_remaining_since(last_wait: Instant) -> Option<Duration> {

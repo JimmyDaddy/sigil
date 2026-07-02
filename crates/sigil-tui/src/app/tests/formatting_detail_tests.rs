@@ -87,14 +87,39 @@ fn preview_helpers_cover_json_markdown_and_limits() {
     let json_value = tool_preview_value(r#"{"items":[1,2]}"#).expect("json preview should parse");
     assert!(matches!(json_value, serde_json::Value::Object(_)));
 
-    let (json_kind, json_source) = tool_preview_source("ls", "ignored", Some(&json_value));
+    let (json_kind, json_source) = tool_preview_source("ls", "ignored", Some(&json_value), None);
     assert_eq!(json_kind, "json");
     assert!(json_source.as_str().contains("\"items\""));
 
     let (markdown_kind, markdown_source) =
-        tool_preview_source("read_file", "# Title\n\n- item", None);
+        tool_preview_source("read_file", "# Title\n\n- item", None, None);
     assert_eq!(markdown_kind, "markdown");
     assert!(markdown_source.as_str().contains("# Title"));
+
+    let rust_metadata = ToolResultMeta {
+        details: json!({ "call": { "path": "src/lib.rs", "summary": "path=src/lib.rs" } }),
+        ..ToolResultMeta::default()
+    };
+    let (rust_kind, rust_source) = tool_preview_source(
+        "read_file",
+        "#[derive(Debug)]\nstruct Example;",
+        None,
+        Some(&rust_metadata),
+    );
+    assert_eq!(rust_kind, "text");
+    assert!(rust_source.as_str().contains("struct Example"));
+
+    let markdown_metadata = ToolResultMeta {
+        details: json!({ "call": { "summary": "path=README.md" } }),
+        ..ToolResultMeta::default()
+    };
+    let (markdown_path_kind, _) = tool_preview_source(
+        "read_file",
+        "# Title\n\nbody",
+        None,
+        Some(&markdown_metadata),
+    );
+    assert_eq!(markdown_path_kind, "markdown");
 
     let compacted = compact_preview_value(
         &json!({

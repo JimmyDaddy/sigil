@@ -58,6 +58,7 @@ pub(crate) fn materialize_memory(
         content: Some(BASE_SYSTEM_PROMPT.to_owned()),
         tool_calls: Vec::new(),
         tool_call_id: None,
+        assistant_kind: None,
     }];
 
     for document in &docs {
@@ -73,6 +74,7 @@ pub(crate) fn materialize_memory(
             )),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            assistant_kind: None,
         });
     }
 

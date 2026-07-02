@@ -347,7 +347,7 @@ impl AgentToolRuntime {
         child_session: Session,
         child_input: sigil_kernel::AgentRunInput,
         child_options: sigil_kernel::AgentRunOptions,
-        budget_scope_id: TaskId,
+        _budget_scope_id: TaskId,
         handler: &mut (dyn EventHandler + Send),
     ) -> ToolResult {
         let thread_id = child_thread.thread_id.clone();
@@ -363,160 +363,58 @@ impl AgentToolRuntime {
             mailbox_rx,
             self.background_runs.event_sink(),
         ));
-
-        loop {
-            if self.supervisor.take_background_request(&thread_id) {
-                let control =
-                    ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
-                        thread_id: thread_id.clone(),
-                        status: AgentThreadStatus::Running,
-                        reason: Some("agent moved to background".to_owned()),
-                        updated_at_ms: None,
-                    });
-                if let Err(error) = session
-                    .append_control(control.clone())
-                    .and_then(|()| handler.handle(RunEvent::Control(control)))
-                {
-                    return ToolResult::error(
-                        call.id.clone(),
-                        call.name.clone(),
-                        ToolErrorKind::Internal,
-                        error.to_string(),
-                    );
-                }
-                let _ = handler.handle(RunEvent::Notice(format!(
-                    "agent @{} moved to background",
-                    child_thread.profile_id.as_str()
-                )));
-                if let Err(error) = self.background_runs.insert(
-                    thread_id.clone(),
-                    BackgroundChatAgentHandle {
-                        thread: thread_record,
-                        handle,
-                    },
-                ) {
-                    let _ = self.supervisor.record_chat_child_failure(
-                        session,
-                        handler,
-                        &child_thread,
-                        format!("{error:#}"),
-                    );
-                    return ToolResult::error(
-                        call.id.clone(),
-                        call.name.clone(),
-                        ToolErrorKind::Internal,
-                        error.to_string(),
-                    );
-                }
-                let projection = session.agent_thread_state_projection();
-                if let Some(thread) = projection.threads.get(&thread_id) {
-                    return agent_backgrounded_tool_result(call, thread);
-                }
-                return ToolResult::ok(
-                    call.id.clone(),
-                    call.name.clone(),
-                    serde_json::to_string(&json!({
-                        "thread_id": thread_id.as_str(),
-                        "status": "running",
-                        "terminal": false,
-                        "result_available": false,
-                        "backgrounded": true,
-                        "reason": "agent moved to background",
-                        "retry_after_ms": 5_000_u64,
-                        "next_action": "continue only non-overlapping parent work; use wait_agent before the final answer",
-                        "do_not_describe_as_finished": true
-                    }))
-                    .unwrap_or_else(|error| {
-                        format!("failed to serialize backgrounded agent status: {error}")
-                    }),
-                    ToolResultMeta {
-                        details: json!({
-                            "thread_id": thread_id.as_str(),
-                            "status": "running",
-                            "terminal": false,
-                            "result_available": false,
-                            "backgrounded": true,
-                            "retry_after_ms": 5_000_u64,
-                        }),
-                        ..ToolResultMeta::default()
-                    },
-                );
-            }
-            if handle.is_finished() {
-                let output = match handle.await {
-                    Ok(Ok(output)) => output,
-                    Ok(Err(error)) => {
-                        let reason = format!("{error:#}");
-                        let _ = self.supervisor.record_chat_child_failure(
-                            session,
-                            handler,
-                            &child_thread,
-                            reason.clone(),
-                        );
-                        return ToolResult::error(
-                            call.id.clone(),
-                            call.name.clone(),
-                            ToolErrorKind::Internal,
-                            format!("child agent failed: {reason}"),
-                        );
-                    }
-                    Err(error) => {
-                        let reason = format!("child agent join failed: {error}");
-                        let _ = self.supervisor.record_chat_child_failure(
-                            session,
-                            handler,
-                            &child_thread,
-                            reason.clone(),
-                        );
-                        return ToolResult::error(
-                            call.id.clone(),
-                            call.name.clone(),
-                            ToolErrorKind::Internal,
-                            reason,
-                        );
-                    }
-                };
-                let budget_warning = self
-                    .supervisor
-                    .validate_usage_budget(&budget_scope_id, &output.usage)
-                    .err()
-                    .map(|error| format!("{error:#}"));
-                if let Err(error) = self.supervisor.record_chat_child_result(
-                    session,
-                    handler,
-                    &child_thread,
-                    output.status,
-                    &output.final_text,
-                    &output.outcome,
-                    Some(output.usage),
-                    output.final_answer_ref,
-                ) {
-                    return ToolResult::error(
-                        call.id.clone(),
-                        call.name.clone(),
-                        ToolErrorKind::Internal,
-                        error.to_string(),
-                    );
-                }
-                if let Some(warning) = budget_warning {
-                    let _ = handler.handle(RunEvent::Notice(format!(
-                        "agent budget warning after child completion: {warning}"
-                    )));
-                }
-                let projection = session.agent_thread_state_projection();
-                let thread = projection.threads.get(&thread_id);
-                let display_name = thread.and_then(|thread| thread.display_name.as_deref());
-                let result = thread.and_then(|thread| thread.result.clone());
-                return agent_result_tool_result(
-                    call,
-                    &thread_id,
-                    display_name,
-                    result.as_ref(),
-                    DEFAULT_RESULT_SUMMARY_LIMIT,
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Err(error) = self.background_runs.insert(
+            thread_id.clone(),
+            BackgroundChatAgentHandle {
+                thread: thread_record,
+                handle,
+            },
+        ) {
+            let _ = self.supervisor.record_chat_child_failure(
+                session,
+                handler,
+                &child_thread,
+                format!("{error:#}"),
+            );
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
         }
+        let projection = session.agent_thread_state_projection();
+        if let Some(thread) = projection.threads.get(&thread_id) {
+            return agent_status_tool_result(call, thread);
+        }
+        ToolResult::ok(
+            call.id.clone(),
+            call.name.clone(),
+            serde_json::to_string(&json!({
+                "thread_id": thread_id.as_str(),
+                "status": "running",
+                "terminal": false,
+                "result_available": false,
+                "backgrounded": false,
+                "required_before_final": true,
+                "retry_after_ms": 5_000_u64,
+                "next_action": "continue only non-overlapping parent work; use wait_agent before the final answer",
+                "do_not_describe_as_finished": true
+            }))
+            .unwrap_or_else(|error| format!("failed to serialize agent status: {error}")),
+            ToolResultMeta {
+                details: json!({
+                    "thread_id": thread_id.as_str(),
+                    "status": "running",
+                    "terminal": false,
+                    "result_available": false,
+                    "backgrounded": false,
+                    "required_before_final": true,
+                    "retry_after_ms": 5_000_u64,
+                }),
+                ..ToolResultMeta::default()
+            },
+        )
     }
 
     pub(super) async fn run_chat_agent(

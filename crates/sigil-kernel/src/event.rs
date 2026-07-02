@@ -836,6 +836,7 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                     | ControlEntry::AgentThreadMessageRouted(_)
                     | ControlEntry::AgentMailboxMessage(_)
                     | ControlEntry::AgentThreadResultRecorded(_)
+                    | ControlEntry::AgentThreadResultDelivered(_)
                     | ControlEntry::AgentThreadDisplayName(_)
                     | ControlEntry::AgentThreadClosed(_) => TypedDomainEvent::AgentThread(control),
                     ControlEntry::TerminalTask(entry) => TypedDomainEvent::TerminalTask(entry),
@@ -1434,6 +1435,8 @@ pub struct PublicAssistantMessage {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_kind: Option<crate::AssistantMessageKind>,
 }
 
 impl From<ModelMessage> for PublicAssistantMessage {
@@ -1442,6 +1445,7 @@ impl From<ModelMessage> for PublicAssistantMessage {
             id: message.id,
             content: message.content,
             tool_calls: message.tool_calls,
+            assistant_kind: message.assistant_kind,
         }
     }
 }
@@ -1560,6 +1564,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::AgentThreadMessageRouted(_) => "agent_thread_message_routed",
         ControlEntry::AgentMailboxMessage(_) => "agent_mailbox_message",
         ControlEntry::AgentThreadResultRecorded(_) => "agent_thread_result_recorded",
+        ControlEntry::AgentThreadResultDelivered(_) => "agent_thread_result_delivered",
         ControlEntry::AgentResultContinuation(_) => "agent_result_continuation",
         ControlEntry::AgentThreadDisplayName(_) => "agent_thread_display_name",
         ControlEntry::AgentApprovalRoute(_) => "agent_approval_route",

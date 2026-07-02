@@ -1193,6 +1193,8 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                 snapshot_required: false,
                 policy_decision: ApprovalMode::Ask,
                 external_directory_required: false,
+                allow_source: None,
+                grant_call_id: None,
                 user_decision: None,
                 reason: None,
                 preview_hash: None,
@@ -1338,6 +1340,99 @@ fn restored_failed_tool_execution_and_reasoning_trace_render_in_session_view() -
         payload["preview_lines"][0]
             .as_str()
             .is_some_and(|line| line.contains("tool execution ended with status failed"))
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_reasoning_trace_before_final_answer_does_not_render_as_second_reply() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_trace".to_owned(),
+            data: json!({"text": "draft summary that should stay hidden"}),
+        }),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            Some("final answer".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 20);
+    assert!(rendered.contains("final answer"));
+    assert!(!rendered.contains("draft summary that should stay hidden"));
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Thinking)
+            .count(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_tool_preamble_before_final_answer_does_not_render_as_second_reply() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            Some("I will inspect the files first.".to_owned()),
+            vec![ToolCall {
+                id: "call-read".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: json!({"path":"src/lib.rs"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::ToolResult(ModelMessage::tool("call-read", "file content")),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            Some("final answer".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 20);
+    assert!(rendered.contains("final answer"));
+    assert!(!rendered.contains("I will inspect the files first."));
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        1
     );
     Ok(())
 }

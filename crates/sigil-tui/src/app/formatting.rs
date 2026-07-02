@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -421,7 +422,7 @@ fn format_tool_preview_payload(
     let content = redactor.redact_text(display_content.as_ref());
     let preview_value = tool_preview_value(&content);
     let (preview_kind, preview_source) =
-        tool_preview_source(tool_name, &content, preview_value.as_ref());
+        tool_preview_source(tool_name, &content, preview_value.as_ref(), metadata);
     let all_lines = if preview_source.is_empty() {
         Vec::new()
     } else {
@@ -774,18 +775,154 @@ fn tool_preview_source(
     tool_name: &str,
     content: &str,
     preview_value: Option<&serde_json::Value>,
+    metadata: Option<&ToolResultMeta>,
 ) -> (&'static str, String) {
     if let Some(source) = agent_tool_preview_source(tool_name, preview_value) {
         return source;
+    }
+    if tool_name == "read_file" {
+        return read_file_tool_preview_source(content, preview_value, metadata);
     }
     if let Some(value) = preview_value {
         let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| content.to_owned());
         return ("json", pretty);
     }
-    if tool_name == "read_file" || looks_like_markdown_document(content) {
+    if looks_like_markdown_document(content) {
         return ("markdown", content.to_owned());
     }
     ("text", content.to_owned())
+}
+
+fn read_file_tool_preview_source(
+    content: &str,
+    preview_value: Option<&serde_json::Value>,
+    metadata: Option<&ToolResultMeta>,
+) -> (&'static str, String) {
+    if let Some(path) = metadata.and_then(read_file_metadata_path) {
+        if path_has_document_extension(&path) {
+            return ("markdown", content.to_owned());
+        }
+        if path_has_code_or_data_extension(&path) {
+            if let Some(value) = preview_value {
+                let pretty =
+                    serde_json::to_string_pretty(value).unwrap_or_else(|_| content.to_owned());
+                return ("json", pretty);
+            }
+            return ("text", content.to_owned());
+        }
+    }
+    if let Some(value) = preview_value {
+        let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| content.to_owned());
+        return ("json", pretty);
+    }
+    if looks_like_markdown_document(content) {
+        return ("markdown", content.to_owned());
+    }
+    ("text", content.to_owned())
+}
+
+fn read_file_metadata_path(metadata: &ToolResultMeta) -> Option<String> {
+    metadata
+        .details
+        .get("call")
+        .and_then(|call| call.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            metadata
+                .details
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            metadata
+                .details
+                .get("call")
+                .and_then(|call| call.get("summary"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|summary| call_summary_value(summary, "path"))
+        })
+}
+
+fn call_summary_value(call_summary: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    let start = call_summary.find(&prefix)? + prefix.len();
+    let tail = &call_summary[start..];
+    let end = tail
+        .find(|character: char| character.is_whitespace())
+        .unwrap_or(tail.len());
+    Some(tail[..end].trim().to_owned()).filter(|value| !value.is_empty())
+}
+
+fn path_has_document_extension(path: &str) -> bool {
+    path_extension(path).is_some_and(|extension| {
+        matches!(
+            extension.as_str(),
+            "md" | "markdown" | "mdown" | "mkd" | "rst" | "adoc" | "asciidoc"
+        )
+    })
+}
+
+fn path_has_code_or_data_extension(path: &str) -> bool {
+    path_extension(path).is_some_and(|extension| {
+        matches!(
+            extension.as_str(),
+            "rs" | "toml"
+                | "lock"
+                | "json"
+                | "jsonl"
+                | "yaml"
+                | "yml"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "py"
+                | "go"
+                | "java"
+                | "kt"
+                | "kts"
+                | "c"
+                | "h"
+                | "cc"
+                | "cpp"
+                | "cxx"
+                | "hpp"
+                | "cs"
+                | "swift"
+                | "rb"
+                | "php"
+                | "sh"
+                | "bash"
+                | "zsh"
+                | "fish"
+                | "sql"
+                | "html"
+                | "css"
+                | "scss"
+                | "sass"
+                | "xml"
+                | "svg"
+                | "lua"
+                | "vim"
+                | "dockerfile"
+        )
+    })
+}
+
+fn path_extension(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| name.eq_ignore_ascii_case("Dockerfile"))
+                .map(|_| "dockerfile".to_owned())
+        })
 }
 
 fn agent_tool_preview_source(
