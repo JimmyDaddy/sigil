@@ -122,7 +122,6 @@ async fn provider_stream_surfaces_sse_events_and_query() -> anyhow::Result<()> {
         base_url: server.base_url(),
         model: "models/gemini-test".to_owned(),
         api_key: Some("test-key".to_owned()),
-        ..GeminiProviderConfig::default()
     })?;
 
     let chunks = provider
@@ -161,7 +160,6 @@ async fn provider_stream_url_uses_request_model_name() -> anyhow::Result<()> {
         base_url: server.base_url(),
         model: "gemini-config".to_owned(),
         api_key: Some("test-key".to_owned()),
-        ..GeminiProviderConfig::default()
     })?;
     let mut request = test_request();
     request.model_name = "gemini-request".to_owned();
@@ -189,7 +187,6 @@ async fn provider_stream_url_falls_back_to_prefixed_config_model() -> anyhow::Re
         base_url: server.base_url(),
         model: "models/gemini-config".to_owned(),
         api_key: Some("test-key".to_owned()),
-        ..GeminiProviderConfig::default()
     })?;
     let mut request = test_request();
     request.model_name = " ".to_owned();
