@@ -670,6 +670,7 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
     let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert!(tab.is_none());
     assert!(!app.is_composer_queue_panel_focused());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
     Ok(())
 }
 
@@ -762,6 +763,15 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
     ));
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(!app.is_composer_queue_panel_focused());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert!(app.is_composer_queue_panel_focused());
+    let typed = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert!(typed.is_none());
+    assert!(!app.is_composer_queue_panel_focused());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert_eq!(app.composer.input, "x");
 
     let mut clamp_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     clamp_app.sync_current_session_state(vec![queued_conversation_input_entry(

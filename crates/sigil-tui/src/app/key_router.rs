@@ -18,7 +18,6 @@ pub(crate) enum InputContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RoutedKeyCommand {
-    Noop,
     QueueActionNext,
     QueueActionPrevious,
     QueueSelectionNext,
@@ -28,6 +27,7 @@ pub(crate) enum RoutedKeyCommand {
     QueueExecute,
     QueueCancel,
     QueueBlur,
+    QueueInsertCharacter(char),
     AgentSelectionNext,
     AgentSelectionPrevious,
     AgentActivate,
@@ -83,7 +83,6 @@ impl AppState {
         command: RoutedKeyCommand,
     ) -> anyhow::Result<Option<AppAction>> {
         let action = match command {
-            RoutedKeyCommand::Noop => None,
             RoutedKeyCommand::QueueActionNext => {
                 self.cycle_composer_queue_action(true);
                 None
@@ -108,6 +107,22 @@ impl AppState {
             RoutedKeyCommand::QueueCancel => self.cancel_selected_queue_item(),
             RoutedKeyCommand::QueueBlur => {
                 self.blur_composer_queue_panel();
+                self.active_pane = PaneFocus::Composer;
+                None
+            }
+            RoutedKeyCommand::QueueInsertCharacter(character) => {
+                self.blur_composer_queue_panel();
+                self.active_pane = PaneFocus::Composer;
+                let normalized = if normalize_command_prefix_character(character).is_some()
+                    && self.composer.input.trim().is_empty()
+                {
+                    '/'
+                } else {
+                    character
+                };
+                self.insert_input_character(normalized);
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
                 None
             }
             RoutedKeyCommand::AgentSelectionNext => {
@@ -397,7 +412,9 @@ fn resolve_queue_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
         KeyCode::Backspace | KeyCode::Delete if key.modifiers.is_empty() => {
             Some(RoutedKeyCommand::QueueCancel)
         }
-        KeyCode::Char(_) if key.modifiers.is_empty() => Some(RoutedKeyCommand::Noop),
+        KeyCode::Char(character) if key.modifiers.is_empty() => {
+            Some(RoutedKeyCommand::QueueInsertCharacter(character))
+        }
         _ => None,
     }
 }
