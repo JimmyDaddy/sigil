@@ -112,6 +112,8 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 
 审批卡片固定为 `Summary / Files / Diff / Actions` 四区。`write_file`、`edit_file`、`delete_file` 和 `apply_changeset` 的 diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换。`apply_changeset` 审批会额外显示 change set id、整体 risk、每文件 action/risk，以及基于文件类型的格式化建议。
 
+permission path 分类使用 primary trust zone + risk overlay 两层信号。`docs`、`dev/docs`、`.sigil` runtime state、project assets、user state/cache 和 external path 先归入对应 `PathTrustZone`；类似 `sigil.toml`、`.env*`、`credentials*`、`secret*`、`secrets*` 的敏感命名会额外产生 `SensitiveName` overlay。这样 `docs/credentials.md` 仍能显示为 workspace docs，但写入风险会按 overlay 升级为 protected，不再依赖单个 `if` 分支顺序在“文档区”和“敏感路径”之间二选一。
+
 shell 审批在进入 policy 前会先做命令意图分析。`cargo check`、`cargo fmt -- --check`、`cargo test`、`scripts/check-touched.sh`、只读 `git`、搜索和列表命令会归入稳定 command family；`cargo check 2>&1`、带 workspace `cd` 的等价命令以及只追加 `tail/head/wc/cat` 的输出过滤命令共享同一 workspace check session grant subject。`/dev/null`、`/dev/stdout` 和 `/dev/stderr` 不作为 external directory subject；`grep --include` 模式不作为路径 subject；workspace-relative missing path 仍按 workspace subject 展示。审批 footer 只把真实 decision 渲染为 action badge，快捷键作为灰色 hint 展示，避免把 `Enter` 或 `Y/N` 误表现为额外按钮。审批、composer agent panel、composer queue panel 和 activity agent list 的核心键位通过集中 key router 解析，footer/keymap 测试覆盖高风险 context。
 
 ## Session 与 Control State

@@ -634,7 +634,7 @@ fn approval_risk_color(label: &str) -> Color {
 
 fn approval_risk_color_with_palette(label: &str, palette: &ThemePalette) -> Color {
     match label {
-        "high" | "delete" => palette.risk_high,
+        "high" | "delete" | "destructive" | "protected" => palette.risk_high,
         "medium" | "update" => palette.risk_medium,
         "low" | "create" => palette.risk_low,
         _ => palette.text_muted,

@@ -481,6 +481,8 @@ fn approval_diagnostics_helpers_cover_clean_warning_and_error_states() {
     assert_eq!(approval_diagnostics_style(warnings).fg, Some(Color::Yellow));
     assert_eq!(approval_diagnostics_style(errors).fg, Some(Color::LightRed));
     assert_eq!(approval_risk_color("low"), Color::Green);
+    assert_eq!(approval_risk_color("destructive"), Color::LightRed);
+    assert_eq!(approval_risk_color("protected"), Color::LightRed);
     assert_eq!(approval_risk_color("unknown"), palette.text_muted);
     let selected = approval_file_meta_style("create", true);
     assert_eq!(selected.fg, Some(Color::Black));

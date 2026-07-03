@@ -9,10 +9,11 @@ use crate::{
 
 use super::{
     ApprovalMode, EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
-    PathTrustZone, PermissionAccessConfig, PermissionConfig, PermissionConfirmation,
-    PermissionEvaluationContext, PermissionPolicy, PermissionPreset, PermissionRisk,
-    PermissionRule, ToolOperation, classify_path_trust_zone, classify_path_trust_zone_with_context,
-    tool_approval_session_grant_available,
+    PathRiskOverlay, PathTrustZone, PermissionAccessConfig, PermissionConfig,
+    PermissionConfirmation, PermissionEvaluationContext, PermissionPolicy, PermissionPreset,
+    PermissionRisk, PermissionRule, ToolOperation, classify_path_trust_analysis,
+    classify_path_trust_analysis_with_context, classify_path_trust_zone,
+    classify_path_trust_zone_with_context, tool_approval_session_grant_available,
 };
 
 fn spec(access: ToolAccess) -> ToolSpec {
@@ -48,6 +49,10 @@ fn permission_fine_grained_enums_serde_roundtrip() -> Result<()> {
     assert_eq!(
         serde_json::from_str::<PathTrustZone>(r#""workspace_project_asset""#)?,
         PathTrustZone::WorkspaceProjectAsset
+    );
+    assert_eq!(
+        serde_json::from_str::<PathRiskOverlay>(r#""sensitive_name""#)?,
+        PathRiskOverlay::SensitiveName
     );
     assert_eq!(
         serde_json::from_str::<PermissionRisk>(r#""destructive""#)?,
@@ -117,6 +122,28 @@ fn destructive_allow_is_overlaid_to_ask() -> Result<()> {
     assert_eq!(decision.operation, ToolOperation::DeleteFile);
     assert_eq!(decision.risk, PermissionRisk::Destructive);
     assert_eq!(decision.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn mutating_command_is_destructive_even_when_tool_allows() -> Result<()> {
+    let config = PermissionConfig {
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteMutatingCommand,
+        vec![ToolSubject::command("make install", "make install")],
+        None,
+    )?;
+
+    assert_eq!(decision.operation, ToolOperation::ExecuteMutatingCommand);
+    assert_eq!(decision.risk, PermissionRisk::Destructive);
+    assert_eq!(decision.mode, ApprovalMode::Ask);
+    assert!(decision.snapshot_required);
     Ok(())
 }
 
@@ -231,6 +258,22 @@ fn permission_context_classifies_runtime_user_and_project_asset_roots() -> Resul
     )?;
     assert_eq!(user_cache.subject_zones, vec![PathTrustZone::UserCache]);
     assert_eq!(user_cache.mode, ApprovalMode::Deny);
+
+    let workspace_doc_path = workspace.join("docs/credentials.md");
+    let workspace_doc_analysis = classify_path_trust_analysis_with_context(
+        &ToolSubject::path_with_scope(
+            workspace_doc_path.display().to_string(),
+            workspace_doc_path.display().to_string(),
+            Some(workspace_doc_path),
+            ToolSubjectScope::Workspace,
+        ),
+        &context,
+    );
+    assert_eq!(workspace_doc_analysis.zone, PathTrustZone::WorkspaceDocs);
+    assert_eq!(
+        workspace_doc_analysis.overlays,
+        vec![PathRiskOverlay::SensitiveName]
+    );
     Ok(())
 }
 
@@ -283,7 +326,7 @@ fn permission_context_handles_caps_relative_roots_and_fallbacks() -> Result<()> 
     );
     assert_eq!(
         classify_path_trust_zone_with_context(&empty_subject, &context),
-        PathTrustZone::WorkspaceSource
+        PathTrustZone::Unknown
     );
 
     let outside_workspace = ToolSubject::path_with_scope(
@@ -310,8 +353,39 @@ fn built_in_path_trust_zone_classifier_covers_sensitive_and_doc_paths() {
         PathTrustZone::WorkspaceConfigSecret
     );
     assert_eq!(
+        classify_path_trust_zone(&path_subject(".env.local")),
+        PathTrustZone::WorkspaceConfigSecret
+    );
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("credentials.json")),
+        PathTrustZone::WorkspaceConfigSecret
+    );
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("secrets/api.toml")),
+        PathTrustZone::WorkspaceConfigSecret
+    );
+    assert_eq!(
         classify_path_trust_zone(&path_subject("docs/en/safety.md")),
         PathTrustZone::WorkspaceDocs
+    );
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("docs/credentials.md")),
+        PathTrustZone::WorkspaceDocs
+    );
+    let doc_secret = classify_path_trust_analysis(&path_subject("docs/credentials.md"));
+    assert_eq!(doc_secret.zone, PathTrustZone::WorkspaceDocs);
+    assert_eq!(doc_secret.overlays, vec![PathRiskOverlay::SensitiveName]);
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("dev/docs/secret-handling.md")),
+        PathTrustZone::WorkspaceDocs
+    );
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("src/credentials_provider.rs")),
+        PathTrustZone::WorkspaceSource
+    );
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("src/secretary.rs")),
+        PathTrustZone::WorkspaceSource
     );
     assert_eq!(
         classify_path_trust_zone(&ToolSubject::command("stdin", "terminal_input")),
@@ -695,6 +769,29 @@ fn workspace_config_secret_write_is_protected_and_not_session_grantable() -> Res
             .subject_zones
             .contains(&PathTrustZone::WorkspaceConfigSecret)
     );
+    assert!(!tool_approval_session_grant_available(&decision));
+    Ok(())
+}
+
+#[test]
+fn sensitive_named_doc_write_is_protected_by_overlay() -> Result<()> {
+    let config = PermissionConfig {
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![path_subject("docs/credentials.md")],
+    )?;
+
+    assert_eq!(decision.subject_zones, vec![PathTrustZone::WorkspaceDocs]);
+    assert_eq!(
+        decision.subject_risk_overlays,
+        vec![PathRiskOverlay::SensitiveName]
+    );
+    assert_eq!(decision.risk, PermissionRisk::Protected);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
     assert!(!tool_approval_session_grant_available(&decision));
     Ok(())
 }

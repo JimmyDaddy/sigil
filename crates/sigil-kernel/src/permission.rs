@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::tool::{ToolAccess, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope};
 
+const WORKSPACE_RUNTIME_STATE_PATHS: &[&str] = &[
+    ".sigil/sessions",
+    ".sigil/state",
+    ".sigil/cache",
+    ".sigil/tasks",
+    ".sigil/changesets",
+    ".sigil/tmp",
+];
+const WORKSPACE_PROJECT_ASSET_PATHS: &[&str] =
+    &[".sigil/agents", ".sigil/skills", ".sigil/plugins"];
+const WORKSPACE_DOC_PATHS: &[&str] = &["docs", "dev/docs"];
+
 /// Default interaction surface for one agent run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionMode {
@@ -203,6 +215,20 @@ pub enum PathTrustZone {
     Unknown,
 }
 
+/// Additional risk signals that can apply independently from a path's primary trust zone.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PathRiskOverlay {
+    SensitiveName,
+}
+
+/// Product safety classification for one path subject.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathTrustAnalysis {
+    pub zone: PathTrustZone,
+    pub overlays: Vec<PathRiskOverlay>,
+}
+
 /// Derived risk label used by policy overlays and approval UI.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -250,6 +276,7 @@ pub struct PermissionDecision {
     pub risk: PermissionRisk,
     pub subjects: Vec<ToolSubject>,
     pub subject_zones: Vec<PathTrustZone>,
+    pub subject_risk_overlays: Vec<PathRiskOverlay>,
     pub external_directory_required: bool,
     pub confirmation: Option<PermissionConfirmation>,
     pub snapshot_required: bool,
@@ -282,16 +309,22 @@ impl PermissionDecision {
         subjects: Vec<ToolSubject>,
         external_directory_required: bool,
     ) -> Self {
-        let subject_zones = subjects
+        let subject_analyses = subjects
             .iter()
-            .map(classify_path_trust_zone)
+            .map(classify_path_trust_analysis)
             .collect::<Vec<_>>();
-        Self::new_with_operation_and_zones(
+        let subject_zones = subject_analyses
+            .iter()
+            .map(|analysis| analysis.zone)
+            .collect::<Vec<_>>();
+        let subject_risk_overlays = collect_path_risk_overlays(&subject_analyses);
+        Self::new_with_operation_zones_and_overlays(
             mode,
             operation,
             access,
             subjects,
             subject_zones,
+            subject_risk_overlays,
             external_directory_required,
         )
     }
@@ -305,7 +338,33 @@ impl PermissionDecision {
         subject_zones: Vec<PathTrustZone>,
         external_directory_required: bool,
     ) -> Self {
-        let risk = derive_permission_risk(access, operation, &subject_zones);
+        let subject_risk_overlays = subjects
+            .iter()
+            .flat_map(path_risk_overlays)
+            .collect::<Vec<_>>();
+        Self::new_with_operation_zones_and_overlays(
+            mode,
+            operation,
+            access,
+            subjects,
+            subject_zones,
+            subject_risk_overlays,
+            external_directory_required,
+        )
+    }
+
+    /// Constructs a decision with pre-classified path zones and risk overlays.
+    pub fn new_with_operation_zones_and_overlays(
+        mode: ApprovalMode,
+        operation: ToolOperation,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+        subject_zones: Vec<PathTrustZone>,
+        subject_risk_overlays: Vec<PathRiskOverlay>,
+        external_directory_required: bool,
+    ) -> Self {
+        let risk =
+            derive_permission_risk(access, operation, &subject_zones, &subject_risk_overlays);
         let mode = apply_operation_risk_overlay(mode, operation, risk);
         let confirmation = confirmation_for_risk(risk, &subject_zones).or_else(|| {
             (access == ToolAccess::Write && subject_zones.contains(&PathTrustZone::External))
@@ -319,6 +378,7 @@ impl PermissionDecision {
             risk,
             subjects,
             subject_zones,
+            subject_risk_overlays,
             external_directory_required,
             confirmation,
             snapshot_required,
@@ -465,25 +525,31 @@ impl<'a> PermissionPolicy<'a> {
         {
             mode = combine_modes(vec![mode, cap_mode]);
         }
-        let subject_zones = self.classify_subject_zones(&subjects);
+        let subject_analyses = self.classify_subject_trust_analyses(&subjects);
+        let subject_zones = subject_analyses
+            .iter()
+            .map(|analysis| analysis.zone)
+            .collect::<Vec<_>>();
+        let subject_risk_overlays = collect_path_risk_overlays(&subject_analyses);
 
-        Ok(PermissionDecision::new_with_operation_and_zones(
+        Ok(PermissionDecision::new_with_operation_zones_and_overlays(
             mode,
             operation,
             access,
             subjects,
             subject_zones,
+            subject_risk_overlays,
             external_directory_required,
         ))
     }
 
-    fn classify_subject_zones(&self, subjects: &[ToolSubject]) -> Vec<PathTrustZone> {
+    fn classify_subject_trust_analyses(&self, subjects: &[ToolSubject]) -> Vec<PathTrustAnalysis> {
         subjects
             .iter()
             .map(|subject| {
                 self.context.map_or_else(
-                    || classify_path_trust_zone(subject),
-                    |context| classify_path_trust_zone_with_context(subject, context),
+                    || classify_path_trust_analysis(subject),
+                    |context| classify_path_trust_analysis_with_context(subject, context),
                 )
             })
             .collect()
@@ -603,51 +669,72 @@ pub fn infer_tool_operation(tool_name: &str, access: ToolAccess) -> ToolOperatio
 
 /// Classifies a path subject into a trust zone using conservative built-in defaults.
 pub fn classify_path_trust_zone(subject: &ToolSubject) -> PathTrustZone {
+    classify_path_trust_analysis(subject).zone
+}
+
+/// Classifies a path subject into a trust zone and independent risk overlays.
+pub fn classify_path_trust_analysis(subject: &ToolSubject) -> PathTrustAnalysis {
     if subject.scope == ToolSubjectScope::External {
-        return PathTrustZone::External;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::External,
+            overlays: path_risk_overlays(subject),
+        };
     }
     if subject.kind != ToolSubjectKind::Path {
-        return PathTrustZone::Unknown;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::Unknown,
+            overlays: Vec::new(),
+        };
     }
 
     let normalized = subject.normalized.trim_start_matches("./");
+    if normalized.trim().is_empty() {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::Unknown,
+            overlays: Vec::new(),
+        };
+    }
+    let overlays = path_risk_overlays(subject);
     if path_is_under(normalized, ".git") {
-        return PathTrustZone::WorkspaceGitMetadata;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceGitMetadata,
+            overlays,
+        };
     }
     if normalized == ".sigil" {
-        return PathTrustZone::WorkspaceRuntimeState;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceRuntimeState,
+            overlays,
+        };
     }
-    if path_is_under_any(
-        normalized,
-        &[
-            ".sigil/sessions",
-            ".sigil/state",
-            ".sigil/cache",
-            ".sigil/tasks",
-            ".sigil/changesets",
-            ".sigil/tmp",
-        ],
-    ) {
-        return PathTrustZone::WorkspaceRuntimeState;
+    if path_is_under_any(normalized, WORKSPACE_RUNTIME_STATE_PATHS) {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceRuntimeState,
+            overlays,
+        };
     }
-    if path_is_under_any(
-        normalized,
-        &[".sigil/agents", ".sigil/skills", ".sigil/plugins"],
-    ) {
-        return PathTrustZone::WorkspaceProjectAsset;
+    if path_is_under_any(normalized, WORKSPACE_PROJECT_ASSET_PATHS) {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceProjectAsset,
+            overlays,
+        };
     }
-    if normalized == "sigil.toml"
-        || normalized == ".env"
-        || normalized.starts_with(".env.")
-        || normalized.contains("credentials")
-        || normalized.contains("secret")
-    {
-        return PathTrustZone::WorkspaceConfigSecret;
+    if path_is_under_any(normalized, WORKSPACE_DOC_PATHS) {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceDocs,
+            overlays,
+        };
     }
-    if normalized.starts_with("docs/") || normalized.starts_with("dev/docs/") {
-        return PathTrustZone::WorkspaceDocs;
+    if workspace_config_secret_path(normalized) {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceConfigSecret,
+            overlays,
+        };
     }
-    PathTrustZone::WorkspaceSource
+    PathTrustAnalysis {
+        zone: PathTrustZone::WorkspaceSource,
+        overlays,
+    }
 }
 
 /// Classifies a path subject into a trust zone using the active runtime path context.
@@ -655,35 +742,87 @@ pub fn classify_path_trust_zone_with_context(
     subject: &ToolSubject,
     context: &PermissionEvaluationContext,
 ) -> PathTrustZone {
+    classify_path_trust_analysis_with_context(subject, context).zone
+}
+
+/// Classifies a path subject using the active runtime path context and risk overlays.
+pub fn classify_path_trust_analysis_with_context(
+    subject: &ToolSubject,
+    context: &PermissionEvaluationContext,
+) -> PathTrustAnalysis {
     if subject.scope == ToolSubjectScope::External {
-        return PathTrustZone::External;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::External,
+            overlays: path_risk_overlays(subject),
+        };
     }
     if subject.kind != ToolSubjectKind::Path {
-        return PathTrustZone::Unknown;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::Unknown,
+            overlays: Vec::new(),
+        };
     }
 
     let Some(subject_path) = subject_path_for_context(subject, context) else {
-        return classify_path_trust_zone(subject);
+        return classify_path_trust_analysis(subject);
     };
+    let overlays = path_risk_overlays(subject);
     if path_starts_with_any_context_root(&subject_path, &context.runtime_state_roots, context) {
-        return PathTrustZone::WorkspaceRuntimeState;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceRuntimeState,
+            overlays,
+        };
     }
     if path_starts_with_any_context_root(&subject_path, &context.project_asset_roots, context) {
-        return PathTrustZone::WorkspaceProjectAsset;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::WorkspaceProjectAsset,
+            overlays,
+        };
     }
     if path_starts_with_any_context_root(&subject_path, &context.user_state_roots, context) {
-        return PathTrustZone::UserState;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::UserState,
+            overlays,
+        };
     }
     if path_starts_with_any_context_root(&subject_path, &context.user_cache_roots, context) {
-        return PathTrustZone::UserCache;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::UserCache,
+            overlays,
+        };
     }
 
     let workspace_root = normalize_policy_path(&context.workspace_root);
     if !workspace_root.as_os_str().is_empty() && !subject_path.starts_with(&workspace_root) {
-        return PathTrustZone::External;
+        return PathTrustAnalysis {
+            zone: PathTrustZone::External,
+            overlays,
+        };
     }
 
-    classify_path_trust_zone(subject)
+    let built_in_subject = subject_path
+        .strip_prefix(&workspace_root)
+        .ok()
+        .map(|relative| {
+            let mut normalized = relative.to_string_lossy().replace('\\', "/");
+            if normalized.is_empty() {
+                normalized = ".".to_owned();
+            }
+            ToolSubject::path_with_scope(
+                subject.original.clone(),
+                normalized,
+                subject.canonical_path.clone(),
+                ToolSubjectScope::Workspace,
+            )
+        });
+    let built_in = built_in_subject.as_ref().map_or_else(
+        || classify_path_trust_analysis(subject),
+        classify_path_trust_analysis,
+    );
+    PathTrustAnalysis {
+        zone: built_in.zone,
+        overlays,
+    }
 }
 
 fn subject_path_for_context(
@@ -746,8 +885,9 @@ pub fn derive_permission_risk(
     access: ToolAccess,
     operation: ToolOperation,
     zones: &[PathTrustZone],
+    overlays: &[PathRiskOverlay],
 ) -> PermissionRisk {
-    if zones.iter().any(|zone| {
+    if (zones.iter().any(|zone| {
         matches!(
             zone,
             PathTrustZone::WorkspaceGitMetadata
@@ -756,7 +896,8 @@ pub fn derive_permission_risk(
                 | PathTrustZone::UserState
                 | PathTrustZone::UserCache
         )
-    }) && access != ToolAccess::Read
+    }) || overlays.contains(&PathRiskOverlay::SensitiveName))
+        && access != ToolAccess::Read
     {
         return PermissionRisk::Protected;
     }
@@ -767,6 +908,7 @@ pub fn derive_permission_risk(
             | ToolOperation::DeleteDirectory
             | ToolOperation::RecursiveDelete
             | ToolOperation::ApplyChangeSet
+            | ToolOperation::ExecuteMutatingCommand
             | ToolOperation::ExecuteDestructiveCommand
     ) {
         return PermissionRisk::Destructive;
@@ -951,6 +1093,49 @@ fn path_is_under(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn collect_path_risk_overlays(analyses: &[PathTrustAnalysis]) -> Vec<PathRiskOverlay> {
+    analyses
+        .iter()
+        .flat_map(|analysis| analysis.overlays.iter().copied())
+        .fold(Vec::new(), |mut overlays, overlay| {
+            if !overlays.contains(&overlay) {
+                overlays.push(overlay);
+            }
+            overlays
+        })
+}
+
+fn path_risk_overlays(subject: &ToolSubject) -> Vec<PathRiskOverlay> {
+    if subject.kind != ToolSubjectKind::Path {
+        return Vec::new();
+    }
+    let normalized = subject.normalized.trim_start_matches("./");
+    workspace_config_secret_path(normalized)
+        .then_some(PathRiskOverlay::SensitiveName)
+        .into_iter()
+        .collect()
+}
+
+fn workspace_config_secret_path(path: &str) -> bool {
+    if path == "sigil.toml" {
+        return true;
+    }
+    Path::new(path).components().any(|component| {
+        let Component::Normal(part) = component else {
+            return false;
+        };
+        let name = part.to_string_lossy().to_ascii_lowercase();
+        name == ".env"
+            || name.starts_with(".env.")
+            || name == "credentials"
+            || name.starts_with("credentials.")
+            || name == "secret"
+            || name.starts_with("secret.")
+            || name == "secrets"
+            || name.starts_with("secrets.")
+    })
 }
 
 struct CompiledPermissionRule<'a> {
