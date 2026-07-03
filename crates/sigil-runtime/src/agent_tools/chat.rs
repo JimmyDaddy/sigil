@@ -80,7 +80,39 @@ impl AgentToolRuntime {
                 error.to_string(),
             );
         }
-        let projection = session.agent_thread_state_projection();
+        let mut projection = session.agent_thread_state_projection();
+        let Some(thread) = projection.threads.get(&thread_id) else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::NotFound,
+                format!("agent thread {} was not found", thread_id.as_str()),
+            );
+        };
+        if !thread.status.is_terminal() && !self.background_runs.contains(&thread_id) {
+            let reason =
+                "agent runtime handle is unavailable; cannot wait for this thread in the current process"
+                    .to_owned();
+            let status = ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+                thread_id: thread_id.clone(),
+                status: AgentThreadStatus::Unavailable,
+                reason: Some(reason),
+                updated_at_ms: Some(unix_time_ms()),
+            });
+            if let Err(error) = session
+                .append_control(status.clone())
+                .and_then(|()| handler.handle(RunEvent::Control(status)))
+            {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+            self.pending_waits.remove(&thread_id);
+            projection = session.agent_thread_state_projection();
+        }
         let Some(thread) = projection.threads.get(&thread_id) else {
             return ToolResult::error(
                 call.id.clone(),

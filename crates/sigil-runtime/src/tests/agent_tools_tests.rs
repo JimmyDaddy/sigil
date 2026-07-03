@@ -1978,6 +1978,51 @@ fn final_answer_blocker_reports_pending_join_before_final_threads() -> Result<()
     Ok(())
 }
 
+#[tokio::test]
+async fn wait_agent_unavailable_join_before_final_thread_unblocks_final_answer() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "agent_join_orphan",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        sigil_kernel::AgentThreadStatus::Running,
+        None,
+    )?;
+
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_some(),
+        "running join-before-final thread should block before wait_agent"
+    );
+    let wait = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-wait-join-orphan".to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("wait_agent handled");
+    let payload: serde_json::Value = serde_json::from_str(&wait.content)?;
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["polling_recommended"], false);
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_none(),
+        "unavailable child handle should not keep forcing repeated wait_agent calls"
+    );
+    Ok(())
+}
+
 #[test]
 fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()> {
     let config = root_config();
@@ -2568,7 +2613,7 @@ async fn wait_agent_waits_for_running_background_result() -> Result<()> {
 }
 
 #[tokio::test]
-async fn wait_agent_throttles_repeated_pending_status_for_same_thread() -> Result<()> {
+async fn wait_agent_marks_running_thread_without_live_handle_unavailable() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -2665,29 +2710,37 @@ async fn wait_agent_throttles_repeated_pending_status_for_same_thread() -> Resul
         .expect("second wait handled");
 
     let first_payload: serde_json::Value = serde_json::from_str(&first.content)?;
+    assert_eq!(first_payload["status"], "unavailable");
+    assert_eq!(first_payload["terminal"], true);
+    assert_eq!(first_payload["result_available"], false);
+    assert_eq!(first_payload["wait_available"], false);
+    assert_eq!(first_payload["polling_recommended"], false);
+    assert_eq!(first_payload["rerun_not_needed"], true);
+    assert_eq!(first_payload["retry_after_ms"], serde_json::Value::Null);
+    assert_eq!(
+        first_payload["next_action"],
+        "report that this agent result is unavailable in the current process; do not call wait_agent again for this thread"
+    );
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("agent thread should be projected");
+    assert_eq!(thread.status, AgentThreadStatus::Unavailable);
+    assert!(
+        thread
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("runtime handle is unavailable"))
+    );
+
     let second_payload: serde_json::Value = serde_json::from_str(&second.content)?;
-    assert_eq!(first_payload["status"], "running");
-    assert_eq!(first_payload["coalesced"], serde_json::Value::Null);
-    assert_eq!(second_payload["status"], "running");
-    assert_eq!(second_payload["coalesced"], true);
-    assert_eq!(second_payload["polling_throttled"], true);
+    assert_eq!(second_payload["status"], "unavailable");
+    assert_eq!(second_payload["polling_recommended"], false);
+    assert_eq!(second_payload["retry_after_ms"], serde_json::Value::Null);
     assert_eq!(
         second_payload["coalescing_key"],
         "wait_agent:agent_chat_pending"
-    );
-    assert!(
-        second_payload["retry_after_ms"]
-            .as_u64()
-            .is_some_and(|value| value > 0)
-    );
-    assert_eq!(
-        second_payload["next_poll_after_ms"],
-        second_payload["retry_after_ms"]
-    );
-    assert!(
-        second_payload["next_poll_after_unix_ms"]
-            .as_u64()
-            .is_some_and(|value| value > 0)
     );
     Ok(())
 }

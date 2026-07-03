@@ -392,6 +392,22 @@ impl AppState {
         self.rerender_timeline_entry(index);
     }
 
+    pub(super) fn discard_streaming_assistant_entry(&mut self) {
+        let Some(index) = self.streaming_assistant_index.take() else {
+            return;
+        };
+        self.deferred_timeline_render_indexes.remove(&index);
+        if self
+            .timeline
+            .get(index)
+            .is_none_or(|entry| entry.role != TimelineRole::Assistant)
+        {
+            return;
+        }
+        self.timeline.remove(index);
+        self.rebuild_timeline_projection_after_entry_removal();
+    }
+
     pub(super) fn downgrade_streaming_assistant_entry_to_thinking(&mut self) {
         let Some(index) = self.streaming_assistant_index else {
             return;

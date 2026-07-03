@@ -1709,6 +1709,9 @@ impl EventHandler for AppState {
                 }
             }
             RunEvent::Notice(note) => {
+                if notice_rejects_current_final_candidate(&note) {
+                    self.discard_streaming_assistant_entry();
+                }
                 self.last_notice = Some(note.clone());
                 if notice_is_timeline_worthy(&note) {
                     self.push_timeline(TimelineRole::Notice, note.clone());
@@ -1946,6 +1949,16 @@ fn notice_is_timeline_worthy(note: &str) -> bool {
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
+}
+
+fn notice_rejects_current_final_candidate(note: &str) -> bool {
+    matches!(
+        note,
+        "agent delegation required before final answer; retrying with explicit agent-tool instruction"
+            | "agent delegation requirement was not satisfied; no final answer was recorded"
+            | "pending agent state blocks final answer; continuing"
+            | "recorded run facts added before final answer; continuing"
+    )
 }
 
 fn spawn_agent_profile_id(call: &ToolCall) -> Option<String> {

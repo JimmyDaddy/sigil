@@ -246,6 +246,17 @@ pub(super) fn agent_status_tool_result(
     let retry_after_ms =
         (!thread.status.is_terminal()).then_some(WAIT_AGENT_RUNNING_RETRY_AFTER_MS);
     let next_poll_after_unix_ms = retry_after_ms.map(|retry| unix_time_ms().saturating_add(retry));
+    let wait_available = thread.status != AgentThreadStatus::Unavailable;
+    let polling_recommended = retry_after_ms.is_some() && wait_available;
+    let next_action = if thread.status == AgentThreadStatus::Unavailable && result.is_none() {
+        "report that this agent result is unavailable in the current process; do not call wait_agent again for this thread"
+    } else if thread.status.is_terminal() && result.is_some() {
+        "use result_ref/read_args when more detail is needed"
+    } else if thread.status.is_terminal() {
+        "report this terminal agent status; no result page is available and wait_agent should not be called again"
+    } else {
+        "continue only non-overlapping parent work; do not call wait_agent again until retry_after_ms; wait before the final answer"
+    };
     let payload = json!({
         "thread_id": thread.thread_id.as_str(),
         "display_name": thread.display_name.as_deref(),
@@ -253,15 +264,14 @@ pub(super) fn agent_status_tool_result(
         "terminal": thread.status.is_terminal(),
         "reason": &thread.reason,
         "result_available": result.is_some(),
+        "wait_available": wait_available,
+        "polling_recommended": polling_recommended,
+        "rerun_not_needed": thread.status == AgentThreadStatus::Unavailable && result.is_none(),
         "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
         "retry_after_ms": retry_after_ms,
         "next_poll_after_ms": retry_after_ms,
         "next_poll_after_unix_ms": next_poll_after_unix_ms,
-        "next_action": if thread.status.is_terminal() {
-            "use result_ref/read_args when more detail is needed"
-        } else {
-            "continue only non-overlapping parent work; do not call wait_agent again until retry_after_ms; wait before the final answer"
-        },
+        "next_action": next_action,
         "result_ref": result.map(|result| json!({
             "thread_id": result.thread_id.as_str(),
             "status": terminal_status_label(result.status),
@@ -297,6 +307,9 @@ pub(super) fn agent_status_tool_result(
                 "display_name": thread.display_name.as_deref(),
                 "status": thread_status_label(thread.status),
                 "result_available": result.is_some(),
+                "wait_available": wait_available,
+                "polling_recommended": polling_recommended,
+                "rerun_not_needed": thread.status == AgentThreadStatus::Unavailable && result.is_none(),
                 "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
                 "retry_after_ms": retry_after_ms,
                 "next_poll_after_ms": retry_after_ms,
