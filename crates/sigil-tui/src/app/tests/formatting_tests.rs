@@ -166,6 +166,7 @@ fn formatted_tool_restore_handles_large_error_payloads() -> Result<()> {
             &envelope,
             Some(&execution),
             None,
+            None,
             &SecretRedactor::empty(),
         ))?;
 
@@ -200,6 +201,36 @@ fn read_file_results_use_markdown_preview_kind() -> Result<()> {
         payload["preview_lines"][0]
             .as_str()
             .is_some_and(|line| line.starts_with("# Title"))
+    );
+    Ok(())
+}
+
+#[test]
+fn read_file_results_use_code_preview_kind_from_metadata_path() -> Result<()> {
+    let payload: serde_json::Value = serde_json::from_str(&format_tool_result_block_redacted(
+        &ToolResult::ok(
+            "call-read-rs",
+            "read_file",
+            "fn main() {}\n".to_owned(),
+            ToolResultMeta {
+                details: serde_json::json!({
+                    "path": "src/main.rs",
+                    "language": "rust"
+                }),
+                ..ToolResultMeta::default()
+            },
+        ),
+        None,
+        &SecretRedactor::empty(),
+    ))?;
+
+    assert_eq!(payload["preview_kind"], "code");
+    assert_eq!(payload["preview_language"], "rust");
+    assert_eq!(payload["metadata"]["details"]["path"], "src/main.rs");
+    assert!(
+        payload["preview_lines"][0]
+            .as_str()
+            .is_some_and(|line| line.contains("fn main"))
     );
     Ok(())
 }

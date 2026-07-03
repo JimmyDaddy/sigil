@@ -642,7 +642,7 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("step 3"))
+            .any(|span| span.content.as_ref().contains("step 2"))
     }));
     assert!(!lines.iter().any(|line| {
         line.spans
@@ -652,7 +652,7 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("1 more lines hidden"))
+            .any(|span| span.content.as_ref().contains("2 lines hidden"))
     }));
 
     let expanded = render_timeline_entry_lines_with_options(
@@ -768,20 +768,10 @@ fn thinking_trace_marker_and_branch_use_configured_theme_palette() {
         lines
             .iter()
             .flat_map(|line| line.spans.iter())
-            .any(|span| span.content.as_ref().contains("step 1")
-                && span.style.fg == Some(palette.text_secondary))
+            .any(|span| span.content.as_ref().contains("2 lines")
+                && span.style.fg == Some(palette.text_muted))
     );
-}
-
-#[test]
-fn thinking_preview_lines_handles_tilde_fences_and_closing_fences() {
-    let preview = thinking_preview_lines("~~~text\nfirst\n~~~\nafter", 1);
-
-    assert_eq!(
-        preview,
-        vec!["~~~text".to_owned(), "first".to_owned(), "~~~".to_owned()]
-    );
-    assert!(is_markdown_fence("   ~~~text"));
+    assert!(!rendered_plain_lines(&lines).join("\n").contains("hidden"));
 }
 
 #[test]
@@ -791,9 +781,7 @@ fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews(
         text: " \n ".to_owned(),
     };
     let empty_plain = rendered_plain_lines(&render_timeline_entry_lines(&empty)).join("\n");
-    assert!(empty_plain.contains("1 line"));
-    assert!(!empty_plain.contains("Ctrl-T"));
-    assert!(!empty_plain.contains("more lines hidden"));
+    assert!(empty_plain.is_empty());
 
     let short = TimelineEntry {
         role: TimelineRole::Thinking,
@@ -801,9 +789,11 @@ fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews(
     };
     let short_plain = rendered_plain_lines(&render_timeline_entry_lines(&short)).join("\n");
     assert!(short_plain.contains("3 lines"));
-    assert!(short_plain.contains("third step"));
-    assert!(!short_plain.contains("Ctrl-T"));
-    assert!(!short_plain.contains("more lines hidden"));
+    assert!(short_plain.contains("only step"));
+    assert!(short_plain.contains("second step"));
+    assert!(short_plain.contains("1 line hidden"));
+    assert!(!short_plain.contains("third step"));
+    assert!(short_plain.contains("Ctrl-T"));
     let expanded_short_plain = rendered_plain_lines(&render_timeline_entry_lines_with_options(
         &short,
         &TimelineRenderOptions {
@@ -814,7 +804,8 @@ fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews(
     ))
     .join("\n");
     assert!(expanded_short_plain.contains("3 lines"));
-    assert!(!expanded_short_plain.contains("Ctrl-T"));
+    assert!(expanded_short_plain.contains("third step"));
+    assert!(expanded_short_plain.contains("Ctrl-T collapse"));
 
     let closed_fence = TimelineEntry {
         role: TimelineRole::Thinking,
@@ -823,7 +814,7 @@ fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews(
     let closed_plain = rendered_plain_lines(&render_timeline_entry_lines(&closed_fence)).join("\n");
     assert!(closed_plain.contains("fn main"));
     assert!(closed_plain.contains("rust"));
-    assert!(closed_plain.contains("more lines hidden"));
+    assert!(closed_plain.contains("2 lines hidden"));
 }
 
 #[test]
@@ -862,11 +853,24 @@ fn render_timeline_entry_lines_extends_collapsed_thinking_code_preview() {
 
     let plain = rendered_plain_lines(&render_timeline_entry_lines(&entry)).join("\n");
 
-    assert!(plain.contains("code"));
-    assert!(plain.contains("plain"));
-    assert!(plain.contains("running 1 test"));
-    assert!(plain.contains("ok"));
-    assert!(plain.contains("more lines hidden"));
+    assert!(!plain.contains("plain"));
+    assert!(!plain.contains("running 1 test"));
+    assert!(!plain.lines().any(|line| line.trim() == "ok"));
+    assert!(plain.contains("5 lines hidden"));
+
+    let expanded = rendered_plain_lines(&render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            expand_thinking_blocks: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    ))
+    .join("\n");
+    assert!(expanded.contains("code"));
+    assert!(expanded.contains("plain"));
+    assert!(expanded.contains("running 1 test"));
+    assert!(expanded.contains("ok"));
 }
 
 #[test]

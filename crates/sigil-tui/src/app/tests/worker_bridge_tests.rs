@@ -1235,6 +1235,71 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
 }
 
 #[test]
+fn run_finished_does_not_duplicate_visible_final_answer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(
+        "draft summary that should be hidden".to_owned(),
+    ))?;
+    app.handle(RunEvent::AssistantMessage(
+        ModelMessage::assistant_with_kind(
+            Some("final summary".to_owned()),
+            Vec::new(),
+            sigil_kernel::AssistantMessageKind::FinalAnswer,
+        ),
+    ))?;
+    app.handle_worker_message(WorkerMessage::RunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "final summary".to_owned(),
+            tool_calls: 0,
+            final_message_id: None,
+        },
+        entries: Vec::new(),
+    })?;
+
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant && entry.text == "final summary")
+            .count(),
+        1
+    );
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking)
+    );
+    Ok(())
+}
+
+#[test]
+fn plain_assistant_message_keeps_intermediate_text_boundary() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(
+        "analysis that belongs to the in-flight turn".to_owned(),
+    ))?;
+    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+        Some("intermediate status".to_owned()),
+        Vec::new(),
+    )))?;
+
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking
+                && entry.text.contains("analysis that belongs"))
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Assistant
+                && entry.text == "intermediate status")
+    );
+    Ok(())
+}
+
+#[test]
 fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -1448,6 +1513,10 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     })?;
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ReasoningDelta("\n  ".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
         event: Box::new(RunEvent::ToolCallStarted(ToolCall {
             id: "call-read".to_owned(),
             name: "read_file".to_owned(),
@@ -1560,7 +1629,16 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
         .iter()
         .map(|entry| (entry.role, entry.text.as_str()))
         .collect::<Vec<_>>();
-    assert!(entries.contains(&(TimelineRole::Thinking, "think")));
+    assert!(
+        entries
+            .iter()
+            .any(|(role, text)| *role == TimelineRole::Thinking && text.starts_with("think"))
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|(role, text)| *role == TimelineRole::Thinking && text.trim().is_empty())
+    );
     assert!(entries.contains(&(TimelineRole::Tool, "Started read_file")));
     assert!(entries.contains(&(TimelineRole::Tool, "Completed read_file")));
     assert!(entries.contains(&(TimelineRole::Tool, "file contents")));
@@ -1770,6 +1848,30 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
             && entry.text.contains("\"action_hint\":\"Ctrl-B background\"")
     }));
 
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-spawn-agent".to_owned(),
+        "spawn_agent".to_owned(),
+        serde_json::json!({
+            "thread_id": "agent_chat_1",
+            "display_name": "kernel-explorer",
+            "status": "running",
+            "terminal": false,
+            "result_available": false,
+            "coalescing_key": "wait_agent:agent_chat_1",
+            "retry_after_ms": 5000,
+            "next_action": "continue only non-overlapping parent work"
+        })
+        .to_string(),
+        sigil_kernel::ToolResultMeta::default(),
+    )))?;
+    let agent_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("agent_chat_1"))
+        .collect::<Vec<_>>();
+    assert_eq!(agent_cards.len(), 1);
+    assert!(agent_cards[0].text.contains("call-spawn-agent"));
+
     app.handle(RunEvent::Control(ControlEntry::AgentThreadStatusChanged(
         sigil_kernel::AgentThreadStatusChangedEntry {
             thread_id: thread_id.clone(),
@@ -1786,6 +1888,12 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
                 .text
                 .contains("\"reason\":\"agent moved to background\"")
     }));
+    let agent_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("agent_chat_1"))
+        .collect::<Vec<_>>();
+    assert_eq!(agent_cards.len(), 1);
     assert!(app.events.iter().any(|event| {
         event.label == "agent:status"
             && event.detail.contains(thread_id.as_str())

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -24,14 +24,13 @@ use super::{
     tool_card::render_tool_entry_lines,
 };
 
+const COLLAPSED_THINKING_PREVIEW_LINES: usize = 2;
+
 #[cfg(test)]
 use super::theme::{accent_blue, accent_gold, ink};
 
 #[cfg(test)]
 use super::theme::user_message_bg;
-
-const COLLAPSED_THINKING_PREVIEW_LINES: usize = 3;
-const COLLAPSED_THINKING_CODE_PREVIEW_LINES: usize = 2;
 
 #[derive(Clone, Default)]
 pub(crate) struct TimelineRenderOptions {
@@ -42,6 +41,7 @@ pub(crate) struct TimelineRenderOptions {
     pub hovered_tool_activity_key: Option<String>,
     pub expanded_tool_activity_keys: BTreeSet<String>,
     pub collapsed_tool_activity_keys: BTreeSet<String>,
+    pub tool_activity_visible_rows: BTreeMap<String, usize>,
     pub max_content_width: usize,
     pub streaming_assistant_index: Option<usize>,
     pub intermediate_assistant_indices: BTreeSet<usize>,
@@ -333,6 +333,9 @@ fn render_thinking_entry_lines(
     syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    if entry.text.trim().is_empty() {
+        return Vec::new();
+    }
     let accent = if hovered {
         palette.accent_warning
     } else {
@@ -348,10 +351,9 @@ fn render_thinking_entry_lines(
         .fg(palette.text_secondary)
         .add_modifier(Modifier::ITALIC);
     let total_lines = thinking_line_count(&entry.text);
-    let preview_lines = thinking_preview_lines(&entry.text, COLLAPSED_THINKING_PREVIEW_LINES);
-    let preview_count = preview_lines.len();
-    let hidden_lines = total_lines.saturating_sub(preview_count);
     let has_hidden_content = thinking_has_collapsed_content(&entry.text);
+    let preview_lines = collapsed_thinking_preview_lines(&entry.text);
+    let hidden_lines = total_lines.saturating_sub(preview_lines.len());
     let mut lines = vec![Line::from(vec![
         Span::styled("●", marker_style),
         Span::raw(" "),
@@ -364,7 +366,7 @@ fn render_thinking_entry_lines(
             if expanded && has_hidden_content {
                 format!("{} · Ctrl-T collapse", thinking_line_label(total_lines))
             } else if !expanded && has_hidden_content {
-                format!("showing first {preview_count}/{total_lines} lines · Ctrl-T expand")
+                format!("{} · Ctrl-T expand", thinking_line_label(total_lines))
             } else {
                 thinking_line_label(total_lines)
             },
@@ -373,14 +375,12 @@ fn render_thinking_entry_lines(
                 .add_modifier(Modifier::ITALIC),
         ),
     ])];
-    if entry.text.trim().is_empty() {
-        return lines;
-    }
-    if !expanded {
+    if !expanded && has_hidden_content {
+        let preview = preview_lines.join("\n");
         let mut body = render_markdown_timeline_lines_with_palette(
             accent,
             body_style,
-            &preview_lines.join("\n"),
+            &preview,
             MarkdownRenderOptions::timeline(max_content_width).with_syntax_theme(syntax_theme),
             palette,
         );
@@ -388,7 +388,7 @@ fn render_thinking_entry_lines(
             body.push(timeline_content_line(
                 accent,
                 vec![Span::styled(
-                    format!("… {hidden_lines} more lines hidden"),
+                    format!("… {} hidden", thinking_line_label(hidden_lines)),
                     Style::default()
                         .fg(palette.text_muted)
                         .add_modifier(Modifier::ITALIC | Modifier::BOLD),
@@ -506,59 +506,14 @@ fn thinking_line_label(count: usize) -> String {
 }
 
 pub(crate) fn thinking_has_collapsed_content(text: &str) -> bool {
-    if text.trim().is_empty() {
-        return false;
-    }
-    thinking_line_count(text) > thinking_preview_lines(text, COLLAPSED_THINKING_PREVIEW_LINES).len()
+    text.lines().filter(|line| !line.trim().is_empty()).count() > COLLAPSED_THINKING_PREVIEW_LINES
 }
 
-fn thinking_preview_lines(text: &str, max_lines: usize) -> Vec<String> {
-    let lines = text
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            (!trimmed.is_empty()).then_some(trimmed.to_owned())
-        })
-        .collect::<Vec<_>>();
-    let mut preview = lines.iter().take(max_lines).cloned().collect::<Vec<_>>();
-    extend_thinking_preview_code_fence(&lines, &mut preview);
-    preview
-}
-
-fn extend_thinking_preview_code_fence(lines: &[String], preview: &mut Vec<String>) {
-    let Some(fence_index) = preview.iter().rposition(|line| is_markdown_fence(line)) else {
-        return;
-    };
-    if preview
-        .iter()
-        .filter(|line| is_markdown_fence(line))
-        .count()
-        % 2
-        == 0
-    {
-        return;
-    }
-
-    let mut code_lines = preview[fence_index + 1..]
-        .iter()
-        .filter(|line| !is_markdown_fence(line))
-        .count();
-    let mut cursor = preview.len();
-    while code_lines < COLLAPSED_THINKING_CODE_PREVIEW_LINES && cursor < lines.len() {
-        let line = lines[cursor].clone();
-        let is_fence = is_markdown_fence(&line);
-        preview.push(line);
-        cursor += 1;
-        if is_fence {
-            break;
-        }
-        code_lines += 1;
-    }
-}
-
-fn is_markdown_fence(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+fn collapsed_thinking_preview_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(COLLAPSED_THINKING_PREVIEW_LINES)
+        .collect()
 }
 
 fn render_notice_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Vec<Line<'static>> {

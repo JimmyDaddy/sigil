@@ -8,8 +8,8 @@ use ratatui::text::Line;
 use sigil_kernel::{
     AgentInvocationMode, AgentInvocationSource, AgentThreadStartedEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, ReasoningEffort, RootConfig, SecretRedactor, TerminalTaskEntry,
-    TerminalTaskStatus, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot, ToolResult,
-    ToolResultMeta, ToolResultStatus,
+    TerminalTaskStatus, ToolCall, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
+    ToolResult, ToolResultMeta, ToolResultStatus,
 };
 
 use crate::slash::KNOWN_MODEL_IDS;
@@ -356,6 +356,7 @@ pub(super) fn format_tool_content_block_redacted_for_restore(
     call_id: Option<&str>,
     content: &str,
     execution: Option<&ToolExecutionEntry>,
+    tool_call: Option<&ToolCall>,
     preview: Option<&ToolPreviewSnapshot>,
     redactor: &SecretRedactor,
 ) -> String {
@@ -374,8 +375,9 @@ pub(super) fn format_tool_content_block_redacted_for_restore(
     let preview = if status == "ok" { preview } else { None };
     let tool_name = execution
         .map(|entry| entry.tool_name.as_str())
+        .or_else(|| tool_call.map(|call| call.name.as_str()))
         .unwrap_or("tool");
-    let metadata = restored_tool_metadata(envelope.as_ref(), execution);
+    let metadata = restored_tool_metadata(envelope.as_ref(), execution, tool_call);
     let error_kind = restored_tool_error_kind(envelope.as_ref(), execution);
     format_tool_preview_payload(
         call_id,
@@ -417,6 +419,7 @@ fn format_tool_preview_payload(
     let preview_value = tool_preview_value(&content);
     let (preview_kind, preview_source) =
         tool_preview_source(tool_name, &content, preview_value.as_ref(), metadata);
+    let preview_language = tool_preview_language(tool_name, preview_kind, metadata);
     let all_lines = if preview_source.is_empty() {
         Vec::new()
     } else {
@@ -456,6 +459,12 @@ fn format_tool_preview_payload(
         "preview_kind".to_owned(),
         serde_json::Value::String(preview_kind.to_owned()),
     );
+    if let Some(preview_language) = preview_language {
+        object.insert(
+            "preview_language".to_owned(),
+            serde_json::Value::String(preview_language),
+        );
+    }
     let diff_payload = preview.and_then(|preview| format_tool_diff_payload(preview, redactor));
     let mut summary = format_tool_preview_summary(
         tool_name,
@@ -654,13 +663,49 @@ fn restored_execution_status_label(execution: &ToolExecutionEntry) -> Option<&'s
 fn restored_tool_metadata(
     envelope: Option<&serde_json::Value>,
     execution: Option<&ToolExecutionEntry>,
+    tool_call: Option<&ToolCall>,
 ) -> Option<ToolResultMeta> {
-    if let Some(execution) = execution {
-        return Some(execution.metadata.clone());
+    let mut metadata = if let Some(execution) = execution {
+        Some(execution.metadata.clone())
+    } else {
+        envelope
+            .and_then(|value| value.get("meta"))
+            .and_then(project_model_meta_to_tool_result_meta)
+    };
+    if let Some(tool_call) = tool_call {
+        enrich_restored_metadata_from_tool_call(&mut metadata, tool_call);
     }
-    envelope
-        .and_then(|value| value.get("meta"))
-        .and_then(project_model_meta_to_tool_result_meta)
+    metadata
+}
+
+fn enrich_restored_metadata_from_tool_call(
+    metadata: &mut Option<ToolResultMeta>,
+    tool_call: &ToolCall,
+) {
+    if tool_call.name != "read_file" {
+        return;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.args_json) else {
+        return;
+    };
+    let Some(args_object) = args.as_object() else {
+        return;
+    };
+    let metadata = metadata.get_or_insert_with(ToolResultMeta::default);
+    let mut details = metadata.details.as_object().cloned().unwrap_or_default();
+    let call_details = details
+        .entry("call".to_owned())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(call_object) = call_details.as_object_mut() {
+        for key in ["path", "offset", "limit"] {
+            if let Some(value) = args_object.get(key) {
+                call_object
+                    .entry(key.to_owned())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
+    metadata.details = serde_json::Value::Object(details);
 }
 
 fn restored_tool_error_kind(
@@ -836,6 +881,38 @@ fn read_file_metadata_path(metadata: &ToolResultMeta) -> Option<String> {
         })
 }
 
+fn tool_preview_language(
+    tool_name: &str,
+    preview_kind: &str,
+    metadata: Option<&ToolResultMeta>,
+) -> Option<String> {
+    if tool_name != "read_file" || preview_kind != "code" {
+        return None;
+    }
+    metadata.and_then(read_file_metadata_language).or_else(|| {
+        metadata
+            .and_then(read_file_metadata_path)
+            .and_then(path_language)
+    })
+}
+
+fn read_file_metadata_language(metadata: &ToolResultMeta) -> Option<String> {
+    metadata
+        .details
+        .get("language")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            metadata
+                .details
+                .get("call")
+                .and_then(|call| call.get("language"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|language| !language.trim().is_empty())
+}
+
 fn call_summary_value(call_summary: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}=");
     let start = call_summary.find(&prefix)? + prefix.len();
@@ -844,6 +921,38 @@ fn call_summary_value(call_summary: &str, key: &str) -> Option<String> {
         .find(|character: char| character.is_whitespace())
         .unwrap_or(tail.len());
     Some(tail[..end].trim().to_owned()).filter(|value| !value.is_empty())
+}
+
+fn path_language(path: String) -> Option<String> {
+    path_extension(&path)
+        .and_then(|extension| match extension.as_str() {
+            "rs" => Some("rust"),
+            "toml" | "lock" => Some("toml"),
+            "json" | "jsonl" => Some("json"),
+            "yaml" | "yml" => Some("yaml"),
+            "js" | "jsx" => Some("javascript"),
+            "ts" | "tsx" => Some("typescript"),
+            "py" => Some("python"),
+            "go" => Some("go"),
+            "java" => Some("java"),
+            "kt" | "kts" => Some("kotlin"),
+            "c" | "h" => Some("c"),
+            "cc" | "cpp" | "cxx" | "hpp" => Some("cpp"),
+            "cs" => Some("c#"),
+            "swift" => Some("swift"),
+            "rb" => Some("ruby"),
+            "php" => Some("php"),
+            "sh" | "bash" | "zsh" | "fish" => Some("bash"),
+            "sql" => Some("sql"),
+            "html" => Some("html"),
+            "css" | "scss" | "sass" => Some("css"),
+            "xml" | "svg" => Some("xml"),
+            "lua" => Some("lua"),
+            "vim" => Some("vim"),
+            "dockerfile" => Some("dockerfile"),
+            _ => None,
+        })
+        .map(str::to_owned)
 }
 
 fn path_has_document_extension(path: &str) -> bool {
@@ -932,6 +1041,10 @@ fn agent_tool_preview_source(
         "wait_agent" | "message_agent" | "close_agent" => Some(("text", String::new())),
         _ => None,
     }
+}
+
+pub(super) fn agent_result_poll_tool_name(tool_name: &str) -> bool {
+    matches!(tool_name, "wait_agent" | "read_agent_result")
 }
 
 fn format_tool_preview_summary(

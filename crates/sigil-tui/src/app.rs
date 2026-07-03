@@ -284,6 +284,7 @@ pub struct AppState {
     selected_tool_activity_key: Option<String>,
     expanded_tool_activity_keys: BTreeSet<String>,
     collapsed_tool_activity_keys: BTreeSet<String>,
+    tool_activity_visible_rows: BTreeMap<String, usize>,
     pending_terminal_cancel_confirmation: Option<String>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
@@ -524,6 +525,7 @@ impl AppState {
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
+            tool_activity_visible_rows: BTreeMap::new(),
             pending_terminal_cancel_confirmation: None,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
@@ -638,6 +640,7 @@ impl AppState {
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
+            tool_activity_visible_rows: BTreeMap::new(),
             pending_terminal_cancel_confirmation: None,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
@@ -735,6 +738,7 @@ impl AppState {
     fn bootstrap(&mut self) {
         self.timeline.clear();
         self.tool_activity_cache.clear();
+        self.tool_activity_visible_rows.clear();
         self.events.clear();
         self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "sigil ready.");
@@ -771,6 +775,7 @@ impl AppState {
     fn bootstrap_setup(&mut self) {
         self.timeline.clear();
         self.tool_activity_cache.clear();
+        self.tool_activity_visible_rows.clear();
         self.events.clear();
         self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "quick setup");
@@ -834,6 +839,7 @@ impl AppState {
         self.collapsed_thinking_entry_indices.clear();
         self.expanded_tool_activity_keys.clear();
         self.collapsed_tool_activity_keys.clear();
+        self.tool_activity_visible_rows.clear();
         self.pending_terminal_cancel_confirmation = None;
         self.pending_mouse_slash_confirmation = None;
         self.mouse_hover_target = None;

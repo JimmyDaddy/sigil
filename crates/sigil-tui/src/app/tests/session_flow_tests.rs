@@ -106,6 +106,60 @@ fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()
 }
 
 #[test]
+fn restored_read_file_tool_result_uses_original_tool_call_for_code_preview() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::User(ModelMessage::user("read source")),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: "call-read-rs".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: json!({"path":"src/main.rs"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::ToolResult(ModelMessage::tool(
+            "call-read-rs",
+            json!({
+                "status": "ok",
+                "content": "fn main() {}\n",
+                "meta": { "bytes": 13 }
+            })
+            .to_string(),
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("expected restored tool entry");
+    let payload: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
+    assert_eq!(payload["tool_name"], "read_file");
+    assert_eq!(payload["preview_kind"], "code");
+    assert_eq!(payload["preview_language"], "rust");
+    assert_eq!(
+        payload["metadata"]["details"]["call"]["path"],
+        "src/main.rs"
+    );
+    assert!(
+        payload["preview_lines"][0]
+            .as_str()
+            .is_some_and(|line| line.contains("fn main"))
+    );
+    Ok(())
+}
+
+#[test]
 fn restored_prefix_snapshot_keeps_large_materialized_text_out_of_activity() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
@@ -304,6 +358,9 @@ fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
     assert_eq!(thinking_entries[0].text, "step 1\nstep 2");
     assert!(rendered.contains("thought"));
     assert!(!rendered.contains("thinking"));
+    assert!(rendered.contains("2 lines"));
+    assert!(!rendered.contains("hidden"));
+    assert!(!rendered.contains("Ctrl-T expand"));
     assert!(rendered.contains("step 1"));
     assert!(rendered.contains("step 2"));
     Ok(())
@@ -1327,8 +1384,12 @@ fn restored_failed_tool_execution_and_reasoning_trace_render_in_session_view() -
         entries,
     })?;
 
-    let rendered = plain_transcript(&app, 20);
-    assert!(rendered.contains("trace line"));
+    let thinking_entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Thinking)
+        .expect("expected restored reasoning entry");
+    assert!(thinking_entry.text.contains("trace line"));
     let tool_entry = app
         .timeline
         .iter()
@@ -1387,6 +1448,105 @@ fn restored_reasoning_trace_before_final_answer_does_not_render_as_second_reply(
             .filter(|entry| entry.role == TimelineRole::Thinking)
             .count(),
         0
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_reasoning_traces_between_tools_before_final_do_not_render() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::User(ModelMessage::user("inspect and summarize")),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_trace".to_owned(),
+            data: json!({"text": "first draft summary that should stay hidden"}),
+        }),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: "call-read".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: json!({"path":"src/lib.rs"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+        SessionLogEntry::ToolResult(ModelMessage::tool("call-read", "file content")),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_delta".to_owned(),
+            data: json!({"delta": "second draft summary that should stay hidden"}),
+        }),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            Some("final answer".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 20);
+    assert!(rendered.contains("final answer"));
+    assert!(!rendered.contains("first draft summary that should stay hidden"));
+    assert!(!rendered.contains("second draft summary that should stay hidden"));
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Thinking)
+            .count(),
+        0
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Tool)
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_reasoning_trace_before_agent_poll_tool_does_not_render() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::User(ModelMessage::user("wait for child agent")),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_trace".to_owned(),
+            data: json!({"text": "Still running. Let me poll again."}),
+        }),
+        SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: "call-wait".to_owned(),
+                name: "wait_agent".to_owned(),
+                args_json: json!({"thread_id":"agent_chat_1"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 20);
+    assert!(!rendered.contains("Still running. Let me poll again."));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking)
     );
     Ok(())
 }

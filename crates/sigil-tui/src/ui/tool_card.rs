@@ -26,6 +26,7 @@ use super::{
         timeline_section_line_with_palette,
     },
     status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
+    syntax_highlight::highlight_code_to_spans_with_theme,
     text::truncate_inline_text,
     theme::ThemePalette,
 };
@@ -102,11 +103,21 @@ pub(crate) fn render_tool_entry_lines(
     }
     if tool_has_preview(&summary) {
         if expanded {
-            lines.extend(render_tool_preview_body_with_palette(
+            let body = render_tool_preview_body_with_palette(
                 &summary,
                 accent,
                 options.max_content_width,
                 options.theme.syntax_theme,
+                palette,
+            );
+            lines.extend(limit_expanded_tool_preview_body(
+                &summary,
+                body,
+                options
+                    .tool_activity_visible_rows
+                    .get(&activity.key)
+                    .copied(),
+                accent,
                 palette,
             ));
         } else {
@@ -128,10 +139,31 @@ pub(crate) fn render_tool_entry_lines(
     )
 }
 
+fn limit_expanded_tool_preview_body(
+    summary: &ToolCardRender,
+    body: Vec<Line<'static>>,
+    visible_rows: Option<usize>,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let Some(visible_rows) = visible_rows else {
+        return body;
+    };
+    if body.len() <= visible_rows {
+        return body;
+    }
+    let visible_rows = visible_rows.max(COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS);
+    let hidden_rows = collapsed_tool_hidden_rows(summary, body.len(), visible_rows);
+    let mut lines = body.into_iter().take(visible_rows).collect::<Vec<_>>();
+    lines.extend(render_tool_hidden_tail(accent, hidden_rows, palette));
+    lines
+}
+
 fn tool_name_matches(tool_name: &str, expected: &str) -> bool {
     tool_name == expected || tool_name.ends_with(&format!("_{expected}"))
 }
 
+#[derive(Clone)]
 struct ToolCardRender {
     call_id: Option<String>,
     tool_name: String,
@@ -140,13 +172,14 @@ struct ToolCardRender {
     summary: Option<String>,
     metadata: ToolCardMetadata,
     preview_kind: ToolPreviewKind,
+    preview_language: Option<String>,
     preview_lines: Vec<String>,
     hidden_lines: usize,
     preview_value: Option<Value>,
     diff: Option<ToolCardDiff>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ToolCardMetadata {
     exit_code: Option<i64>,
     stdout_bytes: Option<u64>,
@@ -327,6 +360,7 @@ fn classify_find_search_args(args: &[String]) -> Option<ShellSearch> {
     Some(ShellSearch { pattern, location })
 }
 
+#[derive(Clone)]
 struct ToolCardDiff {
     summary: String,
     truncated: bool,
@@ -335,6 +369,7 @@ struct ToolCardDiff {
     files: Vec<ToolCardDiffFile>,
 }
 
+#[derive(Clone)]
 struct ToolCardDiffFile {
     path: String,
     lines: Vec<String>,

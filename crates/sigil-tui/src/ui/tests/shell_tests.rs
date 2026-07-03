@@ -446,10 +446,6 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
         cell_bg_at_text(&terminal, "tool-code", "tool-code"),
         Color::Rgb(65, 66, 67)
     );
-    assert_eq!(
-        cell_fg_at_text(&terminal, "tool-code", "tool-code"),
-        Color::Rgb(208, 209, 210)
-    );
     Ok(())
 }
 

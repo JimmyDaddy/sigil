@@ -8,8 +8,9 @@ use super::{
     McpServerRuntimeStatus, ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase,
     TimelineEntry, TimelineRole,
     formatting::{
-        format_agent_thread_started_block, format_agent_thread_status_block,
-        format_terminal_task_block_redacted, format_tool_result_block_redacted, summarize_error,
+        agent_result_poll_tool_name, format_agent_thread_started_block,
+        format_agent_thread_status_block, format_terminal_task_block_redacted,
+        format_tool_result_block_redacted, summarize_error,
     },
     session_flow::render_control_entry_line,
 };
@@ -38,7 +39,7 @@ impl AppState {
         self.push_phase_marker(format!("agent|{profile_id}"));
     }
 
-    fn replace_or_push_terminal_task_card(&mut self, rendered: String) {
+    fn replace_or_push_tool_card(&mut self, rendered: String) {
         if let Some(index) = tool_card_replacement_index(&self.timeline, &rendered) {
             self.replace_tool_timeline_entry(index, rendered);
         } else {
@@ -150,6 +151,9 @@ impl AppState {
     }
 
     fn append_live_child_delta(&mut self, role: TimelineRole, delta: String) -> bool {
+        if delta.is_empty() {
+            return false;
+        }
         let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
             return false;
         };
@@ -159,8 +163,14 @@ impl AppState {
             .last_mut()
             .filter(|entry| entry.role == role)
         {
+            if entry.text.trim().is_empty() && delta.trim().is_empty() {
+                return false;
+            }
             entry.text.push_str(&delta);
         } else {
+            if delta.trim().is_empty() {
+                return false;
+            }
             transcript
                 .timeline_entries
                 .push(TimelineEntry { role, text: delta });
@@ -427,7 +437,7 @@ impl AppState {
                 self.last_notice = Some(notice.clone());
                 self.push_event("notice", notice);
                 let final_text = result.final_text.trim();
-                self.push_assistant_message_once(final_text.to_owned());
+                self.push_final_assistant_message_once(final_text.to_owned());
                 self.push_event(
                     "agent:finish",
                     format!(
@@ -605,7 +615,7 @@ impl AppState {
                     entry.handle.task_id.as_str(),
                     entry.status.as_str()
                 ));
-                self.replace_or_push_terminal_task_card(format_terminal_task_block_redacted(
+                self.replace_or_push_tool_card(format_terminal_task_block_redacted(
                     &entry,
                     &self.secret_redactor,
                 ));
@@ -1381,7 +1391,11 @@ impl EventHandler for AppState {
                     self.downgrade_streaming_assistant_entry_to_thinking();
                 }
                 self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                if suppress_reasoning_before_tool_call(&call.name) {
+                    self.discard_streaming_reasoning_entry();
+                } else {
+                    self.finish_streaming_reasoning_entry();
+                }
                 self.push_phase_marker(format!("tool|{}", call.name));
                 self.push_event("tool:start", format!("{} {}", call.name, call.id));
             }
@@ -1596,7 +1610,7 @@ impl EventHandler for AppState {
                             task.status.as_str()
                         ),
                     );
-                    self.replace_or_push_terminal_task_card(format_terminal_task_block_redacted(
+                    self.replace_or_push_tool_card(format_terminal_task_block_redacted(
                         &task,
                         &self.secret_redactor,
                     ));
@@ -1620,10 +1634,7 @@ impl EventHandler for AppState {
                     ) {
                         let profile_id = entry.profile_id.as_str();
                         self.set_agent_wait_phase(profile_id);
-                        self.push_timeline(
-                            TimelineRole::Tool,
-                            format_agent_thread_started_block(&entry),
-                        );
+                        self.replace_or_push_tool_card(format_agent_thread_started_block(&entry));
                         self.push_event("agent:start", entry.objective.clone());
                     } else {
                         self.push_event("control", render_control_entry_line(&control));
@@ -1635,10 +1646,7 @@ impl EventHandler for AppState {
                         "agent:status",
                         format!("{} {:?}", entry.thread_id.as_str(), entry.status),
                     );
-                    self.push_timeline(
-                        TimelineRole::Tool,
-                        format_agent_thread_status_block(&entry),
-                    );
+                    self.replace_or_push_tool_card(format_agent_thread_status_block(&entry));
                     self.append_current_session_control(ControlEntry::AgentThreadStatusChanged(
                         entry,
                     ));
@@ -1660,11 +1668,25 @@ impl EventHandler for AppState {
                     self.push_phase_marker("streaming".to_owned());
                 }
                 self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                if message
+                    .tool_calls
+                    .iter()
+                    .any(|call| suppress_reasoning_before_tool_call(call.name.as_str()))
+                {
+                    self.discard_streaming_reasoning_entry();
+                } else {
+                    self.finish_streaming_reasoning_entry();
+                }
                 if message.assistant_kind != Some(sigil_kernel::AssistantMessageKind::ToolPreamble)
                     && let Some(content) = message.content
                 {
-                    self.push_assistant_message_once(content);
+                    if message.assistant_kind
+                        == Some(sigil_kernel::AssistantMessageKind::FinalAnswer)
+                    {
+                        self.push_final_assistant_message_once(content);
+                    } else {
+                        self.push_assistant_message_once(content);
+                    }
                 }
             }
             RunEvent::Notice(note) => {
@@ -1695,21 +1717,27 @@ fn agent_tool_name(name: &str) -> bool {
     )
 }
 
+fn suppress_reasoning_before_tool_call(name: &str) -> bool {
+    agent_result_poll_tool_name(name)
+}
+
 fn tool_card_replacement_index(timeline: &[TimelineEntry], rendered: &str) -> Option<usize> {
     let current_key = terminal_task_key_from_tool_block(rendered)
-        .or_else(|| execution_key_from_tool_block(rendered))?;
-    const RECENT_TERMINAL_TASK_SCAN: usize = 96;
+        .or_else(|| execution_key_from_tool_block(rendered))
+        .or_else(|| agent_thread_key_from_tool_block(rendered))?;
+    const RECENT_TOOL_CARD_SCAN: usize = 96;
     timeline
         .iter()
         .enumerate()
         .rev()
-        .take(RECENT_TERMINAL_TASK_SCAN)
+        .take(RECENT_TOOL_CARD_SCAN)
         .find_map(|(index, previous)| {
             if previous.role != TimelineRole::Tool {
                 return None;
             }
             let previous_key = terminal_task_key_from_tool_block(&previous.text)
-                .or_else(|| execution_key_from_tool_block(&previous.text))?;
+                .or_else(|| execution_key_from_tool_block(&previous.text))
+                .or_else(|| agent_thread_key_from_tool_block(&previous.text))?;
             (previous_key == current_key).then_some(index)
         })
 }
@@ -1782,6 +1810,20 @@ fn execution_key_from_tool_block(text: &str) -> Option<String> {
         .and_then(serde_json::Value::as_str)?
         .trim();
     (!execution_id.is_empty()).then(|| format!("tool_execution:{execution_id}"))
+}
+
+fn agent_thread_key_from_tool_block(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let tool_name = value.get("tool_name")?.as_str()?;
+    if !matches!(tool_name, "spawn_agent" | "wait_agent") {
+        return None;
+    }
+    let thread_id = value
+        .get("preview_value")
+        .and_then(|preview| preview.get("thread_id"))
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    (!thread_id.is_empty()).then(|| format!("agent_thread:{thread_id}"))
 }
 
 fn tool_progress_details(execution_id: &str, details: serde_json::Value) -> serde_json::Value {

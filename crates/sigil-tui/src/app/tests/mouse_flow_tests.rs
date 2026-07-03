@@ -1160,7 +1160,7 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
 }
 
 #[test]
-fn mouse_short_thinking_block_has_no_click_target() -> Result<()> {
+fn mouse_single_line_thinking_block_has_no_toggle_target() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
@@ -1171,12 +1171,14 @@ fn mouse_short_thinking_block_has_no_click_target() -> Result<()> {
     }))?;
 
     let plain = rendered_plain(app.transcript_lines(20));
+    assert!(plain.contains("1 line"));
+    assert!(!plain.contains("1 line hidden"));
+    assert!(!plain.contains("Ctrl-T expand"));
     assert!(plain.contains("single visible step"));
-    assert!(!plain.contains("Ctrl-T"));
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
 
-    assert!(layout.thinking_blocks.is_empty());
+    assert_eq!(layout.thinking_blocks.len(), 0);
     Ok(())
 }
 
@@ -1195,7 +1197,7 @@ fn mouse_stale_thinking_block_hit_without_collapsed_content_is_noop() -> Result<
     let thinking_entry_index = app.collapsible_thinking_entry_indices()[0];
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
-    app.timeline[thinking_entry_index].text = "single visible step".to_owned();
+    app.timeline[thinking_entry_index].text = " \n ".to_owned();
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 

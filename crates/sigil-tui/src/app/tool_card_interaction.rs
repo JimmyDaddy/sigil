@@ -1,3 +1,9 @@
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+    path::{Component, Path},
+};
+
 use super::{AppState, PaneFocus, TimelineEntry, TimelineRole, ToolActivityCacheEntry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +31,10 @@ enum ToolCardRevealPolicy {
     RevealEntry,
     PreserveTail,
 }
+
+const TOOL_CARD_VISIBLE_ROWS_STEP: usize = 64;
+const TERMINAL_TASK_LOG_LABEL_ROOT: &str = "state/artifacts/tasks";
+const TERMINAL_TASK_LOG_PREVIEW_MAX_BYTES: usize = 512 * 1024;
 
 impl AppState {
     pub(crate) fn has_tool_cards(&self) -> bool {
@@ -161,20 +171,35 @@ impl AppState {
         let was_at_tail = self.timeline_scroll_back == 0;
         self.active_pane = PaneFocus::Activity;
         if self.tool_entry_is_open_by_key(selected_index, &selected_key) {
-            self.expanded_tool_activity_keys.remove(&selected_key);
-            if self.tool_entry_defaults_to_expanded(selected_index) {
-                self.collapsed_tool_activity_keys
-                    .insert(selected_key.clone());
+            if let Some(visible_rows) = self.tool_activity_visible_rows.get(&selected_key).copied()
+            {
+                if self.tool_entry_has_expandable_terminal_log(selected_index)
+                    || !self.tool_entry_visible_rows_are_complete(selected_index, visible_rows)
+                {
+                    let visible_rows = visible_rows.saturating_add(TOOL_CARD_VISIBLE_ROWS_STEP);
+                    self.tool_activity_visible_rows
+                        .insert(selected_key.clone(), visible_rows);
+                    self.expand_terminal_task_preview_to_rows(selected_index, visible_rows);
+                } else {
+                    self.close_tool_entry_by_key(selected_index, &selected_key);
+                }
+            } else {
+                self.close_tool_entry_by_key(selected_index, &selected_key);
             }
         } else if self.tool_entry_defaults_to_expanded(selected_index) {
             self.collapsed_tool_activity_keys.remove(&selected_key);
+            self.tool_activity_visible_rows.remove(&selected_key);
         } else if !self
             .expanded_tool_activity_keys
             .insert(selected_key.clone())
         {
             self.expanded_tool_activity_keys.remove(&selected_key);
+            self.tool_activity_visible_rows.remove(&selected_key);
         } else {
             self.collapsed_tool_activity_keys.remove(&selected_key);
+            self.tool_activity_visible_rows
+                .insert(selected_key.clone(), TOOL_CARD_VISIBLE_ROWS_STEP);
+            self.expand_terminal_task_preview_to_rows(selected_index, TOOL_CARD_VISIBLE_ROWS_STEP);
         }
         self.rerender_timeline_entry(selected_index);
         self.apply_tool_card_reveal_policy(selected_index, reveal_policy, was_at_tail);
@@ -239,6 +264,29 @@ impl AppState {
                 key: activity.key,
                 defaults_expanded: activity.defaults_expanded,
             })
+    }
+
+    pub(super) fn rebuild_tool_activity_cache(&mut self) {
+        let selected_key = self.selected_tool_activity_key.clone();
+        self.tool_activity_cache = self
+            .timeline
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| self.tool_activity_cache_entry(index, entry))
+            .collect();
+        if let Some(selected_key) = selected_key.as_deref()
+            && self
+                .tool_activity_cache
+                .iter()
+                .any(|activity| activity.key == selected_key)
+        {
+            self.selected_tool_activity_key = Some(selected_key.to_owned());
+            return;
+        }
+        self.selected_tool_activity_key = self
+            .tool_activity_cache
+            .last()
+            .map(|activity| activity.key.clone());
     }
 
     pub(super) fn ensure_selected_tool_entry(
@@ -366,6 +414,149 @@ impl AppState {
                 && !self.collapsed_tool_activity_keys.contains(key))
     }
 
+    fn close_tool_entry_by_key(&mut self, entry_index: usize, key: &str) {
+        self.expanded_tool_activity_keys.remove(key);
+        self.tool_activity_visible_rows.remove(key);
+        if self.tool_entry_defaults_to_expanded(entry_index) {
+            self.collapsed_tool_activity_keys.insert(key.to_owned());
+        }
+    }
+
+    fn tool_entry_visible_rows_are_complete(
+        &self,
+        entry_index: usize,
+        visible_rows: usize,
+    ) -> bool {
+        let Some(available_rows) = self.tool_entry_available_preview_rows(entry_index) else {
+            return false;
+        };
+        visible_rows >= available_rows
+    }
+
+    fn tool_entry_available_preview_rows(&self, entry_index: usize) -> Option<usize> {
+        let entry = self.timeline.get(entry_index)?;
+        let value = serde_json::from_str::<serde_json::Value>(&entry.text).ok()?;
+        let object = value.as_object()?;
+        let preview_rows = object
+            .get("preview_lines")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let hidden_rows = object
+            .get("hidden_lines")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        let diff_rows = object
+            .get("diff")
+            .and_then(|diff| diff.get("files"))
+            .and_then(serde_json::Value::as_array)
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|file| file.get("lines"))
+                    .filter_map(serde_json::Value::as_array)
+                    .map(Vec::len)
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        Some(preview_rows.saturating_add(hidden_rows).max(diff_rows))
+    }
+
+    fn tool_entry_has_expandable_terminal_log(&self, entry_index: usize) -> bool {
+        let Some(value) = self.tool_entry_json(entry_index) else {
+            return false;
+        };
+        if !tool_entry_json_is_terminal_task(&value) {
+            return false;
+        }
+        let hidden_rows = value
+            .get("hidden_lines")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        hidden_rows > 0 && terminal_task_log_label_path(&value).is_some()
+    }
+
+    fn expand_terminal_task_preview_to_rows(&mut self, entry_index: usize, visible_rows: usize) {
+        let Some(mut value) = self.tool_entry_json(entry_index) else {
+            return;
+        };
+        if !tool_entry_json_is_terminal_task(&value) {
+            return;
+        }
+        let Some(log_path) = terminal_task_log_label_path(&value) else {
+            return;
+        };
+        let Some((lines, has_more)) = self.read_terminal_task_log_preview(&log_path, visible_rows)
+        else {
+            return;
+        };
+        let Some(object) = value.as_object_mut() else {
+            return;
+        };
+        object.insert(
+            "preview_lines".to_owned(),
+            serde_json::Value::Array(lines.into_iter().map(serde_json::Value::String).collect()),
+        );
+        object.insert(
+            "hidden_lines".to_owned(),
+            serde_json::Value::Number(u64::from(has_more).into()),
+        );
+        if let Some(entry) = self.timeline.get_mut(entry_index)
+            && let Ok(text) = serde_json::to_string(&value)
+        {
+            entry.text = text;
+        }
+    }
+
+    fn read_terminal_task_log_preview(
+        &self,
+        log_path: &Path,
+        requested_rows: usize,
+    ) -> Option<(Vec<String>, bool)> {
+        let log_path = self.resolve_terminal_task_log_path(log_path)?;
+        let file = File::open(log_path).ok()?;
+        let mut reader = BufReader::new(file);
+        let mut lines = Vec::new();
+        let mut bytes = 0usize;
+        let mut has_more = false;
+        let mut line = String::new();
+        let requested_rows = requested_rows.max(1);
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line).ok()?;
+            if read == 0 {
+                break;
+            }
+            bytes = bytes.saturating_add(read);
+            if lines.len() >= requested_rows || bytes > TERMINAL_TASK_LOG_PREVIEW_MAX_BYTES {
+                has_more = true;
+                break;
+            }
+            let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+            lines.push(trimmed);
+        }
+        Some((lines, has_more))
+    }
+
+    fn resolve_terminal_task_log_path(&self, log_path: &Path) -> Option<std::path::PathBuf> {
+        if log_path.is_absolute()
+            || log_path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return None;
+        }
+        let suffix = log_path
+            .strip_prefix(Path::new(TERMINAL_TASK_LOG_LABEL_ROOT))
+            .ok()?;
+        Some(self.sigil_paths.terminal_tasks_root.join(suffix))
+    }
+
+    fn tool_entry_json(&self, entry_index: usize) -> Option<serde_json::Value> {
+        let entry = self.timeline.get(entry_index)?;
+        serde_json::from_str::<serde_json::Value>(&entry.text).ok()
+    }
+
     fn tool_entry_defaults_to_expanded(&self, entry_index: usize) -> bool {
         self.tool_activity_cache
             .iter()
@@ -373,4 +564,22 @@ impl AppState {
             .map(|activity| activity.defaults_expanded)
             .unwrap_or(false)
     }
+}
+
+fn tool_entry_json_is_terminal_task(value: &serde_json::Value) -> bool {
+    value
+        .get("tool_name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|tool_name| tool_name == "terminal_task")
+}
+
+fn terminal_task_log_label_path(value: &serde_json::Value) -> Option<std::path::PathBuf> {
+    value
+        .get("metadata")?
+        .get("details")?
+        .get("terminal_task")?
+        .get("log_path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(std::path::PathBuf::from)
 }

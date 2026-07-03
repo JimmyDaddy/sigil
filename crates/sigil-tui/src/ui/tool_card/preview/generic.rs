@@ -128,6 +128,32 @@ pub(in crate::ui::tool_card) fn render_code_preview_lines_with_palette(
         .collect()
 }
 
+pub(in crate::ui::tool_card) fn render_highlighted_code_preview_lines_with_palette(
+    accent: Color,
+    lines: &[String],
+    language: &str,
+    syntax_theme: SyntaxThemeId,
+    bg: Color,
+) -> Option<Vec<Line<'static>>> {
+    let highlighted =
+        highlight_code_to_spans_with_theme(&lines.join("\n"), language, syntax_theme)?;
+    Some(
+        highlighted
+            .into_iter()
+            .map(|spans| {
+                let spans = spans
+                    .into_iter()
+                    .map(|mut span| {
+                        span.style = span.style.bg(bg);
+                        span
+                    })
+                    .collect::<Vec<_>>();
+                timeline_content_line(accent, spans)
+            })
+            .collect(),
+    )
+}
+
 pub(in crate::ui::tool_card) fn render_tool_hidden_tail(
     accent: Color,
     hidden_lines: usize,

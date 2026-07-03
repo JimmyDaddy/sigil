@@ -309,7 +309,22 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
+            .any(|span| span.content.as_ref().contains("4 lines"))
+    }));
+    assert!(collapsed.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("planning step 1"))
+    }));
+    assert!(collapsed.iter().any(|line| {
+        line.spans
+            .iter()
             .any(|span| span.content.as_ref().contains("planning step 2"))
+    }));
+    assert!(collapsed.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("2 lines hidden"))
     }));
     assert!(!collapsed.iter().any(|line| {
         line.spans
@@ -374,7 +389,7 @@ fn ctrl_t_toggles_thinking_from_activity_without_tool_selection() -> Result<()> 
 }
 
 #[test]
-fn ctrl_t_ignores_thinking_without_hidden_content() -> Result<()> {
+fn single_line_thinking_block_stays_visible_without_toggle() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
@@ -384,8 +399,10 @@ fn ctrl_t_ignores_thinking_without_hidden_content() -> Result<()> {
         args_json: "{}".to_owned(),
     }))?;
     let rendered = transcript_plain(app.transcript_lines(20));
+    assert!(rendered.contains("1 line"));
+    assert!(!rendered.contains("1 line hidden"));
+    assert!(!rendered.contains("Ctrl-T expand"));
     assert!(rendered.contains("single visible step"));
-    assert!(!rendered.contains("Ctrl-T"));
     let thinking_view_events_before = app
         .events
         .iter()
@@ -396,7 +413,7 @@ fn ctrl_t_ignores_thinking_without_hidden_content() -> Result<()> {
 
     let rendered_after = transcript_plain(app.transcript_lines(20));
     assert!(rendered_after.contains("single visible step"));
-    assert!(!rendered_after.contains("Ctrl-T"));
+    assert!(!rendered_after.contains("Ctrl-T collapse"));
     assert_eq!(
         app.events
             .iter()
@@ -412,12 +429,7 @@ fn ctrl_t_ignores_thinking_without_hidden_content() -> Result<()> {
 #[test]
 fn thinking_entry_toggle_handles_missing_uncollapsible_and_global_override() -> Result<()> {
     let mut short_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    short_app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
-    short_app.handle(RunEvent::ToolCallStarted(ToolCall {
-        id: "call-1".to_owned(),
-        name: "read_file".to_owned(),
-        args_json: "{}".to_owned(),
-    }))?;
+    short_app.push_timeline(TimelineRole::Thinking, " \n ");
     let short_index = short_app
         .timeline
         .iter()
@@ -700,6 +712,27 @@ fn agent_tool_pre_tool_streaming_text_is_thinking_not_assistant() -> Result<()> 
 }
 
 #[test]
+fn empty_streaming_text_before_agent_tool_does_not_create_empty_thought() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::TextDelta(String::new()))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-agent-empty".to_owned(),
+        name: "spawn_agent".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking && entry.text.trim().is_empty())
+    );
+    let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(!rendered.contains("thought  1 line"));
+    Ok(())
+}
+
+#[test]
 fn assistant_message_before_tool_remains_visible() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -749,6 +782,119 @@ fn assistant_message_before_tool_remains_visible() -> Result<()> {
         !after_final
             .iter()
             .any(|line| line.contains("• final answer"))
+    );
+    Ok(())
+}
+
+#[test]
+fn live_reasoning_trace_before_final_answer_does_not_render_as_second_reply() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(
+        "draft summary that should stay hidden".to_owned(),
+    ))?;
+    app.handle(RunEvent::AssistantMessage(
+        ModelMessage::assistant_with_kind(
+            Some("final answer".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ),
+    ))?;
+
+    let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(rendered.contains("final answer"));
+    assert!(!rendered.contains("draft summary that should stay hidden"));
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Thinking)
+            .count(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn live_reasoning_trace_between_tools_is_removed_when_final_answer_arrives() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.push_timeline(TimelineRole::User, "inspect and summarize");
+    app.handle(RunEvent::ReasoningDelta(
+        "first draft summary that should not remain visible".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-read".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: json!({"path":"src/lib.rs"}).to_string(),
+    }))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-read",
+        "read_file",
+        "file contents",
+        ToolResultMeta::default(),
+    )))?;
+    app.handle(RunEvent::ReasoningDelta(
+        "second draft summary that should not remain visible".to_owned(),
+    ))?;
+    app.handle(RunEvent::AssistantMessage(
+        ModelMessage::assistant_with_kind(
+            Some("final answer".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ),
+    ))?;
+
+    let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(rendered.contains("final answer"));
+    assert!(!rendered.contains("first draft summary that should not remain visible"));
+    assert!(!rendered.contains("second draft summary that should not remain visible"));
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Thinking)
+            .count(),
+        0
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Tool)
+    );
+    Ok(())
+}
+
+#[test]
+fn live_reasoning_trace_before_agent_poll_tool_is_not_rendered() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(
+        "Still running. Let me poll again.".to_owned(),
+    ))?;
+    app.handle(RunEvent::AssistantMessage(
+        ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: "call-wait".to_owned(),
+                name: "wait_agent".to_owned(),
+                args_json: json!({"thread_id":"agent_chat_1"}).to_string(),
+            }],
+            AssistantMessageKind::ToolPreamble,
+        ),
+    ))?;
+
+    let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(!rendered.contains("Still running. Let me poll again."));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking)
     );
     Ok(())
 }
@@ -1236,6 +1382,52 @@ fn control_preview_snapshot_event_caches_diff_for_tool_result() -> Result<()> {
                 .detail
                 .contains("preview call-1 write_file files=1 +1 -1")
     }));
+    Ok(())
+}
+
+#[test]
+fn approval_preview_snapshot_caches_diff_for_approved_tool_result() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approved: true,
+        reason: None,
+    })?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-1",
+        "write_file",
+        "wrote note.txt",
+        ToolResultMeta {
+            bytes: Some(14),
+            changed_files: vec!["note.txt".to_owned()],
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let tool_entry = app
+        .timeline
+        .iter()
+        .rev()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("expected approved write tool card");
+    let rendered: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
+    assert_eq!(rendered["tool_name"], "write_file");
+    assert_eq!(rendered["diff"]["summary"], "+1 -1 · 1 file");
+    assert_eq!(rendered["diff"]["files"][0]["path"], "note.txt");
+    assert!(
+        rendered["diff"]["files"][0]["lines"]
+            .as_array()
+            .is_some_and(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.as_str().is_some_and(|text| text == "-beta"))
+                    && lines
+                        .iter()
+                        .any(|line| line.as_str().is_some_and(|text| text == "+gamma"))
+            })
+    );
     Ok(())
 }
 

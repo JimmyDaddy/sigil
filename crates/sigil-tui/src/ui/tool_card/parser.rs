@@ -9,6 +9,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         summary: None,
         metadata: ToolCardMetadata::default(),
         preview_kind: ToolPreviewKind::Text,
+        preview_language: None,
         preview_lines: text.lines().take(8).map(str::to_owned).collect(),
         hidden_lines: text.lines().count().saturating_sub(8),
         preview_value: None,
@@ -57,6 +58,11 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         .map(ToolPreviewKind::from_value)
         .or_else(|| object.get("content").map(legacy_tool_preview_kind))
         .unwrap_or_default();
+    let preview_language = object
+        .get("preview_language")
+        .and_then(serde_json::Value::as_str)
+        .filter(|language| !language.trim().is_empty())
+        .map(str::to_owned);
     let preview_value = object.get("preview_value").cloned().or_else(|| {
         object
             .get("content")
@@ -92,6 +98,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         summary,
         metadata,
         preview_kind,
+        preview_language,
         preview_lines,
         hidden_lines,
         preview_value,

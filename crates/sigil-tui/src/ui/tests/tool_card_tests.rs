@@ -74,6 +74,7 @@ fn base_summary(tool_name: &str) -> ToolCardRender {
         summary: None,
         metadata: ToolCardMetadata::default(),
         preview_kind: ToolPreviewKind::Text,
+        preview_language: None,
         preview_lines: Vec::new(),
         hidden_lines: 0,
         preview_value: None,
@@ -1652,6 +1653,7 @@ fn tool_card_read_file_preview_uses_document_and_file_sections() {
     };
     let code_summary = ToolCardRender {
         preview_kind: ToolPreviewKind::Code,
+        preview_language: Some("rust".to_owned()),
         preview_lines: vec!["fn main() {}".to_owned()],
         ..base_summary("read_file")
     };
@@ -1672,6 +1674,16 @@ fn tool_card_read_file_preview_uses_document_and_file_sections() {
     assert!(markdown_text.contains("document excerpt"));
     assert!(code_text.contains("code excerpt"));
     assert!(text.contains("file excerpt"));
+
+    let code_lines = render_read_file_preview(&code_summary, accent_rose(), 80);
+    let default_code_fg = crate::ui::theme::default_palette().markdown_code_fg;
+    assert!(code_lines.iter().any(|line| {
+        line.spans.iter().any(|span| {
+            span.content.as_ref().contains("fn")
+                && span.style.fg.is_some()
+                && span.style.fg != Some(default_code_fg)
+        })
+    }));
 }
 
 #[test]

@@ -105,6 +105,7 @@ impl AppState {
     fn bootstrap_workspace_trust_gate(&mut self) {
         self.timeline.clear();
         self.tool_activity_cache.clear();
+        self.tool_activity_visible_rows.clear();
         self.events.clear();
         self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "workspace trust");

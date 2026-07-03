@@ -50,12 +50,25 @@ pub(in crate::ui::tool_card) fn render_read_file_preview_with_palette(
             ));
         }
         ToolPreviewKind::Json | ToolPreviewKind::Code | ToolPreviewKind::Text => {
-            lines.extend(render_code_preview_lines_with_palette(
-                accent,
-                &summary.preview_lines,
-                palette.markdown_code_bg,
-                palette,
-            ));
+            if summary.preview_kind == ToolPreviewKind::Code
+                && let Some(language) = summary.preview_language.as_deref()
+                && let Some(highlighted) = render_highlighted_code_preview_lines_with_palette(
+                    accent,
+                    &summary.preview_lines,
+                    language,
+                    syntax_theme,
+                    palette.markdown_code_bg,
+                )
+            {
+                lines.extend(highlighted);
+            } else {
+                lines.extend(render_code_preview_lines_with_palette(
+                    accent,
+                    &summary.preview_lines,
+                    palette.markdown_code_bg,
+                    palette,
+                ));
+            }
         }
     }
     lines.extend(render_tool_hidden_tail(

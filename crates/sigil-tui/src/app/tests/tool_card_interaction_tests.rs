@@ -1,5 +1,9 @@
 use super::*;
 
+fn full_plain_timeline(app: &AppState) -> String {
+    app.timeline_plain_lines().join("\n")
+}
+
 #[test]
 fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -148,6 +152,134 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
 
     assert!(!app.collapsed_tool_activity_keys.contains(&tool_key));
     assert!(app.tool_card_status_line().contains("open"));
+    Ok(())
+}
+
+#[test]
+fn non_default_tool_card_toggle_pages_large_preview_before_closing() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let preview_lines = (0..140)
+        .map(|index| format!("line-{index:03}"))
+        .collect::<Vec<_>>();
+    app.push_timeline(
+        TimelineRole::Tool,
+        serde_json::json!({
+            "call_id": "call-large",
+            "tool_name": "diagnostic_dump",
+            "status": "ok",
+            "summary": "140 lines · 1 KB",
+            "preview_kind": "text",
+            "preview_lines": preview_lines,
+            "hidden_lines": 0
+        })
+        .to_string(),
+    );
+    let tool_key = "call:call-large".to_owned();
+    assert_eq!(app.selected_tool_activity_key, Some(tool_key.clone()));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&64));
+    let first_page = full_plain_timeline(&app);
+    assert!(first_page.contains("line-062"));
+    assert!(!first_page.contains("line-063"));
+    assert!(first_page.contains("more lines hidden"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&128));
+    let second_page = full_plain_timeline(&app);
+    assert!(second_page.contains("line-126"));
+    assert!(!second_page.contains("line-127"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&192));
+    let full_page = full_plain_timeline(&app);
+    assert!(full_page.contains("line-139"));
+    assert!(!full_page.contains("more lines hidden"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), None);
+    assert!(!app.expanded_tool_activity_keys.contains(&tool_key));
+    let closed = full_plain_timeline(&app);
+    assert!(!closed.contains("line-139"));
+    Ok(())
+}
+
+#[test]
+fn terminal_task_tool_card_pages_from_safe_log_artifact() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sigil_paths.terminal_tasks_root = temp.path().join("tasks");
+    let task_dir = app.sigil_paths.terminal_tasks_root.join("terminal-big");
+    std::fs::create_dir_all(&task_dir)?;
+    std::fs::write(
+        task_dir.join("output.log"),
+        (0..90)
+            .map(|index| format!("log-line-{index:03}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )?;
+    app.push_timeline(
+        TimelineRole::Tool,
+        serde_json::json!({
+            "call_id": "call-terminal",
+            "tool_name": "terminal_task",
+            "status": "ok",
+            "summary": "running · ./scripts/check-touched.sh --tier quick",
+            "preview_kind": "text",
+            "preview_lines": ["tail-only"],
+            "hidden_lines": 1,
+            "metadata": {
+                "details": {
+                    "terminal_task": {
+                        "task_id": "terminal-big",
+                        "status": "exited",
+                        "status_detail": { "state": "exited", "exit_code": 0 },
+                        "command": "./scripts/check-touched.sh --tier quick",
+                        "cwd": ".",
+                        "shell": "zsh",
+                        "log_path": "state/artifacts/tasks/terminal-big/output.log",
+                        "created_at_ms": 1,
+                        "updated_at_ms": 2
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    let tool_key = app
+        .selected_tool_activity_key
+        .clone()
+        .expect("terminal tool card should be selected");
+    let entry_index = app
+        .timeline_entry_index_for_activity_key(&tool_key)
+        .expect("terminal tool card should have a timeline entry");
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&64));
+    let payload: serde_json::Value = serde_json::from_str(&app.timeline[entry_index].text)?;
+    let preview_lines = payload["preview_lines"]
+        .as_array()
+        .expect("terminal card should keep preview lines");
+    assert_eq!(preview_lines.len(), 64);
+    assert_eq!(preview_lines[0], "log-line-000");
+    assert_eq!(preview_lines[63], "log-line-063");
+    assert_eq!(payload["hidden_lines"], 1);
+    let first_page = full_plain_timeline(&app);
+    assert!(first_page.contains("log-line-000"));
+    assert!(first_page.contains("more lines hidden"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&128));
+    let payload: serde_json::Value = serde_json::from_str(&app.timeline[entry_index].text)?;
+    let preview_lines = payload["preview_lines"]
+        .as_array()
+        .expect("terminal card should keep expanded preview lines");
+    assert_eq!(preview_lines.len(), 90);
+    assert_eq!(preview_lines[89], "log-line-089");
+    assert_eq!(payload["hidden_lines"], 0);
+    let second_page = full_plain_timeline(&app);
+    assert!(second_page.contains("log-line-089"));
+    assert!(!second_page.contains("more lines hidden"));
     Ok(())
 }
 

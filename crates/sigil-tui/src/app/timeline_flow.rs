@@ -157,6 +157,10 @@ impl AppState {
     }
 
     pub(super) fn append_assistant_delta(&mut self, delta: &str) {
+        if delta.is_empty() || (self.streaming_assistant_index.is_none() && delta.trim().is_empty())
+        {
+            return;
+        }
         self.finish_streaming_reasoning_entry();
         if let Some(index) = self.streaming_assistant_index
             && let Some(entry) = self.timeline.get_mut(index)
@@ -175,6 +179,11 @@ impl AppState {
             return;
         }
         self.push_timeline(TimelineRole::Assistant, content);
+    }
+
+    pub(super) fn push_final_assistant_message_once(&mut self, content: String) {
+        self.suppress_reasoning_since_last_user_before_final();
+        self.push_assistant_message_once(content);
     }
 
     fn assistant_message_seen_since_last_user(&self, content: &str) -> bool {
@@ -207,6 +216,53 @@ impl AppState {
         if let Some(index) = self.streaming_reasoning_index.take() {
             self.rerender_timeline_entry_deferred(index);
         }
+    }
+
+    pub(super) fn discard_streaming_reasoning_entry(&mut self) {
+        let Some(index) = self.streaming_reasoning_index.take() else {
+            return;
+        };
+        if self
+            .timeline
+            .get(index)
+            .is_none_or(|entry| entry.role != TimelineRole::Thinking)
+        {
+            return;
+        }
+        self.timeline.remove(index);
+        self.rebuild_timeline_projection_after_entry_removal();
+    }
+
+    fn suppress_reasoning_since_last_user_before_final(&mut self) {
+        self.finish_streaming_reasoning_entry();
+        let start = self
+            .timeline
+            .iter()
+            .rposition(|entry| entry.role == TimelineRole::User)
+            .map(|index| index.saturating_add(1))
+            .unwrap_or(0);
+        let before_len = self.timeline.len();
+        let mut index = 0usize;
+        self.timeline.retain(|entry| {
+            let keep = index < start || entry.role != TimelineRole::Thinking;
+            index = index.saturating_add(1);
+            keep
+        });
+        if self.timeline.len() == before_len {
+            return;
+        }
+
+        self.rebuild_timeline_projection_after_entry_removal();
+    }
+
+    fn rebuild_timeline_projection_after_entry_removal(&mut self) {
+        self.streaming_assistant_index = None;
+        self.streaming_reasoning_index = None;
+        self.expanded_thinking_entry_indices.clear();
+        self.collapsed_thinking_entry_indices.clear();
+        self.deferred_timeline_render_indexes.clear();
+        self.rebuild_tool_activity_cache();
+        self.rebuild_timeline_render_store();
     }
 
     pub(super) fn push_phase_marker(&mut self, text: impl Into<String>) {
@@ -325,18 +381,34 @@ impl AppState {
             return;
         };
         self.deferred_timeline_render_indexes.remove(&index);
-        if index < self.timeline.len() {
-            self.rerender_timeline_entry(index);
+        let Some(entry) = self.timeline.get(index) else {
+            return;
+        };
+        if entry.text.trim().is_empty() {
+            self.timeline.remove(index);
+            self.rebuild_timeline_projection_after_entry_removal();
+            return;
         }
+        self.rerender_timeline_entry(index);
     }
 
     pub(super) fn downgrade_streaming_assistant_entry_to_thinking(&mut self) {
         let Some(index) = self.streaming_assistant_index else {
             return;
         };
-        if let Some(entry) = self.timeline.get_mut(index)
-            && entry.role == TimelineRole::Assistant
-        {
+        let Some(entry) = self.timeline.get(index) else {
+            return;
+        };
+        if entry.role != TimelineRole::Assistant {
+            return;
+        }
+        if entry.text.trim().is_empty() {
+            self.streaming_assistant_index = None;
+            self.timeline.remove(index);
+            self.rebuild_timeline_projection_after_entry_removal();
+            return;
+        }
+        if let Some(entry) = self.timeline.get_mut(index) {
             entry.role = TimelineRole::Thinking;
         }
     }
@@ -878,6 +950,7 @@ impl AppState {
             hovered_tool_activity_key: self.hovered_tool_activity_key(),
             expanded_tool_activity_keys: self.expanded_tool_activity_keys.clone(),
             collapsed_tool_activity_keys: self.collapsed_tool_activity_keys.clone(),
+            tool_activity_visible_rows: self.tool_activity_visible_rows.clone(),
             max_content_width: self.timeline_content_width(),
             streaming_assistant_index: self.streaming_assistant_index,
             streaming_reasoning_index: self.streaming_reasoning_index,

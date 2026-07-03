@@ -8,8 +8,8 @@ use std::{
 
 use sigil_kernel::{
     AssistantMessageKind, CompactionPreview, ControlEntry, JsonlSessionStore, ModelMessage,
-    RootConfig, Session, SessionLogEntry, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreviewSnapshot, inspect_memory_documents, latest_compaction_record,
+    RootConfig, Session, SessionLogEntry, ToolCall, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreviewSnapshot, inspect_memory_documents, latest_compaction_record,
     session_stats_from_entries,
 };
 use uuid::Uuid;
@@ -18,9 +18,10 @@ use super::{
     AppState, PaneFocus, RunPhase, SESSION_HISTORY_TITLE_SCAN_LIMIT, SessionHistoryEntry,
     SessionHistoryRow, SessionViewMode, TimelineRole,
     formatting::{
-        format_agent_thread_started_block, format_agent_thread_status_block,
-        format_terminal_task_block_redacted, format_tool_content_block_redacted_for_restore,
-        human_file_size, relative_age_label, truncate_session_view_text,
+        agent_result_poll_tool_name, format_agent_thread_started_block,
+        format_agent_thread_status_block, format_terminal_task_block_redacted,
+        format_tool_content_block_redacted_for_restore, human_file_size, relative_age_label,
+        truncate_session_view_text,
     },
 };
 use crate::view_model::{RecoveryPanelViewModel, TaskMemoryInspectViewModel};
@@ -437,6 +438,7 @@ impl AppState {
         self.recompute_compaction_status(false);
         self.timeline.clear();
         self.tool_activity_cache.clear();
+        self.tool_activity_visible_rows.clear();
         self.expanded_thinking_entry_indices.clear();
         self.collapsed_thinking_entry_indices.clear();
         self.events.clear();
@@ -473,6 +475,7 @@ impl AppState {
         self.push_event("restore", format!("entries={}", entries.len()));
 
         let restored_tool_executions = restored_tool_execution_index(&entries);
+        let restored_tool_calls = restored_tool_call_index(&entries);
         let restored_tool_previews = restored_tool_preview_snapshot_index(&entries);
         let restored_tool_result_call_ids = restored_tool_result_call_ids(&entries);
         let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(&entries);
@@ -503,12 +506,17 @@ impl AppState {
                             .tool_call_id
                             .as_deref()
                             .and_then(|call_id| restored_tool_previews.get(call_id));
+                        let tool_call = message
+                            .tool_call_id
+                            .as_deref()
+                            .and_then(|call_id| restored_tool_calls.get(call_id));
                         self.push_timeline(
                             TimelineRole::Tool,
                             format_tool_content_block_redacted_for_restore(
                                 message.tool_call_id.as_deref(),
                                 &content,
                                 execution,
+                                tool_call,
                                 preview,
                                 &self.secret_redactor,
                             ),
@@ -532,12 +540,14 @@ impl AppState {
                         ) =>
                     {
                         let preview = restored_tool_previews.get(&execution.call_id);
+                        let tool_call = restored_tool_calls.get(&execution.call_id);
                         self.push_timeline(
                             TimelineRole::Tool,
                             format_tool_content_block_redacted_for_restore(
                                 Some(execution.call_id.as_str()),
                                 &restored_tool_execution_content(execution.as_ref()),
                                 Some(execution.as_ref()),
+                                tool_call,
                                 preview,
                                 &self.secret_redactor,
                             ),
@@ -646,6 +656,7 @@ fn restored_timeline_entries_from_session_entries(
     redactor: &sigil_kernel::SecretRedactor,
 ) -> Vec<crate::timeline::TimelineEntry> {
     let restored_tool_executions = restored_tool_execution_index(entries);
+    let restored_tool_calls = restored_tool_call_index(entries);
     let restored_tool_previews = restored_tool_preview_snapshot_index(entries);
     let restored_tool_result_call_ids = restored_tool_result_call_ids(entries);
     let suppressed_reasoning_trace_indices = suppressed_reasoning_trace_indices(entries);
@@ -682,12 +693,17 @@ fn restored_timeline_entries_from_session_entries(
                         .tool_call_id
                         .as_deref()
                         .and_then(|call_id| restored_tool_previews.get(call_id));
+                    let tool_call = message
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|call_id| restored_tool_calls.get(call_id));
                     timeline.push(crate::timeline::TimelineEntry {
                         role: TimelineRole::Tool,
                         text: format_tool_content_block_redacted_for_restore(
                             message.tool_call_id.as_deref(),
                             content,
                             execution,
+                            tool_call,
                             preview,
                             redactor,
                         ),
@@ -710,12 +726,14 @@ fn restored_timeline_entries_from_session_entries(
                 ) =>
             {
                 let preview = restored_tool_previews.get(&execution.call_id);
+                let tool_call = restored_tool_calls.get(&execution.call_id);
                 timeline.push(crate::timeline::TimelineEntry {
                     role: TimelineRole::Tool,
                     text: format_tool_content_block_redacted_for_restore(
                         Some(execution.call_id.as_str()),
                         &restored_tool_execution_content(execution.as_ref()),
                         Some(execution.as_ref()),
+                        tool_call,
                         preview,
                         redactor,
                     ),
@@ -746,32 +764,49 @@ fn restored_timeline_entries_from_session_entries(
 }
 
 fn suppressed_reasoning_trace_indices(entries: &[SessionLogEntry]) -> HashSet<usize> {
-    let final_answer_indices = entries
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| match entry {
-            SessionLogEntry::Assistant(message) if assistant_message_is_final_answer(message) => {
-                Some(index)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if final_answer_indices.is_empty() {
-        return HashSet::new();
-    }
     entries
         .iter()
         .enumerate()
         .filter_map(|(index, entry)| {
-            restored_reasoning_trace_entry(entry)
+            restored_reasoning_note_entry(entry)
+                .then_some(())
                 .filter(|_| {
-                    final_answer_indices
-                        .iter()
-                        .any(|final_index| *final_index > index)
+                    reasoning_trace_is_in_turn_before_final(entries, index)
+                        || reasoning_trace_is_immediately_before_agent_poll(entries, index)
                 })
                 .map(|_| index)
         })
         .collect()
+}
+
+fn reasoning_trace_is_in_turn_before_final(entries: &[SessionLogEntry], index: usize) -> bool {
+    entries
+        .iter()
+        .skip(index.saturating_add(1))
+        .take_while(|entry| !matches!(entry, SessionLogEntry::User(_)))
+        .any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Assistant(message) if assistant_message_is_final_answer(message)
+            )
+        })
+}
+
+fn reasoning_trace_is_immediately_before_agent_poll(
+    entries: &[SessionLogEntry],
+    index: usize,
+) -> bool {
+    for entry in entries.iter().skip(index.saturating_add(1)) {
+        if restored_reasoning_note_entry(entry) {
+            continue;
+        }
+        return matches!(
+            entry,
+            SessionLogEntry::Assistant(message)
+                if assistant_message_calls_suppressed_agent_poll(message)
+        );
+    }
+    false
 }
 
 fn suppressed_assistant_preamble_indices(entries: &[SessionLogEntry]) -> HashSet<usize> {
@@ -810,13 +845,12 @@ fn suppressed_assistant_preamble_indices(entries: &[SessionLogEntry]) -> HashSet
         .collect()
 }
 
-fn restored_reasoning_trace_entry(entry: &SessionLogEntry) -> Option<()> {
-    match entry {
-        SessionLogEntry::Control(ControlEntry::Note { kind, .. }) if kind == "reasoning_trace" => {
-            Some(())
-        }
-        _ => None,
-    }
+fn restored_reasoning_note_entry(entry: &SessionLogEntry) -> bool {
+    matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::Note { kind, .. })
+            if kind == "reasoning_delta" || kind == "reasoning_trace"
+    )
 }
 
 fn assistant_message_is_final_answer(message: &ModelMessage) -> bool {
@@ -835,6 +869,13 @@ fn assistant_message_is_final_answer(message: &ModelMessage) -> bool {
 
 fn assistant_message_is_tool_preamble(message: &ModelMessage) -> bool {
     message.assistant_kind == Some(AssistantMessageKind::ToolPreamble)
+}
+
+fn assistant_message_calls_suppressed_agent_poll(message: &ModelMessage) -> bool {
+    message
+        .tool_calls
+        .iter()
+        .any(|call| agent_result_poll_tool_name(call.name.as_str()))
 }
 
 fn push_restored_reasoning_timeline_entry(
@@ -1580,6 +1621,18 @@ fn restored_tool_execution_index(
         }
     }
     executions
+}
+
+fn restored_tool_call_index(entries: &[SessionLogEntry]) -> HashMap<String, ToolCall> {
+    let mut calls = HashMap::new();
+    for entry in entries {
+        if let SessionLogEntry::Assistant(message) = entry {
+            for call in &message.tool_calls {
+                calls.insert(call.id.clone(), call.clone());
+            }
+        }
+    }
+    calls
 }
 
 fn restored_tool_preview_snapshot_index(

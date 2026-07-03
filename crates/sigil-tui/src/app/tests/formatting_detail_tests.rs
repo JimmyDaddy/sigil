@@ -62,11 +62,12 @@ fn restored_metadata_and_error_kind_prefer_execution_state() {
 
     assert_eq!(restored_execution_status_label(&execution), Some("error"));
     assert_eq!(
-        restored_tool_metadata(Some(&envelope), Some(&execution))
+        restored_tool_metadata(Some(&envelope), Some(&execution), None)
             .and_then(|metadata| metadata.bytes),
         Some(42)
     );
-    let projected = restored_tool_metadata(Some(&envelope), None).expect("metadata should exist");
+    let projected =
+        restored_tool_metadata(Some(&envelope), None, None).expect("metadata should exist");
     assert_eq!(projected.bytes, Some(7));
     assert_eq!(projected.exit_code, Some(2));
     assert_eq!(projected.changed_files, vec!["other.txt".to_owned()]);
