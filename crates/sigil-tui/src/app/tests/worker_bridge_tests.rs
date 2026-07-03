@@ -2436,7 +2436,7 @@ fn terminal_progress_updates_existing_task_card() -> Result<()> {
 
     for (sequence, preview) in [(1, "phase one"), (2, "phase two")] {
         app.handle(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
-            execution_id: "terminal-progress".to_owned(),
+            execution_id: sigil_kernel::ToolExecutionId::new("terminal-progress")?,
             call_id: "call-terminal-progress".to_owned(),
             tool_name: "terminal_start".to_owned(),
             sequence,

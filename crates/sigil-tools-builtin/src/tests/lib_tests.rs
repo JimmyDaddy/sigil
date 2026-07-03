@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result};
@@ -15,8 +15,8 @@ use sigil_kernel::{
     JsonlSessionStore, MutationEventRecorder, PathTrustZone, PermissionRisk, SessionStreamRecord,
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
     TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCall,
-    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolRegistry,
-    ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
+    ToolProgressSink, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -37,6 +37,20 @@ fn bash_tool(test_root: &Path) -> BashTool {
         scratch_root: test_root.join("scratch-cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
         backend: Arc::new(LocalExecutionBackend),
+    }
+}
+
+struct RecordingProgressSink {
+    events: Arc<Mutex<Vec<ToolProgressEvent>>>,
+}
+
+impl ToolProgressSink for RecordingProgressSink {
+    fn emit(&self, event: ToolProgressEvent) -> Result<()> {
+        self.events
+            .lock()
+            .expect("progress event lock should not be poisoned")
+            .push(event);
+        Ok(())
     }
 }
 
@@ -2023,7 +2037,12 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
 async fn terminal_start_foreground_waits_and_returns_final_facts() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let shell = test_shell(temp.path())?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let progress_events = Arc::new(Mutex::new(Vec::new()));
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5).with_progress_sink(Arc::new(
+        RecordingProgressSink {
+            events: Arc::clone(&progress_events),
+        },
+    ));
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
@@ -2066,6 +2085,13 @@ async fn terminal_start_foreground_waits_and_returns_final_facts() -> Result<()>
         model_content["meta"]["details"]["output_preview"]["omitted"],
         true
     );
+    let progress_events = progress_events
+        .lock()
+        .expect("progress event lock should not be poisoned");
+    assert!(!progress_events.is_empty());
+    assert!(progress_events.iter().all(|event| {
+        event.execution_id.as_str() == "terminal-foreground" && event.tool_name == "terminal_start"
+    }));
     Ok(())
 }
 

@@ -26,10 +26,10 @@ use crate::{
     SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
     TaskRunEntry, TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
     ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, VerificationVerdict,
-    VisibleCompletionState, WorkspaceMutationDetected, plan_text_hash,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
+    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected, plan_text_hash,
 };
 
 use super::{
@@ -284,6 +284,10 @@ impl Provider for CapturingTextProvider {
 struct ToolSideEffectProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
+struct ForegroundTerminalProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+    tool_completed: Arc<AtomicBool>,
+}
 struct WorkspaceMutationToolProvider;
 
 #[async_trait]
@@ -327,6 +331,57 @@ impl Provider for ToolSideEffectProvider {
                     id: "call-side-effect".to_owned(),
                     name: "side_effect".to_owned(),
                     args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])))
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ForegroundTerminalProvider {
+    fn name(&self) -> &str {
+        "mock-foreground-terminal"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        if tool_used {
+            if !self.tool_completed.load(Ordering::SeqCst) {
+                anyhow::bail!("provider was polled before foreground terminal completed");
+            }
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("foreground complete".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])))
+        } else {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-terminal-foreground".to_owned(),
+                    name: "terminal_start".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-terminal-foreground".to_owned(),
+                    delta: r#"{"command":"cargo check 2>&1","mode":"foreground"}"#.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-terminal-foreground".to_owned(),
+                    name: "terminal_start".to_owned(),
+                    args_json: r#"{"command":"cargo check 2>&1","mode":"foreground"}"#.to_owned(),
                 })),
                 Ok(ProviderChunk::Done),
             ])))
@@ -380,6 +435,9 @@ impl Provider for WorkspaceMutationToolProvider {
 
 struct EchoTool;
 struct ProgressEchoTool;
+struct ForegroundTerminalTool {
+    completed: Arc<AtomicBool>,
+}
 struct AgentCategoryTool;
 struct FailingAgentCategoryTool;
 struct RunningSpawnAgentCategoryTool;
@@ -455,7 +513,7 @@ impl Tool for ProgressEchoTool {
         args: serde_json::Value,
     ) -> Result<ToolResult> {
         ctx.emit_progress(ToolProgressEvent {
-            execution_id: "progress-echo".to_owned(),
+            execution_id: ToolExecutionId::new("progress-echo")?,
             call_id: call_id.clone(),
             tool_name: "echo".to_owned(),
             sequence: 1,
@@ -468,7 +526,7 @@ impl Tool for ProgressEchoTool {
             details: json!({"phase": "one"}),
         })?;
         ctx.emit_progress(ToolProgressEvent {
-            execution_id: "progress-echo".to_owned(),
+            execution_id: ToolExecutionId::new("progress-echo")?,
             call_id: call_id.clone(),
             tool_name: "echo".to_owned(),
             sequence: 2,
@@ -485,6 +543,96 @@ impl Tool for ProgressEchoTool {
             "echo",
             args["value"].as_str().unwrap_or_default(),
             ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for ForegroundTerminalTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "terminal_start".to_owned(),
+            description: "foreground terminal".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "mode": {"type": "string"}
+                },
+                "required": ["command"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        ctx.emit_progress(ToolProgressEvent {
+            execution_id: ToolExecutionId::new("terminal-foreground")?,
+            call_id: call_id.clone(),
+            tool_name: "terminal_start".to_owned(),
+            sequence: 1,
+            status: "running".to_owned(),
+            message: Some("terminal terminal-foreground running".to_owned()),
+            output_preview: Some("compiling".to_owned()),
+            output_log_ref: Some(PathBuf::from(
+                "state/artifacts/tasks/terminal-foreground/output.log",
+            )),
+            total_bytes: Some(9),
+            updated_at_ms: Some(1),
+            details: json!({
+                "task_id": "terminal-foreground",
+                "status": "running",
+                "execution_mode": "foreground",
+                "output_preview": "compiling"
+            }),
+        })?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        ctx.emit_progress(ToolProgressEvent {
+            execution_id: ToolExecutionId::new("terminal-foreground")?,
+            call_id: call_id.clone(),
+            tool_name: "terminal_start".to_owned(),
+            sequence: 2,
+            status: "running".to_owned(),
+            message: Some("terminal terminal-foreground running".to_owned()),
+            output_preview: Some("finished".to_owned()),
+            output_log_ref: Some(PathBuf::from(
+                "state/artifacts/tasks/terminal-foreground/output.log",
+            )),
+            total_bytes: Some(17),
+            updated_at_ms: Some(2),
+            details: json!({
+                "task_id": "terminal-foreground",
+                "status": "running",
+                "execution_mode": "foreground",
+                "output_preview": "finished"
+            }),
+        })?;
+        self.completed.store(true, Ordering::SeqCst);
+
+        Ok(ToolResult::ok(
+            call_id,
+            "terminal_start",
+            "terminal task terminal-foreground exited · verdict passed\nexit_code: 0\nlog: state/artifacts/tasks/terminal-foreground/output.log\noutput_preview omitted from model context; read log only if requested",
+            ToolResultMeta {
+                exit_code: Some(0),
+                details: json!({
+                    "task_id": "terminal-foreground",
+                    "status": "exited",
+                    "execution_mode": "foreground",
+                    "verdict": "passed",
+                    "rerun_not_needed": true,
+                    "output_log_ref": "state/artifacts/tasks/terminal-foreground/output.log",
+                    "output_preview": "finished"
+                }),
+                ..ToolResultMeta::default()
+            },
         ))
     }
 }
@@ -2059,6 +2207,83 @@ async fn agent_forwards_tool_progress_without_persisting_progress_as_tool_messag
                 .is_some_and(|content| !content.contains("progress one")
                     && !content.contains("progress two")))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_waits_for_foreground_terminal_result_before_next_provider_request() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let completed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ForegroundTerminalTool {
+        completed: Arc::clone(&completed),
+    }));
+    let agent = Agent::new(
+        ForegroundTerminalProvider {
+            captured: Arc::clone(&captured),
+            tool_completed: Arc::clone(&completed),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = agent
+        .run(
+            &mut session,
+            "run the workspace check",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "foreground complete");
+    assert!(completed.load(Ordering::SeqCst));
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::ToolProgress(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                RunEvent::ToolResult(result) if result.tool_name == "terminal_start"
+            ))
+            .count(),
+        1
+    );
+
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 2);
+    let second_request_tool_text = requests[1]
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(second_request_tool_text.contains("terminal task terminal-foreground exited"));
+    assert!(second_request_tool_text.contains("rerun_not_needed"));
+    assert!(!second_request_tool_text.contains("compiling"));
     Ok(())
 }
 

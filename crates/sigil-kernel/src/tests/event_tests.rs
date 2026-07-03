@@ -34,16 +34,17 @@ use crate::{
     TaskStepEntry, TaskStepId, TaskStepStatus, TaskSubagentApprovalRouteEntry,
     TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
     TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
-    ToolCategory, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolProgressEvent,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, TypedDomainEvent, TypedStoredEventDecode,
-    UsageStats, VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationVerdict,
-    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
-    WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
-    decode_stored_event, decode_typed_stored_event, is_transient_run_event,
-    projection_apply_decision, projection_apply_decision_for_record, reducer_disposition,
+    ToolCategory, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionId,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
+    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, TypedDomainEvent,
+    TypedStoredEventDecode, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
+    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceRootSnapshot, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, decode_stored_event,
+    decode_typed_stored_event, is_transient_run_event, projection_apply_decision,
+    projection_apply_decision_for_record, reducer_disposition,
 };
 
 #[test]
@@ -1222,7 +1223,8 @@ fn public_run_event_projects_all_internal_run_event_variants() {
 
 fn tool_progress_event(call_id: &str) -> ToolProgressEvent {
     ToolProgressEvent {
-        execution_id: "execution-1".to_owned(),
+        execution_id: ToolExecutionId::new("execution-1")
+            .expect("test tool execution id should be valid"),
         call_id: call_id.to_owned(),
         tool_name: "terminal_start".to_owned(),
         sequence: 1,

@@ -4,9 +4,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
@@ -411,11 +411,65 @@ pub trait ToolProgressSink: Send + Sync {
     fn emit(&self, event: ToolProgressEvent) -> Result<()>;
 }
 
+/// Stable identifier for one logical tool execution lifecycle.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct ToolExecutionId(String);
+
+impl ToolExecutionId {
+    /// Creates an identifier safe to use in progress coalescing keys and durable execution records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is empty or contains path separators or unstable characters.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        validate_tool_execution_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolExecutionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolExecutionId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_tool_execution_id(value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("tool execution id cannot be empty");
+    }
+    if value == "." || value == ".." || value.contains('/') || value.contains('\\') {
+        bail!("tool execution id must not contain path separators or traversal");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!("tool execution id contains unsupported characters");
+    }
+    Ok(())
+}
+
 /// Provider-neutral live progress update for a running tool execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolProgressEvent {
-    pub execution_id: String,
+    pub execution_id: ToolExecutionId,
     pub call_id: String,
     pub tool_name: String,
     pub sequence: u64,

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
     TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCategory,
-    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolContext, ToolErrorKind, ToolExecutionId, ToolOperation, ToolPreviewCapability,
+    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 use tokio::time::sleep;
 
@@ -944,7 +944,7 @@ fn emit_terminal_progress(
     progress: ForegroundTerminalProgress<'_>,
 ) -> Result<()> {
     ctx.emit_progress(ToolProgressEvent {
-        execution_id: entry.handle.task_id.as_str().to_owned(),
+        execution_id: ToolExecutionId::new(entry.handle.task_id.as_str())?,
         call_id: call_id.to_owned(),
         tool_name: tool_name.to_owned(),
         sequence,
