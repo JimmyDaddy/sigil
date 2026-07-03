@@ -215,7 +215,7 @@ fn wait_agent_pending_key_helpers_cover_pending_and_terminal_boundaries() {
 
     let pending_result = ToolResult::ok("call-wait", "wait_agent", "", ToolResultMeta::default());
     assert!(
-        wait_agent_pending_replacement_index(
+        wait_agent_pending_replacement_indices(
             &[],
             &pending_result,
             &json!({

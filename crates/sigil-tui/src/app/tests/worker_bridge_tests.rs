@@ -1849,6 +1849,35 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
     }));
 
     app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-spawn-agent-metadata".to_owned(),
+        "spawn_agent".to_owned(),
+        "agent thread agent_chat_1 is running".to_owned(),
+        sigil_kernel::ToolResultMeta {
+            details: serde_json::json!({
+                "thread_id": "agent_chat_1",
+                "display_name": "kernel-explorer",
+                "status": "running",
+                "reason": "agent tool spawned child session",
+                "retry_after_ms": 5000,
+                "next_action": "continue only non-overlapping parent work"
+            }),
+            ..sigil_kernel::ToolResultMeta::default()
+        },
+    )))?;
+    let agent_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("agent_chat_1"))
+        .collect::<Vec<_>>();
+    assert_eq!(agent_cards.len(), 1);
+    assert!(agent_cards[0].text.contains("call-spawn-agent-metadata"));
+    assert!(
+        agent_cards[0]
+            .text
+            .contains("\"reason\":\"agent tool spawned child session\"")
+    );
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
         "call-spawn-agent".to_owned(),
         "spawn_agent".to_owned(),
         serde_json::json!({

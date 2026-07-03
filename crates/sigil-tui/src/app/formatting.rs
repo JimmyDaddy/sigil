@@ -416,7 +416,8 @@ fn format_tool_preview_payload(
     let original_bytes = content.len() as u64;
     let (display_content, display_truncated) = bounded_tool_display_content(content);
     let content = redactor.redact_text(display_content.as_ref());
-    let preview_value = tool_preview_value(&content);
+    let preview_value = tool_preview_value(&content)
+        .or_else(|| agent_tool_metadata_preview_value(tool_name, metadata));
     let (preview_kind, preview_source) =
         tool_preview_source(tool_name, &content, preview_value.as_ref(), metadata);
     let preview_language = tool_preview_language(tool_name, preview_kind, metadata);
@@ -1041,6 +1042,58 @@ fn agent_tool_preview_source(
         "wait_agent" | "message_agent" | "close_agent" => Some(("text", String::new())),
         _ => None,
     }
+}
+
+fn agent_tool_metadata_preview_value(
+    tool_name: &str,
+    metadata: Option<&ToolResultMeta>,
+) -> Option<serde_json::Value> {
+    if !matches!(
+        tool_name,
+        "spawn_agent" | "wait_agent" | "read_agent_result" | "message_agent" | "close_agent"
+    ) {
+        return None;
+    }
+    let details = &metadata?.details;
+    let thread_id = details
+        .get("thread_id")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if thread_id.is_empty() {
+        return None;
+    }
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "thread_id".to_owned(),
+        serde_json::Value::String(thread_id.to_owned()),
+    );
+    for key in [
+        "display_name",
+        "profile_id",
+        "objective",
+        "status",
+        "reason",
+        "coalescing_key",
+        "next_action",
+    ] {
+        if let Some(value) = details.get(key).filter(|value| !value.is_null()) {
+            object.insert(key.to_owned(), value.clone());
+        }
+    }
+    for key in [
+        "terminal",
+        "result_available",
+        "backgrounded",
+        "required_before_final",
+        "retry_after_ms",
+        "next_poll_after_ms",
+        "next_poll_after_unix_ms",
+    ] {
+        if let Some(value) = details.get(key).filter(|value| !value.is_null()) {
+            object.insert(key.to_owned(), value.clone());
+        }
+    }
+    Some(serde_json::Value::Object(object))
 }
 
 pub(super) fn agent_result_poll_tool_name(tool_name: &str) -> bool {

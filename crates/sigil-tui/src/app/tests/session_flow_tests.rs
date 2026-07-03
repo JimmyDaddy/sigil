@@ -293,16 +293,13 @@ fn restored_agent_thread_controls_render_user_facing_cards() -> Result<()> {
         .filter(|entry| entry.role == TimelineRole::Tool)
         .map(|entry| entry.text.as_str())
         .collect::<Vec<_>>();
-    assert!(tool_cards.iter().any(|text| {
-        text.contains("\"tool_name\":\"spawn_agent\"")
-            && text.contains("\"thread_id\":\"agent_restore_1\"")
-            && text.contains("\"source\":\"mention\"")
-    }));
-    assert!(tool_cards.iter().any(|text| {
-        text.contains("\"tool_name\":\"wait_agent\"")
-            && text.contains("\"thread_id\":\"agent_restore_1\"")
-            && text.contains("\"reason\":\"waiting for result\"")
-    }));
+    let agent_cards = tool_cards
+        .iter()
+        .filter(|text| text.contains("\"thread_id\":\"agent_restore_1\""))
+        .collect::<Vec<_>>();
+    assert_eq!(agent_cards.len(), 1);
+    assert!(agent_cards[0].contains("\"tool_name\":\"wait_agent\""));
+    assert!(agent_cards[0].contains("\"reason\":\"waiting for result\""));
     assert!(app.events.iter().any(|event| {
         event.label == "control:restore"
             && event.detail.contains("agent_restore_1")

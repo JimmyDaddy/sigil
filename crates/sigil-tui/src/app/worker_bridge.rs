@@ -39,20 +39,37 @@ impl AppState {
         self.push_phase_marker(format!("agent|{profile_id}"));
     }
 
-    fn replace_or_push_tool_card(&mut self, rendered: String) {
-        if let Some(index) = tool_card_replacement_index(&self.timeline, &rendered) {
-            self.replace_tool_timeline_entry(index, rendered);
+    pub(super) fn replace_or_push_tool_card(&mut self, rendered: String) {
+        if let Some(indices) = tool_card_replacement_indices(&self.timeline, &rendered) {
+            self.replace_tool_timeline_entries(&indices, rendered);
         } else {
             self.push_timeline(TimelineRole::Tool, rendered);
         }
     }
 
-    fn replace_tool_timeline_entry(&mut self, index: usize, rendered: String) {
-        let Some(entry) = self.timeline.get_mut(index) else {
+    fn replace_tool_timeline_entries(&mut self, indices: &[usize], rendered: String) {
+        let Some((&keep_index, duplicate_indices)) = indices.split_first() else {
+            return;
+        };
+        let Some(entry) = self.timeline.get_mut(keep_index) else {
             return;
         };
         entry.text = rendered;
+        let mut removed_duplicate = false;
+        for index in duplicate_indices.iter().rev().copied() {
+            if index < self.timeline.len() {
+                self.timeline.remove(index);
+                removed_duplicate = true;
+            }
+        }
+        if removed_duplicate {
+            self.rebuild_timeline_projection_after_entry_removal();
+        } else {
+            self.refresh_replaced_tool_timeline_entry(keep_index);
+        }
+    }
 
+    fn refresh_replaced_tool_timeline_entry(&mut self, index: usize) {
         if let Some(entry) = self.timeline.get(index)
             && let Some(activity) = self.tool_activity_cache_entry(index, entry)
         {
@@ -1528,8 +1545,8 @@ impl EventHandler for AppState {
                 let result = tool_progress_result(progress);
                 let rendered =
                     format_tool_result_block_redacted(&result, None, &self.secret_redactor);
-                if let Some(index) = tool_card_replacement_index(&self.timeline, &rendered) {
-                    self.replace_tool_timeline_entry(index, rendered);
+                if let Some(indices) = tool_card_replacement_indices(&self.timeline, &rendered) {
+                    self.replace_tool_timeline_entries(&indices, rendered);
                 } else {
                     self.push_timeline(TimelineRole::Tool, rendered);
                 }
@@ -1556,12 +1573,14 @@ impl EventHandler for AppState {
                 let preview = self.tool_preview_snapshots.get(&result.call_id);
                 let rendered =
                     format_tool_result_block_redacted(&result, preview, &self.secret_redactor);
-                if let Some(index) =
-                    wait_agent_pending_replacement_index(&self.timeline, &result, &rendered)
+                if let Some(indices) =
+                    wait_agent_pending_replacement_indices(&self.timeline, &result, &rendered)
                 {
-                    self.replace_tool_timeline_entry(index, rendered);
-                } else if let Some(index) = tool_card_replacement_index(&self.timeline, &rendered) {
-                    self.replace_tool_timeline_entry(index, rendered);
+                    self.replace_tool_timeline_entries(&indices, rendered);
+                } else if let Some(indices) =
+                    tool_card_replacement_indices(&self.timeline, &rendered)
+                {
+                    self.replace_tool_timeline_entries(&indices, rendered);
                 } else {
                     self.push_timeline(TimelineRole::Tool, rendered);
                 }
@@ -1721,25 +1740,29 @@ fn suppress_reasoning_before_tool_call(name: &str) -> bool {
     agent_result_poll_tool_name(name)
 }
 
-fn tool_card_replacement_index(timeline: &[TimelineEntry], rendered: &str) -> Option<usize> {
-    let current_key = terminal_task_key_from_tool_block(rendered)
-        .or_else(|| execution_key_from_tool_block(rendered))
-        .or_else(|| agent_thread_key_from_tool_block(rendered))?;
+fn tool_card_replacement_indices(timeline: &[TimelineEntry], rendered: &str) -> Option<Vec<usize>> {
+    let current_key = tool_card_replacement_key(rendered)?;
     const RECENT_TOOL_CARD_SCAN: usize = 96;
-    timeline
+    let start_index = timeline.len().saturating_sub(RECENT_TOOL_CARD_SCAN);
+    let indices = timeline
         .iter()
         .enumerate()
-        .rev()
-        .take(RECENT_TOOL_CARD_SCAN)
-        .find_map(|(index, previous)| {
+        .skip(start_index)
+        .filter_map(|(index, previous)| {
             if previous.role != TimelineRole::Tool {
                 return None;
             }
-            let previous_key = terminal_task_key_from_tool_block(&previous.text)
-                .or_else(|| execution_key_from_tool_block(&previous.text))
-                .or_else(|| agent_thread_key_from_tool_block(&previous.text))?;
+            let previous_key = tool_card_replacement_key(&previous.text)?;
             (previous_key == current_key).then_some(index)
         })
+        .collect::<Vec<_>>();
+    (!indices.is_empty()).then_some(indices)
+}
+
+pub(super) fn tool_card_replacement_key(text: &str) -> Option<String> {
+    terminal_task_key_from_tool_block(text)
+        .or_else(|| execution_key_from_tool_block(text))
+        .or_else(|| agent_thread_key_from_tool_block(text))
 }
 
 fn tool_progress_result(progress: ToolProgressEvent) -> ToolResult {
@@ -1841,24 +1864,28 @@ fn tool_progress_details(execution_id: &str, details: serde_json::Value) -> serd
     }
 }
 
-fn wait_agent_pending_replacement_index(
+fn wait_agent_pending_replacement_indices(
     timeline: &[TimelineEntry],
     result: &ToolResult,
     rendered: &str,
-) -> Option<usize> {
+) -> Option<Vec<usize>> {
     let current_key = wait_agent_pending_key_from_result(result, rendered)?;
     const RECENT_PENDING_WAIT_AGENT_SCAN: usize = 64;
-    timeline
+    let start_index = timeline
+        .len()
+        .saturating_sub(RECENT_PENDING_WAIT_AGENT_SCAN);
+    let indices = timeline
         .iter()
         .enumerate()
-        .rev()
-        .take(RECENT_PENDING_WAIT_AGENT_SCAN)
-        .find_map(|(index, previous)| {
+        .skip(start_index)
+        .filter_map(|(index, previous)| {
             (previous.role == TimelineRole::Tool
                 && wait_agent_pending_key_from_tool_block(&previous.text)
                     .is_some_and(|previous_key| previous_key == current_key))
             .then_some(index)
         })
+        .collect::<Vec<_>>();
+    (!indices.is_empty()).then_some(indices)
 }
 
 fn wait_agent_pending_key_from_result(result: &ToolResult, rendered: &str) -> Option<String> {

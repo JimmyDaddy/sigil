@@ -23,6 +23,7 @@ use super::{
         format_tool_content_block_redacted_for_restore, human_file_size, relative_age_label,
         truncate_session_view_text,
     },
+    worker_bridge::tool_card_replacement_key,
 };
 use crate::view_model::{RecoveryPanelViewModel, TaskMemoryInspectViewModel};
 
@@ -510,8 +511,7 @@ impl AppState {
                             .tool_call_id
                             .as_deref()
                             .and_then(|call_id| restored_tool_calls.get(call_id));
-                        self.push_timeline(
-                            TimelineRole::Tool,
+                        self.replace_or_push_tool_card(
                             format_tool_content_block_redacted_for_restore(
                                 message.tool_call_id.as_deref(),
                                 &content,
@@ -541,8 +541,7 @@ impl AppState {
                     {
                         let preview = restored_tool_previews.get(&execution.call_id);
                         let tool_call = restored_tool_calls.get(&execution.call_id);
-                        self.push_timeline(
-                            TimelineRole::Tool,
+                        self.replace_or_push_tool_card(
                             format_tool_content_block_redacted_for_restore(
                                 Some(execution.call_id.as_str()),
                                 &restored_tool_execution_content(execution.as_ref()),
@@ -555,10 +554,10 @@ impl AppState {
                         self.push_event("control:restore", render_tool_execution_line(&execution));
                     }
                     ControlEntry::TerminalTask(task) => {
-                        self.push_timeline(
-                            TimelineRole::Tool,
-                            format_terminal_task_block_redacted(&task, &self.secret_redactor),
-                        );
+                        self.replace_or_push_tool_card(format_terminal_task_block_redacted(
+                            &task,
+                            &self.secret_redactor,
+                        ));
                         self.push_event(
                             "control:restore",
                             format!(
@@ -569,10 +568,7 @@ impl AppState {
                         );
                     }
                     ControlEntry::AgentThreadStarted(entry) => {
-                        self.push_timeline(
-                            TimelineRole::Tool,
-                            format_agent_thread_started_block(&entry),
-                        );
+                        self.replace_or_push_tool_card(format_agent_thread_started_block(&entry));
                         self.push_event(
                             "control:restore",
                             format!(
@@ -583,10 +579,7 @@ impl AppState {
                         );
                     }
                     ControlEntry::AgentThreadStatusChanged(entry) => {
-                        self.push_timeline(
-                            TimelineRole::Tool,
-                            format_agent_thread_status_block(&entry),
-                        );
+                        self.replace_or_push_tool_card(format_agent_thread_status_block(&entry));
                         self.push_event(
                             "control:restore",
                             format!(
@@ -697,9 +690,9 @@ fn restored_timeline_entries_from_session_entries(
                         .tool_call_id
                         .as_deref()
                         .and_then(|call_id| restored_tool_calls.get(call_id));
-                    timeline.push(crate::timeline::TimelineEntry {
-                        role: TimelineRole::Tool,
-                        text: format_tool_content_block_redacted_for_restore(
+                    push_restored_tool_card(
+                        &mut timeline,
+                        format_tool_content_block_redacted_for_restore(
                             message.tool_call_id.as_deref(),
                             content,
                             execution,
@@ -707,7 +700,7 @@ fn restored_timeline_entries_from_session_entries(
                             preview,
                             redactor,
                         ),
-                    });
+                    );
                 }
             }
             SessionLogEntry::Control(ControlEntry::Note { kind, data })
@@ -727,9 +720,9 @@ fn restored_timeline_entries_from_session_entries(
             {
                 let preview = restored_tool_previews.get(&execution.call_id);
                 let tool_call = restored_tool_calls.get(&execution.call_id);
-                timeline.push(crate::timeline::TimelineEntry {
-                    role: TimelineRole::Tool,
-                    text: format_tool_content_block_redacted_for_restore(
+                push_restored_tool_card(
+                    &mut timeline,
+                    format_tool_content_block_redacted_for_restore(
                         Some(execution.call_id.as_str()),
                         &restored_tool_execution_content(execution.as_ref()),
                         Some(execution.as_ref()),
@@ -737,30 +730,56 @@ fn restored_timeline_entries_from_session_entries(
                         preview,
                         redactor,
                     ),
-                });
+                );
             }
             SessionLogEntry::Control(ControlEntry::TerminalTask(task)) => {
-                timeline.push(crate::timeline::TimelineEntry {
-                    role: TimelineRole::Tool,
-                    text: format_terminal_task_block_redacted(task, redactor),
-                });
+                push_restored_tool_card(
+                    &mut timeline,
+                    format_terminal_task_block_redacted(task, redactor),
+                );
             }
             SessionLogEntry::Control(ControlEntry::AgentThreadStarted(entry)) => {
-                timeline.push(crate::timeline::TimelineEntry {
-                    role: TimelineRole::Tool,
-                    text: format_agent_thread_started_block(entry),
-                });
+                push_restored_tool_card(&mut timeline, format_agent_thread_started_block(entry));
             }
             SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(entry)) => {
-                timeline.push(crate::timeline::TimelineEntry {
-                    role: TimelineRole::Tool,
-                    text: format_agent_thread_status_block(entry),
-                });
+                push_restored_tool_card(&mut timeline, format_agent_thread_status_block(entry));
             }
             SessionLogEntry::Control(_) => {}
         }
     }
     timeline
+}
+
+fn push_restored_tool_card(timeline: &mut Vec<crate::timeline::TimelineEntry>, text: String) {
+    let Some(current_key) = tool_card_replacement_key(&text) else {
+        timeline.push(crate::timeline::TimelineEntry {
+            role: TimelineRole::Tool,
+            text,
+        });
+        return;
+    };
+    let mut matching_indices = timeline
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            (entry.role == TimelineRole::Tool
+                && tool_card_replacement_key(&entry.text)
+                    .is_some_and(|previous_key| previous_key == current_key))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let Some(keep_index) = matching_indices.first().copied() else {
+        timeline.push(crate::timeline::TimelineEntry {
+            role: TimelineRole::Tool,
+            text,
+        });
+        return;
+    };
+    timeline[keep_index].text = text;
+    matching_indices.remove(0);
+    for index in matching_indices.into_iter().rev() {
+        timeline.remove(index);
+    }
 }
 
 fn suppressed_reasoning_trace_indices(entries: &[SessionLogEntry]) -> HashSet<usize> {

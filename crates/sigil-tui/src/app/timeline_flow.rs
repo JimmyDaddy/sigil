@@ -255,7 +255,7 @@ impl AppState {
         self.rebuild_timeline_projection_after_entry_removal();
     }
 
-    fn rebuild_timeline_projection_after_entry_removal(&mut self) {
+    pub(super) fn rebuild_timeline_projection_after_entry_removal(&mut self) {
         self.streaming_assistant_index = None;
         self.streaming_reasoning_index = None;
         self.expanded_thinking_entry_indices.clear();

@@ -1538,9 +1538,16 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
     assert!(rendered.contains("think 2"));
     assert!(rendered.contains("command failed"));
     assert!(rendered.contains("terminal_task"));
-    assert!(rendered.contains("\"tool_name\":\"spawn_agent\""));
     assert!(rendered.contains("\"tool_name\":\"wait_agent\""));
     assert!(rendered.contains("\"thread_id\":\"agent_restore_1\""));
+    assert_eq!(
+        restored
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Tool
+                && entry.text.contains("\"thread_id\":\"agent_restore_1\""))
+            .count(),
+        1
+    );
     assert!(!rendered.contains("other"));
     Ok(())
 }
