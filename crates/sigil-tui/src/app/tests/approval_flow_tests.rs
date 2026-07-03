@@ -154,8 +154,10 @@ fn terminal_input_approval_modal_explains_task_without_echoing_input() -> Result
     let view = app
         .approval_modal_view()
         .expect("approval modal view should exist");
+    assert_eq!(view.tool_name, "terminal task input");
     assert_eq!(view.access_label, "terminal input");
     assert_eq!(view.preview_title, "Send terminal input");
+    assert_eq!(view.diff_label, "terminal task terminal-1");
     assert!(view.preview_summary.contains("Terminal task: terminal-1"));
     assert!(view.preview_summary.contains("Input: 2 bytes"));
     assert!(!view.preview_summary.contains("xy"));

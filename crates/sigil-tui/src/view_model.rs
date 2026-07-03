@@ -904,7 +904,9 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · {shortcut_hint} · V details");
     }
     if app.is_composer_queue_panel_focused() {
-        return format!("{agent} · Follow-ups ↑↓ item · Tab action · Enter selected · Esc input");
+        return format!(
+            "{agent} · Follow-ups ↑↓ item · ←/→ action · Enter selected · Tab/Esc input"
+        );
     }
     if app.runtime.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
         let queue = queue

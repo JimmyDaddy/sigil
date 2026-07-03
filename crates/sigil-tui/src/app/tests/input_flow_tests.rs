@@ -655,8 +655,8 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
     ));
     assert_eq!(app.last_notice(), Some("follow-up will run next"));
 
-    let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    assert!(tab.is_none());
+    let action_cycle = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert!(action_cycle.is_none());
     let interrupt = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         interrupt,
@@ -667,6 +667,9 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
         app.last_notice(),
         Some("interrupting current turn for follow-up")
     );
+    let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert!(tab.is_none());
+    assert!(!app.is_composer_queue_panel_focused());
     Ok(())
 }
 
@@ -686,6 +689,15 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
     );
 
     app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))?;
+    assert!(!app.is_composer_queue_panel_focused());
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert!(app.is_composer_queue_panel_focused());
+    assert_eq!(
+        app.selected_composer_queue_action(),
+        ComposerQueueAction::KeepNext
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(
         app.selected_composer_queue_action(),
         ComposerQueueAction::Delete
@@ -695,10 +707,15 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
         app.selected_composer_queue_action(),
         ComposerQueueAction::KeepNext
     );
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.selected_composer_queue_action(),
+        ComposerQueueAction::SendNow
+    );
     app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(
         app.selected_composer_queue_action(),
-        ComposerQueueAction::Delete
+        ComposerQueueAction::KeepNext
     );
 
     let move_first_up = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))?;

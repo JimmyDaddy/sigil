@@ -534,6 +534,11 @@ fn approval_diff_status_line_with_palette(
     } else {
         format!("hunk {}/{}", view.active_hunk_index, view.hunk_total)
     };
+    let target_label = if view.file_rows.is_empty() && view.changed_files.is_empty() {
+        "target"
+    } else {
+        "path"
+    };
     let mut spans = vec![
         approval_badge_with_palette("Prev", palette.text_muted, palette),
         Span::raw(" "),
@@ -551,7 +556,7 @@ fn approval_diff_status_line_with_palette(
             palette,
         ),
         Span::raw("  "),
-        Span::styled("path", Style::default().fg(palette.text_muted)),
+        Span::styled(target_label, Style::default().fg(palette.text_muted)),
         Span::raw(" "),
         Span::styled(
             view.diff_label.clone(),

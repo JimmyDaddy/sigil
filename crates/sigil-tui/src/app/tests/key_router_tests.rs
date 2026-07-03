@@ -83,6 +83,26 @@ fn key_router_keeps_agent_panel_letters_available_for_composer_text() {
 }
 
 #[test]
+fn key_router_maps_queue_panel_tab_to_exit_and_arrows_to_actions() {
+    assert_eq!(
+        resolve_binding(InputContext::ComposerQueuePanel, key(KeyCode::Tab)),
+        Some(RoutedKeyCommand::QueueBlur)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ComposerQueuePanel, key(KeyCode::BackTab)),
+        Some(RoutedKeyCommand::QueueBlur)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ComposerQueuePanel, key(KeyCode::Right)),
+        Some(RoutedKeyCommand::QueueActionNext)
+    );
+    assert_eq!(
+        resolve_binding(InputContext::ComposerQueuePanel, key(KeyCode::Left)),
+        Some(RoutedKeyCommand::QueueActionPrevious)
+    );
+}
+
+#[test]
 fn key_router_snapshot_covers_high_risk_contexts() {
     let snapshot = key_binding_snapshot();
     assert!(snapshot.iter().any(|binding| {
@@ -94,6 +114,16 @@ fn key_router_snapshot_covers_high_risk_contexts() {
         binding.context == InputContext::ComposerQueuePanel
             && binding.key == "Down"
             && binding.command == RoutedKeyCommand::QueueSelectionNext
+    }));
+    assert!(snapshot.iter().any(|binding| {
+        binding.context == InputContext::ComposerQueuePanel
+            && binding.key == "Right"
+            && binding.command == RoutedKeyCommand::QueueActionNext
+    }));
+    assert!(snapshot.iter().any(|binding| {
+        binding.context == InputContext::ComposerQueuePanel
+            && binding.key == "Tab"
+            && binding.command == RoutedKeyCommand::QueueBlur
     }));
     assert!(snapshot.iter().any(|binding| {
         binding.context == InputContext::ComposerAgentPanel

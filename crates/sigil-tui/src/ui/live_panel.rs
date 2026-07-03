@@ -373,7 +373,7 @@ fn render_queue_header(
         "Follow-ups"
     };
     let detail = if view_model.queue_panel_focused {
-        "Up/Down item · Tab action · Enter selected"
+        "↑↓ item · ←/→ action · Enter selected · Tab/Esc input"
     } else {
         "Tab focus · /queue advanced"
     };

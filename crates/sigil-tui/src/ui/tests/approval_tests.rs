@@ -447,6 +447,21 @@ fn approval_diff_status_line_handles_empty_hunks_without_diagnostics() {
 }
 
 #[test]
+fn approval_diff_status_line_uses_target_for_non_file_approval() {
+    let text = plain_line_text(&approval_diff_status_line(&ApprovalModalView {
+        file_rows: Vec::new(),
+        changed_files: Vec::new(),
+        diff_label: "terminal task terminal-1".to_owned(),
+        hunk_total: 0,
+        active_hunk_index: 0,
+        ..modal_view("terminal input")
+    }));
+
+    assert!(text.contains("target terminal task terminal-1"));
+    assert!(!text.contains("path terminal task terminal-1"));
+}
+
+#[test]
 fn approval_diagnostics_helpers_cover_clean_warning_and_error_states() {
     let palette = crate::ui::theme::default_palette();
     let clean = ApprovalDiagnosticSummary::default();

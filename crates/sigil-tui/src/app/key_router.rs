@@ -385,8 +385,7 @@ fn resolve_approval_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
 
 fn resolve_queue_binding(key: KeyEvent) -> Option<RoutedKeyCommand> {
     match key.code {
-        KeyCode::Tab => Some(RoutedKeyCommand::QueueActionNext),
-        KeyCode::BackTab => Some(RoutedKeyCommand::QueueActionPrevious),
+        KeyCode::Tab | KeyCode::BackTab => Some(RoutedKeyCommand::QueueBlur),
         KeyCode::Right if key.modifiers.is_empty() => Some(RoutedKeyCommand::QueueActionNext),
         KeyCode::Left if key.modifiers.is_empty() => Some(RoutedKeyCommand::QueueActionPrevious),
         KeyCode::Up if has_alt_without_control(key) => Some(RoutedKeyCommand::QueueMoveUp),
@@ -448,6 +447,16 @@ pub(crate) fn key_binding_snapshot() -> Vec<KeyBindingView> {
             context: InputContext::ComposerQueuePanel,
             key: "Down",
             command: RoutedKeyCommand::QueueSelectionNext,
+        },
+        KeyBindingView {
+            context: InputContext::ComposerQueuePanel,
+            key: "Right",
+            command: RoutedKeyCommand::QueueActionNext,
+        },
+        KeyBindingView {
+            context: InputContext::ComposerQueuePanel,
+            key: "Tab",
+            command: RoutedKeyCommand::QueueBlur,
         },
         KeyBindingView {
             context: InputContext::ComposerAgentPanel,

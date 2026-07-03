@@ -281,9 +281,11 @@ impl AppState {
         let source_agent = self.pending_approval_source_agent(&pending.call.id);
         let shell_preview =
             approval_shell_preview(pending).or_else(|| approval_terminal_input_preview(pending));
+        let tool_name = approval_tool_display_name(pending);
+        let target_label = approval_target_label(pending, shell_preview.as_ref());
         let Some(preview) = pending.preview.as_ref() else {
             return Some(ApprovalModalView {
-                tool_name: pending.call.name.clone(),
+                tool_name,
                 call_id: pending.call.id.clone(),
                 source_agent,
                 access_label,
@@ -302,7 +304,7 @@ impl AppState {
                 diff_mode_label: self.approval.diff_mode.label(),
                 active_hunk_index: 0,
                 hunk_total: 0,
-                diff_label: pending.call.name.clone(),
+                diff_label: target_label,
                 diff_lines: vec![ApprovalDiffLine {
                     text: "No structured diff preview available.".to_owned(),
                     kind: ApprovalDiffLineKind::Context,
@@ -405,7 +407,7 @@ impl AppState {
             .unwrap_or_else(|| preview.title.clone());
 
         Some(ApprovalModalView {
-            tool_name: pending.call.name.clone(),
+            tool_name,
             call_id: pending.call.id.clone(),
             source_agent,
             access_label,
@@ -622,6 +624,38 @@ fn approval_pending_access_label(pending: &PendingApproval) -> String {
         return "terminal input".to_owned();
     }
     approval_access_label(&pending.spec)
+}
+
+fn approval_tool_display_name(pending: &PendingApproval) -> String {
+    if pending.operation == ToolOperation::SendTerminalInput
+        && pending.call.name == "terminal_input"
+    {
+        "terminal task input".to_owned()
+    } else {
+        pending.call.name.clone()
+    }
+}
+
+fn approval_target_label(
+    pending: &PendingApproval,
+    preview: Option<&ShellApprovalPreview>,
+) -> String {
+    if pending.operation == ToolOperation::SendTerminalInput
+        && pending.call.name == "terminal_input"
+    {
+        return serde_json::from_str::<Value>(&pending.call.args_json)
+            .ok()
+            .and_then(|args| {
+                args.get("task_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .map(|task_id| format!("terminal task {task_id}"))
+            .unwrap_or_else(|| "terminal task input".to_owned());
+    }
+    preview
+        .map(|preview| preview.title.clone())
+        .unwrap_or_else(|| pending.call.name.clone())
 }
 
 #[derive(Debug, Clone)]
