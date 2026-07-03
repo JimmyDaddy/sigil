@@ -201,7 +201,7 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
 
     app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
     app.handle(RunEvent::ReasoningDelta(
-        "\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+        "\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5".to_owned(),
     ))?;
 
     assert!(
@@ -216,7 +216,8 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
     );
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Thinking
-            && entry.text == "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4"
+            && entry.text
+                == "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5"
     }));
     let streaming = app.transcript_lines(20);
     let streaming_plain = transcript_plain(streaming.clone());
@@ -231,7 +232,7 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
     assert!(streaming.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 4"))
+            .any(|span| span.content.as_ref().contains("planning step 5"))
     }));
 
     app.handle(RunEvent::ToolCallStarted(ToolCall {
@@ -253,7 +254,7 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
     assert!(!collapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 4"))
+            .any(|span| span.content.as_ref().contains("planning step 5"))
     }));
     Ok(())
 }
@@ -292,7 +293,7 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
     app.handle(RunEvent::ReasoningDelta("\nplanning step 2".to_owned()))?;
     app.handle(RunEvent::ReasoningDelta(
-        "\nplanning step 3\nplanning step 4".to_owned(),
+        "\nplanning step 3\nplanning step 4\nplanning step 5".to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-1".to_owned(),
@@ -309,7 +310,7 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("4 lines"))
+            .any(|span| span.content.as_ref().contains("5 lines"))
     }));
     assert!(collapsed.iter().any(|line| {
         line.spans
@@ -324,12 +325,12 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("2 lines hidden"))
+            .any(|span| span.content.as_ref().contains("3 lines hidden"))
     }));
     assert!(!collapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 4"))
+            .any(|span| span.content.as_ref().contains("planning step 5"))
     }));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
@@ -343,7 +344,7 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     assert!(expanded.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 4"))
+            .any(|span| span.content.as_ref().contains("planning step 5"))
     }));
     assert_eq!(app.last_notice(), Some("thinking expanded"));
 
@@ -358,7 +359,7 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     assert!(!recollapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 4"))
+            .any(|span| span.content.as_ref().contains("planning step 5"))
     }));
     assert_eq!(app.last_notice(), Some("thinking collapsed"));
     Ok(())
@@ -369,7 +370,8 @@ fn ctrl_t_toggles_thinking_from_activity_without_tool_selection() -> Result<()> 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta(
-        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5"
+            .to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-1".to_owned(),
@@ -384,7 +386,7 @@ fn ctrl_t_toggles_thinking_from_activity_without_tool_selection() -> Result<()> 
     assert_eq!(app.last_notice(), Some("thinking expanded"));
     let expanded = transcript_plain(app.transcript_lines(20));
     assert!(expanded.contains("Ctrl-T collapse"));
-    assert!(expanded.contains("planning step 4"));
+    assert!(expanded.contains("planning step 5"));
     Ok(())
 }
 
@@ -427,6 +429,28 @@ fn single_line_thinking_block_stays_visible_without_toggle() -> Result<()> {
 }
 
 #[test]
+fn short_thinking_block_stays_visible_without_toggle() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
+    let rendered = transcript_plain(app.transcript_lines(20));
+    assert!(rendered.contains("4 lines"));
+    assert!(rendered.contains("planning step 4"));
+    assert!(!rendered.contains("hidden"));
+    assert!(!rendered.contains("Ctrl-T expand"));
+    assert!(app.collapsible_thinking_entry_indices().is_empty());
+    Ok(())
+}
+
+#[test]
 fn thinking_entry_toggle_handles_missing_uncollapsible_and_global_override() -> Result<()> {
     let mut short_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     short_app.push_timeline(TimelineRole::Thinking, " \n ");
@@ -441,7 +465,8 @@ fn thinking_entry_toggle_handles_missing_uncollapsible_and_global_override() -> 
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ReasoningDelta(
-        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5"
+            .to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-2".to_owned(),
@@ -453,12 +478,12 @@ fn thinking_entry_toggle_handles_missing_uncollapsible_and_global_override() -> 
     app.toggle_thinking_block_mode();
     let expanded = transcript_plain(app.transcript_lines(20));
     assert!(expanded.contains("Ctrl-T collapse"));
-    assert!(expanded.contains("planning step 4"));
+    assert!(expanded.contains("planning step 5"));
 
     assert!(app.toggle_thinking_entry(entry_index));
     let collapsed = transcript_plain(app.transcript_lines(20));
     assert!(collapsed.contains("Ctrl-T expand"));
-    assert!(!collapsed.contains("planning step 4"));
+    assert!(!collapsed.contains("planning step 5"));
     Ok(())
 }
 
@@ -484,7 +509,7 @@ fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<
 
     app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
     app.handle(RunEvent::ReasoningDelta(
-        "\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+        "\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5".to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-2".to_owned(),
@@ -511,7 +536,7 @@ fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<
     assert!(expanded.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 4"))
+            .any(|span| span.content.as_ref().contains("planning step 5"))
     }));
     Ok(())
 }

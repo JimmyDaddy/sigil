@@ -603,7 +603,7 @@ fn render_timeline_entry_lines_show_phase_default_summaries_without_detail() {
 fn render_timeline_entry_lines_show_thinking_trace_block() {
     let entry = TimelineEntry {
         role: TimelineRole::Thinking,
-        text: "step 1\nstep 2\nstep 3\nstep 4".to_owned(),
+        text: "step 1\nstep 2\nstep 3\nstep 4\nstep 5".to_owned(),
     };
 
     let lines = render_timeline_entry_lines(&entry);
@@ -652,7 +652,7 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("2 lines hidden"))
+            .any(|span| span.content.as_ref().contains("3 lines hidden"))
     }));
 
     let expanded = render_timeline_entry_lines_with_options(
@@ -682,7 +682,7 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
     assert!(expanded.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("step 4"))
+            .any(|span| span.content.as_ref().contains("step 5"))
     }));
 
     let streaming = render_timeline_entry_lines_with_options(
@@ -714,7 +714,7 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
     assert!(streaming.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("step 4"))
+            .any(|span| span.content.as_ref().contains("step 5"))
     }));
 
     let hovered = render_timeline_entry_lines_with_options(
@@ -791,21 +791,9 @@ fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews(
     assert!(short_plain.contains("3 lines"));
     assert!(short_plain.contains("only step"));
     assert!(short_plain.contains("second step"));
-    assert!(short_plain.contains("1 line hidden"));
-    assert!(!short_plain.contains("third step"));
-    assert!(short_plain.contains("Ctrl-T"));
-    let expanded_short_plain = rendered_plain_lines(&render_timeline_entry_lines_with_options(
-        &short,
-        &TimelineRenderOptions {
-            expand_thinking_blocks: true,
-            ..TimelineRenderOptions::default()
-        },
-        0,
-    ))
-    .join("\n");
-    assert!(expanded_short_plain.contains("3 lines"));
-    assert!(expanded_short_plain.contains("third step"));
-    assert!(expanded_short_plain.contains("Ctrl-T collapse"));
+    assert!(short_plain.contains("third step"));
+    assert!(!short_plain.contains("1 line hidden"));
+    assert!(!short_plain.contains("Ctrl-T"));
 
     let closed_fence = TimelineEntry {
         role: TimelineRole::Thinking,
@@ -814,7 +802,21 @@ fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews(
     let closed_plain = rendered_plain_lines(&render_timeline_entry_lines(&closed_fence)).join("\n");
     assert!(closed_plain.contains("fn main"));
     assert!(closed_plain.contains("rust"));
-    assert!(closed_plain.contains("2 lines hidden"));
+    assert!(closed_plain.contains("next hidden"));
+    assert!(!closed_plain.contains("hidden hidden"));
+    assert!(!closed_plain.contains("Ctrl-T"));
+
+    let long = TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: "step 1\nstep 2\nstep 3\nstep 4\nstep 5".to_owned(),
+    };
+    let long_plain = rendered_plain_lines(&render_timeline_entry_lines(&long)).join("\n");
+    assert!(long_plain.contains("5 lines"));
+    assert!(long_plain.contains("step 1"));
+    assert!(long_plain.contains("step 2"));
+    assert!(long_plain.contains("3 lines hidden"));
+    assert!(!long_plain.contains("step 5"));
+    assert!(long_plain.contains("Ctrl-T"));
 }
 
 #[test]

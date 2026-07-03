@@ -647,7 +647,8 @@ fn layout_snapshot_hits_visible_thinking_block_over_live_panel() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.handle(RunEvent::ReasoningDelta(
-        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5"
+            .to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-1".to_owned(),
@@ -1094,7 +1095,8 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 24);
     app.handle(RunEvent::ReasoningDelta(
-        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5"
+            .to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-1".to_owned(),
@@ -1105,7 +1107,7 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
     let collapsed_plain = rendered_plain(app.transcript_lines(20));
     assert!(collapsed_plain.contains("thought"));
     assert!(collapsed_plain.contains("Ctrl-T expand"));
-    assert!(!collapsed_plain.contains("planning step 4"));
+    assert!(!collapsed_plain.contains("planning step 5"));
 
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
     let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
@@ -1143,7 +1145,7 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
     );
     let expanded_plain = rendered_plain(app.transcript_lines(20));
     assert!(expanded_plain.contains("Ctrl-T collapse"));
-    assert!(expanded_plain.contains("planning step 4"));
+    assert!(expanded_plain.contains("planning step 5"));
 
     let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
     let (column, row) = thinking_header_point(&expanded_layout, thinking_entry_index);
@@ -1155,7 +1157,7 @@ fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
     assert!(matches!(collapse, AppMouseOutcome::Redraw));
     let collapsed_again_plain = rendered_plain(app.transcript_lines(20));
     assert!(collapsed_again_plain.contains("Ctrl-T expand"));
-    assert!(!collapsed_again_plain.contains("planning step 4"));
+    assert!(!collapsed_again_plain.contains("planning step 5"));
     Ok(())
 }
 
@@ -1183,11 +1185,37 @@ fn mouse_single_line_thinking_block_has_no_toggle_target() -> Result<()> {
 }
 
 #[test]
-fn mouse_stale_thinking_block_hit_without_collapsed_content_is_noop() -> Result<()> {
+fn mouse_short_thinking_block_has_no_toggle_target() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.handle(RunEvent::ReasoningDelta(
         "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
+    let plain = rendered_plain(app.transcript_lines(20));
+    assert!(plain.contains("4 lines"));
+    assert!(plain.contains("planning step 4"));
+    assert!(!plain.contains("hidden"));
+    assert!(!plain.contains("Ctrl-T expand"));
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+
+    assert_eq!(layout.thinking_blocks.len(), 0);
+    Ok(())
+}
+
+#[test]
+fn mouse_stale_thinking_block_hit_without_collapsed_content_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.handle(RunEvent::ReasoningDelta(
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4\nplanning step 5"
+            .to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-1".to_owned(),

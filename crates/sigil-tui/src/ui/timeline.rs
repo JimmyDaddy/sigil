@@ -25,6 +25,7 @@ use super::{
 };
 
 const COLLAPSED_THINKING_PREVIEW_LINES: usize = 2;
+const THINKING_COLLAPSE_THRESHOLD_LINES: usize = 4;
 
 #[cfg(test)]
 use super::theme::{accent_blue, accent_gold, ink};
@@ -506,7 +507,7 @@ fn thinking_line_label(count: usize) -> String {
 }
 
 pub(crate) fn thinking_has_collapsed_content(text: &str) -> bool {
-    text.lines().filter(|line| !line.trim().is_empty()).count() > COLLAPSED_THINKING_PREVIEW_LINES
+    text.lines().filter(|line| !line.trim().is_empty()).count() > THINKING_COLLAPSE_THRESHOLD_LINES
 }
 
 fn collapsed_thinking_preview_lines(text: &str) -> Vec<&str> {
