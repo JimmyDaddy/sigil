@@ -44,8 +44,10 @@ const MIN_RESULT_SUMMARY_LIMIT: usize = 200;
 const DEFAULT_RESULT_PAGE_LIMIT: usize = 4_000;
 const MAX_RESULT_PAGE_LIMIT: usize = 12_000;
 const WAIT_AGENT_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-const WAIT_AGENT_MIN_REPOLL_INTERVAL: Duration = Duration::from_secs(5);
+const WAIT_AGENT_FOREGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const WAIT_AGENT_RUNNING_RETRY_AFTER_MS: u64 = 30 * 60 * 1_000;
+const WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT: Duration = WAIT_AGENT_FOREGROUND_WAIT_TIMEOUT;
+const WAIT_AGENT_MIN_REPOLL_INTERVAL: Duration = WAIT_AGENT_FOREGROUND_WAIT_TIMEOUT;
 
 mod background;
 mod chat;

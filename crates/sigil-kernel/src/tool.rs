@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -16,6 +17,10 @@ use crate::{
     session::ControlEntry,
     verification::{DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ToolEffect, VerificationScope},
 };
+
+const MODEL_TOOL_CONTENT_MAX_BYTES: usize = 32 * 1024;
+const MODEL_TOOL_CONTENT_HEAD_BYTES: usize = 24 * 1024;
+const MODEL_TOOL_CONTENT_TAIL_BYTES: usize = 8 * 1024;
 
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -568,16 +573,26 @@ impl ToolResult {
 
     pub fn to_model_content(&self) -> String {
         let mut envelope = Map::new();
+        let model_content = model_visible_tool_content(&self.content);
         match &self.status {
             ToolResultStatus::Ok => {
                 envelope.insert("status".to_owned(), Value::String("ok".to_owned()));
-                envelope.insert("content".to_owned(), Value::String(self.content.clone()));
+                envelope.insert(
+                    "content".to_owned(),
+                    Value::String(model_content.content.into_owned()),
+                );
             }
             ToolResultStatus::Error(error) => {
                 envelope.insert("status".to_owned(), Value::String("error".to_owned()));
-                envelope.insert("content".to_owned(), Value::String(self.content.clone()));
+                envelope.insert(
+                    "content".to_owned(),
+                    Value::String(model_content.content.into_owned()),
+                );
                 envelope.insert("error".to_owned(), error.to_model_value());
             }
+        }
+        if let Some(truncation) = model_content.truncation {
+            envelope.insert("content_truncation".to_owned(), truncation.to_model_value());
         }
         if let Some(meta) = self.metadata.to_model_value() {
             envelope.insert("meta".to_owned(), meta);
@@ -616,6 +631,101 @@ impl ToolResult {
             error_message,
         }
     }
+}
+
+struct ModelVisibleToolContent<'a> {
+    content: Cow<'a, str>,
+    truncation: Option<ModelToolContentTruncation>,
+}
+
+struct ModelToolContentTruncation {
+    original_bytes: usize,
+    omitted_bytes: usize,
+    head_bytes: usize,
+    tail_bytes: usize,
+}
+
+impl ModelToolContentTruncation {
+    fn to_model_value(&self) -> Value {
+        let mut object = Map::new();
+        object.insert("truncated".to_owned(), Value::Bool(true));
+        object.insert(
+            "reason".to_owned(),
+            Value::String("model_context_limit".to_owned()),
+        );
+        object.insert(
+            "original_bytes".to_owned(),
+            Value::Number((self.original_bytes as u64).into()),
+        );
+        object.insert(
+            "omitted_bytes".to_owned(),
+            Value::Number((self.omitted_bytes as u64).into()),
+        );
+        object.insert(
+            "head_bytes".to_owned(),
+            Value::Number((self.head_bytes as u64).into()),
+        );
+        object.insert(
+            "tail_bytes".to_owned(),
+            Value::Number((self.tail_bytes as u64).into()),
+        );
+        Value::Object(object)
+    }
+}
+
+fn model_visible_tool_content(content: &str) -> ModelVisibleToolContent<'_> {
+    if content.len() <= MODEL_TOOL_CONTENT_MAX_BYTES {
+        return ModelVisibleToolContent {
+            content: Cow::Borrowed(content),
+            truncation: None,
+        };
+    }
+
+    let head_end = previous_char_boundary(content, MODEL_TOOL_CONTENT_HEAD_BYTES);
+    let tail_start = next_char_boundary(
+        content,
+        content.len().saturating_sub(MODEL_TOOL_CONTENT_TAIL_BYTES),
+    )
+    .max(head_end);
+    let tail_bytes = content.len().saturating_sub(tail_start);
+    let omitted_bytes = tail_start.saturating_sub(head_end);
+    let marker = format!(
+        "\n[model content truncated: original_bytes={} omitted_bytes={} head_bytes={} tail_bytes={}]\n",
+        content.len(),
+        omitted_bytes,
+        head_end,
+        tail_bytes
+    );
+    let mut visible = String::with_capacity(head_end + marker.len() + tail_bytes);
+    visible.push_str(&content[..head_end]);
+    visible.push_str(&marker);
+    visible.push_str(&content[tail_start..]);
+
+    ModelVisibleToolContent {
+        content: Cow::Owned(visible),
+        truncation: Some(ModelToolContentTruncation {
+            original_bytes: content.len(),
+            omitted_bytes,
+            head_bytes: head_end,
+            tail_bytes,
+        }),
+    }
+}
+
+fn previous_char_boundary(value: &str, max_index: usize) -> usize {
+    let mut index = max_index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char_boundary(value: &str, min_index: usize) -> usize {
+    let mut index = min_index.min(value.len());
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 /// Structured success/error status for one tool result.

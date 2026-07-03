@@ -87,6 +87,10 @@ impl Tool for ReadFileTool {
         let limited = limit_text_head(&selected, limit_bytes, limit);
         let next_offset = offset + limited.returned_lines as usize;
         let mut details = serde_json::Map::new();
+        details.insert("path".to_owned(), json!(path.as_str()));
+        if let Some(language) = read_file_language(&path) {
+            details.insert("language".to_owned(), json!(language));
+        }
         details.insert("offset".to_owned(), json!(offset));
         if next_offset < total_lines {
             details.insert("next_offset".to_owned(), json!(next_offset));
@@ -109,6 +113,47 @@ impl Tool for ReadFileTool {
                 ..ToolResultMeta::default()
             },
         ))
+    }
+}
+
+fn read_file_language(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| name.eq_ignore_ascii_case("Dockerfile"))
+                .map(|_| "dockerfile".to_owned())
+        })?;
+    match extension.as_str() {
+        "rs" => Some("rust"),
+        "toml" | "lock" => Some("toml"),
+        "json" | "jsonl" => Some("json"),
+        "yaml" | "yml" => Some("yaml"),
+        "js" | "jsx" => Some("javascript"),
+        "ts" | "tsx" => Some("typescript"),
+        "py" => Some("python"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "kt" | "kts" => Some("kotlin"),
+        "c" | "h" => Some("c"),
+        "cc" | "cpp" | "cxx" | "hpp" => Some("cpp"),
+        "cs" => Some("c#"),
+        "swift" => Some("swift"),
+        "rb" => Some("ruby"),
+        "php" => Some("php"),
+        "sh" | "bash" | "zsh" | "fish" => Some("bash"),
+        "sql" => Some("sql"),
+        "html" => Some("html"),
+        "css" | "scss" | "sass" => Some("css"),
+        "xml" | "svg" => Some("xml"),
+        "lua" => Some("lua"),
+        "vim" => Some("vim"),
+        "dockerfile" => Some("dockerfile"),
+        _ => None,
     }
 }
 

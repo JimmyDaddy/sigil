@@ -240,7 +240,7 @@ impl AgentTool {
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
-                "Wait briefly for an agent thread status update and return lightweight status plus result references only. This tool may block for a short bounded interval before returning running; repeated pending waits for the same thread are throttled/coalesced and should not be retried until retry_after_ms. Does not return child result text; use read_agent_result when the user explicitly needs result details."
+                "Join an agent thread and return only when it completes or a long bounded wait interval expires. Runtime and UI own live progress updates; do not repeatedly poll wait_agent while it is running. Does not return child result text; use read_agent_result when the user explicitly needs result details."
                     .to_owned()
             }
             AgentToolKind::ReadResult => {
@@ -271,7 +271,7 @@ impl AgentTool {
                     "mode": {
                         "type": "string",
                         "enum": ["foreground", "join_before_final", "background"],
-                        "default": "background"
+                        "default": "join_before_final"
                     },
                     "display_name_hint": { "type": "string" }
                 },
@@ -436,7 +436,7 @@ impl SpawnAgentArgs {
                 .as_deref()
                 .map(parse_invocation_mode)
                 .transpose()?
-                .unwrap_or(AgentInvocationMode::Background),
+                .unwrap_or(AgentInvocationMode::JoinBeforeFinal),
             display_name_hint: optional_string(args, "display_name_hint"),
         })
     }

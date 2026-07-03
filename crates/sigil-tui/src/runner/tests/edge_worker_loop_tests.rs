@@ -540,7 +540,8 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
                 name: "terminal_start".to_owned(),
                 args_json: serde_json::json!({
                     "task_id": task_id,
-                    "command": "printf terminal-mutated > terminal-mutated.txt; printf cancel-tail; sleep 5"
+                    "command": "printf terminal-mutated > terminal-mutated.txt; printf cancel-tail; sleep 5",
+                    "mode": "background"
                 })
                 .to_string(),
             },
@@ -700,7 +701,8 @@ fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -
                 name: "terminal_start".to_owned(),
                 args_json: serde_json::json!({
                     "task_id": task_id,
-                    "command": "printf terminal-mutated > terminal-natural.txt; printf natural-tail"
+                    "command": "printf terminal-mutated > terminal-natural.txt; printf natural-tail",
+                    "mode": "background"
                 })
                 .to_string(),
             },
@@ -747,7 +749,7 @@ fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -
         if !updates.is_empty() {
             break;
         }
-        runtime.block_on(tokio::time::sleep(Duration::from_millis(25)));
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(25)).await });
     }
 
     assert_eq!(updates.len(), 1);

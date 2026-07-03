@@ -659,7 +659,7 @@ fn optional_positive_u64(args: &Value, key: &str) -> Result<Option<u64>> {
     Ok(Some(value))
 }
 
-fn resolve_terminal_start_execution_mode(
+pub(crate) fn resolve_terminal_start_execution_mode(
     requested: Option<TerminalStartExecutionMode>,
     pty: bool,
     analysis: &ShellCommandAnalysis,
@@ -667,10 +667,10 @@ fn resolve_terminal_start_execution_mode(
     let mode = requested.unwrap_or_else(|| {
         if pty {
             TerminalStartExecutionMode::Interactive
-        } else if analysis.command_family.is_workspace_check() {
-            TerminalStartExecutionMode::Foreground
-        } else {
+        } else if terminal_command_defaults_to_background(&analysis.command) {
             TerminalStartExecutionMode::Background
+        } else {
+            TerminalStartExecutionMode::Foreground
         }
     });
     match (mode, pty) {
@@ -681,6 +681,81 @@ fn resolve_terminal_start_execution_mode(
             bail!("terminal_start mode=interactive requires pty=true")
         }
         _ => Ok(mode),
+    }
+}
+
+fn terminal_command_defaults_to_background(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    let words = normalized
+        .split_whitespace()
+        .map(|word| word.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '(' | ')')))
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return false;
+    }
+    let first = words[0];
+    if first == "watch" {
+        return true;
+    }
+    if first == "tail" && words.iter().any(|word| matches!(*word, "-f" | "--follow")) {
+        return true;
+    }
+    if first == "cargo" && words.get(1) == Some(&"watch") {
+        return true;
+    }
+    if matches!(first, "vite" | "serve" | "http-server") {
+        return true;
+    }
+    if matches!(first, "next" | "nuxt" | "astro") && words.get(1) == Some(&"dev") {
+        return true;
+    }
+    if matches!(first, "npm" | "pnpm" | "yarn" | "bun")
+        && terminal_package_manager_command_is_long_lived(&words)
+    {
+        return true;
+    }
+    if first == "python"
+        && words
+            .windows(2)
+            .any(|window| window == ["-m", "http.server"])
+    {
+        return true;
+    }
+    if first == "php" && words.contains(&"-s") {
+        return true;
+    }
+    if first == "docker-compose" && words.get(1) == Some(&"up") {
+        return true;
+    }
+    if first == "docker" && words.get(1) == Some(&"compose") && words.get(2) == Some(&"up") {
+        return true;
+    }
+    if first == "kubectl" && words.get(1) == Some(&"port-forward") {
+        return true;
+    }
+    words.iter().any(|word| {
+        matches!(
+            *word,
+            "--watch" | "--watch-all" | "--serve" | "--host" | "--listen"
+        )
+    })
+}
+
+fn terminal_package_manager_command_is_long_lived(words: &[&str]) -> bool {
+    match words {
+        ["npm", "run", script, ..]
+        | ["pnpm", "run", script, ..]
+        | ["yarn", "run", script, ..]
+        | ["bun", "run", script, ..] => matches!(
+            *script,
+            "dev" | "develop" | "serve" | "start" | "preview" | "watch"
+        ),
+        ["pnpm", script, ..] | ["yarn", script, ..] => matches!(
+            *script,
+            "dev" | "develop" | "serve" | "start" | "preview" | "watch"
+        ),
+        ["npm", script, ..] => matches!(*script, "start"),
+        _ => false,
     }
 }
 

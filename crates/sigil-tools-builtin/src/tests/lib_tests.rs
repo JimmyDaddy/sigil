@@ -1889,6 +1889,7 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
                 json!({
                     "task_id": "terminal-tool-read",
                     "command": "printf 0123456789",
+                    "mode": "background",
                     "shell": shell
                 }),
             ),
@@ -1934,6 +1935,7 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
                 json!({
                     "task_id": "terminal-tool-cancel",
                     "command": "sleep 5",
+                    "mode": "background",
                     "shell": shell
                 }),
             ),
@@ -2142,6 +2144,70 @@ async fn terminal_start_defaults_check_touched_to_foreground() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn terminal_start_defaults_unknown_one_shot_to_foreground() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let one_shot = super::analyze_shell_command(workspace.path(), "printf unknown-ok")?;
+    let dev_server = super::analyze_shell_command(workspace.path(), "npm run dev")?;
+    let tail_follow = super::analyze_shell_command(workspace.path(), "tail -f logs/app.log")?;
+
+    assert_eq!(
+        super::resolve_terminal_start_execution_mode(None, false, &one_shot)?,
+        super::TerminalStartExecutionMode::Foreground
+    );
+    assert_eq!(
+        super::resolve_terminal_start_execution_mode(None, false, &dev_server)?,
+        super::TerminalStartExecutionMode::Background
+    );
+    assert_eq!(
+        super::resolve_terminal_start_execution_mode(None, false, &tail_follow)?,
+        super::TerminalStartExecutionMode::Background
+    );
+    assert_eq!(
+        super::resolve_terminal_start_execution_mode(
+            Some(super::TerminalStartExecutionMode::Background),
+            false,
+            &one_shot
+        )?,
+        super::TerminalStartExecutionMode::Background
+    );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_start_unknown_one_shot_without_mode_returns_final_facts() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let result = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-unknown-one-shot-default",
+                    "command": "printf unknown-one-shot-ok",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert_eq!(result.metadata.exit_code, Some(0));
+    assert_eq!(result.metadata.details["execution_mode"], "foreground");
+    assert_eq!(result.metadata.details["verdict"], "passed");
+    assert_eq!(result.metadata.details["rerun_not_needed"], true);
+    assert_eq!(result.metadata.details["status"], "exited");
+    assert!(!result.content.contains("unknown-one-shot-ok"));
+    Ok(())
+}
+
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
@@ -2327,6 +2393,7 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
                 json!({
                     "task_id": "terminal-input",
                     "command": "sleep 5",
+                    "mode": "background",
                     "shell": shell
                 }),
             ),
@@ -2556,8 +2623,24 @@ async fn read_file_supports_offset_limit_and_truncation_metadata() -> Result<()>
     assert!(result.metadata.truncated);
     assert_eq!(result.metadata.returned_lines, Some(2));
     assert_eq!(result.metadata.total_lines, Some(4));
+    assert_eq!(result.metadata.details["path"], "big.txt");
     assert_eq!(result.metadata.details["offset"], 1);
     assert_eq!(result.metadata.details["next_offset"], 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_file_reports_code_preview_metadata() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("lib.rs"), "fn main() {}\n")?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+
+    let result = ReadFileTool
+        .execute(ctx, "read".to_owned(), json!({ "path": "lib.rs" }))
+        .await?;
+
+    assert_eq!(result.metadata.details["path"], "lib.rs");
+    assert_eq!(result.metadata.details["language"], "rust");
     Ok(())
 }
 

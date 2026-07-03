@@ -892,6 +892,47 @@ fn tool_result_model_content_omits_empty_false_metadata_values() {
     assert!(!content.contains("meta"));
 }
 
+#[test]
+fn tool_result_model_content_truncates_large_content_without_mutating_result() {
+    let large_content = format!("head-sentinel\n{}tail-sentinel", "中间内容".repeat(8_000));
+    let result = ToolResult::ok(
+        "call-large",
+        "fixture",
+        large_content.clone(),
+        ToolResultMeta {
+            bytes: Some(large_content.len() as u64),
+            ..ToolResultMeta::default()
+        },
+    );
+
+    let content: serde_json::Value =
+        serde_json::from_str(&result.to_model_content()).expect("tool result should serialize");
+    let model_content = content["content"]
+        .as_str()
+        .expect("model content should remain a string");
+
+    assert_eq!(result.content, large_content);
+    assert!(model_content.contains("head-sentinel"));
+    assert!(model_content.contains("tail-sentinel"));
+    assert!(model_content.contains("model content truncated"));
+    assert!(model_content.len() < large_content.len());
+    assert_eq!(content["content_truncation"]["truncated"], true);
+    assert_eq!(
+        content["content_truncation"]["reason"],
+        "model_context_limit"
+    );
+    assert_eq!(
+        content["content_truncation"]["original_bytes"],
+        large_content.len() as u64
+    );
+    assert!(
+        content["content_truncation"]["omitted_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    assert_eq!(content["meta"]["bytes"], large_content.len() as u64);
+}
+
 struct DefaultHookTool;
 
 #[async_trait]

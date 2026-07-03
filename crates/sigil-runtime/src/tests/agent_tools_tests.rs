@@ -922,7 +922,7 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     let wait_spec = registry
         .spec_for(WAIT_AGENT_TOOL_NAME)
         .expect("wait_agent registered");
-    assert!(wait_spec.description.contains("short bounded interval"));
+    assert!(wait_spec.description.contains("bounded wait interval"));
     assert!(
         wait_spec.input_schema["properties"]
             .get("result_offset_chars")
@@ -952,9 +952,24 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     assert!(modes.iter().any(|mode| mode == "background"));
     assert_eq!(
         spec.input_schema["properties"]["mode"]["default"],
-        "background"
+        "join_before_final"
     );
     assert!(registry.spec_for(MESSAGE_AGENT_TOOL_NAME).is_some());
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_args_default_to_join_before_final() -> Result<()> {
+    let parsed = super::surface::SpawnAgentArgs::parse(&json!({
+        "profile_id": "explore",
+        "objective": "inspect",
+        "prompt": "inspect"
+    }))?;
+
+    assert_eq!(
+        parsed.mode,
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal
+    );
     Ok(())
 }
 
@@ -1695,8 +1710,8 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
     assert!(!result.is_error());
     assert!(result.content.contains("running"));
     let payload: serde_json::Value = serde_json::from_str(&result.content)?;
-    assert_eq!(payload["retry_after_ms"], 5_000);
-    assert_eq!(payload["next_poll_after_ms"], 5_000);
+    assert_eq!(payload["retry_after_ms"], 1_800_000);
+    assert_eq!(payload["next_poll_after_ms"], 1_800_000);
     assert!(
         payload["next_poll_after_unix_ms"]
             .as_u64()
@@ -2479,7 +2494,7 @@ async fn wait_agent_collects_completed_background_result() -> Result<()> {
 }
 
 #[tokio::test]
-async fn wait_agent_waits_briefly_for_running_background_result() -> Result<()> {
+async fn wait_agent_waits_for_running_background_result() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;

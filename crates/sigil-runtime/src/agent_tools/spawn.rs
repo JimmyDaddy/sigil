@@ -228,7 +228,7 @@ impl AgentToolRuntime {
                     details: json!({
                         "thread_id": thread_id.as_str(),
                         "status": "running",
-                        "retry_after_ms": 5_000_u64,
+                        "retry_after_ms": WAIT_AGENT_RUNNING_RETRY_AFTER_MS,
                     }),
                     ..ToolResultMeta::default()
                 },
@@ -397,7 +397,7 @@ impl AgentToolRuntime {
                 "result_available": false,
                 "backgrounded": false,
                 "required_before_final": true,
-                "retry_after_ms": 5_000_u64,
+                "retry_after_ms": WAIT_AGENT_RUNNING_RETRY_AFTER_MS,
                 "next_action": "continue only non-overlapping parent work; use wait_agent before the final answer",
                 "do_not_describe_as_finished": true
             }))
@@ -410,7 +410,7 @@ impl AgentToolRuntime {
                     "result_available": false,
                     "backgrounded": false,
                     "required_before_final": true,
-                    "retry_after_ms": 5_000_u64,
+                    "retry_after_ms": WAIT_AGENT_RUNNING_RETRY_AFTER_MS,
                 }),
                 ..ToolResultMeta::default()
             },

@@ -163,7 +163,7 @@ pub(super) fn agent_result_tool_result(
     max_summary_chars: usize,
 ) -> ToolResult {
     let Some(result) = result else {
-        let retry_after_ms = 5_000_u64;
+        let retry_after_ms = WAIT_AGENT_RUNNING_RETRY_AFTER_MS;
         let next_poll_after_unix_ms = unix_time_ms().saturating_add(retry_after_ms);
         return ToolResult::ok(
             call.id.clone(),
@@ -243,7 +243,8 @@ pub(super) fn agent_status_tool_result(
     thread: &AgentThreadProjection,
 ) -> ToolResult {
     let result = thread.result.as_ref();
-    let retry_after_ms = (!thread.status.is_terminal()).then_some(5_000_u64);
+    let retry_after_ms =
+        (!thread.status.is_terminal()).then_some(WAIT_AGENT_RUNNING_RETRY_AFTER_MS);
     let next_poll_after_unix_ms = retry_after_ms.map(|retry| unix_time_ms().saturating_add(retry));
     let payload = json!({
         "thread_id": thread.thread_id.as_str(),
