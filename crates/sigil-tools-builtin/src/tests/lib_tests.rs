@@ -2098,6 +2098,53 @@ async fn terminal_start_foreground_waits_and_returns_final_facts() -> Result<()>
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
+async fn terminal_start_defaults_check_touched_to_foreground() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let scripts = temp.path().join("scripts");
+    fs::create_dir_all(&scripts)?;
+    let check_touched = scripts.join("check-touched.sh");
+    fs::write(&check_touched, "#!/bin/sh\necho check-touched-ok\n")?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&check_touched)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&check_touched, permissions)?;
+    }
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let result = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-check-touched-default",
+                    "command": "./scripts/check-touched.sh --tier quick 2>&1",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert_eq!(result.metadata.exit_code, Some(0));
+    assert_eq!(result.metadata.details["execution_mode"], "foreground");
+    assert_eq!(result.metadata.details["verdict"], "passed");
+    assert_eq!(result.metadata.details["rerun_not_needed"], true);
+    assert_eq!(
+        result.metadata.details["shell_analysis"]["command_family"],
+        "check_touched"
+    );
+    assert!(!result.content.contains("check-touched-ok"));
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
 async fn terminal_start_foreground_uses_long_task_timeout_contract() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let shell = test_shell(temp.path())?;

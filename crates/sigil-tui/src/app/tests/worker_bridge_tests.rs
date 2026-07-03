@@ -2482,6 +2482,53 @@ fn terminal_progress_updates_existing_task_card() -> Result<()> {
 }
 
 #[test]
+fn tool_progress_and_result_update_existing_card_by_execution_id() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ToolProgress(sigil_kernel::ToolProgressEvent {
+        execution_id: sigil_kernel::ToolExecutionId::new("execution-only-progress")?,
+        call_id: "call-execution-progress".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        sequence: 1,
+        status: "running".to_owned(),
+        message: Some("progress".to_owned()),
+        output_preview: Some("phase one".to_owned()),
+        output_log_ref: None,
+        total_bytes: Some(9),
+        updated_at_ms: Some(1),
+        details: json!({
+            "status": "running",
+            "execution_mode": "foreground"
+        }),
+    }))?;
+    app.handle(RunEvent::ToolResult(sigil_kernel::ToolResult::ok(
+        "call-execution-progress",
+        "terminal_start",
+        "terminal task exited · verdict passed",
+        sigil_kernel::ToolResultMeta {
+            exit_code: Some(0),
+            details: json!({
+                "execution_id": "execution-only-progress",
+                "status": "exited",
+                "execution_mode": "foreground",
+                "verdict": "passed"
+            }),
+            ..sigil_kernel::ToolResultMeta::default()
+        },
+    )))?;
+
+    let terminal_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("terminal_start"))
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_cards.len(), 1);
+    assert!(terminal_cards[0].text.contains("verdict passed"));
+    assert!(!terminal_cards[0].text.contains("phase one"));
+    Ok(())
+}
+
+#[test]
 fn new_session_started_restores_empty_session_view() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.push_timeline(TimelineRole::Assistant, "old context");

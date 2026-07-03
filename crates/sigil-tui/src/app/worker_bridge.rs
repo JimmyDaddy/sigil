@@ -39,7 +39,7 @@ impl AppState {
     }
 
     fn replace_or_push_terminal_task_card(&mut self, rendered: String) {
-        if let Some(index) = terminal_task_replacement_index(&self.timeline, &rendered) {
+        if let Some(index) = tool_card_replacement_index(&self.timeline, &rendered) {
             self.replace_tool_timeline_entry(index, rendered);
         } else {
             self.push_timeline(TimelineRole::Tool, rendered);
@@ -1514,7 +1514,7 @@ impl EventHandler for AppState {
                 let result = tool_progress_result(progress);
                 let rendered =
                     format_tool_result_block_redacted(&result, None, &self.secret_redactor);
-                if let Some(index) = terminal_task_replacement_index(&self.timeline, &rendered) {
+                if let Some(index) = tool_card_replacement_index(&self.timeline, &rendered) {
                     self.replace_tool_timeline_entry(index, rendered);
                 } else {
                     self.push_timeline(TimelineRole::Tool, rendered);
@@ -1546,9 +1546,7 @@ impl EventHandler for AppState {
                     wait_agent_pending_replacement_index(&self.timeline, &result, &rendered)
                 {
                     self.replace_tool_timeline_entry(index, rendered);
-                } else if let Some(index) =
-                    terminal_task_replacement_index(&self.timeline, &rendered)
-                {
+                } else if let Some(index) = tool_card_replacement_index(&self.timeline, &rendered) {
                     self.replace_tool_timeline_entry(index, rendered);
                 } else {
                     self.push_timeline(TimelineRole::Tool, rendered);
@@ -1697,8 +1695,9 @@ fn agent_tool_name(name: &str) -> bool {
     )
 }
 
-fn terminal_task_replacement_index(timeline: &[TimelineEntry], rendered: &str) -> Option<usize> {
-    let current_key = terminal_task_key_from_tool_block(rendered)?;
+fn tool_card_replacement_index(timeline: &[TimelineEntry], rendered: &str) -> Option<usize> {
+    let current_key = terminal_task_key_from_tool_block(rendered)
+        .or_else(|| execution_key_from_tool_block(rendered))?;
     const RECENT_TERMINAL_TASK_SCAN: usize = 96;
     timeline
         .iter()
@@ -1706,10 +1705,12 @@ fn terminal_task_replacement_index(timeline: &[TimelineEntry], rendered: &str) -
         .rev()
         .take(RECENT_TERMINAL_TASK_SCAN)
         .find_map(|(index, previous)| {
-            (previous.role == TimelineRole::Tool
-                && terminal_task_key_from_tool_block(&previous.text)
-                    .is_some_and(|previous_key| previous_key == current_key))
-            .then_some(index)
+            if previous.role != TimelineRole::Tool {
+                return None;
+            }
+            let previous_key = terminal_task_key_from_tool_block(&previous.text)
+                .or_else(|| execution_key_from_tool_block(&previous.text))?;
+            (previous_key == current_key).then_some(index)
         })
 }
 
@@ -1719,6 +1720,7 @@ fn tool_progress_result(progress: ToolProgressEvent) -> ToolResult {
         .clone()
         .filter(|preview| !preview.is_empty())
         .unwrap_or_else(|| tool_progress_summary(&progress));
+    let details = tool_progress_details(progress.execution_id.as_str(), progress.details);
     ToolResult::ok(
         progress.call_id,
         progress.tool_name,
@@ -1734,7 +1736,7 @@ fn tool_progress_result(progress: ToolProgressEvent) -> ToolResult {
                 .output_preview
                 .as_ref()
                 .map(|preview| preview.lines().count() as u64),
-            details: progress.details,
+            details,
             ..ToolResultMeta::default()
         },
     )
@@ -1769,6 +1771,32 @@ fn terminal_task_key_from_tool_block(text: &str) -> Option<String> {
         .and_then(serde_json::Value::as_str)?
         .trim();
     (!task_id.is_empty()).then(|| format!("terminal_task:{task_id}"))
+}
+
+fn execution_key_from_tool_block(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let execution_id = value
+        .get("metadata")?
+        .get("details")?
+        .get("execution_id")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    (!execution_id.is_empty()).then(|| format!("tool_execution:{execution_id}"))
+}
+
+fn tool_progress_details(execution_id: &str, details: serde_json::Value) -> serde_json::Value {
+    match details {
+        serde_json::Value::Object(mut object) => {
+            object
+                .entry("execution_id".to_owned())
+                .or_insert_with(|| serde_json::Value::String(execution_id.to_owned()));
+            serde_json::Value::Object(object)
+        }
+        other => serde_json::json!({
+            "execution_id": execution_id,
+            "progress_details": other,
+        }),
+    }
 }
 
 fn wait_agent_pending_replacement_index(
