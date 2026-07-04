@@ -28,7 +28,6 @@ pub(crate) fn test_config() -> RootConfig {
             cache_root: sigil_kernel::StorageRoot::Path(
                 storage_root.join("cache").display().to_string(),
             ),
-            project_assets_root: ".sigil".to_owned(),
             ..Default::default()
         },
         session: SessionConfig::default(),

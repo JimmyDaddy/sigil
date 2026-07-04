@@ -19,7 +19,7 @@ use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfileSnapshot,
     AgentProfileSource, AgentProfileTrustEntry, AgentTrustState, AppearanceConfig, ApprovalMode,
     CodeIntelStartup, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
-    JsonlSessionStore, McpServerConfig, McpServerStartup, MutationEventRecorder, PermissionPreset,
+    JsonlSessionStore, McpServerConfig, McpServerStartup, MutationEventRecorder, PermissionMode,
     PluginCapability, PluginManifestSnapshot, PluginStateProjection, PluginTrustDecision,
     PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
     SkillTrustState, SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope,
@@ -76,6 +76,7 @@ use mcp_detail::*;
 use navigation::*;
 use permission_detail::*;
 use plugin_detail::*;
+#[cfg(test)]
 pub(super) use shared::cycle_approval_mode;
 use shared::*;
 use skill_detail::*;
@@ -648,16 +649,9 @@ impl AppState {
                                 config_state.draft.provider_api_key.clone(),
                             ));
                         }
-                        ConfigField::PermissionsPreset => {
-                            config_state.draft.permission_preset =
-                                cycle_permission_preset(config_state.draft.permission_preset);
-                            config_state.dirty = true;
-                            self.last_notice = Some(format!("updated {}", field.label()));
-                            return Ok(None);
-                        }
-                        ConfigField::PermissionsDefaultMode => {
-                            config_state.draft.permission_default_mode =
-                                cycle_approval_mode(config_state.draft.permission_default_mode);
+                        ConfigField::PermissionMode => {
+                            config_state.draft.permission_mode =
+                                cycle_permission_mode(config_state.draft.permission_mode);
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
@@ -1056,9 +1050,8 @@ impl AppState {
         root_config: &RootConfig,
     ) -> (Vec<SkillDescriptor>, Vec<String>) {
         let user_config_dir = default_user_config_dir().ok();
-        match sigil_runtime::discover_skill_index_with_project_assets_root(
+        match sigil_runtime::discover_skill_index_with_user_dir(
             &self.workspace_root,
-            &self.sigil_paths.project_assets_root,
             user_config_dir.as_deref(),
             &root_config.skills,
         ) {
@@ -1094,11 +1087,7 @@ impl AppState {
             .trust_entries
             .into_values()
             .collect::<Vec<PluginTrustEntry>>();
-        match sigil_runtime::discover_workspace_plugins_with_project_assets_root(
-            &self.workspace_root,
-            &self.sigil_paths.project_assets_root,
-            &trust_entries,
-        ) {
+        match sigil_runtime::discover_workspace_plugins(&self.workspace_root, &trust_entries) {
             Ok(report) => {
                 let warnings = report
                     .warnings
@@ -1666,8 +1655,7 @@ impl AppState {
         self.session_log_dir = self.sigil_paths.session_log_dir.clone();
         self.config_snapshot = Some(root_config.clone());
         self.secret_redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
-        self.runtime.permission_default_mode =
-            root_config.permission.default_mode.as_str().to_owned();
+        self.runtime.permission_mode = root_config.permission.mode.as_str().to_owned();
         self.memory_config = root_config.memory.clone();
         self.compaction_config = root_config.compaction.clone();
         self.refresh_session_view_cache();
@@ -1789,10 +1777,12 @@ impl AppState {
     }
 }
 
-fn cycle_permission_preset(preset: PermissionPreset) -> PermissionPreset {
-    match preset {
-        PermissionPreset::Balanced => PermissionPreset::ReadOnly,
-        PermissionPreset::ReadOnly => PermissionPreset::Balanced,
+pub(super) fn cycle_permission_mode(mode: PermissionMode) -> PermissionMode {
+    match mode {
+        PermissionMode::ReadOnly => PermissionMode::Manual,
+        PermissionMode::Manual => PermissionMode::AutoEdit,
+        PermissionMode::AutoEdit => PermissionMode::DangerFullAccess,
+        PermissionMode::DangerFullAccess => PermissionMode::ReadOnly,
     }
 }
 

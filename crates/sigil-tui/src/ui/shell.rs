@@ -189,10 +189,10 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            " {}/{}  write={}  {} ",
+            " {}/{}  mode={}  {} ",
             app.runtime.provider_name,
             app.runtime.model_name,
-            app.runtime.permission_default_mode,
+            app.runtime.permission_mode,
             if app.runtime.is_busy {
                 "running"
             } else {

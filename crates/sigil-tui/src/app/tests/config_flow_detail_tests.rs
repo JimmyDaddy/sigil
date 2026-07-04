@@ -432,7 +432,7 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
             reasoning_effort: None,
             tool_scope: Default::default(),
             permission_policy: sigil_kernel::AgentPermissionPolicy {
-                default_mode: sigil_kernel::ApprovalMode::Ask,
+                mode: sigil_kernel::PermissionMode::Manual,
                 ..Default::default()
             },
             invocation_policy: sigil_kernel::AgentInvocationPolicy::ManualOnly,
@@ -463,7 +463,7 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
     assert!(detail.contains("- Provider: session"));
     assert!(detail.contains("- Model name: session"));
     assert!(detail.contains("- Reasoning: session"));
-    assert!(detail.contains("- Permission: ask"));
+    assert!(detail.contains("- Permission: manual"));
     assert!(detail.contains("- Skills: review,audit"));
     assert!(detail.contains("- MCP: filesystem"));
     assert!(detail.contains("- Nicknames: none"));

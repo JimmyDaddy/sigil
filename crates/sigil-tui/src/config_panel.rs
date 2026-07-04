@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
-    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, PermissionPreset,
+    CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, PermissionMode,
     PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, SyntaxThemeId,
     TerminalKeyboardEnhancement, ThemeId, UsageCostCurrency, VerificationAutoRunPolicy,
 };
@@ -185,8 +185,7 @@ pub(crate) enum ConfigField {
     ProviderBaseUrl,
     #[allow(dead_code)]
     ProviderFimModel,
-    PermissionsPreset,
-    PermissionsDefaultMode,
+    PermissionMode,
     // Verification auto-run is a policy-file concern. Task status owns
     // immediate run/retry actions in the product surface.
     #[allow(dead_code)]
@@ -247,7 +246,7 @@ impl ConfigField {
         Self::ProviderName,
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
-    const PERMISSION_FIELDS: [Self; 2] = [Self::PermissionsPreset, Self::PermissionsDefaultMode];
+    const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionMode];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
         Self::CompactionEnabled,
@@ -298,8 +297,7 @@ impl ConfigField {
             Self::ModelRequestStreamIdleTimeoutSecs => "stream_idle_timeout",
             Self::ProviderBaseUrl => "base_url",
             Self::ProviderFimModel => "fim_model",
-            Self::PermissionsPreset => "preset",
-            Self::PermissionsDefaultMode => "mode",
+            Self::PermissionMode => "mode",
             Self::VerificationAutoRun => "checks",
             Self::MemoryEnabled => "enabled",
             Self::CompactionEnabled => "enabled",
@@ -338,8 +336,7 @@ impl ConfigField {
             Self::ModelRequestStreamIdleTimeoutSecs => "Stream idle timeout",
             Self::ProviderBaseUrl => "Endpoint",
             Self::ProviderFimModel => "FIM model",
-            Self::PermissionsPreset => "Preset",
-            Self::PermissionsDefaultMode => "Mode",
+            Self::PermissionMode => "Mode",
             Self::VerificationAutoRun => "Checks",
             Self::MemoryEnabled => "Memory",
             Self::CompactionEnabled => "Auto compact",
@@ -392,11 +389,8 @@ impl ConfigField {
             Self::ProviderFimModel => {
                 "DeepSeek-only model used by prefix/FIM helpers. Chat runs use Model."
             }
-            Self::PermissionsPreset => {
-                "Coarse safety profile. Read-only caps all non-read tools before detailed rules."
-            }
-            Self::PermissionsDefaultMode => {
-                "Default safety posture for tool calls that do not have a more specific rule."
+            Self::PermissionMode => {
+                "Top-level safety mode: read-only, manual confirmation, automatic workspace edits, or danger full access."
             }
             Self::VerificationAutoRun => {
                 "Controls whether trusted project checks may start automatically after writes."
@@ -497,8 +491,7 @@ impl ConfigField {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
             Self::ProviderName => "Enter cycle",
             Self::ProviderApiKey => "Enter input",
-            Self::PermissionsPreset
-            | Self::PermissionsDefaultMode
+            Self::PermissionMode
             | Self::VerificationAutoRun
             | Self::CodeIntelServerStartup
             | Self::AppearanceTheme
@@ -721,8 +714,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) provider_fim_model: String,
     pub(crate) model_request_timeout_secs: String,
     pub(crate) model_request_stream_idle_timeout_secs: String,
-    pub(crate) permission_preset: PermissionPreset,
-    pub(crate) permission_default_mode: ApprovalMode,
+    pub(crate) permission_mode: PermissionMode,
     pub(crate) verification_auto_run: VerificationAutoRunPolicy,
     pub(crate) memory_enabled: bool,
     pub(crate) compaction_enabled: bool,
@@ -799,8 +791,7 @@ impl ConfigDraft {
             provider_fim_model: deepseek_fields.fim_model,
             model_request_timeout_secs: model_request_fields.request_timeout_secs,
             model_request_stream_idle_timeout_secs: model_request_fields.stream_idle_timeout_secs,
-            permission_preset: root_config.permission.preset,
-            permission_default_mode: root_config.permission.default_mode,
+            permission_mode: root_config.permission.mode,
             verification_auto_run: root_config.verification.auto_run,
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
@@ -955,8 +946,7 @@ impl ConfigDraft {
         let mut root_config = self.base_root_config.clone();
         root_config.agent.provider = provider_name.to_owned();
         root_config.agent.model = model.to_owned();
-        root_config.permission.preset = self.permission_preset;
-        root_config.permission.default_mode = self.permission_default_mode;
+        root_config.permission.mode = self.permission_mode;
         root_config.verification.auto_run = self.verification_auto_run;
         root_config.memory.enabled = self.memory_enabled;
         root_config.compaction.enabled = self.compaction_enabled;
@@ -1742,8 +1732,7 @@ impl ConfigState {
             ConfigField::McpStartupTimeoutSecs => self
                 .selected_mcp_server()
                 .map(|server| server.startup_timeout_secs.as_str()),
-            ConfigField::PermissionsPreset
-            | ConfigField::PermissionsDefaultMode
+            ConfigField::PermissionMode
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
@@ -1801,8 +1790,7 @@ impl ConfigState {
             ConfigField::McpStartupTimeoutSecs => self
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.startup_timeout_secs),
-            ConfigField::PermissionsPreset
-            | ConfigField::PermissionsDefaultMode
+            ConfigField::PermissionMode
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
@@ -1847,11 +1835,8 @@ impl ConfigState {
                     .map(|plugin| plugin.plugin_id.clone())
                     .unwrap_or_else(|| "none".to_owned());
             }
-            ConfigField::PermissionsPreset => {
-                return permission_preset_label(self.draft.permission_preset).to_owned();
-            }
-            ConfigField::PermissionsDefaultMode => {
-                return permission_mode_label(self.draft.permission_default_mode).to_owned();
+            ConfigField::PermissionMode => {
+                return permission_mode_label(self.draft.permission_mode).to_owned();
             }
             ConfigField::VerificationAutoRun => {
                 return verification_auto_run_label(self.draft.verification_auto_run).to_owned();
@@ -1991,8 +1976,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         ConfigField::SkillId | ConfigField::PluginId => false,
         ConfigField::ProviderApiKey
         | ConfigField::ProviderName
-        | ConfigField::PermissionsPreset
-        | ConfigField::PermissionsDefaultMode
+        | ConfigField::PermissionMode
         | ConfigField::VerificationAutoRun
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled
@@ -2021,18 +2005,12 @@ fn bool_label(enabled: bool) -> &'static str {
     if enabled { "yes" } else { "no" }
 }
 
-fn permission_preset_label(preset: PermissionPreset) -> &'static str {
-    match preset {
-        PermissionPreset::Balanced => "balanced",
-        PermissionPreset::ReadOnly => "read only",
-    }
-}
-
-fn permission_mode_label(mode: sigil_kernel::ApprovalMode) -> &'static str {
+fn permission_mode_label(mode: PermissionMode) -> &'static str {
     match mode {
-        sigil_kernel::ApprovalMode::Ask => "standard",
-        sigil_kernel::ApprovalMode::Allow => "full access",
-        sigil_kernel::ApprovalMode::Deny => "locked down",
+        PermissionMode::ReadOnly => "read-only",
+        PermissionMode::Manual => "manual",
+        PermissionMode::AutoEdit => "auto-edit",
+        PermissionMode::DangerFullAccess => "danger-full-access",
     }
 }
 

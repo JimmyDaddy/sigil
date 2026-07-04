@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
     match mode {
         ApprovalMode::Allow => ApprovalMode::Ask,

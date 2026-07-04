@@ -10,7 +10,7 @@ fn sync_smoke_child_agent(app: &mut AppState) -> Result<()> {
 }
 
 #[test]
-fn product_smoke_workspace_check_approval_defaults_once_and_can_select_session() -> Result<()> {
+fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ToolApprovalRequested {

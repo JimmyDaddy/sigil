@@ -23,6 +23,18 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         "Project assets",
         &paths.project_assets_root.display().to_string(),
     ));
+    lines.push(render_config_readonly_row(
+        "Workspace skills",
+        &paths.workspace_skills_dir.display().to_string(),
+    ));
+    lines.push(render_config_readonly_row(
+        "Workspace agents",
+        &paths.workspace_agents_dir.display().to_string(),
+    ));
+    lines.push(render_config_readonly_row(
+        "Workspace plugins",
+        &paths.workspace_plugins_dir.display().to_string(),
+    ));
     lines.push(String::new());
     lines.push("[files]".to_owned());
     lines.push(render_config_readonly_row(
@@ -58,7 +70,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     lines.push(String::new());
     lines.push("[details]".to_owned());
     lines.push(render_config_hint_row(
-        "read-only; set [storage] roots or SIGIL_STATE_HOME/SIGIL_CACHE_HOME to override",
+        "read-only; state/cache roots can be overridden, project assets are fixed under workspace .sigil",
     ));
     lines.push(render_config_hint_row(
         "footer clean records lifecycle events; artifact details are audit/debug",

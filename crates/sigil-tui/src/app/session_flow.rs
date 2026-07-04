@@ -459,10 +459,7 @@ impl AppState {
             format!("{}/{}", self.runtime.provider_name, self.runtime.model_name),
         );
         self.push_event("effort", self.runtime.reasoning_effort.as_str());
-        self.push_event(
-            "approval_default",
-            self.runtime.permission_default_mode.clone(),
-        );
+        self.push_event("permission_mode", self.runtime.permission_mode.clone());
         self.push_event(
             "memory",
             format!(

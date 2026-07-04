@@ -34,13 +34,13 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
-    AgentResultContinuationProjection, AgentThreadId, AgentThreadStateProjection, ApprovalMode,
-    CompactionConfig, CompactionRecord, CompactionThresholdStatus, ConversationInputKind,
-    ConversationInputQueueId, ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
-    MutationArtifactInventoryItem, MutationArtifactRetentionReport, PlanApprovalPermission,
-    PlanDraftCreatedEntry, PlanTaskStartMode, ReasoningEffort, RootConfig, SecretRedactor, Session,
-    SessionConfig, SessionLogEntry, SessionStats, StorageConfig, TaskStateProjection,
-    TerminalKeyboardEnhancement, ToolPreviewSnapshot, resolve_workspace_root,
+    AgentResultContinuationProjection, AgentThreadId, AgentThreadStateProjection, CompactionConfig,
+    CompactionRecord, CompactionThresholdStatus, ConversationInputKind, ConversationInputQueueId,
+    ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
+    MutationArtifactInventoryItem, MutationArtifactRetentionReport, PermissionMode,
+    PlanApprovalPermission, PlanDraftCreatedEntry, PlanTaskStartMode, ReasoningEffort, RootConfig,
+    SecretRedactor, Session, SessionConfig, SessionLogEntry, SessionStats, StorageConfig,
+    TaskStateProjection, TerminalKeyboardEnhancement, ToolPreviewSnapshot, resolve_workspace_root,
 };
 use sigil_runtime::{
     BalanceSnapshot, ContextWindowSource, SigilPaths, effective_compaction_config,
@@ -67,7 +67,7 @@ pub(crate) use crate::timeline::{
 };
 pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
-use self::config_flow::cycle_approval_mode;
+use self::config_flow::cycle_permission_mode;
 use self::formatting::*;
 use self::modal_flow::{ModalState, ModelPickerRefresh};
 use self::runtime_status::{McpProgressState, ResolvedUsageCostCurrency};
@@ -449,7 +449,7 @@ impl AppState {
             resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
         let session_log_dir = sigil_paths.session_log_dir.clone();
         let session_id = Uuid::new_v4().to_string();
-        let permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
+        let permission_mode = root_config.permission.mode.as_str().to_owned();
         let initial_compaction_status = effective_compaction_config(
             &root_config.agent.provider,
             &root_config.agent.model,
@@ -471,7 +471,7 @@ impl AppState {
             runtime: RuntimeStatusState {
                 provider_name: root_config.agent.provider.clone(),
                 model_name: root_config.agent.model.clone(),
-                permission_default_mode,
+                permission_mode,
                 memory_enabled: root_config.memory.enabled,
                 memory_document_count: 0,
                 memory_last_status: "pending".to_owned(),
@@ -586,7 +586,7 @@ impl AppState {
             runtime: RuntimeStatusState {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
-                permission_default_mode: ApprovalMode::Ask.as_str().to_owned(),
+                permission_mode: PermissionMode::Manual.as_str().to_owned(),
                 memory_enabled: true,
                 memory_document_count: 0,
                 memory_last_status: "pending".to_owned(),
@@ -749,10 +749,7 @@ impl AppState {
             format!("{}/{}", self.runtime.provider_name, self.runtime.model_name),
         );
         self.push_event("effort", self.runtime.reasoning_effort.as_str());
-        self.push_event(
-            "approval_default",
-            self.runtime.permission_default_mode.clone(),
-        );
+        self.push_event("permission_mode", self.runtime.permission_mode.clone());
         self.push_event(
             "memory",
             format!(
@@ -2153,7 +2150,7 @@ impl AppState {
 
     pub(crate) fn permission_card_lines(&self) -> Vec<String> {
         vec![
-            format!("mode: {}", self.runtime.permission_default_mode),
+            format!("mode: {}", self.runtime.permission_mode),
             "Shift-Tab cycle + save".to_owned(),
             if self.runtime.is_busy {
                 "busy: locked during run".to_owned()
@@ -2253,11 +2250,11 @@ impl AppState {
             _ => "ctx n/a".to_owned(),
         };
         format!(
-            "{}  ·  {}  ·  cache {:.0}%  ·  spent {delta_spent} since opening / {session_spent} total  ·  write {}  ·  Ctrl-C {}",
+            "{}  ·  {}  ·  cache {:.0}%  ·  spent {delta_spent} since opening / {session_spent} total  ·  mode {}  ·  Ctrl-C {}",
             token_line,
             context,
             self.cache_hit_ratio() * 100.0,
-            self.runtime.permission_default_mode,
+            self.runtime.permission_mode,
             if self.runtime.is_busy {
                 "cancel"
             } else {
@@ -2393,24 +2390,17 @@ impl AppState {
             return Ok(None);
         };
         let mut next_config = root_config.clone();
-        next_config.permission.default_mode =
-            cycle_approval_mode(next_config.permission.default_mode);
+        next_config.permission.mode = cycle_permission_mode(next_config.permission.mode);
         persisted_root_config(&next_config).save(&self.config_path)?;
         self.apply_runtime_config_snapshot(&next_config);
         self.last_notice = Some(format!(
-            "default mode = {}",
-            next_config.permission.default_mode.as_str()
+            "permission mode = {}",
+            next_config.permission.mode.as_str()
         ));
-        self.push_event(
-            "approval_default",
-            self.runtime.permission_default_mode.clone(),
-        );
+        self.push_event("permission_mode", self.runtime.permission_mode.clone());
         self.push_timeline(
             TimelineRole::Notice,
-            format!(
-                "default permission -> {}",
-                self.runtime.permission_default_mode
-            ),
+            format!("permission mode -> {}", self.runtime.permission_mode),
         );
         self.schedule_balance_refresh();
         Ok(Some(AppAction::RuntimeConfigUpdated {

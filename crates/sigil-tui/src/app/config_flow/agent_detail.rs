@@ -29,10 +29,7 @@ pub(super) fn render_agent_detail_lines(agent: &ResolvedAgentProfile) -> Vec<Str
         render_config_readonly_row("Invocation", agent.profile.invocation_policy.as_str()),
         render_config_readonly_row("Result", agent.profile.result_policy.as_str()),
         render_config_readonly_row("Tools", &tool_scope_summary(&agent.profile.tool_scope)),
-        render_config_readonly_row(
-            "Permission",
-            agent.profile.permission_policy.default_mode.as_str(),
-        ),
+        render_config_readonly_row("Permission", agent.profile.permission_policy.mode.as_str()),
         render_config_readonly_row("Skills", &list_summary(&agent.profile.skills)),
         render_config_readonly_row("MCP", &list_summary(&agent.profile.mcp_servers)),
         render_config_readonly_row(

@@ -30,6 +30,9 @@ fn config_storage_section_shows_resolved_paths_readonly() {
     assert!(detail.contains("Cache root"));
     assert!(detail.contains("Workspace state"));
     assert!(detail.contains("Project assets"));
+    assert!(detail.contains("Workspace skills"));
+    assert!(detail.contains("Workspace agents"));
+    assert!(detail.contains("Workspace plugins"));
     assert!(detail.contains("[files]"));
     assert!(detail.contains("Session logs"));
     assert!(detail.contains("Input history"));
@@ -47,7 +50,11 @@ fn config_storage_section_shows_resolved_paths_readonly() {
         detail
             .contains("i footer clean records lifecycle events; artifact details are audit/debug")
     );
-    assert!(detail.contains("SIGIL_STATE_HOME"));
+    assert!(
+        detail.contains(
+            "i read-only; state/cache roots can be overridden, project assets are fixed under workspace .sigil"
+        )
+    );
     assert_eq!(app.config_selected_field_label(), None);
 }
 
@@ -724,7 +731,7 @@ fn config_left_right_switches_steps() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Permissions"));
-    assert_eq!(app.config_selected_field_label(), Some("Preset"));
+    assert_eq!(app.config_selected_field_label(), Some("Mode"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
@@ -818,8 +825,7 @@ fn config_permissions_step_uses_policy_summary_and_details() {
     let detail = app.config_detail_lines().join("\n");
 
     assert!(detail.contains("[permissions]"));
-    assert!(detail.contains("Preset: balanced"));
-    assert!(detail.contains("Mode: standard"));
+    assert!(detail.contains("Mode: manual"));
     assert!(!detail.contains("Checks: manual"));
     assert!(detail.contains("[workspace]"));
     assert!(detail.contains("Workspace trust: unknown"));
@@ -839,13 +845,13 @@ fn config_permissions_step_uses_policy_summary_and_details() {
     assert!(detail.contains("Generated roots: none"));
     assert!(detail.contains("Advanced overrides: 0 excludes, 0 generated roots"));
     assert!(detail.contains("[details]"));
-    assert!(detail.contains("selected: Preset"));
-    assert!(detail.contains("key: preset"));
+    assert!(detail.contains("selected: Mode"));
+    assert!(detail.contains("key: mode"));
     assert!(detail.contains("controls: Tab section"));
     assert!(!detail.lines().any(|line| line.starts_with("overrides:")));
     assert!(!detail.contains("subject="));
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("Permissions: Enter cycle preset/mode"));
+    assert!(nav.contains("Permissions: Enter cycle mode"));
     assert!(nav.contains("Permissions: task checks run from task status"));
     assert!(!nav.contains("footer approve"));
 }
@@ -2985,8 +2991,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.provider_base_url = "https://example.invalid/api".to_owned();
     state.draft.provider_user_id_strategy = "stable_per_workspace".to_owned();
     state.draft.provider_fim_model = "deepseek-v4-flash".to_owned();
-    state.draft.permission_preset = sigil_kernel::PermissionPreset::ReadOnly;
-    state.draft.permission_default_mode = ApprovalMode::Allow;
+    state.draft.permission_mode = sigil_kernel::PermissionMode::AutoEdit;
     state.draft.memory_enabled = false;
     state.draft.compaction_soft_threshold_ratio = "0.40".to_owned();
     state.draft.compaction_hard_threshold_ratio = "0.75".to_owned();
@@ -3007,10 +3012,9 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     };
     assert_eq!(root_config.agent.model, "deepseek-v4-pro");
     assert_eq!(
-        root_config.permission.preset,
-        sigil_kernel::PermissionPreset::ReadOnly
+        root_config.permission.mode,
+        sigil_kernel::PermissionMode::AutoEdit
     );
-    assert_eq!(root_config.permission.default_mode, ApprovalMode::Allow);
     assert!(!root_config.memory.enabled);
     assert_eq!(root_config.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(root_config.compaction.hard_threshold_ratio, 0.75);
@@ -3026,16 +3030,15 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert!(!root_config.terminal.osc52_clipboard);
     assert_eq!(root_config.terminal.scroll_sensitivity, 6);
     assert!(!app.config_is_dirty());
-    assert_eq!(app.runtime.permission_default_mode, "allow");
+    assert_eq!(app.runtime.permission_mode, "auto-edit");
     assert!(!app.runtime.memory_enabled);
 
     let saved = RootConfig::load(&config_path)?;
     assert_eq!(saved.agent.model, "deepseek-v4-pro");
     assert_eq!(
-        saved.permission.preset,
-        sigil_kernel::PermissionPreset::ReadOnly
+        saved.permission.mode,
+        sigil_kernel::PermissionMode::AutoEdit
     );
-    assert_eq!(saved.permission.default_mode, ApprovalMode::Allow);
     assert!(!saved.memory.enabled);
     assert_eq!(saved.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(saved.compaction.hard_threshold_ratio, 0.75);
@@ -3092,7 +3095,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
 }
 
 #[test]
-fn runtime_permission_toggle_persists_default_mode_to_config() -> Result<()> {
+fn runtime_permission_toggle_persists_mode_to_config() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     let root_config = test_config();
@@ -3105,13 +3108,19 @@ fn runtime_permission_toggle_persists_default_mode_to_config() -> Result<()> {
     let Some(AppAction::RuntimeConfigUpdated { root_config }) = action else {
         panic!("expected runtime config update action");
     };
-    assert_eq!(root_config.permission.default_mode, ApprovalMode::Deny);
-    assert_eq!(app.runtime.permission_default_mode, "deny");
+    assert_eq!(
+        root_config.permission.mode,
+        sigil_kernel::PermissionMode::AutoEdit
+    );
+    assert_eq!(app.runtime.permission_mode, "auto-edit");
 
     let saved = RootConfig::load(&config_path)?;
-    assert_eq!(saved.permission.default_mode, ApprovalMode::Deny);
+    assert_eq!(
+        saved.permission.mode,
+        sigil_kernel::PermissionMode::AutoEdit
+    );
     let reopened = AppState::from_root_config(&config_path, &saved);
-    assert_eq!(reopened.runtime.permission_default_mode, "deny");
+    assert_eq!(reopened.runtime.permission_mode, "auto-edit");
     Ok(())
 }
 
@@ -3779,7 +3788,7 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Permissions);
-        state.selected_field = Some(ConfigField::PermissionsPreset);
+        state.selected_field = Some(ConfigField::PermissionMode);
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let state = app
@@ -3787,25 +3796,9 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
         .as_ref()
         .expect("config state should exist");
     assert_eq!(
-        state.draft.permission_preset,
-        sigil_kernel::PermissionPreset::ReadOnly
+        state.draft.permission_mode,
+        sigil_kernel::PermissionMode::AutoEdit
     );
-    assert!(state.dirty);
-
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should exist");
-        state.set_section(ConfigSection::Permissions);
-        state.selected_field = Some(ConfigField::PermissionsDefaultMode);
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    let state = app
-        .config_state
-        .as_ref()
-        .expect("config state should exist");
-    assert_eq!(state.draft.permission_default_mode, ApprovalMode::Deny);
     assert!(state.dirty);
 
     {

@@ -213,12 +213,9 @@ pub(crate) fn info_rail_permission_lines(app: &AppState) -> Vec<String> {
     let scope = if app.runtime.is_busy {
         "locked during run"
     } else {
-        "saved default"
+        "saved mode"
     };
-    vec![format!(
-        "mode: {} · {scope}",
-        app.runtime.permission_default_mode
-    )]
+    vec![format!("mode: {} · {scope}", app.runtime.permission_mode)]
 }
 
 fn compact_info_rail_task_lines(app: &AppState) -> Vec<String> {

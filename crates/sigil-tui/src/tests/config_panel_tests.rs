@@ -441,10 +441,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::fields_for_section(ConfigSection::Storage), &[]);
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Permissions),
-        &[
-            ConfigField::PermissionsPreset,
-            ConfigField::PermissionsDefaultMode
-        ]
+        &[ConfigField::PermissionMode]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
@@ -490,8 +487,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     );
 
     assert_eq!(ConfigField::McpCommand.label(), "command");
-    assert_eq!(ConfigField::PermissionsPreset.label(), "preset");
-    assert_eq!(ConfigField::PermissionsDefaultMode.label(), "mode");
+    assert_eq!(ConfigField::PermissionMode.label(), "mode");
     assert_eq!(ConfigField::VerificationAutoRun.label(), "checks");
     assert_eq!(ConfigField::SkillId.label(), "skill");
     assert_eq!(ConfigField::PluginId.label(), "plugin");
@@ -1072,8 +1068,7 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     draft.provider_fim_model = " deepseek-v4-pro ".to_owned();
     draft.model_request_timeout_secs = "60".to_owned();
     draft.model_request_stream_idle_timeout_secs = "90".to_owned();
-    draft.permission_preset = sigil_kernel::PermissionPreset::ReadOnly;
-    draft.permission_default_mode = sigil_kernel::ApprovalMode::Deny;
+    draft.permission_mode = sigil_kernel::PermissionMode::ReadOnly;
     draft.memory_enabled = true;
     draft.compaction_enabled = true;
     draft.compaction_soft_threshold_ratio = "0.5".to_owned();
@@ -1094,12 +1089,8 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
 
     assert_eq!(config.agent.model, "deepseek-v4-pro");
     assert_eq!(
-        config.permission.preset,
-        sigil_kernel::PermissionPreset::ReadOnly
-    );
-    assert_eq!(
-        config.permission.default_mode,
-        sigil_kernel::ApprovalMode::Deny
+        config.permission.mode,
+        sigil_kernel::PermissionMode::ReadOnly
     );
     assert_eq!(config.compaction.context_window_tokens, Some(128000));
     assert_eq!(config.compaction.tail_messages, 8);
@@ -1535,34 +1526,24 @@ fn config_display_helpers_cover_permission_and_verification_labels() {
     );
 
     let mut config = test_root_config();
-    config.permission.preset = sigil_kernel::PermissionPreset::ReadOnly;
-    config.permission.default_mode = sigil_kernel::ApprovalMode::Allow;
+    config.permission.mode = sigil_kernel::PermissionMode::DangerFullAccess;
     config.verification.auto_run = sigil_kernel::VerificationAutoRunPolicy::TrustedOnly;
     let mut state = ConfigState::from_root_config(&config);
 
     assert_eq!(
-        state.display_value(ConfigField::PermissionsPreset),
-        "read only"
-    );
-    assert_eq!(
-        state.display_value(ConfigField::PermissionsDefaultMode),
-        "full access"
+        state.display_value(ConfigField::PermissionMode),
+        "danger-full-access"
     );
     assert_eq!(
         state.display_value(ConfigField::VerificationAutoRun),
         "auto trusted"
     );
 
-    state.draft.permission_preset = sigil_kernel::PermissionPreset::Balanced;
-    state.draft.permission_default_mode = sigil_kernel::ApprovalMode::Deny;
+    state.draft.permission_mode = sigil_kernel::PermissionMode::AutoEdit;
     state.draft.verification_auto_run = sigil_kernel::VerificationAutoRunPolicy::Never;
     assert_eq!(
-        state.display_value(ConfigField::PermissionsPreset),
-        "balanced"
-    );
-    assert_eq!(
-        state.display_value(ConfigField::PermissionsDefaultMode),
-        "locked down"
+        state.display_value(ConfigField::PermissionMode),
+        "auto-edit"
     );
     assert_eq!(state.display_value(ConfigField::VerificationAutoRun), "off");
 }

@@ -1,13 +1,18 @@
-use std::{collections::BTreeSet, fs, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sigil_kernel::{
-    Agent, ApprovalMode, ControlEntry, JsonlSessionStore, LanguageServerConfig,
-    PermissionAccessConfig, PermissionConfig, PermissionDecision, Provider, RunEvent, Session,
-    SessionLogEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
-    ToolExecutionStatus, ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolSpec, ToolSubject, ToolSubjectScope,
+    Agent, ApprovalMode, ControlEntry, JsonlSessionStore, LanguageServerConfig, PermissionConfig,
+    PermissionDecision, Provider, RunEvent, Session, SessionLogEntry, Tool, ToolAccess, ToolCall,
+    ToolCategory, ToolContext, ToolErrorKind, ToolExecutionStatus, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec,
+    ToolSubject, ToolSubjectScope,
 };
 use tempfile::tempdir;
 
@@ -140,10 +145,10 @@ fn test_runtime() -> Result<tokio::runtime::Runtime> {
 
 fn test_options(
     workspace_root: &std::path::Path,
-    default_mode: ApprovalMode,
+    permission_mode: sigil_kernel::PermissionMode,
 ) -> sigil_kernel::AgentRunOptions {
     let mut root_config = test_root_config(workspace_root, "planned", "planned-model");
-    root_config.permission.default_mode = default_mode;
+    root_config.permission.mode = permission_mode;
     sigil_runtime::build_run_options(
         &root_config,
         workspace_root.to_path_buf(),
@@ -558,7 +563,7 @@ fn check_changed_files_diagnostics_errors_when_tool_is_not_registered() -> Resul
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = Session::new("planned", "planned-model");
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
 
     let result = check_changed_files_diagnostics(
         &runtime,
@@ -587,7 +592,7 @@ fn check_changed_files_diagnostics_propagates_missing_tool_audit_write_errors() 
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = session_with_directory_store(temp.path(), "session-dir")?;
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
 
     let error = check_changed_files_diagnostics(
         &runtime,
@@ -608,7 +613,7 @@ fn check_changed_files_diagnostics_surfaces_subject_resolution_errors() -> Resul
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = Session::new("planned", "planned-model");
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
         DiagnosticsTestTool::new(
@@ -646,7 +651,7 @@ fn check_changed_files_diagnostics_propagates_subject_audit_write_errors() -> Re
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = session_with_directory_store(temp.path(), "subject-session-dir")?;
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
         DiagnosticsTestTool::new(
@@ -680,7 +685,7 @@ fn check_changed_files_diagnostics_surfaces_access_resolution_errors() -> Result
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = Session::new("planned", "planned-model");
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
         DiagnosticsTestTool::new(
@@ -718,7 +723,7 @@ fn check_changed_files_diagnostics_surfaces_operation_resolution_errors() -> Res
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = Session::new("planned", "planned-model");
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
         DiagnosticsTestTool::new(
@@ -756,7 +761,7 @@ fn check_changed_files_diagnostics_propagates_access_audit_write_errors() -> Res
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = session_with_directory_store(temp.path(), "access-session-dir")?;
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
         DiagnosticsTestTool::new(
@@ -790,7 +795,7 @@ fn check_changed_files_diagnostics_honors_permission_policy_blocks() -> Result<(
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = Session::new("planned", "planned-model");
-    let options = test_options(temp.path(), ApprovalMode::Ask);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::Manual);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(DiagnosticsTestTool::new(
         ToolAccess::Execute,
@@ -825,7 +830,7 @@ fn check_changed_files_diagnostics_propagates_policy_audit_write_errors() -> Res
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = session_with_directory_store(temp.path(), "policy-session-dir")?;
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(DiagnosticsTestTool::new(
         ToolAccess::Read,
@@ -857,7 +862,7 @@ fn check_changed_files_diagnostics_converts_execute_failures_to_internal_tool_er
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = Session::new("planned", "planned-model");
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
         DiagnosticsTestTool::new(ToolAccess::Execute, ExecutePlan::Err("tool exploded"))
@@ -992,7 +997,7 @@ fn check_changed_files_diagnostics_completes_and_preserves_existing_call_metadat
     let temp = tempdir()?;
     let runtime = test_runtime()?;
     let mut session = Session::new("planned", "planned-model");
-    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let options = test_options(temp.path(), sigil_kernel::PermissionMode::DangerFullAccess);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
         DiagnosticsTestTool::new(
@@ -1089,10 +1094,7 @@ fn check_changed_files_diagnostics_honors_permission_denial() -> Result<()> {
     let session_log_path = workspace_root.join(".sigil/sessions/session-denied-tool.jsonl");
     let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
     root_config.permission = PermissionConfig {
-        access: PermissionAccessConfig {
-            read: Some(ApprovalMode::Deny),
-            ..PermissionAccessConfig::default()
-        },
+        tools: BTreeMap::from([("code_diagnostics".to_owned(), ApprovalMode::Deny)]),
         ..PermissionConfig::default()
     };
     let provider = PlannedProvider::new(Vec::new());

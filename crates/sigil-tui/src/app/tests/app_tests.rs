@@ -2061,7 +2061,7 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
         action,
         Some(AppAction::RuntimeConfigUpdated { .. })
     ));
-    assert_eq!(app.runtime.permission_default_mode, "deny");
+    assert_eq!(app.runtime.permission_mode, "auto-edit");
 
     app.active_pane = PaneFocus::Activity;
     app.sidebar_selected_card = SidebarCard::Permission;

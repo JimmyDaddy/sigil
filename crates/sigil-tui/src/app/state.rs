@@ -24,7 +24,7 @@ use super::{
 pub(crate) struct RuntimeStatusState {
     pub(crate) provider_name: String,
     pub(crate) model_name: String,
-    pub(crate) permission_default_mode: String,
+    pub(crate) permission_mode: String,
     pub(crate) memory_enabled: bool,
     pub(crate) memory_document_count: usize,
     pub(crate) memory_last_status: String,
