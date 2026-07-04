@@ -220,8 +220,6 @@ impl AgentSupervisor {
         Ok(thread_id)
     }
 
-    pub fn reset_turn_budget(&self) {}
-
     #[must_use]
     pub fn active_profile_ids(&self) -> Vec<AgentProfileId> {
         self.state

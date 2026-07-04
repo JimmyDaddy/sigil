@@ -603,7 +603,6 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let agent = Arc::clone(&agent);
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
-                agent_supervisor.reset_turn_budget();
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
                     agent_supervisor.clone(),
                     root_config.clone(),
@@ -725,7 +724,6 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                agent_supervisor.reset_turn_budget();
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
                     agent_supervisor.clone(),
                     root_config.clone(),

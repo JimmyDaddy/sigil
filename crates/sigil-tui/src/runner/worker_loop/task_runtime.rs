@@ -872,7 +872,6 @@ pub(in crate::runner) fn build_task_role_runtime(
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &dyn TaskRoleProviderBuilder,
 ) -> std::result::Result<TaskRoleRuntime, String> {
-    agent_supervisor.reset_turn_budget();
     let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
     let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
     let subagent_read_provider =
@@ -949,7 +948,6 @@ pub(in crate::runner) fn build_skill_child_role_runtime(
     agent_supervisor: sigil_runtime::AgentSupervisor,
     role_provider_builder: &dyn TaskRoleProviderBuilder,
 ) -> std::result::Result<TaskRoleRuntime, String> {
-    agent_supervisor.reset_turn_budget();
     let planner_provider = role_provider_builder.build(root_config, AgentRole::Planner)?;
     let executor_provider = role_provider_builder.build(root_config, AgentRole::Executor)?;
     let subagent_read_provider =

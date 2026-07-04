@@ -242,7 +242,6 @@ where
         Arc::new(std::sync::Mutex::new(Vec::new()));
     elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-    agent_supervisor.reset_turn_budget();
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
         root_config.clone(),
@@ -388,7 +387,6 @@ where
         options.reasoning_effort = Some(reasoning_effort);
     }
     let workspace_root = options.workspace_root.clone();
-    agent_supervisor.reset_turn_budget();
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
         root_config.clone(),

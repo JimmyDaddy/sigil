@@ -2450,7 +2450,20 @@ async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result
         .await?
         .expect("second spawn handled");
     assert!(!second.is_error());
-    assert!(!second.content.contains("max_parallel_readonly"));
+    for stale_field in [
+        "max_child_sessions",
+        "allow_parallel_readonly_subagents",
+        "max_parallel_readonly",
+        "max_parallel_write",
+        "max_background_threads",
+        "max_spawn_fanout_per_turn",
+        "max_agent_tokens_per_task",
+    ] {
+        assert!(
+            !second.content.contains(stale_field),
+            "agent result should not mention stale budget field {stale_field}"
+        );
+    }
     Ok(())
 }
 

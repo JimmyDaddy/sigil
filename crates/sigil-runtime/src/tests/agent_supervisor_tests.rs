@@ -960,7 +960,6 @@ fn cancel_foreground_run_releases_active_child_and_appends_audit() -> Result<()>
     assert_eq!(thread.status, sigil_kernel::AgentThreadStatus::Interrupted);
     assert_eq!(thread.reason.as_deref(), Some("run cancelled from test"));
 
-    supervisor.reset_turn_budget();
     supervisor.begin_task_child_thread(
         &mut session,
         &mut handler,

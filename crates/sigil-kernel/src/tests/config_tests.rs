@@ -1023,6 +1023,18 @@ fn root_config_rejects_legacy_code_intelligence_keys() {
 	model = "deepseek-v4-flash"
 
 	[code_intelligence]
+	feature = true
+	"#,
+        "feature",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[code_intelligence]
 	enabled = true
 	startup = "lazy"
 	"#,
