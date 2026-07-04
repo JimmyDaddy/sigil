@@ -143,11 +143,11 @@ pub use mutation::{
 };
 pub use permission::{
     ApprovalMode, EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
-    InteractionMode, PathTrustZone, PermissionAccessConfig, PermissionConfig,
-    PermissionConfirmation, PermissionDecision, PermissionEvaluationContext, PermissionPolicy,
-    PermissionPreset, PermissionRisk, PermissionRule, ToolOperation, apply_risk_overlay,
-    classify_path_trust_zone, derive_permission_risk, infer_tool_operation,
-    tool_approval_session_grant_available, tool_approval_session_grant_available_for_parts,
+    InteractionMode, PathTrustZone, PermissionConfig, PermissionConfirmation, PermissionDecision,
+    PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionRisk, PermissionRule,
+    ToolOperation, apply_risk_overlay, classify_path_trust_zone, derive_permission_risk,
+    infer_tool_operation, tool_approval_session_grant_available,
+    tool_approval_session_grant_available_for_parts,
 };
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,

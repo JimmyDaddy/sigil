@@ -10,7 +10,7 @@ use crate::{
     EvalWorkspaceFixture, EventClass, JsonlSessionStore, MemoryConfig, MergeDecision,
     MergeReviewId, MergeReviewParentMutationRequest, MergeReviewRequested, ModelMessage,
     MutationBatchStatus, MutationEventRecorder, MutationObservedState, MutationReconciled,
-    MutationResolution, PermissionConfig, PermissionPolicy, PermissionPreset, ProjectionCursor,
+    MutationResolution, PermissionConfig, PermissionMode, PermissionPolicy, ProjectionCursor,
     RunStatus, Session, SessionLogEntry, SessionStreamRecord, StoredEvent, ToolAccess,
     ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject, VerificationVerdict,
     VisibleCompletionState, WorkspaceTrust, bytes_hash, resolve_merge_review_parent_mutation,
@@ -1995,7 +1995,7 @@ fn eval_security_path_distinguishes_read_only_and_approval_denials() {
         preview: ToolPreviewCapability::None,
     };
     let read_only_config = PermissionConfig {
-        preset: PermissionPreset::ReadOnly,
+        mode: PermissionMode::ReadOnly,
         ..PermissionConfig::default()
     };
     let read_only_policy = PermissionPolicy::new(&read_only_config);

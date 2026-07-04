@@ -727,14 +727,12 @@ pub struct SessionConfig {
 
 /// User-local storage root configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct StorageConfig {
     #[serde(default)]
     pub state_root: StorageRoot,
     #[serde(default)]
     pub cache_root: StorageRoot,
-    #[serde(default = "default_project_assets_root")]
-    pub project_assets_root: String,
     #[serde(default)]
     pub mutation_artifact_retention: MutationArtifactRetentionConfig,
 }
@@ -744,7 +742,6 @@ impl Default for StorageConfig {
         Self {
             state_root: StorageRoot::Auto,
             cache_root: StorageRoot::Auto,
-            project_assets_root: default_project_assets_root(),
             mutation_artifact_retention: MutationArtifactRetentionConfig::default(),
         }
     }
@@ -973,14 +970,10 @@ impl Default for MemoryConfig {
 
 /// Skill discovery configuration shared by runtime entrypoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct SkillConfig {
     #[serde(default = "default_skill_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_skill_workspace_dir")]
-    pub workspace_dir: String,
-    #[serde(default = "default_skill_workspace_agents_dir")]
-    pub workspace_agents_dir: String,
     #[serde(default = "default_skill_user_skills")]
     pub user_skills: bool,
     #[serde(default = "default_skill_user_agents")]
@@ -993,8 +986,6 @@ impl Default for SkillConfig {
     fn default() -> Self {
         Self {
             enabled: default_skill_enabled(),
-            workspace_dir: default_skill_workspace_dir(),
-            workspace_agents_dir: default_skill_workspace_agents_dir(),
             user_skills: default_skill_user_skills(),
             user_agents: default_skill_user_agents(),
             compatibility_sources: default_skill_compatibility_sources(),
@@ -1283,18 +1274,6 @@ fn default_memory_enabled() -> bool {
 
 fn default_skill_enabled() -> bool {
     true
-}
-
-fn default_skill_workspace_dir() -> String {
-    ".sigil/skills".to_owned()
-}
-
-fn default_skill_workspace_agents_dir() -> String {
-    ".sigil/agents".to_owned()
-}
-
-fn default_project_assets_root() -> String {
-    ".sigil".to_owned()
 }
 
 fn default_skill_user_skills() -> bool {

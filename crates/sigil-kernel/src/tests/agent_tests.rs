@@ -4186,10 +4186,7 @@ async fn session_grant_covers_same_stable_read_call_without_second_prompt() -> R
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig {
-            access: crate::PermissionAccessConfig {
-                read: Some(ApprovalMode::Ask),
-                ..crate::PermissionAccessConfig::default()
-            },
+            tools: BTreeMap::from([("read_path".to_owned(), ApprovalMode::Ask)]),
             ..PermissionConfig::default()
         },
         permission_context: crate::PermissionEvaluationContext::default(),
@@ -4301,10 +4298,7 @@ async fn session_grant_covers_cargo_check_family_without_second_prompt() -> Resu
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig {
-            access: crate::PermissionAccessConfig {
-                execute: Some(ApprovalMode::Ask),
-                ..crate::PermissionAccessConfig::default()
-            },
+            tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Ask)]),
             ..PermissionConfig::default()
         },
         permission_context: crate::PermissionEvaluationContext::default(),
@@ -4717,10 +4711,7 @@ async fn agent_stops_after_max_turns_without_failing_the_run() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig {
-                    access: crate::PermissionAccessConfig {
-                        write: Some(ApprovalMode::Allow),
-                        ..crate::PermissionAccessConfig::default()
-                    },
+                    mode: crate::PermissionMode::AutoEdit,
                     ..PermissionConfig::default()
                 },
                 permission_context: crate::PermissionEvaluationContext::default(),
@@ -5135,10 +5126,8 @@ async fn agent_allows_external_directory_when_all_gates_allow() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig {
-                    access: crate::PermissionAccessConfig {
-                        write: Some(ApprovalMode::Allow),
-                        ..crate::PermissionAccessConfig::default()
-                    },
+                    mode: crate::PermissionMode::AutoEdit,
+                    tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
                     external_directory: ExternalDirectoryConfig {
                         enabled: true,
                         rules: vec![ExternalDirectoryRule {
@@ -5652,10 +5641,7 @@ async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig {
-                    access: crate::PermissionAccessConfig {
-                        write: Some(ApprovalMode::Allow),
-                        ..crate::PermissionAccessConfig::default()
-                    },
+                    mode: crate::PermissionMode::AutoEdit,
                     ..PermissionConfig::default()
                 },
                 permission_context: crate::PermissionEvaluationContext::default(),
@@ -5701,10 +5687,7 @@ async fn agent_records_internal_error_when_tool_execution_fails() -> Result<()> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig {
-                    access: crate::PermissionAccessConfig {
-                        write: Some(ApprovalMode::Allow),
-                        ..crate::PermissionAccessConfig::default()
-                    },
+                    mode: crate::PermissionMode::AutoEdit,
                     ..PermissionConfig::default()
                 },
                 permission_context: crate::PermissionEvaluationContext::default(),

@@ -132,8 +132,6 @@ fn assert_root_config_rejects(raw: &str, expected: &str) {
 fn skill_config_defaults_and_toml_overrides_are_stable() {
     let defaults = SkillConfig::default();
     assert!(defaults.enabled);
-    assert_eq!(defaults.workspace_dir, ".sigil/skills");
-    assert_eq!(defaults.workspace_agents_dir, ".sigil/agents");
     assert!(defaults.user_skills);
     assert!(defaults.user_agents);
     assert!(defaults.compatibility_sources.is_empty());
@@ -145,8 +143,6 @@ model = "deepseek-v4-pro"
 
 [skills]
 enabled = false
-workspace_dir = "skills"
-workspace_agents_dir = "agents"
 user_skills = false
 user_agents = false
 compatibility_sources = ["opencode"]
@@ -154,11 +150,83 @@ compatibility_sources = ["opencode"]
 
     let config: RootConfig = toml::from_str(raw).expect("skills config should load");
     assert!(!config.skills.enabled);
-    assert_eq!(config.skills.workspace_dir, "skills");
-    assert_eq!(config.skills.workspace_agents_dir, "agents");
     assert!(!config.skills.user_skills);
     assert!(!config.skills.user_agents);
     assert_eq!(config.skills.compatibility_sources, vec!["opencode"]);
+}
+
+#[test]
+fn removed_project_asset_config_keys_are_rejected() {
+    assert_root_config_rejects(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[storage]
+project_assets_root = "project-assets"
+"#,
+        "project_assets_root",
+    );
+    assert_root_config_rejects(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[skills]
+workspace_dir = "skills"
+"#,
+        "workspace_dir",
+    );
+    assert_root_config_rejects(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[skills]
+workspace_agents_dir = "agents"
+"#,
+        "workspace_agents_dir",
+    );
+}
+
+#[test]
+fn removed_permission_config_keys_are_rejected() {
+    assert_root_config_rejects(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[permission]
+preset = "balanced"
+"#,
+        "preset",
+    );
+    assert_root_config_rejects(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[permission]
+default_mode = "ask"
+"#,
+        "default_mode",
+    );
+    assert_root_config_rejects(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[permission.access]
+write = "allow"
+"#,
+        "access",
+    );
 }
 
 #[test]

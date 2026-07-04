@@ -16,35 +16,20 @@ pub fn build_run_options(
         reasoning_effort: Some(default_reasoning_effort(root_config)),
         interaction_mode,
         permission_config: root_config.permission.clone(),
-        permission_context: permission_evaluation_context(root_config, &paths),
+        permission_context: permission_evaluation_context(&paths),
         memory_config: root_config.memory.clone(),
         compaction_config: root_config.compaction.clone(),
     }
 }
 
-fn permission_evaluation_context(
-    root_config: &RootConfig,
-    paths: &SigilPaths,
-) -> PermissionEvaluationContext {
+fn permission_evaluation_context(paths: &SigilPaths) -> PermissionEvaluationContext {
     PermissionEvaluationContext {
         workspace_root: paths.workspace_root.clone(),
         project_asset_roots: vec![
             paths.project_assets_root.clone(),
-            project_asset_dir(
-                &paths.workspace_root,
-                &paths.project_assets_root,
-                &root_config.skills.workspace_dir,
-                DEFAULT_WORKSPACE_SKILLS_DIR,
-                "skills",
-            ),
-            project_asset_dir(
-                &paths.workspace_root,
-                &paths.project_assets_root,
-                &root_config.skills.workspace_agents_dir,
-                DEFAULT_WORKSPACE_AGENTS_DIR,
-                "agents",
-            ),
-            paths.project_assets_root.join("plugins"),
+            paths.workspace_skills_dir.clone(),
+            paths.workspace_agents_dir.clone(),
+            paths.workspace_plugins_dir.clone(),
         ],
         runtime_state_roots: vec![
             paths.workspace_state_root.clone(),

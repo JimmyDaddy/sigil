@@ -19,9 +19,10 @@ pub const DEFAULT_ARTIFACTS_DIR: &str = "artifacts";
 pub const DEFAULT_CHANGESETS_DIR: &str = "changesets";
 pub const DEFAULT_TERMINAL_TASKS_DIR: &str = "tasks";
 pub const DEFAULT_SCRATCH_DIR: &str = "tmp";
-pub const DEFAULT_PROJECT_ASSETS_ROOT: &str = ".sigil";
-pub const DEFAULT_WORKSPACE_SKILLS_DIR: &str = ".sigil/skills";
-pub const DEFAULT_WORKSPACE_AGENTS_DIR: &str = ".sigil/agents";
+pub const DEFAULT_PROJECT_ASSETS_DIR: &str = ".sigil";
+pub const DEFAULT_WORKSPACE_SKILLS_LEAF: &str = "skills";
+pub const DEFAULT_WORKSPACE_AGENTS_LEAF: &str = "agents";
+pub const DEFAULT_WORKSPACE_PLUGINS_LEAF: &str = "plugins";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigilPaths {
@@ -38,6 +39,9 @@ pub struct SigilPaths {
     pub terminal_tasks_root: PathBuf,
     pub scratch_root: PathBuf,
     pub project_assets_root: PathBuf,
+    pub workspace_skills_dir: PathBuf,
+    pub workspace_agents_dir: PathBuf,
+    pub workspace_plugins_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,10 +100,11 @@ pub fn resolve_sigil_paths_with_env(
     workspace_root: impl AsRef<Path>,
     env: &PathResolverEnv,
 ) -> SigilPaths {
-    let raw_workspace_root = workspace_root.as_ref().to_path_buf();
-    let project_assets_root =
-        resolve_configured_path(&storage.project_assets_root, &raw_workspace_root);
     let workspace_root = canonical_or_absolute(workspace_root.as_ref());
+    let project_assets_root = workspace_root.join(DEFAULT_PROJECT_ASSETS_DIR);
+    let workspace_skills_dir = project_assets_root.join(DEFAULT_WORKSPACE_SKILLS_LEAF);
+    let workspace_agents_dir = project_assets_root.join(DEFAULT_WORKSPACE_AGENTS_LEAF);
+    let workspace_plugins_dir = project_assets_root.join(DEFAULT_WORKSPACE_PLUGINS_LEAF);
     let workspace_id = workspace_id_for_root(&workspace_root);
     let state_root = resolve_state_root(storage, env);
     let cache_root = resolve_cache_root(storage, env);
@@ -126,6 +131,9 @@ pub fn resolve_sigil_paths_with_env(
         terminal_tasks_root,
         scratch_root,
         project_assets_root,
+        workspace_skills_dir,
+        workspace_agents_dir,
+        workspace_plugins_dir,
     }
 }
 
@@ -137,20 +145,6 @@ pub fn workspace_id_for_root(workspace_root: &Path) -> String {
     hasher.update(canonical.to_string_lossy().as_bytes());
     let hash = hex_lower(&hasher.finalize());
     format!("{slug}-{}", &hash[..12])
-}
-
-#[must_use]
-pub fn project_asset_dir(
-    workspace_root: &Path,
-    project_assets_root: &Path,
-    configured: &str,
-    default_configured: &str,
-    default_leaf: &str,
-) -> PathBuf {
-    if configured.trim() == default_configured {
-        return project_assets_root.join(default_leaf);
-    }
-    resolve_configured_path(configured, workspace_root)
 }
 
 fn resolve_state_root(storage: &StorageConfig, env: &PathResolverEnv) -> PathBuf {
@@ -368,7 +362,10 @@ mod tests {
         assert!(paths.workspace_id.contains('-'));
         assert!(paths.session_log_dir.ends_with("sessions"));
         assert!(paths.input_history_file.ends_with(INPUT_HISTORY_FILE));
-        assert_eq!(paths.project_assets_root, workspace.path().join(".sigil"));
+        assert_eq!(
+            paths.project_assets_root,
+            paths.workspace_root.join(".sigil")
+        );
     }
 
     #[test]

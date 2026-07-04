@@ -81,18 +81,17 @@ pub use context_window::{
     resolve_context_window_tokens,
 };
 pub use paths::{
-    DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_ROOT,
-    DEFAULT_SCRATCH_DIR, DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR,
-    DEFAULT_WORKSPACE_AGENTS_DIR, DEFAULT_WORKSPACE_SKILLS_DIR, INPUT_HISTORY_FILE,
+    DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR,
+    DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF,
+    DEFAULT_WORKSPACE_PLUGINS_LEAF, DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE,
     PathResolverEnv, SIGIL_CACHE_HOME_ENV, SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform,
-    project_asset_dir, resolve_sigil_paths, resolve_sigil_paths_with_env, workspace_id_for_root,
+    resolve_sigil_paths, resolve_sigil_paths_with_env, workspace_id_for_root,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
     PluginHookExecutionOutcome, PluginHookExecutionRequest, PluginHookExecutionRunner,
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
-    discover_workspace_plugins, discover_workspace_plugins_with_project_assets_root,
-    merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
+    discover_workspace_plugins, merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
 };
 pub use product_view::{
     AgentGraphProductSummary, agent_graph_product_summary_from_entries,
@@ -120,9 +119,8 @@ pub use provider_status::{
 pub use session_control::{append_session_control_entries, current_unix_time_ms};
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
-    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_project_assets_root,
-    discover_skill_index_with_user_dir, load_user_invoked_skill, namespaced_plugin_skill_id,
-    register_skill_tools, register_skill_tools_with_project_assets_root,
+    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,
+    load_user_invoked_skill, namespaced_plugin_skill_id, register_skill_tools,
 };
 
 pub use mcp_registry::{

@@ -9,11 +9,11 @@ use crate::{
 
 use super::{
     ApprovalMode, EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
-    PathRiskOverlay, PathTrustZone, PermissionAccessConfig, PermissionConfig,
-    PermissionConfirmation, PermissionEvaluationContext, PermissionPolicy, PermissionPreset,
-    PermissionRisk, PermissionRule, ToolOperation, classify_path_trust_analysis,
-    classify_path_trust_analysis_with_context, classify_path_trust_zone,
-    classify_path_trust_zone_with_context, tool_approval_session_grant_available,
+    PathRiskOverlay, PathTrustZone, PermissionConfig, PermissionConfirmation,
+    PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionRisk, PermissionRule,
+    ToolOperation, classify_path_trust_analysis, classify_path_trust_analysis_with_context,
+    classify_path_trust_zone, classify_path_trust_zone_with_context,
+    tool_approval_session_grant_available,
 };
 
 fn spec(access: ToolAccess) -> ToolSpec {
@@ -66,17 +66,24 @@ fn permission_fine_grained_enums_serde_roundtrip() -> Result<()> {
 }
 
 #[test]
-fn permission_preset_defaults_to_balanced_and_parses_read_only() -> Result<()> {
+fn permission_mode_defaults_to_manual_and_parses_all_user_modes() -> Result<()> {
     let default_config: PermissionConfig = toml::from_str("")?;
-    assert_eq!(default_config.preset, PermissionPreset::Balanced);
+    assert_eq!(default_config.mode, PermissionMode::Manual);
 
-    let read_only: PermissionConfig = toml::from_str(r#"preset = "read_only""#)?;
-    assert_eq!(read_only.preset, PermissionPreset::ReadOnly);
+    for (raw, expected) in [
+        ("read-only", PermissionMode::ReadOnly),
+        ("manual", PermissionMode::Manual),
+        ("auto-edit", PermissionMode::AutoEdit),
+        ("danger-full-access", PermissionMode::DangerFullAccess),
+    ] {
+        let config: PermissionConfig = toml::from_str(&format!(r#"mode = "{raw}""#))?;
+        assert_eq!(config.mode, expected);
+    }
     Ok(())
 }
 
 #[test]
-fn permission_access_overrides_default_mode_for_read_tools() -> Result<()> {
+fn manual_mode_allows_read_tools() -> Result<()> {
     let decision = PermissionPolicy::new(&PermissionConfig::default()).decide(
         &spec(ToolAccess::Read),
         "read_file",
@@ -88,13 +95,10 @@ fn permission_access_overrides_default_mode_for_read_tools() -> Result<()> {
 }
 
 #[test]
-fn read_only_preset_is_a_write_safety_cap() -> Result<()> {
+fn read_only_mode_is_a_non_read_safety_cap() -> Result<()> {
     let config = PermissionConfig {
-        preset: PermissionPreset::ReadOnly,
-        access: PermissionAccessConfig {
-            write: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
+        mode: PermissionMode::ReadOnly,
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
         ..PermissionConfig::default()
     };
     let decision = PermissionPolicy::new(&config).decide(
@@ -104,6 +108,51 @@ fn read_only_preset_is_a_write_safety_cap() -> Result<()> {
     )?;
 
     assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn auto_edit_allows_workspace_file_edits_but_not_shell_or_network() -> Result<()> {
+    let config = PermissionConfig {
+        mode: PermissionMode::AutoEdit,
+        ..PermissionConfig::default()
+    };
+    let write = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![path_subject("src/main.rs")],
+    )?;
+    let shell = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command("cargo check", "cargo check")],
+    )?;
+    let network = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Network),
+        "mcp__fake__echo",
+        vec![ToolSubject::mcp_tool("mcp__fake__echo")],
+    )?;
+
+    assert_eq!(write.mode, ApprovalMode::Allow);
+    assert_eq!(shell.mode, ApprovalMode::Ask);
+    assert_eq!(network.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn danger_full_access_bypasses_normal_protected_path_overlay() -> Result<()> {
+    let config = PermissionConfig {
+        mode: PermissionMode::DangerFullAccess,
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![path_subject(".git/config")],
+    )?;
+
+    assert_eq!(decision.risk, PermissionRisk::Protected);
+    assert_eq!(decision.mode, ApprovalMode::Allow);
     Ok(())
 }
 
@@ -207,10 +256,7 @@ fn permission_context_classifies_runtime_user_and_project_asset_roots() -> Resul
         effective_policy_cap: None,
     };
     let config = PermissionConfig {
-        access: PermissionAccessConfig {
-            write: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
+        mode: PermissionMode::AutoEdit,
         ..PermissionConfig::default()
     };
     let policy = PermissionPolicy::new_with_context(&config, &context);
@@ -293,13 +339,7 @@ fn permission_context_handles_caps_relative_roots_and_fallbacks() -> Result<()> 
             mode: ApprovalMode::Deny,
         }),
     };
-    let config = PermissionConfig {
-        access: PermissionAccessConfig {
-            read: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
-        ..PermissionConfig::default()
-    };
+    let config = PermissionConfig::default();
     let policy = PermissionPolicy::new_with_context(&config, &context);
 
     let capped = policy.decide(
@@ -396,10 +436,7 @@ fn built_in_path_trust_zone_classifier_covers_sensitive_and_doc_paths() {
 #[test]
 fn terminal_input_cannot_be_auto_allowed_by_execute_allow() -> Result<()> {
     let config = PermissionConfig {
-        access: PermissionAccessConfig {
-            execute: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
+        tools: BTreeMap::from([("terminal_input".to_owned(), ApprovalMode::Allow)]),
         ..PermissionConfig::default()
     };
     let decision = PermissionPolicy::new(&config).decide(
@@ -494,19 +531,13 @@ fn permission_dynamic_access_can_downgrade_execute_to_read() -> Result<()> {
 }
 
 #[test]
-fn permission_tool_default_mode_is_between_access_default_and_tool_rules() -> Result<()> {
+fn permission_tool_default_mode_is_between_mode_baseline_and_tool_rules() -> Result<()> {
     let subjects = vec![
         ToolSubject::mcp_tool("mcp__fake__echo"),
         ToolSubject::mcp_trust_class("fake", "third_party"),
     ];
-    let access_deny = PermissionConfig {
-        access: PermissionAccessConfig {
-            network: Some(ApprovalMode::Deny),
-            ..PermissionAccessConfig::default()
-        },
-        ..PermissionConfig::default()
-    };
-    let server_default = PermissionPolicy::new(&access_deny).decide_with_access_and_default(
+    let config = PermissionConfig::default();
+    let server_default = PermissionPolicy::new(&config).decide_with_access_and_default(
         &spec(ToolAccess::Network),
         "mcp__fake__echo",
         ToolAccess::Network,
@@ -517,10 +548,6 @@ fn permission_tool_default_mode_is_between_access_default_and_tool_rules() -> Re
     assert_eq!(server_default.mode, ApprovalMode::Allow);
 
     let tool_override = PermissionConfig {
-        access: PermissionAccessConfig {
-            network: Some(ApprovalMode::Deny),
-            ..PermissionAccessConfig::default()
-        },
         tools: BTreeMap::from([("mcp__fake__echo".to_owned(), ApprovalMode::Ask)]),
         ..PermissionConfig::default()
     };
@@ -555,7 +582,7 @@ fn permission_tool_default_mode_is_between_access_default_and_tool_rules() -> Re
 }
 
 #[test]
-fn permission_tool_override_is_more_specific_than_access_default() -> Result<()> {
+fn permission_tool_override_is_more_specific_than_mode_baseline() -> Result<()> {
     let config = PermissionConfig {
         tools: BTreeMap::from([("read_file".to_owned(), ApprovalMode::Ask)]),
         ..PermissionConfig::default()
@@ -571,7 +598,7 @@ fn permission_tool_override_is_more_specific_than_access_default() -> Result<()>
 }
 
 #[test]
-fn permission_rules_override_tool_and_access_defaults() -> Result<()> {
+fn permission_rules_override_tool_and_mode_defaults() -> Result<()> {
     let config = PermissionConfig {
         tools: BTreeMap::from([("read_file".to_owned(), ApprovalMode::Deny)]),
         rules: vec![PermissionRule {
@@ -633,10 +660,7 @@ fn permission_deny_dominates_among_matching_rules() -> Result<()> {
 #[test]
 fn permission_any_subject_ask_requires_approval() -> Result<()> {
     let config = PermissionConfig {
-        access: PermissionAccessConfig {
-            write: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
+        mode: PermissionMode::AutoEdit,
         rules: vec![PermissionRule {
             tool_name: Some("write_file".to_owned()),
             subject_glob: Some("sensitive/**".to_owned()),

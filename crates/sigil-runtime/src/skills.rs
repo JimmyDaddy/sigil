@@ -18,7 +18,9 @@ use sigil_kernel::{
     ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };
 
-use crate::{DEFAULT_WORKSPACE_AGENTS_DIR, DEFAULT_WORKSPACE_SKILLS_DIR, project_asset_dir};
+use crate::{
+    DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_SKILLS_LEAF,
+};
 
 pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 const MAX_SKILL_BODY_BYTES: usize = 256 * 1024;
@@ -81,26 +83,6 @@ pub fn discover_skill_index_with_user_dir(
     user_config_dir: Option<&Path>,
     config: &SkillConfig,
 ) -> Result<SkillDiscoveryReport> {
-    discover_skill_index_with_project_assets_root(
-        workspace_root,
-        &workspace_root.join(crate::DEFAULT_PROJECT_ASSETS_ROOT),
-        user_config_dir,
-        config,
-    )
-}
-
-/// Discovers skills using an explicit project assets root for workspace-owned skill and agent
-/// directories.
-///
-/// # Errors
-///
-/// Returns an error if the deterministic index snapshot cannot be built.
-pub fn discover_skill_index_with_project_assets_root(
-    workspace_root: &Path,
-    project_assets_root: &Path,
-    user_config_dir: Option<&Path>,
-    config: &SkillConfig,
-) -> Result<SkillDiscoveryReport> {
     if !config.enabled {
         return Ok(SkillDiscoveryReport {
             snapshot: SkillIndexSnapshot::new(Vec::new())?,
@@ -109,22 +91,11 @@ pub fn discover_skill_index_with_project_assets_root(
     }
 
     let mut discovery = SkillDiscovery::new(workspace_root);
-    let workspace_skills = project_asset_dir(
-        workspace_root,
-        project_assets_root,
-        &config.workspace_dir,
-        DEFAULT_WORKSPACE_SKILLS_DIR,
-        "skills",
-    );
+    let project_assets_root = workspace_root.join(DEFAULT_PROJECT_ASSETS_DIR);
+    let workspace_skills = project_assets_root.join(DEFAULT_WORKSPACE_SKILLS_LEAF);
     discovery.discover_skill_dir(&workspace_skills, SkillCandidateKind::WorkspaceSkill);
 
-    let workspace_agents = project_asset_dir(
-        workspace_root,
-        project_assets_root,
-        &config.workspace_agents_dir,
-        DEFAULT_WORKSPACE_AGENTS_DIR,
-        "agents",
-    );
+    let workspace_agents = project_assets_root.join(DEFAULT_WORKSPACE_AGENTS_LEAF);
     discovery.discover_agent_dir(&workspace_agents, SkillCandidateKind::WorkspaceAgent);
 
     if compatibility_source_enabled(config, "claude") {
@@ -248,33 +219,7 @@ pub fn register_skill_tools(
     user_config_dir: Option<&Path>,
     config: &SkillConfig,
 ) -> Result<SkillDiscoveryReport> {
-    register_skill_tools_with_project_assets_root(
-        registry,
-        workspace_root,
-        &workspace_root.join(crate::DEFAULT_PROJECT_ASSETS_ROOT),
-        user_config_dir,
-        config,
-    )
-}
-
-/// Registers the skill loading tool using an explicit project assets root.
-///
-/// # Errors
-///
-/// Returns an error when skill discovery fails.
-pub fn register_skill_tools_with_project_assets_root(
-    registry: &mut ToolRegistry,
-    workspace_root: &Path,
-    project_assets_root: &Path,
-    user_config_dir: Option<&Path>,
-    config: &SkillConfig,
-) -> Result<SkillDiscoveryReport> {
-    let report = discover_skill_index_with_project_assets_root(
-        workspace_root,
-        project_assets_root,
-        user_config_dir,
-        config,
-    )?;
+    let report = discover_skill_index_with_user_dir(workspace_root, user_config_dir, config)?;
     if config.enabled {
         registry.register(Arc::new(LoadSkillTool::new(
             workspace_root.to_path_buf(),

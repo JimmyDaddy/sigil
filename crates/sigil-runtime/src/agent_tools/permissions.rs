@@ -53,18 +53,9 @@ pub(super) fn apply_child_permission_overlay(
     mut base: PermissionConfig,
     overlay: &PermissionConfig,
 ) -> PermissionConfig {
-    if overlay.preset == PermissionPreset::ReadOnly {
-        base.preset = PermissionPreset::ReadOnly;
+    if overlay.mode != PermissionConfig::default().mode {
+        base.mode = strictest_permission_mode(base.mode, overlay.mode);
     }
-
-    if overlay.default_mode != PermissionConfig::default().default_mode {
-        base.default_mode = strictest_mode(base.default_mode, overlay.default_mode);
-    }
-
-    apply_access_overlay(&mut base, overlay, ToolAccess::Read);
-    apply_access_overlay(&mut base, overlay, ToolAccess::Write);
-    apply_access_overlay(&mut base, overlay, ToolAccess::Execute);
-    apply_access_overlay(&mut base, overlay, ToolAccess::Network);
 
     for (tool_name, mode) in &overlay.tools {
         base.tools.insert(
@@ -85,57 +76,7 @@ pub(super) fn apply_child_permission_overlay(
 }
 
 pub(super) fn access_mode(config: &PermissionConfig, access: ToolAccess) -> ApprovalMode {
-    let configured = match access {
-        ToolAccess::Read => config.access.read,
-        ToolAccess::Write => config.access.write,
-        ToolAccess::Execute => config.access.execute,
-        ToolAccess::Network => config.access.network,
-    };
-    configured.unwrap_or(config.default_mode)
-}
-
-pub(super) fn configured_access_mode(
-    config: &PermissionConfig,
-    access: ToolAccess,
-) -> Option<ApprovalMode> {
-    match access {
-        ToolAccess::Read => config.access.read,
-        ToolAccess::Write => config.access.write,
-        ToolAccess::Execute => config.access.execute,
-        ToolAccess::Network => config.access.network,
-    }
-}
-
-pub(super) fn set_access_mode(
-    config: &mut PermissionConfig,
-    access: ToolAccess,
-    mode: ApprovalMode,
-) {
-    match access {
-        ToolAccess::Read => config.access.read = Some(mode),
-        ToolAccess::Write => config.access.write = Some(mode),
-        ToolAccess::Execute => config.access.execute = Some(mode),
-        ToolAccess::Network => config.access.network = Some(mode),
-    }
-}
-
-pub(super) fn apply_access_overlay(
-    base: &mut PermissionConfig,
-    overlay: &PermissionConfig,
-    access: ToolAccess,
-) {
-    let default_access = configured_access_mode(&PermissionConfig::default(), access);
-    let Some(overlay_mode) = configured_access_mode(overlay, access) else {
-        return;
-    };
-    if Some(overlay_mode) == default_access {
-        return;
-    }
-    set_access_mode(
-        base,
-        access,
-        strictest_mode(access_mode(base, access), overlay_mode),
-    );
+    config.mode.baseline_for_access(access)
 }
 
 pub(super) fn cap_mode_for_tool(config: &PermissionConfig, tool_name: &str) -> ApprovalMode {
@@ -154,7 +95,7 @@ pub(super) fn cap_permission_rule(
         .tool_name
         .as_deref()
         .map(|tool_name| cap_mode_for_tool(cap, tool_name))
-        .unwrap_or(cap.default_mode);
+        .unwrap_or_else(|| cap.mode.baseline_for_access(ToolAccess::Execute));
     let mut capped = rule.clone();
     capped.mode = strictest_mode(cap_mode, rule.mode);
     capped
@@ -232,4 +173,11 @@ pub(super) fn strictest_mode(left: ApprovalMode, right: ApprovalMode) -> Approva
         (ApprovalMode::Ask, _) | (_, ApprovalMode::Ask) => ApprovalMode::Ask,
         (ApprovalMode::Allow, ApprovalMode::Allow) => ApprovalMode::Allow,
     }
+}
+
+pub(super) fn strictest_permission_mode(
+    left: PermissionMode,
+    right: PermissionMode,
+) -> PermissionMode {
+    left.min(right)
 }

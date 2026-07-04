@@ -16,13 +16,12 @@ use sigil_kernel::{
     AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentThreadStatus,
     AgentToolDelegate, AgentTrustState, ApprovalMode, AutoApproveHandler, CompactionConfig,
     CompletionRequest, ControlEntry, EventHandler, InteractionMode, JsonlSessionStore,
-    MemoryConfig, MessageRole, PermissionAccessConfig, PermissionConfig, PermissionPolicy,
-    PermissionPreset, PermissionRisk, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig,
-    SessionLogEntry, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolExecutionEntry, ToolExecutionStatus,
-    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject,
-    UsageStats, WorkspaceConfig,
+    MemoryConfig, MessageRole, PermissionConfig, PermissionMode, PermissionPolicy, PermissionRisk,
+    Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport,
+    RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry, ToolAccess,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolPreviewCapability,
+    ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -52,18 +51,11 @@ fn permission_test_spec(access: ToolAccess) -> ToolSpec {
 #[test]
 fn child_permission_config_keeps_parent_read_only_cap() -> Result<()> {
     let parent = PermissionConfig {
-        preset: PermissionPreset::ReadOnly,
-        access: PermissionAccessConfig {
-            write: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
+        mode: PermissionMode::ReadOnly,
         ..PermissionConfig::default()
     };
     let role = PermissionConfig {
-        access: PermissionAccessConfig {
-            write: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
+        mode: PermissionMode::AutoEdit,
         ..PermissionConfig::default()
     };
     let profile = PermissionConfig::default();
@@ -75,7 +67,7 @@ fn child_permission_config_keeps_parent_read_only_cap() -> Result<()> {
         vec![ToolSubject::path("src/main.rs", "src/main.rs")],
     )?;
 
-    assert_eq!(effective.preset, PermissionPreset::ReadOnly);
+    assert_eq!(effective.mode, PermissionMode::ReadOnly);
     assert_eq!(decision.mode, ApprovalMode::Deny);
     Ok(())
 }
@@ -83,10 +75,7 @@ fn child_permission_config_keeps_parent_read_only_cap() -> Result<()> {
 #[test]
 fn child_permission_config_profile_deny_narrows_parent_allow() -> Result<()> {
     let parent = PermissionConfig {
-        access: PermissionAccessConfig {
-            write: Some(ApprovalMode::Allow),
-            ..PermissionAccessConfig::default()
-        },
+        mode: PermissionMode::AutoEdit,
         ..PermissionConfig::default()
     };
     let role = parent.clone();
@@ -109,10 +98,7 @@ fn child_permission_config_profile_deny_narrows_parent_allow() -> Result<()> {
 #[test]
 fn child_permission_config_profile_tool_allow_cannot_widen_parent_deny() -> Result<()> {
     let parent = PermissionConfig {
-        access: PermissionAccessConfig {
-            write: Some(ApprovalMode::Deny),
-            ..PermissionAccessConfig::default()
-        },
+        mode: PermissionMode::ReadOnly,
         ..PermissionConfig::default()
     };
     let role = PermissionConfig::default();
@@ -135,7 +121,6 @@ fn child_permission_config_profile_tool_allow_cannot_widen_parent_deny() -> Resu
 #[test]
 fn child_permission_config_profile_tool_allow_cannot_widen_parent_tool_deny() -> Result<()> {
     let parent = PermissionConfig {
-        default_mode: ApprovalMode::Allow,
         tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Deny)]),
         ..PermissionConfig::default()
     };
@@ -157,9 +142,9 @@ fn child_permission_config_profile_tool_allow_cannot_widen_parent_tool_deny() ->
 }
 
 #[test]
-fn child_permission_config_default_role_and_profile_inherit_parent_allow() -> Result<()> {
+fn child_permission_config_default_role_and_profile_inherit_parent_tool_allow() -> Result<()> {
     let parent = PermissionConfig {
-        default_mode: ApprovalMode::Allow,
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
         ..PermissionConfig::default()
     };
     let role = PermissionConfig::default();
@@ -177,17 +162,14 @@ fn child_permission_config_default_role_and_profile_inherit_parent_allow() -> Re
 }
 
 #[test]
-fn child_permission_config_explicit_execute_ask_narrows_parent_allow() -> Result<()> {
+fn child_permission_config_explicit_tool_ask_narrows_parent_allow() -> Result<()> {
     let parent = PermissionConfig {
-        default_mode: ApprovalMode::Allow,
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
         ..PermissionConfig::default()
     };
     let role = PermissionConfig::default();
     let profile = PermissionConfig {
-        access: PermissionAccessConfig {
-            execute: Some(ApprovalMode::Ask),
-            ..PermissionAccessConfig::default()
-        },
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Ask)]),
         ..PermissionConfig::default()
     };
 
@@ -205,13 +187,7 @@ fn child_permission_config_explicit_execute_ask_narrows_parent_allow() -> Result
 #[test]
 fn child_permission_config_profile_rule_allow_cannot_widen_parent_default_deny() -> Result<()> {
     let parent = PermissionConfig {
-        default_mode: ApprovalMode::Deny,
-        access: PermissionAccessConfig {
-            read: Some(ApprovalMode::Deny),
-            write: Some(ApprovalMode::Deny),
-            execute: Some(ApprovalMode::Deny),
-            network: Some(ApprovalMode::Deny),
-        },
+        mode: PermissionMode::ReadOnly,
         ..PermissionConfig::default()
     };
     let role = PermissionConfig::default();

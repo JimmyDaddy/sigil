@@ -25,8 +25,7 @@ use sigil_kernel::{
 
 use super::{
     LOAD_SKILL_TOOL_NAME, SkillDiscoveryWarningKind, discover_skill_index,
-    discover_skill_index_with_project_assets_root, discover_skill_index_with_user_dir,
-    namespaced_plugin_skill_id, register_skill_tools,
+    discover_skill_index_with_user_dir, namespaced_plugin_skill_id, register_skill_tools,
 };
 
 struct LoadSkillProvider {
@@ -187,11 +186,10 @@ disable-model-invocation: true
 }
 
 #[test]
-fn discovery_uses_explicit_project_assets_root_for_workspace_skills_and_agents() {
+fn discovery_uses_fixed_sigil_project_assets_for_workspace_skills_and_agents() {
     let workspace = tempfile::tempdir().expect("workspace should create");
-    let project_assets = workspace.path().join("project-assets");
     write_skill(
-        project_assets.join("skills/review/SKILL.md"),
+        workspace.path().join(".sigil/skills/review/SKILL.md"),
         r#"---
 name: review
 description: Project asset review skill.
@@ -201,7 +199,7 @@ description: Project asset review skill.
 "#,
     );
     write_skill(
-        project_assets.join("agents/audit.md"),
+        workspace.path().join(".sigil/agents/audit.md"),
         r#"---
 name: audit
 description: Project asset agent skill.
@@ -211,13 +209,8 @@ description: Project asset agent skill.
 "#,
     );
 
-    let report = discover_skill_index_with_project_assets_root(
-        workspace.path(),
-        &project_assets,
-        None,
-        &SkillConfig::default(),
-    )
-    .expect("discovery should succeed");
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("discovery should succeed");
 
     assert_eq!(
         report
@@ -230,10 +223,10 @@ description: Project asset agent skill.
     );
     let review = descriptor(&report, "review");
     assert_eq!(review.source, SkillSource::Workspace);
-    assert!(review.entrypoint.starts_with(Path::new("project-assets")));
+    assert!(review.entrypoint.starts_with(Path::new(".sigil/skills")));
     let audit = descriptor(&report, "audit");
     assert_eq!(audit.run_as, SkillRunMode::ChildSession);
-    assert!(audit.entrypoint.starts_with(Path::new("project-assets")));
+    assert!(audit.entrypoint.starts_with(Path::new(".sigil/agents")));
 }
 
 #[test]
@@ -312,35 +305,8 @@ description: Compatibility skill.
 }
 
 #[test]
-fn invalid_paths_and_names_are_rejected_without_breaking_discovery() {
+fn invalid_names_are_rejected_without_breaking_discovery() {
     let workspace = tempfile::tempdir().expect("workspace should create");
-    let outside = tempfile::tempdir().expect("outside should create");
-    write_skill(
-        outside.path().join("skills/escape/SKILL.md"),
-        r#"---
-name: escape
-description: Outside workspace.
----
-
-# Escape
-"#,
-    );
-    let escaping_config = SkillConfig {
-        workspace_dir: outside.path().join("skills").display().to_string(),
-        ..SkillConfig::default()
-    };
-
-    let escaping = discover_skill_index(workspace.path(), &escaping_config)
-        .expect("discovery should succeed with warnings");
-
-    assert!(escaping.snapshot.descriptors.is_empty());
-    assert!(
-        escaping
-            .warnings
-            .iter()
-            .any(|warning| warning.kind == SkillDiscoveryWarningKind::InvalidPath)
-    );
-
     write_skill(
         workspace.path().join(".sigil/skills/bad name/SKILL.md"),
         r#"---
@@ -1310,12 +1276,10 @@ paths:
 # Bad List Scalar
 "#,
     );
-    let config = SkillConfig {
-        workspace_agents_dir: ".sigil/not-a-dir".to_owned(),
-        ..SkillConfig::default()
-    };
+    fs::write(workspace.path().join(".sigil/agents"), "not a directory")
+        .expect("agents file should write");
 
-    let report = discover_skill_index(workspace.path(), &config)
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
         .expect("discovery should succeed with warnings");
 
     let commented = descriptor(&report, "commented");
@@ -1373,7 +1337,7 @@ fn unix_filesystem_edges_are_non_fatal_warnings() {
     fs::set_permissions(&unreadable_entrypoint, unreadable_permissions)
         .expect("unreadable permissions should set");
 
-    let unreadable_agents_dir = workspace.path().join(".sigil/unreadable-agents");
+    let unreadable_agents_dir = workspace.path().join(".sigil/agents");
     fs::create_dir_all(&unreadable_agents_dir).expect("unreadable agents dir should create");
     let mut unreadable_dir_permissions = fs::metadata(&unreadable_agents_dir)
         .expect("unreadable dir metadata should load")
@@ -1382,11 +1346,7 @@ fn unix_filesystem_edges_are_non_fatal_warnings() {
     fs::set_permissions(&unreadable_agents_dir, unreadable_dir_permissions)
         .expect("unreadable dir permissions should set");
 
-    let config = SkillConfig {
-        workspace_agents_dir: ".sigil/unreadable-agents".to_owned(),
-        ..SkillConfig::default()
-    };
-    let report = discover_skill_index(workspace.path(), &config)
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
         .expect("discovery should succeed with warnings");
 
     restore_permissions(&unreadable_entrypoint);

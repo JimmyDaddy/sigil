@@ -24,8 +24,7 @@ use sigil_kernel::{
 
 use super::{
     PluginDiscoveryWarningKind, PluginHookExecutionRequest, PluginHookExecutionRunner,
-    discover_workspace_plugins, discover_workspace_plugins_with_project_assets_root,
-    merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
+    discover_workspace_plugins, merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
 };
 use crate::build_tool_registry_without_eager_mcp;
 use crate::skills::discover_plugin_skill_descriptors;
@@ -43,10 +42,9 @@ fn missing_plugin_directory_returns_empty_report() {
 }
 
 #[test]
-fn plugin_discovery_uses_explicit_project_assets_root() {
+fn plugin_discovery_uses_fixed_sigil_plugins_dir() {
     let workspace = tempfile::tempdir().expect("workspace should create");
-    let project_assets = workspace.path().join("project-assets");
-    let plugin_root = project_assets.join("plugins/repo-review");
+    let plugin_root = workspace.path().join(".sigil/plugins/repo-review");
     write_file(
         &plugin_root.join("plugin.toml"),
         r#"id = "repo-review"
@@ -71,14 +69,13 @@ trust: trusted
     );
 
     let pending =
-        discover_workspace_plugins_with_project_assets_root(workspace.path(), &project_assets, &[])
-            .expect("plugin discovery should succeed");
+        discover_workspace_plugins(workspace.path(), &[]).expect("plugin discovery should succeed");
     assert_eq!(pending.manifests.len(), 1);
     assert_eq!(pending.manifests[0].plugin_id, "repo-review");
     assert!(
         pending.manifests[0]
             .manifest_path
-            .starts_with("project-assets")
+            .starts_with(".sigil/plugins")
     );
 }
 

@@ -141,13 +141,10 @@ slash_names = ["review-agent"]
 }
 
 #[test]
-fn registry_uses_project_assets_root_for_native_workspace_agents() -> Result<()> {
+fn registry_uses_fixed_sigil_project_assets_for_native_workspace_agents() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
-    let agent_dir = workspace
-        .join("project-assets")
-        .join("agents")
-        .join("review");
+    let agent_dir = workspace.join(".sigil").join("agents").join("review");
     fs::create_dir_all(&agent_dir)?;
     fs::write(
         agent_dir.join("agent.toml"),
@@ -160,7 +157,6 @@ invocation_policy = "model_allowed"
     )?;
     let mut config = root_config();
     config.workspace.root = workspace.display().to_string();
-    config.storage.project_assets_root = "project-assets".to_owned();
 
     let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     let review = registry
@@ -1114,9 +1110,9 @@ fn registry_reports_workspace_agent_discovery_edge_warnings() -> Result<()> {
         AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     assert!(disabled_registry.warnings().is_empty());
 
-    let mut config = root_config();
-    config.skills.workspace_agents_dir = "agents-file".to_owned();
-    fs::write(workspace.join("agents-file"), "not a directory")?;
+    let config = root_config();
+    fs::create_dir_all(workspace.join(".sigil"))?;
+    fs::write(workspace.join(".sigil").join("agents"), "not a directory")?;
     let file_registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     assert!(
         file_registry.warnings().iter().any(|warning| {
@@ -1124,15 +1120,7 @@ fn registry_reports_workspace_agent_discovery_edge_warnings() -> Result<()> {
         })
     );
 
-    let mut config = root_config();
-    config.skills.workspace_agents_dir = temp.path().join("outside-agents").display().to_string();
-    fs::create_dir_all(temp.path().join("outside-agents"))?;
-    let escaped_registry =
-        AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
-    assert!(escaped_registry.warnings().iter().any(|warning| {
-        warning.contains("workspace agent discovery path escapes workspace root")
-    }));
-
+    fs::remove_file(workspace.join(".sigil").join("agents"))?;
     let agents_dir = workspace.join(".sigil").join("agents");
     fs::create_dir_all(&agents_dir)?;
     fs::write(agents_dir.join("noise.txt"), "ignored")?;

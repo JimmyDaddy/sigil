@@ -17,7 +17,7 @@ use sigil_kernel::{
     AgentThreadResultDeliveredEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
     AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState, AgentUsageSummary,
     ApprovalHandler, ApprovalMode, ControlEntry, EventHandler, FinalAnswerContext,
-    JsonlSessionStore, ModelMessage, PermissionConfig, PermissionPreset, Provider, RootConfig,
+    JsonlSessionStore, ModelMessage, PermissionConfig, PermissionMode, Provider, RootConfig,
     RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, Tool,
     ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
     ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolErrorKind,

@@ -304,10 +304,9 @@ fn register_local_tools(
         workspace_root.clone(),
     );
     let user_config_dir = default_user_config_dir().ok();
-    let _ = skills::register_skill_tools_with_project_assets_root(
+    let _ = skills::register_skill_tools(
         registry,
         &workspace_root,
-        &paths.project_assets_root,
         user_config_dir.as_deref(),
         &root_config.skills,
     );

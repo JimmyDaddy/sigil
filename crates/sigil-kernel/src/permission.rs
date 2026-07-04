@@ -49,50 +49,101 @@ impl ApprovalMode {
     }
 }
 
-/// User-facing permission preset. Presets stay intentionally coarse so normal users do not need
-/// to understand the internal operation/path-rule lattice.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionPreset {
+/// User-facing permission mode for one agent run.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode {
     ReadOnly,
     #[default]
-    Balanced,
+    Manual,
+    AutoEdit,
+    DangerFullAccess,
 }
 
-/// Per-access permission defaults.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct PermissionAccessConfig {
-    #[serde(default)]
-    pub read: Option<ApprovalMode>,
-    #[serde(default)]
-    pub write: Option<ApprovalMode>,
-    #[serde(default)]
-    pub execute: Option<ApprovalMode>,
-    #[serde(default)]
-    pub network: Option<ApprovalMode>,
-}
+impl PermissionMode {
+    /// Returns the stable config-friendly label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::Manual => "manual",
+            Self::AutoEdit => "auto-edit",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
 
-impl Default for PermissionAccessConfig {
-    fn default() -> Self {
-        Self {
-            read: Some(ApprovalMode::Allow),
-            write: None,
-            execute: None,
-            network: None,
+    /// Returns a conservative access-level baseline when no concrete subject is available.
+    pub fn baseline_for_access(self, access: ToolAccess) -> ApprovalMode {
+        let operation = match access {
+            ToolAccess::Read => ToolOperation::Read,
+            ToolAccess::Write => ToolOperation::EditFile,
+            ToolAccess::Execute => ToolOperation::ExecuteUnknownCommand,
+            ToolAccess::Network => ToolOperation::NetworkRequest,
+        };
+        self.baseline_for(access, operation, None)
+    }
+
+    fn baseline_for(
+        self,
+        access: ToolAccess,
+        operation: ToolOperation,
+        zone: Option<PathTrustZone>,
+    ) -> ApprovalMode {
+        match self {
+            Self::ReadOnly => {
+                if access == ToolAccess::Read {
+                    ApprovalMode::Allow
+                } else {
+                    ApprovalMode::Deny
+                }
+            }
+            Self::Manual => match access {
+                ToolAccess::Read => ApprovalMode::Allow,
+                ToolAccess::Write | ToolAccess::Execute | ToolAccess::Network => ApprovalMode::Ask,
+            },
+            Self::AutoEdit => auto_edit_baseline(access, operation, zone),
+            Self::DangerFullAccess => ApprovalMode::Allow,
         }
     }
 }
 
-impl PermissionAccessConfig {
-    fn mode_for(&self, access: ToolAccess) -> Option<ApprovalMode> {
-        match access {
-            ToolAccess::Read => self.read,
-            ToolAccess::Write => self.write,
-            ToolAccess::Execute => self.execute,
-            ToolAccess::Network => self.network,
+fn auto_edit_baseline(
+    access: ToolAccess,
+    operation: ToolOperation,
+    zone: Option<PathTrustZone>,
+) -> ApprovalMode {
+    match access {
+        ToolAccess::Read => ApprovalMode::Allow,
+        ToolAccess::Execute | ToolAccess::Network => ApprovalMode::Ask,
+        ToolAccess::Write => {
+            if auto_edit_write_operation_allowed(operation)
+                && zone.is_some_and(auto_edit_workspace_zone_allowed)
+            {
+                ApprovalMode::Allow
+            } else {
+                ApprovalMode::Ask
+            }
         }
     }
+}
+
+fn auto_edit_write_operation_allowed(operation: ToolOperation) -> bool {
+    matches!(
+        operation,
+        ToolOperation::CreateFile
+            | ToolOperation::EditFile
+            | ToolOperation::OverwriteFile
+            | ToolOperation::CreateDirectory
+    )
+}
+
+fn auto_edit_workspace_zone_allowed(zone: PathTrustZone) -> bool {
+    matches!(
+        zone,
+        PathTrustZone::WorkspaceSource
+            | PathTrustZone::WorkspaceDocs
+            | PathTrustZone::WorkspaceProjectAsset
+            | PathTrustZone::WorkspaceIgnored
+    )
 }
 
 /// One explicit tool permission override rule.
@@ -139,34 +190,17 @@ pub struct ExternalDirectoryRule {
 }
 
 /// Shared permission policy configuration for one entrypoint.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct PermissionConfig {
     #[serde(default)]
-    pub preset: PermissionPreset,
-    #[serde(default)]
-    pub default_mode: ApprovalMode,
-    #[serde(default)]
-    pub access: PermissionAccessConfig,
+    pub mode: PermissionMode,
     #[serde(default)]
     pub tools: BTreeMap<String, ApprovalMode>,
     #[serde(default)]
     pub rules: Vec<PermissionRule>,
     #[serde(default)]
     pub external_directory: ExternalDirectoryConfig,
-}
-
-impl Default for PermissionConfig {
-    fn default() -> Self {
-        Self {
-            preset: PermissionPreset::default(),
-            default_mode: ApprovalMode::Ask,
-            access: PermissionAccessConfig::default(),
-            tools: BTreeMap::new(),
-            rules: Vec::new(),
-            external_directory: ExternalDirectoryConfig::default(),
-        }
-    }
 }
 
 /// Provider-neutral operation class derived from a tool call for fine-grained permission logic.
@@ -363,9 +397,33 @@ impl PermissionDecision {
         subject_risk_overlays: Vec<PathRiskOverlay>,
         external_directory_required: bool,
     ) -> Self {
+        Self::new_with_policy_mode_operation_zones_and_overlays(
+            PermissionMode::Manual,
+            mode,
+            operation,
+            access,
+            subjects,
+            subject_zones,
+            subject_risk_overlays,
+            external_directory_required,
+        )
+    }
+
+    /// Constructs a decision from an active user-facing permission mode.
+    pub fn new_with_policy_mode_operation_zones_and_overlays(
+        policy_mode: PermissionMode,
+        mode: ApprovalMode,
+        operation: ToolOperation,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+        subject_zones: Vec<PathTrustZone>,
+        subject_risk_overlays: Vec<PathRiskOverlay>,
+        external_directory_required: bool,
+    ) -> Self {
         let risk =
             derive_permission_risk(access, operation, &subject_zones, &subject_risk_overlays);
-        let mode = apply_operation_risk_overlay(mode, operation, risk);
+        let mode = apply_permission_mode_cap(policy_mode, mode, access);
+        let mode = apply_policy_risk_overlay(policy_mode, mode, operation, risk);
         let confirmation = confirmation_for_risk(risk, &subject_zones).or_else(|| {
             (access == ToolAccess::Write && subject_zones.contains(&PathTrustZone::External))
                 .then_some(PermissionConfirmation::TypePath)
@@ -502,17 +560,38 @@ impl<'a> PermissionPolicy<'a> {
         subjects: Vec<ToolSubject>,
         tool_default_mode: Option<ApprovalMode>,
     ) -> Result<PermissionDecision> {
+        let subject_analyses = self.classify_subject_trust_analyses(&subjects);
+        let subject_zones = subject_analyses
+            .iter()
+            .map(|analysis| analysis.zone)
+            .collect::<Vec<_>>();
+        let subject_risk_overlays = collect_path_risk_overlays(&subject_analyses);
         let external_directory_required = subjects
             .iter()
             .any(|subject| subject.scope == ToolSubjectScope::External)
             && !self.config.external_directory.enabled;
         let subject_modes = if subjects.is_empty() {
-            vec![self.decide_one_subject(tool_name, access, tool_default_mode, None)?]
+            vec![self.decide_one_subject(
+                tool_name,
+                access,
+                operation,
+                tool_default_mode,
+                None,
+                None,
+            )?]
         } else {
             subjects
                 .iter()
-                .map(|subject| {
-                    self.decide_one_subject(tool_name, access, tool_default_mode, Some(subject))
+                .zip(subject_zones.iter().copied())
+                .map(|(subject, zone)| {
+                    self.decide_one_subject(
+                        tool_name,
+                        access,
+                        operation,
+                        tool_default_mode,
+                        Some(subject),
+                        Some(zone),
+                    )
                 })
                 .collect::<Result<Vec<_>>>()?
         };
@@ -525,22 +604,19 @@ impl<'a> PermissionPolicy<'a> {
         {
             mode = combine_modes(vec![mode, cap_mode]);
         }
-        let subject_analyses = self.classify_subject_trust_analyses(&subjects);
-        let subject_zones = subject_analyses
-            .iter()
-            .map(|analysis| analysis.zone)
-            .collect::<Vec<_>>();
-        let subject_risk_overlays = collect_path_risk_overlays(&subject_analyses);
 
-        Ok(PermissionDecision::new_with_operation_zones_and_overlays(
-            mode,
-            operation,
-            access,
-            subjects,
-            subject_zones,
-            subject_risk_overlays,
-            external_directory_required,
-        ))
+        Ok(
+            PermissionDecision::new_with_policy_mode_operation_zones_and_overlays(
+                self.config.mode,
+                mode,
+                operation,
+                access,
+                subjects,
+                subject_zones,
+                subject_risk_overlays,
+                external_directory_required,
+            ),
+        )
     }
 
     fn classify_subject_trust_analyses(&self, subjects: &[ToolSubject]) -> Vec<PathTrustAnalysis> {
@@ -559,18 +635,12 @@ impl<'a> PermissionPolicy<'a> {
         &self,
         tool_name: &str,
         access: ToolAccess,
+        operation: ToolOperation,
         tool_default_mode: Option<ApprovalMode>,
         subject: Option<&ToolSubject>,
+        zone: Option<PathTrustZone>,
     ) -> Result<ApprovalMode> {
-        if self.config.preset == PermissionPreset::ReadOnly && access != ToolAccess::Read {
-            return Ok(ApprovalMode::Deny);
-        }
-
-        let mut mode = self
-            .config
-            .access
-            .mode_for(access)
-            .unwrap_or(self.config.default_mode);
+        let mut mode = self.config.mode.baseline_for(access, operation, zone);
         if let Some(tool_default_mode) = tool_default_mode {
             mode = tool_default_mode;
         }
@@ -1067,6 +1137,30 @@ fn apply_operation_risk_overlay(
             combine_modes(vec![mode, ApprovalMode::Ask])
         }
         _ => mode,
+    }
+}
+
+fn apply_policy_risk_overlay(
+    policy_mode: PermissionMode,
+    mode: ApprovalMode,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+) -> ApprovalMode {
+    if policy_mode == PermissionMode::DangerFullAccess {
+        return mode;
+    }
+    apply_operation_risk_overlay(mode, operation, risk)
+}
+
+fn apply_permission_mode_cap(
+    policy_mode: PermissionMode,
+    mode: ApprovalMode,
+    access: ToolAccess,
+) -> ApprovalMode {
+    match policy_mode {
+        PermissionMode::ReadOnly if access != ToolAccess::Read => ApprovalMode::Deny,
+        PermissionMode::DangerFullAccess => ApprovalMode::Allow,
+        PermissionMode::ReadOnly | PermissionMode::Manual | PermissionMode::AutoEdit => mode,
     }
 }
 
