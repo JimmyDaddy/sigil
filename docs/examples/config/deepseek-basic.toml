@@ -7,11 +7,7 @@ model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [permission]
-preset = "balanced"
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 
 [providers.deepseek]
 # Prefer SIGIL_API_KEY in your shell.

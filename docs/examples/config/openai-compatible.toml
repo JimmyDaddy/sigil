@@ -7,11 +7,7 @@ model = "gpt-4.1"
 tool_timeout_secs = 30
 
 [permission]
-preset = "balanced"
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 
 [providers.openai_compat]
 base_url = "https://api.openai.com/v1"

@@ -26,10 +26,7 @@ The recommended default is:
 
 ```toml
 [permission]
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 ```
 
 This lets ordinary repository inspection proceed while keeping mutating or risky actions reviewable.
@@ -99,7 +96,7 @@ default_mode = "ask"
 rules = []
 ```
 
-Only enable it for narrow, intentional use cases. Keep `default_mode = "ask"` unless the external path is low risk and stable. Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` still require external-directory access.
+Only enable it for narrow, intentional use cases. Keep `external_directory.default_mode = "ask"` unless the external path is low risk and stable. Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` still require external-directory access.
 
 ## Shell Commands
 
@@ -182,10 +179,7 @@ Start with:
 
 ```toml
 [permission]
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 
 [permission.external_directory]
 enabled = false

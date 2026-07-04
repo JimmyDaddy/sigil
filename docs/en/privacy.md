@@ -95,7 +95,7 @@ Remove:
 ## Recommended Defaults
 
 - Keep real secrets in environment variables.
-- Keep `permission.default_mode = "ask"` while learning the tool.
+- Keep `permission.mode = "manual"` while learning the tool.
 - Keep MCP `allow_secrets = false`.
 - Keep external directory access disabled unless needed.
 - Review approval diffs before allowing file changes.

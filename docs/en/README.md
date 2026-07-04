@@ -87,7 +87,7 @@ Common choices:
 - OpenAI-compatible provider: use `[agent].provider = "openai_compat"` and `[providers.openai_compat]`.
 - Anthropic provider: use `[agent].provider = "anthropic"` and `[providers.anthropic]`.
 - Gemini provider: use `[agent].provider = "gemini"` and `[providers.gemini]`.
-- Permission default: keep `[permission].default_mode = "ask"` until you know which actions you want to allow automatically.
+- Permission mode: keep `[permission].mode = "manual"` until you know which actions you want to allow automatically.
 - Terminal compatibility: tune `[terminal].mouse_capture`, `[terminal].osc52_clipboard`, and `[terminal].scroll_sensitivity`.
 - Code intelligence: enable `[code_intelligence].enabled = true` when you want LSP-backed symbol, reference, diagnostic, code action, and rename tools.
 

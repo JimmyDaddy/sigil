@@ -78,4 +78,4 @@ Provider 调用失败时：
 2. 确认 `[agent].provider` 和配置的 `[providers.*]` 区块一致。
 3. 确认目标环境变量在启动 `sigil` 的同一个 shell 中可见。
 4. 到 provider 专页检查 endpoint 和 timeout 字段。
-5. 排障期间保持 `[permission].default_mode = "ask"`，让写操作保持可见。
+5. 排障期间保持 `[permission].mode = "manual"`，让写操作保持可见。

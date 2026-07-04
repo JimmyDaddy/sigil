@@ -26,10 +26,7 @@ Sigil 的 permission layer 常见结果：
 
 ```toml
 [permission]
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 ```
 
 这让普通仓库检查可以继续，同时保留对修改性或高风险动作的 review。
@@ -99,7 +96,7 @@ default_mode = "ask"
 rules = []
 ```
 
-只在明确需要时启用，并保持 `default_mode = "ask"`，除非外部路径低风险且稳定。临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍需要 external-directory 权限。
+只在明确需要时启用，并保持 `external_directory.default_mode = "ask"`，除非外部路径低风险且稳定。临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍需要 external-directory 权限。
 
 ## Shell Commands
 
@@ -182,10 +179,7 @@ export SIGIL_API_KEY="sk-..."
 
 ```toml
 [permission]
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 
 [permission.external_directory]
 enabled = false

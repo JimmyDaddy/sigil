@@ -1023,7 +1023,7 @@ Permission policy 负责决定一次工具调用是：
 默认行为建议：
 
 - `ToolAccess::Read` 默认 allow
-- `Write / Execute / Network` 继承 `permission.default_mode`
+- `Write / Execute / Network` 由 `permission.mode` 决定：`manual` 默认 ask，`auto-edit` 只自动允许 workspace 文件编辑，`read-only` 拒绝非读，`danger-full-access` 显式全放开
 - `bash` 静态是 `Shell / Execute`，但简单只读 allowlist 命令可通过动态 `permission_access` 走 `Read`；重定向、变量展开、管道、subshell、glob、未知命令、测试/包管理/写操作仍按 `Execute`
 - headless run 遇到最终 `ask` 返回结构化 `approval_required` tool error，不静默执行
 - interactive run 遇到 `ask` 弹审批

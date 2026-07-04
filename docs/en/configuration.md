@@ -132,7 +132,6 @@ File tools are confined to the workspace root. They reject `..`, absolute paths,
 [storage]
 state_root = "auto"
 cache_root = "auto"
-project_assets_root = ".sigil"
 
 [session]
 # log_dir = "sessions"
@@ -144,12 +143,19 @@ These settings control different path responsibilities. They are not alternate n
 | --- | --- | --- |
 | `storage.state_root` | Durable per-user Sigil state. Sigil derives each workspace's state directory under `state_root/workspaces/<workspace-id>` and stores session-adjacent records such as input history, artifacts, changesets, and terminal task records there. | `auto` uses the platform user state directory. `SIGIL_STATE_HOME` overrides the configured value. Prefer an absolute path when you override it in a config file. |
 | `storage.cache_root` | Rebuildable per-user cache. Sigil derives each workspace's cache directory under `cache_root/workspaces/<workspace-id>` and uses it for scratch data such as `$SIGIL_SCRATCH_DIR`. | `auto` uses the platform user cache directory. `SIGIL_CACHE_HOME` overrides the configured value. Prefer an absolute path when you override it in a config file. |
-| `storage.project_assets_root` | Project-local Sigil assets resolved relative to `workspace.root`, such as workspace agents and skills under the default `.sigil` tree. | Relative paths resolve under the workspace root. The default is `.sigil`. |
 | `session.log_dir` | Append-only session JSONL logs for the current workspace. This changes only where session logs are written; it does not replace `storage.state_root`. | When omitted, Sigil writes logs under the workspace state directory's `sessions` child. Relative overrides resolve under the workspace state directory. |
 
-Derived paths such as workspace state/cache roots, artifacts, changesets, terminal task records, input history, and scratch are intentionally not separate user-facing root settings. Use the root above that matches the data's lifecycle: state for durable audit/recovery data, cache for disposable scratch data, project assets for repo-local reusable assets, and `session.log_dir` only for session JSONL placement.
+Repo-local Sigil assets are fixed under the workspace `.sigil` directory and are not user-editable root settings:
 
-The TUI `/config` Storage page is read-only for these roots. It shows resolved paths, artifact retention, and the cleanup action; edit roots in `sigil.toml` or with `SIGIL_STATE_HOME` / `SIGIL_CACHE_HOME`.
+| Path | Responsibility |
+| --- | --- |
+| `.sigil/skills` | Sigil-native workspace skills. |
+| `.sigil/agents` | Sigil-native workspace agent profiles. |
+| `.sigil/plugins` | Workspace plugin manifests and plugin-owned assets. |
+
+Derived paths such as workspace state/cache roots, artifacts, changesets, terminal task records, input history, scratch, and `.sigil/*` project assets are intentionally not separate user-facing root settings. Use the root above that matches the data's lifecycle: state for durable audit/recovery data, cache for disposable scratch data, fixed `.sigil/*` paths for repo-local reusable assets, and `session.log_dir` only for session JSONL placement.
+
+The TUI `/config` Storage page is read-only for these paths. It shows resolved paths, artifact retention, and the cleanup action; edit only state/cache roots in `sigil.toml` or with `SIGIL_STATE_HOME` / `SIGIL_CACHE_HOME`. Project assets remain fixed under `.sigil/*`.
 
 ## Agent
 
@@ -336,11 +342,7 @@ Default shape:
 
 ```toml
 [permission]
-preset = "balanced"
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 
 [permission.external_directory]
 enabled = false
@@ -348,12 +350,19 @@ default_mode = "ask"
 rules = []
 ```
 
+Modes:
+
+| Mode | User meaning | Semantics |
+| --- | --- | --- |
+| `read-only` | Inspect only | Reads are allowed; write, execute, and network tools are denied even if a lower-level override tries to allow them. |
+| `manual` | Confirm manually | Reads are allowed by default; write, execute, and network tools ask unless a specific tool/rule/external-directory policy says otherwise. |
+| `auto-edit` | Edit files automatically | Workspace file edits are allowed; shell and network tools still ask by default. |
+| `danger-full-access` | High-risk full access | All tool access is allowed by default. The explicit `danger` name is intentional to avoid accidental use. |
+
 Meaning:
 
-- `preset = "balanced"` is the default interactive safety profile: reads are allowed, ordinary edits and shell commands ask, and destructive/protected paths remain guarded.
-- `preset = "read_only"` is for planning, audits, and dry runs; it denies writes and mutating shell operations even if a legacy write allow is configured.
-- `default_mode` is the default for unmatched tool calls after access-level defaults are checked.
-- `access`, `tools`, `rules`, and `external_directory` are advanced policy-file overrides. The default TUI config surface only edits `preset` and `default_mode`.
+- `mode = "manual"` is the default interactive safety posture.
+- `tools`, `rules`, and `external_directory` are advanced policy-file overrides for specific tools, subjects, or external paths. They are not a second default permission baseline.
 - Paths outside the workspace are disabled by default; if external directories are enabled, they still go through the external-directory gate.
 - Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`. It is backed by Sigil's per-user cache root and shown to the model as `cache/tmp`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
 - In headless `run`, final `ask` decisions are returned to the model as structured `approval_required` tool errors instead of being executed silently.
@@ -362,13 +371,12 @@ Precedence:
 
 | Order | Source | Responsibility |
 | --- | --- | --- |
-| 1 | `preset = "read_only"` | Hard cap: non-read tools are denied before lower-level overrides. |
-| 2 | `access.<kind>` then `default_mode` | Base mode for the tool access class; unset access values fall back to `default_mode`. |
-| 3 | Tool-provided default | Runtime/tool-specific default, such as a trusted read-only command downgrade. |
-| 4 | `tools.<tool_name>` | Tool-name override. |
-| 5 | `rules[]` | Matching tool/subject rules; multiple matches combine by the strictest mode: `deny > ask > allow`. |
-| 6 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
-| 7 | Effective policy cap | Runtime caps are combined by the same strictest-mode rule. |
+| 1 | `mode` baseline | The user-facing top-level mode sets the default posture; `read-only` is a hard non-read cap and `danger-full-access` is an explicit full-access override. |
+| 2 | Tool-provided default | Runtime/tool-specific default, such as a trusted read-only command downgrade. |
+| 3 | `tools.<tool_name>` | Tool-name override. |
+| 4 | `rules[]` | Matching tool/subject rules; multiple matches combine by the strictest mode: `deny > ask > allow`. |
+| 5 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
+| 6 | Effective policy cap | Runtime caps are combined by the same strictest-mode rule. |
 
 ## Memory
 
@@ -384,8 +392,6 @@ When enabled, Sigil loads stable workspace memory files such as `SIGIL.md`, `AGE
 ```toml
 [skills]
 enabled = true
-workspace_dir = ".sigil/skills"
-workspace_agents_dir = ".sigil/agents"
 user_skills = true
 user_agents = true
 compatibility_sources = []
@@ -395,12 +401,12 @@ Skill and agent discovery has three separate source classes:
 
 | Setting | Responsibility |
 | --- | --- |
-| `workspace_dir` | Sigil-native reusable skills for the current workspace. The default maps to `storage.project_assets_root/skills`; override it only when the workspace intentionally keeps Sigil skills elsewhere. |
-| `workspace_agents_dir` | Sigil-native workspace agent profiles. The default maps to `storage.project_assets_root/agents`; it is separate from `workspace_dir` because agents run as child sessions rather than inline skill context. |
+| `.sigil/skills` | Fixed Sigil-native reusable skills for the current workspace. |
+| `.sigil/agents` | Fixed Sigil-native workspace agent profiles. Agents run as child sessions rather than inline skill context. |
 | `user_skills` / `user_agents` | Whether to include per-user skills and agents from the user config directory. These do not change workspace discovery roots. |
 | `compatibility_sources` | Explicit imports from foreign layouts. Supported values are `claude` and `reasonix`; the default is empty so Sigil-native `.sigil/*` remains the ordinary workspace source. |
 
-Compatibility sources are marked by source/trust in the Agents and Skills browsers and still go through the same trust lifecycle before model or user invocation. The TUI `/config` Agents and Skills sections browse discovered entries, show source/trust/hash/run mode, and expose trust/use actions; edit discovery roots in `sigil.toml`.
+Compatibility sources are marked by source/trust in the Agents and Skills browsers and still go through the same trust lifecycle before model or user invocation. The TUI `/config` Agents and Skills sections browse discovered entries, show source/trust/hash/run mode, and expose trust/use actions. Workspace discovery roots are fixed under `.sigil/*`.
 
 ## Compaction
 

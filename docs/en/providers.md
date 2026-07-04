@@ -78,4 +78,4 @@ If a provider fails:
 2. Confirm `[agent].provider` matches the configured `[providers.*]` block.
 3. Confirm the expected environment variable is visible in the same shell where `sigil` starts.
 4. Check the provider-specific page for endpoint and timeout fields.
-5. Keep `[permission].default_mode = "ask"` while diagnosing so write actions remain visible.
+5. Keep `[permission].mode = "manual"` while diagnosing so write actions remain visible.

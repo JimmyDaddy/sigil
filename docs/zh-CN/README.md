@@ -87,7 +87,7 @@ cargo install --path crates/sigil --locked
 - OpenAI-compatible provider：使用 `[agent].provider = "openai_compat"` 和 `[providers.openai_compat]`。
 - Anthropic provider：使用 `[agent].provider = "anthropic"` 和 `[providers.anthropic]`。
 - Gemini provider：使用 `[agent].provider = "gemini"` 和 `[providers.gemini]`。
-- 默认权限：在明确知道哪些动作可以自动允许前，保持 `[permission].default_mode = "ask"`。
+- 默认权限：在明确知道哪些动作可以自动允许前，保持 `[permission].mode = "manual"`。
 - 终端兼容性：调整 `[terminal].mouse_capture`、`[terminal].osc52_clipboard` 和 `[terminal].scroll_sensitivity`。
 - Code intelligence：需要 LSP-backed 符号、引用、诊断、code action 和 rename 工具时，启用 `[code_intelligence].enabled = true`。
 

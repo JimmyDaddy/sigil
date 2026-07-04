@@ -95,7 +95,7 @@ Doctor 会报告：
 ## 推荐默认值
 
 - 真实 secret 放在环境变量。
-- 学习工具时保持 `permission.default_mode = "ask"`。
+- 学习工具时保持 `permission.mode = "manual"`。
 - MCP 保持 `allow_secrets = false`。
 - External directory access 默认关闭。
 - 允许文件变更前 review approval diff。

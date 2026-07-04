@@ -132,7 +132,6 @@ root = "."
 [storage]
 state_root = "auto"
 cache_root = "auto"
-project_assets_root = ".sigil"
 
 [session]
 # log_dir = "sessions"
@@ -144,12 +143,19 @@ project_assets_root = ".sigil"
 | --- | --- | --- |
 | `storage.state_root` | 用户态持久状态根。Sigil 会在 `state_root/workspaces/<workspace-id>` 下为每个 workspace 派生状态目录，并把 input history、artifacts、changesets、terminal task records 等需要审计或恢复的数据放在这里。 | `auto` 使用平台用户状态目录。`SIGIL_STATE_HOME` 会覆盖配置文件值。手动覆盖时建议写绝对路径。 |
 | `storage.cache_root` | 用户态可重建缓存根。Sigil 会在 `cache_root/workspaces/<workspace-id>` 下为每个 workspace 派生缓存目录，并用于 `$SIGIL_SCRATCH_DIR` 等临时数据。 | `auto` 使用平台用户缓存目录。`SIGIL_CACHE_HOME` 会覆盖配置文件值。手动覆盖时建议写绝对路径。 |
-| `storage.project_assets_root` | 项目内 Sigil 资产根，按 `workspace.root` 解析，例如默认 `.sigil` 树下的 workspace agents 和 skills。 | 相对路径按 workspace root 解析，默认是 `.sigil`。 |
 | `session.log_dir` | 当前 workspace 的 append-only session JSONL 日志目录。它只改变 session logs 写到哪里，不替代 `storage.state_root`。 | 省略时写入 workspace state 目录下的 `sessions` 子目录；相对覆盖值按 workspace state 目录解析。 |
 
-派生路径（workspace state/cache roots、artifacts、changesets、terminal task records、input history、scratch）不会再暴露成独立 root 配置。选择配置时按数据生命周期判断：持久审计/恢复数据走 state，可丢弃 scratch 走 cache，repo-local reusable assets 走 project assets，`session.log_dir` 只用于调整 session JSONL 位置。
+项目内 Sigil 资产固定在 workspace 的 `.sigil` 目录下，不作为用户可编辑 root：
 
-TUI `/config` 的 Storage 页不会编辑这些 root；它只展示已解析路径、artifact retention 和 cleanup action。需要改 root 时，在 `sigil.toml` 或 `SIGIL_STATE_HOME` / `SIGIL_CACHE_HOME` 中配置。
+| 路径 | 职责 |
+| --- | --- |
+| `.sigil/skills` | Sigil-native workspace skills。 |
+| `.sigil/agents` | Sigil-native workspace agent profiles。 |
+| `.sigil/plugins` | Workspace plugin manifests 和 plugin-owned assets。 |
+
+派生路径（workspace state/cache roots、artifacts、changesets、terminal task records、input history、scratch、`.sigil/*` 项目资产）不会再暴露成独立 root 配置。选择配置时按数据生命周期判断：持久审计/恢复数据走 state，可丢弃 scratch 走 cache，repo-local reusable assets 走固定 `.sigil/*`，`session.log_dir` 只用于调整 session JSONL 位置。
+
+TUI `/config` 的 Storage 页不会编辑这些路径；它只展示已解析路径、artifact retention 和 cleanup action。只有 state/cache roots 可在 `sigil.toml` 或 `SIGIL_STATE_HOME` / `SIGIL_CACHE_HOME` 中配置，项目资产仍固定在 `.sigil/*`。
 
 ## Agent
 
@@ -336,11 +342,7 @@ Provider 专项行为保留在 provider 配置和 provider crate 内。共享的
 
 ```toml
 [permission]
-preset = "balanced"
-default_mode = "ask"
-
-[permission.access]
-read = "allow"
+mode = "manual"
 
 [permission.external_directory]
 enabled = false
@@ -348,12 +350,19 @@ default_mode = "ask"
 rules = []
 ```
 
+模式：
+
+| Mode | 用户理解 | 语义 |
+| --- | --- | --- |
+| `read-only` | 只看不改 | 读取默认允许；写入、执行、网络工具会被拒绝，即使低层覆盖尝试放行也不能放宽。 |
+| `manual` | 手动确认 | 读取默认允许；写入、执行、网络工具默认询问，除非命中特定 tool/rule/external-directory 策略。 |
+| `auto-edit` | 自动改文件 | Workspace 内文件编辑默认允许；shell 和网络工具默认仍询问。 |
+| `danger-full-access` | 高风险全放开 | 默认允许所有工具访问。名称中显式带 `danger`，避免误用。 |
+
 含义：
 
-- `preset = "balanced"` 是默认交互安全档位：只读操作默认放行，普通编辑和 shell 命令进入审批，destructive/protected 路径继续受保护。
-- `preset = "read_only"` 用于 planning、audit 和 dry run；即使旧配置里写了 write allow，也会拒绝写入和 mutating shell 操作。
-- `default_mode` 是 access-level 默认值检查之后，未命中工具调用的兜底模式。
-- `access`、`tools`、`rules` 和 `external_directory` 是高级配置文件覆盖项。默认 TUI 配置面只编辑 `preset` 和 `default_mode`。
+- `mode = "manual"` 是默认交互安全姿态。
+- `tools`、`rules` 和 `external_directory` 是高级配置文件覆盖项，只用于特定工具、subject 或外部路径，不再承担第二套默认权限 baseline。
 - workspace 外路径默认不可执行；开启 external directory 后仍会先经过 external-directory gate。
 - 临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`。它由 Sigil 用户态 cache root 承载，对模型显示为 `cache/tmp`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
 - headless `run` 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误。
@@ -362,13 +371,12 @@ rules = []
 
 | 顺序 | 来源 | 职责 |
 | --- | --- | --- |
-| 1 | `preset = "read_only"` | 硬上限：非 Read 工具先被拒绝，低层覆盖不能放宽。 |
-| 2 | `access.<kind>` 然后 `default_mode` | 工具 access class 的基础模式；未配置的 access 值回退到 `default_mode`。 |
-| 3 | 工具自身 default | runtime/tool 提供的默认值，例如可信只读命令降级。 |
-| 4 | `tools.<tool_name>` | 工具名覆盖。 |
-| 5 | `rules[]` | 命中的 tool/subject 规则；多条命中按最严格模式合并：`deny > ask > allow`。 |
-| 6 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
-| 7 | Effective policy cap | runtime cap 继续按同一个最严格模式合并。 |
+| 1 | `mode` baseline | 用户可理解的顶层模式设置默认姿态；`read-only` 是非读硬上限，`danger-full-access` 是显式全放开。 |
+| 2 | 工具自身 default | runtime/tool 提供的默认值，例如可信只读命令降级。 |
+| 3 | `tools.<tool_name>` | 工具名覆盖。 |
+| 4 | `rules[]` | 命中的 tool/subject 规则；多条命中按最严格模式合并：`deny > ask > allow`。 |
+| 5 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
+| 6 | Effective policy cap | runtime cap 继续按同一个最严格模式合并。 |
 
 ## Memory
 
@@ -384,8 +392,6 @@ enabled = true
 ```toml
 [skills]
 enabled = true
-workspace_dir = ".sigil/skills"
-workspace_agents_dir = ".sigil/agents"
 user_skills = true
 user_agents = true
 compatibility_sources = []
@@ -395,12 +401,12 @@ Skill 和 agent discovery 分成三类 source：
 
 | 配置 | 职责 |
 | --- | --- |
-| `workspace_dir` | 当前 workspace 的 Sigil-native reusable skills。默认映射到 `storage.project_assets_root/skills`；只有 workspace 有意把 Sigil skills 放在别处时才覆盖。 |
-| `workspace_agents_dir` | 当前 workspace 的 Sigil-native agent profiles。默认映射到 `storage.project_assets_root/agents`；它和 `workspace_dir` 分开，是因为 agents 会作为 child session 运行，而不是 inline skill context。 |
+| `.sigil/skills` | 当前 workspace 固定的 Sigil-native reusable skills。 |
+| `.sigil/agents` | 当前 workspace 固定的 Sigil-native agent profiles。Agents 会作为 child session 运行，而不是 inline skill context。 |
 | `user_skills` / `user_agents` | 是否加载用户配置目录里的 per-user skills 和 agents。它们不会改变 workspace discovery roots。 |
 | `compatibility_sources` | 显式导入外部生态目录。当前支持 `claude` 和 `reasonix`；默认值为空，因此普通 workspace source 只来自 Sigil-native `.sigil/*`。 |
 
-Compatibility source 会在 Agents / Skills 浏览器里通过 source/trust 标出来，并且仍需经过同一套 trust lifecycle 才能被模型或用户调用。TUI `/config` 的 Agents 和 Skills 区块用于浏览已发现条目、展示 source/trust/hash/run mode，并提供 trust/use action；discovery root 请在 `sigil.toml` 中编辑。
+Compatibility source 会在 Agents / Skills 浏览器里通过 source/trust 标出来，并且仍需经过同一套 trust lifecycle 才能被模型或用户调用。TUI `/config` 的 Agents 和 Skills 区块用于浏览已发现条目、展示 source/trust/hash/run mode，并提供 trust/use action。Workspace discovery roots 固定在 `.sigil/*`。
 
 ## Compaction
 
