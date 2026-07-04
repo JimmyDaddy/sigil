@@ -27,8 +27,7 @@ stream_idle_timeout_secs = 180
 
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
-model = "claude-sonnet-4-5"
-# 优先使用 SIGIL_ANTHROPIC_API_KEY 或 ANTHROPIC_API_KEY。
+# 优先使用 SIGIL_ANTHROPIC_API_KEY。
 # api_key = "sk-ant-..."
 anthropic_version = "2023-06-01"
 max_tokens = 4096
@@ -42,8 +41,7 @@ beta_headers = []
 Sigil 按这个顺序解析 Anthropic 认证：
 
 1. `SIGIL_ANTHROPIC_API_KEY`
-2. `ANTHROPIC_API_KEY`
-3. `[providers.anthropic].api_key`
+2. `[providers.anthropic].api_key`
 
 本地和 CI 优先使用环境变量。不要提交包含明文 `api_key` 的配置文件。
 
@@ -51,7 +49,6 @@ Sigil 按这个顺序解析 Anthropic 认证：
 
 | 变量 | 覆盖 |
 | --- | --- |
-| `SIGIL_ANTHROPIC_MODEL` | `[providers.anthropic].model` |
 | `SIGIL_ANTHROPIC_BASE_URL` | `[providers.anthropic].base_url` |
 | `SIGIL_ANTHROPIC_VERSION` | `[providers.anthropic].anthropic_version` |
 | `SIGIL_ANTHROPIC_MAX_TOKENS` | `[providers.anthropic].max_tokens` |
@@ -78,5 +75,5 @@ sigil doctor
 | --- | --- |
 | 请求因 version/header 被拒绝 | 确认 `anthropic_version` 和 `beta_headers`。 |
 | 输出过早停止 | 检查 `max_tokens` 和模型限制。 |
-| 认证用了错误 key | 检查 `SIGIL_ANTHROPIC_API_KEY` 是否覆盖了 `ANTHROPIC_API_KEY`。 |
+| 认证用了错误 key | 确认 `SIGIL_ANTHROPIC_API_KEY` 或 `[providers.anthropic].api_key` 是预期值。 |
 | Tool-use 行为和其他 provider 不同 | 对比 provider 支持情况，测试期间保持 permission policy 不变。 |

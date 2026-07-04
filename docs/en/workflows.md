@@ -123,7 +123,7 @@ Enable it in config:
 ```toml
 [code_intelligence]
 enabled = true
-startup = "lazy"
+server_startup = "lazy"
 ```
 
 In the TUI, use:

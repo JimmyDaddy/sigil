@@ -62,7 +62,7 @@ For DeepSeek, prefer:
 export SIGIL_API_KEY="sk-..."
 ```
 
-The legacy `DEEPSEEK_API_KEY` is still read as a fallback for the DeepSeek provider.
+Generic `DEEPSEEK_API_KEY` is ignored. Use `SIGIL_API_KEY` or `[providers.deepseek].api_key`.
 
 For OpenAI-compatible providers, prefer:
 
@@ -70,7 +70,7 @@ For OpenAI-compatible providers, prefer:
 export SIGIL_OPENAI_COMPATIBLE_API_KEY="sk-..."
 ```
 
-`OPENAI_API_KEY` is read as a fallback for the OpenAI-compatible provider.
+Generic `OPENAI_API_KEY` is ignored. Use `SIGIL_OPENAI_COMPATIBLE_API_KEY` or `[providers.openai_compat].api_key`.
 
 For Anthropic, prefer:
 
@@ -78,7 +78,7 @@ For Anthropic, prefer:
 export SIGIL_ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-`ANTHROPIC_API_KEY` is read as a fallback for the Anthropic provider.
+Generic `ANTHROPIC_API_KEY` is ignored. Use `SIGIL_ANTHROPIC_API_KEY` or `[providers.anthropic].api_key`.
 
 For Gemini, prefer:
 
@@ -86,7 +86,7 @@ For Gemini, prefer:
 export SIGIL_GEMINI_API_KEY="..."
 ```
 
-`GEMINI_API_KEY` and `GOOGLE_API_KEY` are read as fallbacks for the Gemini provider.
+Generic `GEMINI_API_KEY` and `GOOGLE_API_KEY` are ignored. Use `SIGIL_GEMINI_API_KEY` or `[providers.gemini].api_key`.
 
 If you saved a key in `/config`, it is stored as plaintext in `sigil.toml`. That can be acceptable for a private local config, but do not commit it.
 

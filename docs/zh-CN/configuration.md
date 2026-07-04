@@ -88,13 +88,12 @@ syntax_theme = "auto"
 usage_cost_currency = "auto"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
 # 推荐优先使用 SIGIL_API_KEY；如果写在这里，会以 plaintext 保存。
 # api_key = "sk-..."
 ```
 
-`SIGIL_API_KEY` 优先级高于配置文件里的 `api_key`。旧环境变量 `DEEPSEEK_API_KEY` 仍作为 DeepSeek provider 的备用来源读取。`doctor` 会对仅来自明文配置的认证给 warning，但不会阻止运行。
+`SIGIL_API_KEY` 优先级高于配置文件里的 `api_key`。`doctor` 会对仅来自明文配置的认证给 warning，但不会阻止运行。
 
 可复制模板位于 [docs/examples/config](../examples/config)：
 
@@ -127,6 +126,31 @@ root = "."
 
 文件类工具会限制在 workspace root 内，拒绝 `..`、绝对路径和指向 workspace 外的 symlink。`bash` 仍不提供完整进程 sandbox。
 
+## Storage 和 Session 路径
+
+```toml
+[storage]
+state_root = "auto"
+cache_root = "auto"
+project_assets_root = ".sigil"
+
+[session]
+# log_dir = "sessions"
+```
+
+这些配置分别承担不同路径职责，不是同一个存储位置的多个别名。
+
+| 配置 | 职责 | 默认值 / 解析方式 |
+| --- | --- | --- |
+| `storage.state_root` | 用户态持久状态根。Sigil 会在 `state_root/workspaces/<workspace-id>` 下为每个 workspace 派生状态目录，并把 input history、artifacts、changesets、terminal task records 等需要审计或恢复的数据放在这里。 | `auto` 使用平台用户状态目录。`SIGIL_STATE_HOME` 会覆盖配置文件值。手动覆盖时建议写绝对路径。 |
+| `storage.cache_root` | 用户态可重建缓存根。Sigil 会在 `cache_root/workspaces/<workspace-id>` 下为每个 workspace 派生缓存目录，并用于 `$SIGIL_SCRATCH_DIR` 等临时数据。 | `auto` 使用平台用户缓存目录。`SIGIL_CACHE_HOME` 会覆盖配置文件值。手动覆盖时建议写绝对路径。 |
+| `storage.project_assets_root` | 项目内 Sigil 资产根，按 `workspace.root` 解析，例如默认 `.sigil` 树下的 workspace agents 和 skills。 | 相对路径按 workspace root 解析，默认是 `.sigil`。 |
+| `session.log_dir` | 当前 workspace 的 append-only session JSONL 日志目录。它只改变 session logs 写到哪里，不替代 `storage.state_root`。 | 省略时写入 workspace state 目录下的 `sessions` 子目录；相对覆盖值按 workspace state 目录解析。 |
+
+派生路径（workspace state/cache roots、artifacts、changesets、terminal task records、input history、scratch）不会再暴露成独立 root 配置。选择配置时按数据生命周期判断：持久审计/恢复数据走 state，可丢弃 scratch 走 cache，repo-local reusable assets 走 project assets，`session.log_dir` 只用于调整 session JSONL 位置。
+
+TUI `/config` 的 Storage 页不会编辑这些 root；它只展示已解析路径、artifact retention 和 cleanup action。需要改 root 时，在 `sigil.toml` 或 `SIGIL_STATE_HOME` / `SIGIL_CACHE_HOME` 中配置。
+
 ## Agent
 
 ```toml
@@ -146,26 +170,36 @@ tool_timeout_secs = 30
 
 ```toml
 [execution]
-backend = "local"
-isolation = "allow_local"
+strategy = "local"
 ```
 
-`[execution]` 是只通过配置文件编辑的高级配置。默认 `local` backend 保持普通本地 shell 行为，不声明 OS sandbox 隔离能力。
+`[execution]` 是只通过配置文件编辑的高级配置。默认 `strategy = "local"` 保持普通本地 shell 行为，不声明 OS sandbox 隔离能力。
 
 macOS 上的高级用户可以显式启用第一版 sandbox backend MVP：
 
 ```toml
 [execution]
+strategy = "sandbox"
+
+[execution.sandbox]
 backend = "macos_seatbelt"
-isolation = "require_sandbox"
+profile = "workspace_write"
+fallback = "deny"
 ```
 
 `macos_seatbelt` 会通过 `/usr/bin/sandbox-exec` 运行命令；profile 允许读取文件系统、只允许写入命令工作目录，并且不开放网络访问。当前支持的本地路径包括非交互 shell，以及会记录 sandbox coverage receipt 的 PTY、MCP 和 plugin hook handoff surface。它仍然只支持 macOS，不会让远端工具或所有容器/daemon 场景自动获得 sandbox；如果 `sandbox-exec` 不可用会 fail closed。Apple 已将 `sandbox-exec` 标记为 deprecated，因此这个 backend 是 enforcement MVP，不是最终跨平台 sandbox 策略。
+
+合法组合刻意收窄：`strategy = "local"` 不能同时配置 `[execution.sandbox]`；`strategy = "sandbox"` 必须配置 `[execution.sandbox]`；sandbox backend 只支持 `macos_seatbelt`、`linux_bubblewrap` 或 `docker`；Docker 必须配置 `container_image`；非 Docker backend 不能配置 `container_image`。`isolation` 由 strategy 派生，不再是用户配置项。
 
 ## 验证
 
 ```toml
 [verification]
+
+[verification.scope]
+profile = "auto"
+# extra_excludes = ["tmp/generated/**"]
+# generated_roots = ["generated"]
 
 [[verification.checks]]
 id = "cargo-test"
@@ -175,6 +209,8 @@ effect = "read_only"
 ```
 
 `[verification]` 是只通过配置文件编辑的显式用户检查配置。当前 task run 会先把这些条目物化成 verification policy 记录，再用于 completion readiness 判断。Sigil 的 kernel 也支持从 `.sigil/verification.toml`、CI `run:` 步骤、`package.json`、`Cargo.toml` 和 `Makefile` 发现仓库本地候选检查，但“发现”不等于“执行”。仓库本地候选会保持为 suggested checks，直到经过显式审批、满足 policy 的 sandbox decision 或 global policy promotion；仅仅 trust 一个 workspace 不会让所有 CI/Cargo/Makefile 发现项阻塞普通任务。
+
+`[verification.scope]` 是 verification 范围的唯一用户配置入口。`profile` 选择粗粒度 preset，`extra_excludes` 增加项目自己的排除 glob，`generated_roots` 标记不应作为 verification evidence 的生成目录。
 
 首次进入 workspace 时，TUI 会先记录粗粒度 workspace trust decision，然后才进入正式使用。这个 decision 允许加载仓库本地 instructions 和发现 repo-local checks，但不会自动提升发现到的 checks，也不会单独授予 shell、plugin、MCP 或文件写入权限。
 
@@ -245,12 +281,7 @@ enabled = true
 default_mode = "chat"
 max_plan_steps = 12
 max_replans = 2
-max_child_sessions = 8
-max_parallel_readonly = 3
-max_parallel_write = 1
-max_background_threads = 2
-max_spawn_fanout_per_turn = 4
-max_agent_tokens_per_task = 200000
+max_subagents = 8
 allow_write_subagents = true
 
 [task.planner]
@@ -272,7 +303,7 @@ allow_write_subagents = true
 
 各 role 的 provider/model 未配置时继承 `[agent]`。Planner 和 subagent-read 默认只看到只读文件/搜索/code-intelligence 工具。Executor 可以看到完整 runtime registry。Subagent-write 只有在 `allow_write_subagents = true` 时才能看到完整 registry；否则回退到只读工具面。写工具仍然按正常审批策略执行。
 
-Agent fan-out 限制都放在 `[task]`：默认只读子 agent 最多并行 3 个、后台 agent 最多 2 个；需要串行化只读子 agent 时再显式设置 `max_parallel_readonly = 1`。`max_spawn_fanout_per_turn` 应不超过期望的单轮 spawn 上限。旧字段 `allow_parallel_readonly_subagents` 仅为兼容读取保留，当前预算以 `max_parallel_readonly` 为准。
+Agent 并发由 `[task].max_subagents` 控制：默认最多允许 8 个活跃子 agent，覆盖 foreground、background、只读和可写角色。Token 用量会记录到 agent result 里用于报告，但不作为拒绝 spawn 的硬预算。
 
 每个 role 都可以覆盖可见工具：
 
@@ -287,7 +318,8 @@ allow_all = false
 
 ## Providers
 
-`[agent].provider` 选择 runtime provider。对应的 `[providers.*]` 区块控制 endpoint、model、认证和 provider 专项选项。
+`[agent].provider` 选择 runtime provider，`[agent].model` 选择聊天模型。对应的 `[providers.*]` 区块控制 endpoint、认证和 provider 专项选项。
+只支持下表中的 provider 值；其他值会在配置校验时报错。
 
 | Provider value | Config block | 主要 API key 环境变量 | 指南 |
 | --- | --- | --- | --- |
@@ -320,11 +352,23 @@ rules = []
 
 - `preset = "balanced"` 是默认交互安全档位：只读操作默认放行，普通编辑和 shell 命令进入审批，destructive/protected 路径继续受保护。
 - `preset = "read_only"` 用于 planning、audit 和 dry run；即使旧配置里写了 write allow，也会拒绝写入和 mutating shell 操作。
-- 未显式覆盖的工具调用默认进入审批。
-- 只读文件和搜索工具默认放行。
-- workspace 外路径默认不可执行；开启 external directory 后仍会按规则进入审批或放行。
+- `default_mode` 是 access-level 默认值检查之后，未命中工具调用的兜底模式。
+- `access`、`tools`、`rules` 和 `external_directory` 是高级配置文件覆盖项。默认 TUI 配置面只编辑 `preset` 和 `default_mode`。
+- workspace 外路径默认不可执行；开启 external directory 后仍会先经过 external-directory gate。
 - 临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`。它由 Sigil 用户态 cache root 承载，对模型显示为 `cache/tmp`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
 - headless `run` 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误。
+
+优先级：
+
+| 顺序 | 来源 | 职责 |
+| --- | --- | --- |
+| 1 | `preset = "read_only"` | 硬上限：非 Read 工具先被拒绝，低层覆盖不能放宽。 |
+| 2 | `access.<kind>` 然后 `default_mode` | 工具 access class 的基础模式；未配置的 access 值回退到 `default_mode`。 |
+| 3 | 工具自身 default | runtime/tool 提供的默认值，例如可信只读命令降级。 |
+| 4 | `tools.<tool_name>` | 工具名覆盖。 |
+| 5 | `rules[]` | 命中的 tool/subject 规则；多条命中按最严格模式合并：`deny > ask > allow`。 |
+| 6 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
+| 7 | Effective policy cap | runtime cap 继续按同一个最严格模式合并。 |
 
 ## Memory
 
@@ -334,6 +378,29 @@ enabled = true
 ```
 
 启用后，Sigil 启动时会稳定装载工作区根 memory 文档，例如 `SIGIL.md`、`AGENTS.md`、`CLAUDE.md`、`SIGIL.local.md`，并支持单独一行 `@path` 导入。
+
+## Skills 和 Agents
+
+```toml
+[skills]
+enabled = true
+workspace_dir = ".sigil/skills"
+workspace_agents_dir = ".sigil/agents"
+user_skills = true
+user_agents = true
+compatibility_sources = []
+```
+
+Skill 和 agent discovery 分成三类 source：
+
+| 配置 | 职责 |
+| --- | --- |
+| `workspace_dir` | 当前 workspace 的 Sigil-native reusable skills。默认映射到 `storage.project_assets_root/skills`；只有 workspace 有意把 Sigil skills 放在别处时才覆盖。 |
+| `workspace_agents_dir` | 当前 workspace 的 Sigil-native agent profiles。默认映射到 `storage.project_assets_root/agents`；它和 `workspace_dir` 分开，是因为 agents 会作为 child session 运行，而不是 inline skill context。 |
+| `user_skills` / `user_agents` | 是否加载用户配置目录里的 per-user skills 和 agents。它们不会改变 workspace discovery roots。 |
+| `compatibility_sources` | 显式导入外部生态目录。当前支持 `claude` 和 `reasonix`；默认值为空，因此普通 workspace source 只来自 Sigil-native `.sigil/*`。 |
+
+Compatibility source 会在 Agents / Skills 浏览器里通过 source/trust 标出来，并且仍需经过同一套 trust lifecycle 才能被模型或用户调用。TUI `/config` 的 Agents 和 Skills 区块用于浏览已发现条目、展示 source/trust/hash/run mode，并提供 trust/use action；discovery root 请在 `sigil.toml` 中编辑。
 
 ## Compaction
 
@@ -348,28 +415,24 @@ tail_messages = 6
 
 如果当前 provider/model 能解析 context window，Sigil 会优先使用模型窗口。只有无法解析时，才回退到 `fallback_context_window_tokens`。
 
-旧配置里的 `context_window_tokens` 仍兼容读取；保存时会写成新的 fallback 字段。
-
 ## Code Intelligence
 
 ```toml
 [code_intelligence]
 enabled = false
-startup = "lazy"
+server_startup = "lazy"
 default_timeout_ms = 5000
 max_results = 100
 max_payload_bytes = 65536
-
-[code_intelligence.discovery]
-enabled = true
+auto_discover = true
 report_missing = true
 ```
 
 开启后，runtime 会注册只读 code intelligence 工具，以及用于 code action 和 symbol rename 的 LSP edit 工具。edit 工具属于 `Write` 工具，必须先展示 diff 审批，获批后才会改文件。TUI 可以用 `Alt-D` 对 git changed source files 触发 diagnostics 检查。
 
-`discovery.enabled = true` 时，Sigil 会按 workspace 自动发现常见语言和 PATH 上可用的安全 LSP server。手写 `code_intelligence.servers` 只作为高级覆盖或补充。
+`auto_discover = true` 时，Sigil 会按 workspace 自动发现常见语言和 PATH 上可用的安全 LSP server。手写 `code_intelligence.servers` 只作为高级覆盖或补充。
 
-TUI `/config` 面板里有 `Code Intel` 区块，可以调整 `enabled`、`startup` 和 discovery 设置，并查看只读 trust 边界与 readiness 检查。readiness 行复用同一份本地 doctor 事实，所以缺 LSP command 时会在启动 language server 前先给出修复建议。
+TUI `/config` 面板里有 `Code Intel` 区块，可以调整 `enabled`、`server_startup` 和 `auto_discover`，并查看只读 trust 边界与 readiness 检查。readiness 行复用同一份本地 doctor 事实，所以缺 LSP command 时会在启动 language server 前先给出修复建议。
 
 语言服务器示例：
 
@@ -394,7 +457,7 @@ osc52_clipboard = true
 scroll_sensitivity = 3
 ```
 
-`keyboard_enhancement` 控制 crossterm 键盘增强协议。默认 `auto` 会在 TUI 启动时探测当前终端，只在支持时请求 enhanced key reporting。需要强制请求时设为 `on`；如果终端、multiplexer、SSH 层或嵌入式 PTY 不能稳定处理增强协议，设为 `off`。旧布尔值仍兼容读取：`true = on`，`false = off`。
+`keyboard_enhancement` 控制 crossterm 键盘增强协议。默认 `auto` 会在 TUI 启动时探测当前终端，只在支持时请求 enhanced key reporting。需要强制请求时设为 `on`；如果终端、multiplexer、SSH 层或嵌入式 PTY 不能稳定处理增强协议，设为 `off`。
 
 `mouse_capture` 控制 TUI 是否向终端请求鼠标事件，用于点击、滚动、审批控件、setup/config/session 选择和 transcript 拖选。它默认关闭，优先保证不同 multiplexer 和嵌入式 PTY 下的键盘输入可靠；只有在你需要鼠标能力且终端能稳定处理 mouse mode 时再开启。键盘操作始终可用。
 
@@ -421,7 +484,6 @@ Model request：
 
 DeepSeek：
 
-- `SIGIL_MODEL`
 - `SIGIL_API_KEY`
 - `SIGIL_BASE_URL`
 - `SIGIL_BETA_BASE_URL`
@@ -430,33 +492,30 @@ DeepSeek：
 - `SIGIL_USER_ID_STRATEGY`
 - `SIGIL_STRICT_TOOLS_MODE`
 
-`SIGIL_API_KEY` 优先级最高。`DEEPSEEK_API_KEY` 作为 DeepSeek provider 的备用来源继续兼容读取。如果只配置了 `[providers.deepseek].api_key`，Sigil 会把它视为明文配置认证，`doctor` 会输出 warning 和修复建议。
+`SIGIL_API_KEY` 优先级最高。如果只配置了 `[providers.deepseek].api_key`，Sigil 会把它视为明文配置认证，`doctor` 会输出 warning 和修复建议。
 
 OpenAI-compatible：
 
-- `SIGIL_OPENAI_COMPATIBLE_MODEL`
 - `SIGIL_OPENAI_COMPATIBLE_API_KEY`
 - `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
 
-`OPENAI_API_KEY` 作为 OpenAI-compatible provider 的备用来源继续读取。
+OpenAI-compatible provider 认证使用 `SIGIL_OPENAI_COMPATIBLE_API_KEY`。通用 OpenAI 环境变量会被忽略，避免 Sigil 凭据和其他工具共享状态。
 
 Anthropic：
 
-- `SIGIL_ANTHROPIC_MODEL`
 - `SIGIL_ANTHROPIC_API_KEY`
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_ANTHROPIC_VERSION`
 - `SIGIL_ANTHROPIC_MAX_TOKENS`
 
-`ANTHROPIC_API_KEY` 作为 Anthropic provider 的备用来源继续读取。
+Anthropic 认证使用 `SIGIL_ANTHROPIC_API_KEY`。通用 Anthropic 环境变量会被忽略。
 
 Gemini：
 
-- `SIGIL_GEMINI_MODEL`
 - `SIGIL_GEMINI_API_KEY`
 - `SIGIL_GEMINI_BASE_URL`
 
-`GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 作为 Gemini provider 的备用来源继续读取。
+Gemini 认证使用 `SIGIL_GEMINI_API_KEY`。通用 Google/Gemini 环境变量会被忽略。
 
 ## Plugins
 

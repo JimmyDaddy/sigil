@@ -88,13 +88,12 @@ syntax_theme = "auto"
 usage_cost_currency = "auto"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
 # Prefer SIGIL_API_KEY. If written here, the key is stored as plaintext.
 # api_key = "sk-..."
 ```
 
-`SIGIL_API_KEY` has higher priority than `api_key` in the config file. The legacy `DEEPSEEK_API_KEY` environment variable is still read as a fallback for the DeepSeek provider. `doctor` warns when auth only comes from plaintext config, but it does not block the run.
+`SIGIL_API_KEY` has higher priority than `api_key` in the config file. `doctor` warns when auth only comes from plaintext config, but it does not block the run.
 
 Copyable templates are available under [docs/examples/config](../examples/config):
 
@@ -127,6 +126,31 @@ root = "."
 
 File tools are confined to the workspace root. They reject `..`, absolute paths, and symlinks that point outside the workspace. `bash` does not provide a full process sandbox.
 
+## Storage and Session Paths
+
+```toml
+[storage]
+state_root = "auto"
+cache_root = "auto"
+project_assets_root = ".sigil"
+
+[session]
+# log_dir = "sessions"
+```
+
+These settings control different path responsibilities. They are not alternate names for the same storage location.
+
+| Setting | Responsibility | Default / resolution |
+| --- | --- | --- |
+| `storage.state_root` | Durable per-user Sigil state. Sigil derives each workspace's state directory under `state_root/workspaces/<workspace-id>` and stores session-adjacent records such as input history, artifacts, changesets, and terminal task records there. | `auto` uses the platform user state directory. `SIGIL_STATE_HOME` overrides the configured value. Prefer an absolute path when you override it in a config file. |
+| `storage.cache_root` | Rebuildable per-user cache. Sigil derives each workspace's cache directory under `cache_root/workspaces/<workspace-id>` and uses it for scratch data such as `$SIGIL_SCRATCH_DIR`. | `auto` uses the platform user cache directory. `SIGIL_CACHE_HOME` overrides the configured value. Prefer an absolute path when you override it in a config file. |
+| `storage.project_assets_root` | Project-local Sigil assets resolved relative to `workspace.root`, such as workspace agents and skills under the default `.sigil` tree. | Relative paths resolve under the workspace root. The default is `.sigil`. |
+| `session.log_dir` | Append-only session JSONL logs for the current workspace. This changes only where session logs are written; it does not replace `storage.state_root`. | When omitted, Sigil writes logs under the workspace state directory's `sessions` child. Relative overrides resolve under the workspace state directory. |
+
+Derived paths such as workspace state/cache roots, artifacts, changesets, terminal task records, input history, and scratch are intentionally not separate user-facing root settings. Use the root above that matches the data's lifecycle: state for durable audit/recovery data, cache for disposable scratch data, project assets for repo-local reusable assets, and `session.log_dir` only for session JSONL placement.
+
+The TUI `/config` Storage page is read-only for these roots. It shows resolved paths, artifact retention, and the cleanup action; edit roots in `sigil.toml` or with `SIGIL_STATE_HOME` / `SIGIL_CACHE_HOME`.
+
 ## Agent
 
 ```toml
@@ -146,26 +170,36 @@ tool_timeout_secs = 30
 
 ```toml
 [execution]
-backend = "local"
-isolation = "allow_local"
+strategy = "local"
 ```
 
-`[execution]` is a file-only advanced section. The default `local` backend preserves the normal local shell behavior and does not claim OS sandbox isolation.
+`[execution]` is a file-only advanced section. The default `strategy = "local"` preserves normal local shell behavior and does not claim OS sandbox isolation.
 
 On macOS, advanced users can opt into the first sandbox backend MVP:
 
 ```toml
 [execution]
+strategy = "sandbox"
+
+[execution.sandbox]
 backend = "macos_seatbelt"
-isolation = "require_sandbox"
+profile = "workspace_write"
+fallback = "deny"
 ```
 
 `macos_seatbelt` runs commands through `/usr/bin/sandbox-exec` with full filesystem reads, writes limited to the command working directory, and network access omitted from the profile. Supported local paths include non-interactive shell execution and the current PTY/MCP/plugin-hook handoff surfaces that report sandbox coverage receipts. It remains macOS-only, does not make remote tools or every container/daemon scenario sandboxed, and fails closed if `sandbox-exec` is unavailable. `sandbox-exec` is deprecated by Apple, so this backend is an enforcement MVP rather than the final cross-platform sandbox strategy.
+
+Legal combinations are intentionally narrow: `strategy = "local"` must not include `[execution.sandbox]`; `strategy = "sandbox"` requires `[execution.sandbox]`; sandbox backends are `macos_seatbelt`, `linux_bubblewrap`, or `docker`; Docker requires `container_image`; non-Docker backends must not set `container_image`. `isolation` is derived from the strategy and is not a user-facing key.
 
 ## Verification
 
 ```toml
 [verification]
+
+[verification.scope]
+profile = "auto"
+# extra_excludes = ["tmp/generated/**"]
+# generated_roots = ["generated"]
 
 [[verification.checks]]
 id = "cargo-test"
@@ -175,6 +209,8 @@ effect = "read_only"
 ```
 
 `[verification]` is a file-only section for explicit user-approved checks. Current task runs materialize these entries into verification policy records before evaluating completion. Sigil also has kernel support for discovering repository-local candidate checks from `.sigil/verification.toml`, CI `run:` steps, `package.json`, `Cargo.toml`, and `Makefile`, but discovery never means execution. Repository-local candidates stay suggested checks until they are promoted through explicit approval, a satisfying sandbox decision, or a global policy; trusting a workspace alone does not make every discovered CI/Cargo/Makefile check block ordinary tasks.
+
+`[verification.scope]` is the single user-facing place for verification scope. `profile` chooses the coarse preset, `extra_excludes` adds project-specific excluded globs, and `generated_roots` marks generated directories that should not become verification evidence.
 
 On first workspace entry, the TUI records a coarse workspace trust decision before normal use. That decision allows repository-local instructions and check discovery, but it does not promote discovered checks by itself and does not grant shell, plugin, MCP, or file-write permissions.
 
@@ -245,12 +281,7 @@ enabled = true
 default_mode = "chat"
 max_plan_steps = 12
 max_replans = 2
-max_child_sessions = 8
-max_parallel_readonly = 3
-max_parallel_write = 1
-max_background_threads = 2
-max_spawn_fanout_per_turn = 4
-max_agent_tokens_per_task = 200000
+max_subagents = 8
 allow_write_subagents = true
 
 [task.planner]
@@ -272,7 +303,7 @@ Planned tasks are started from the TUI with `/task <task>`. `/plan` remains read
 
 Role-specific provider/model settings inherit `[agent]` when omitted. Planner and subagent-read default to read-only file/search/code-intelligence tools. Executor can see the full runtime registry. Subagent-write can see the full runtime registry only when `allow_write_subagents = true`; otherwise it falls back to the read-only scope. Mutating tools still go through the normal approval policy.
 
-Agent fan-out limits live in `[task]`: the default permits up to 3 parallel read-only child agents and up to 2 background agents; set `max_parallel_readonly = 1` only when you want to serialize read-only child agents. Keep `max_spawn_fanout_per_turn` no higher than the intended per-turn spawn fan-out. The old `allow_parallel_readonly_subagents` field is retained only for compatibility; current budgeting follows `max_parallel_readonly`.
+Agent concurrency is controlled by `[task].max_subagents`: the default permits up to 8 active child agents across foreground, background, read-only, and write-capable roles. Token usage is recorded in agent results for reporting, but it is not a hard spawn-denial budget.
 
 Each role can override visible tools:
 
@@ -287,7 +318,8 @@ Use explicit names and stable prefixes carefully. A scoped role registry gates t
 
 ## Providers
 
-`[agent].provider` selects the runtime provider. The matching `[providers.*]` block controls endpoint, model, authentication, and provider-specific options.
+`[agent].provider` selects the runtime provider, and `[agent].model` selects the chat model. The matching `[providers.*]` block controls endpoint, authentication, and provider-specific options.
+Only the provider values in this table are supported; any other value fails configuration validation.
 
 | Provider value | Config block | Primary API key env | Guide |
 | --- | --- | --- | --- |
@@ -320,11 +352,23 @@ Meaning:
 
 - `preset = "balanced"` is the default interactive safety profile: reads are allowed, ordinary edits and shell commands ask, and destructive/protected paths remain guarded.
 - `preset = "read_only"` is for planning, audits, and dry runs; it denies writes and mutating shell operations even if a legacy write allow is configured.
-- Tool calls without an explicit override default to approval.
-- Read-only file and search tools are allowed by default.
-- Paths outside the workspace are disabled by default; if external directories are enabled, they still go through rules and approval.
+- `default_mode` is the default for unmatched tool calls after access-level defaults are checked.
+- `access`, `tools`, `rules`, and `external_directory` are advanced policy-file overrides. The default TUI config surface only edits `preset` and `default_mode`.
+- Paths outside the workspace are disabled by default; if external directories are enabled, they still go through the external-directory gate.
 - Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`. It is backed by Sigil's per-user cache root and shown to the model as `cache/tmp`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
 - In headless `run`, final `ask` decisions are returned to the model as structured `approval_required` tool errors instead of being executed silently.
+
+Precedence:
+
+| Order | Source | Responsibility |
+| --- | --- | --- |
+| 1 | `preset = "read_only"` | Hard cap: non-read tools are denied before lower-level overrides. |
+| 2 | `access.<kind>` then `default_mode` | Base mode for the tool access class; unset access values fall back to `default_mode`. |
+| 3 | Tool-provided default | Runtime/tool-specific default, such as a trusted read-only command downgrade. |
+| 4 | `tools.<tool_name>` | Tool-name override. |
+| 5 | `rules[]` | Matching tool/subject rules; multiple matches combine by the strictest mode: `deny > ask > allow`. |
+| 6 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
+| 7 | Effective policy cap | Runtime caps are combined by the same strictest-mode rule. |
 
 ## Memory
 
@@ -334,6 +378,29 @@ enabled = true
 ```
 
 When enabled, Sigil loads stable workspace memory files such as `SIGIL.md`, `AGENTS.md`, `CLAUDE.md`, and `SIGIL.local.md`. A memory file can also import another file with a single-line `@path`.
+
+## Skills and Agents
+
+```toml
+[skills]
+enabled = true
+workspace_dir = ".sigil/skills"
+workspace_agents_dir = ".sigil/agents"
+user_skills = true
+user_agents = true
+compatibility_sources = []
+```
+
+Skill and agent discovery has three separate source classes:
+
+| Setting | Responsibility |
+| --- | --- |
+| `workspace_dir` | Sigil-native reusable skills for the current workspace. The default maps to `storage.project_assets_root/skills`; override it only when the workspace intentionally keeps Sigil skills elsewhere. |
+| `workspace_agents_dir` | Sigil-native workspace agent profiles. The default maps to `storage.project_assets_root/agents`; it is separate from `workspace_dir` because agents run as child sessions rather than inline skill context. |
+| `user_skills` / `user_agents` | Whether to include per-user skills and agents from the user config directory. These do not change workspace discovery roots. |
+| `compatibility_sources` | Explicit imports from foreign layouts. Supported values are `claude` and `reasonix`; the default is empty so Sigil-native `.sigil/*` remains the ordinary workspace source. |
+
+Compatibility sources are marked by source/trust in the Agents and Skills browsers and still go through the same trust lifecycle before model or user invocation. The TUI `/config` Agents and Skills sections browse discovered entries, show source/trust/hash/run mode, and expose trust/use actions; edit discovery roots in `sigil.toml`.
 
 ## Compaction
 
@@ -348,28 +415,24 @@ tail_messages = 6
 
 If Sigil can resolve the current provider/model context window, it uses that value. `fallback_context_window_tokens` is used only when the model window cannot be resolved.
 
-Older configs using `context_window_tokens` still load; saved configs use the fallback field.
-
 ## Code Intelligence
 
 ```toml
 [code_intelligence]
 enabled = false
-startup = "lazy"
+server_startup = "lazy"
 default_timeout_ms = 5000
 max_results = 100
 max_payload_bytes = 65536
-
-[code_intelligence.discovery]
-enabled = true
+auto_discover = true
 report_missing = true
 ```
 
 When enabled, the runtime registers read-only code intelligence tools plus LSP edit tools for code actions and symbol rename. Edit tools are `Write` tools and require a diff approval before files are changed. The TUI can use `Alt-D` to run diagnostics over git changed source files.
 
-With `discovery.enabled = true`, Sigil discovers common languages and safe LSP servers available on `PATH`. Explicit `code_intelligence.servers` entries are advanced overrides or additions.
+With `auto_discover = true`, Sigil discovers common languages and safe LSP servers available on `PATH`. Explicit `code_intelligence.servers` entries are advanced overrides or additions.
 
-The TUI `/config` panel includes a `Code Intel` section for `enabled`, `startup`, discovery, the read-only trust boundary, and readiness checks. The readiness rows reuse the same local doctor facts, so missing LSP commands show remediation before any language server is started.
+The TUI `/config` panel includes a `Code Intel` section for `enabled`, `server_startup`, `auto_discover`, the read-only trust boundary, and readiness checks. The readiness rows reuse the same local doctor facts, so missing LSP commands show remediation before any language server is started.
 
 Language server example:
 
@@ -394,7 +457,7 @@ osc52_clipboard = true
 scroll_sensitivity = 3
 ```
 
-`keyboard_enhancement` controls crossterm keyboard enhancement. The default `auto` probes the current terminal at TUI startup and requests enhanced key reporting only when supported. Use `on` to force the request, or `off` if the terminal, multiplexer, SSH layer, or embedded PTY mishandles the enhanced protocol. Legacy boolean values still load as `true = on` and `false = off`.
+`keyboard_enhancement` controls crossterm keyboard enhancement. The default `auto` probes the current terminal at TUI startup and requests enhanced key reporting only when supported. Use `on` to force the request, or `off` if the terminal, multiplexer, SSH layer, or embedded PTY mishandles the enhanced protocol.
 
 `mouse_capture` lets the TUI request terminal mouse events for clicks, scrolling, approval controls, setup/config/session selection, and transcript drag selection. It defaults off so terminal keyboard input remains reliable across multiplexers and embedded PTYs. Turn it on only if you want mouse support and your terminal handles mouse mode well; keyboard controls remain available.
 
@@ -421,7 +484,6 @@ job needs a different transport timeout without editing `sigil.toml`.
 
 DeepSeek:
 
-- `SIGIL_MODEL`
 - `SIGIL_API_KEY`
 - `SIGIL_BASE_URL`
 - `SIGIL_BETA_BASE_URL`
@@ -430,33 +492,30 @@ DeepSeek:
 - `SIGIL_USER_ID_STRATEGY`
 - `SIGIL_STRICT_TOOLS_MODE`
 
-`SIGIL_API_KEY` has the highest priority. `DEEPSEEK_API_KEY` remains a fallback source for the DeepSeek provider. If only `[providers.deepseek].api_key` is present, Sigil treats it as plaintext config auth and `doctor` reports a warning with remediation.
+`SIGIL_API_KEY` has the highest priority. If only `[providers.deepseek].api_key` is present, Sigil treats it as plaintext config auth and `doctor` reports a warning with remediation.
 
 OpenAI-compatible:
 
-- `SIGIL_OPENAI_COMPATIBLE_MODEL`
 - `SIGIL_OPENAI_COMPATIBLE_API_KEY`
 - `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
 
-`OPENAI_API_KEY` remains a fallback source for the OpenAI-compatible provider.
+Use `SIGIL_OPENAI_COMPATIBLE_API_KEY` for OpenAI-compatible provider auth. Generic OpenAI environment variables are ignored so Sigil credentials do not share state with other tools.
 
 Anthropic:
 
-- `SIGIL_ANTHROPIC_MODEL`
 - `SIGIL_ANTHROPIC_API_KEY`
 - `SIGIL_ANTHROPIC_BASE_URL`
 - `SIGIL_ANTHROPIC_VERSION`
 - `SIGIL_ANTHROPIC_MAX_TOKENS`
 
-`ANTHROPIC_API_KEY` remains a fallback source for the Anthropic provider.
+Use `SIGIL_ANTHROPIC_API_KEY` for Anthropic auth. Generic Anthropic environment variables are ignored.
 
 Gemini:
 
-- `SIGIL_GEMINI_MODEL`
 - `SIGIL_GEMINI_API_KEY`
 - `SIGIL_GEMINI_BASE_URL`
 
-`GEMINI_API_KEY` and `GOOGLE_API_KEY` remain fallback sources for the Gemini provider.
+Use `SIGIL_GEMINI_API_KEY` for Gemini auth. Generic Google/Gemini environment variables are ignored.
 
 ## Plugins
 

@@ -27,8 +27,7 @@ stream_idle_timeout_secs = 180
 
 [providers.openai_compat]
 base_url = "https://api.openai.com/v1"
-model = "gpt-4.1"
-# Prefer SIGIL_OPENAI_COMPATIBLE_API_KEY or OPENAI_API_KEY.
+# Prefer SIGIL_OPENAI_COMPATIBLE_API_KEY.
 # api_key = "sk-..."
 organization = "org_..."
 project = "proj_..."
@@ -41,8 +40,7 @@ A full starting template is available at [openai-compatible.toml](../examples/co
 Sigil resolves OpenAI-compatible authentication in this order:
 
 1. `SIGIL_OPENAI_COMPATIBLE_API_KEY`
-2. `OPENAI_API_KEY`
-3. `[providers.openai_compat].api_key`
+2. `[providers.openai_compat].api_key`
 
 Optional `organization` and `project` fields are only needed for endpoints/accounts that require them.
 
@@ -50,7 +48,6 @@ Optional `organization` and `project` fields are only needed for endpoints/accou
 
 | Variable | Overrides |
 | --- | --- |
-| `SIGIL_OPENAI_COMPATIBLE_MODEL` | `[providers.openai_compat].model` |
 | `SIGIL_OPENAI_COMPATIBLE_BASE_URL` | `[providers.openai_compat].base_url` |
 
 These overrides are useful for CI and local experiments where you do not want to edit `sigil.toml`.
@@ -76,6 +73,6 @@ Check that `[agent].provider` is `openai_compat`, the base URL includes the expe
 | Symptom | Check |
 | --- | --- |
 | 404 or route errors | Confirm `base_url` points to the Chat Completions-compatible `/v1` root. |
-| Auth fails despite `OPENAI_API_KEY` | Check whether `SIGIL_OPENAI_COMPATIBLE_API_KEY` is set to an older value and taking priority. |
+| Auth fails | Confirm `SIGIL_OPENAI_COMPATIBLE_API_KEY` or `[providers.openai_compat].api_key` is set. |
 | Tool calls are not accepted | Confirm the selected endpoint/model supports streamed tool calls. |
 | Wrong account/project is billed | Check `organization`, `project`, and provider dashboard settings. |

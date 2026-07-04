@@ -27,8 +27,7 @@ stream_idle_timeout_secs = 180
 
 [providers.openai_compat]
 base_url = "https://api.openai.com/v1"
-model = "gpt-4.1"
-# 优先使用 SIGIL_OPENAI_COMPATIBLE_API_KEY 或 OPENAI_API_KEY。
+# 优先使用 SIGIL_OPENAI_COMPATIBLE_API_KEY。
 # api_key = "sk-..."
 organization = "org_..."
 project = "proj_..."
@@ -41,8 +40,7 @@ project = "proj_..."
 Sigil 按这个顺序解析 OpenAI-compatible 认证：
 
 1. `SIGIL_OPENAI_COMPATIBLE_API_KEY`
-2. `OPENAI_API_KEY`
-3. `[providers.openai_compat].api_key`
+2. `[providers.openai_compat].api_key`
 
 `organization` 和 `project` 只在 endpoint 或账号要求时才需要。
 
@@ -50,7 +48,6 @@ Sigil 按这个顺序解析 OpenAI-compatible 认证：
 
 | 变量 | 覆盖 |
 | --- | --- |
-| `SIGIL_OPENAI_COMPATIBLE_MODEL` | `[providers.openai_compat].model` |
 | `SIGIL_OPENAI_COMPATIBLE_BASE_URL` | `[providers.openai_compat].base_url` |
 
 这些覆盖适合 CI 和本地实验，不需要修改 `sigil.toml`。
@@ -76,6 +73,6 @@ sigil doctor
 | 现象 | 检查 |
 | --- | --- |
 | 404 或 route 错误 | 确认 `base_url` 指向 Chat Completions-compatible `/v1` root。 |
-| 设置了 `OPENAI_API_KEY` 仍认证失败 | 检查是否存在旧的 `SIGIL_OPENAI_COMPATIBLE_API_KEY` 且优先级更高。 |
+| 认证失败 | 确认已设置 `SIGIL_OPENAI_COMPATIBLE_API_KEY` 或 `[providers.openai_compat].api_key`。 |
 | Tool calls 不被接受 | 确认所选 endpoint/model 支持 streamed tool calls。 |
 | 计费账号或 project 不对 | 检查 `organization`、`project` 和 provider 控制台设置。 |

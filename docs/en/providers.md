@@ -26,21 +26,21 @@ model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
+# Provider block contains endpoint/auth/provider-specific fields.
 ```
 
-Provider-level `model` should normally match `[agent].model`. Role-specific task settings can still override the inherited agent provider/model for planner, executor, or subagent roles.
+`[agent].model` is the single chat-model setting. Role-specific task settings can still override the inherited agent provider/model for planner, executor, or subagent roles.
 
 ## Authentication Priority
 
 Prefer environment variables for credentials. Plaintext `api_key` fields are supported for local-only configs, but `doctor` warns when a key is resolved only from config.
 
-| Provider | Highest-priority key | Fallbacks |
+| Provider | Environment key | Config fallback |
 | --- | --- | --- |
-| DeepSeek | `SIGIL_API_KEY` | `DEEPSEEK_API_KEY`, then `api_key` |
-| OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `OPENAI_API_KEY`, then `api_key` |
-| Anthropic | `SIGIL_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY`, then `api_key` |
-| Gemini | `SIGIL_GEMINI_API_KEY` | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, then `api_key` |
+| DeepSeek | `SIGIL_API_KEY` | `[providers.deepseek].api_key` |
+| OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `[providers.openai_compat].api_key` |
+| Anthropic | `SIGIL_ANTHROPIC_API_KEY` | `[providers.anthropic].api_key` |
+| Gemini | `SIGIL_GEMINI_API_KEY` | `[providers.gemini].api_key` |
 
 Run this after changing credentials:
 

@@ -115,8 +115,10 @@ macOS 上可以在 `~/.sigil/sigil.toml` 中为非交互命令显式启用 `maco
 
 ```toml
 [execution]
+strategy = "sandbox"
+
+[execution.sandbox]
 backend = "macos_seatbelt"
-isolation = "require_sandbox"
 ```
 
 这个 backend 会通过 `/usr/bin/sandbox-exec` 运行命令，允许读取文件系统、限制写入到命令工作目录，并且不在 sandbox profile 中开放网络访问。当前本地 handoff 路径可以在所选 backend 支持时，为非交互 shell、PTY、MCP stdio 和受信任 plugin hook command 记录 sandbox coverage。它不会让远端工具、所有容器/daemon 场景或不支持的平台获得等价 sandbox。
@@ -125,13 +127,15 @@ isolation = "require_sandbox"
 
 ```toml
 [execution]
+strategy = "sandbox"
+
+[execution.sandbox]
 backend = "docker"
-isolation = "require_sandbox"
 profile = "build_offline"
 container_image = "rust:1.94.1"
 ```
 
-Sigil 不会隐式选择或拉取容器镜像。选择 Docker backend 但未配置 `container_image` 时，启动和 doctor 检查会 fail closed。Docker backend 会 bind mount 命令工作目录，将 offline profile 映射为 `--network none`，并且只报告它预期能强制的 capability。PTY、MCP、plugin、远端和 daemon-style 路径使用各自的 coverage label；不支持时应 fail closed，而不是静默退回本地执行。
+Sigil 不会隐式选择或拉取容器镜像。选择 Docker backend 但未配置 `execution.sandbox.container_image` 时，配置解析、启动和 doctor 检查会 fail closed。Docker backend 会 bind mount 命令工作目录，将 offline profile 映射为 `--network none`，并且只报告它预期能强制的 capability。PTY、MCP、plugin、远端和 daemon-style 路径使用各自的 coverage label；不支持时应 fail closed，而不是静默退回本地执行。
 
 ## MCP Trust
 

@@ -27,8 +27,7 @@ stream_idle_timeout_secs = 180
 
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
-model = "claude-sonnet-4-5"
-# Prefer SIGIL_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY.
+# Prefer SIGIL_ANTHROPIC_API_KEY.
 # api_key = "sk-ant-..."
 anthropic_version = "2023-06-01"
 max_tokens = 4096
@@ -42,8 +41,7 @@ A full starting template is available at [anthropic.toml](../examples/config/ant
 Sigil resolves Anthropic authentication in this order:
 
 1. `SIGIL_ANTHROPIC_API_KEY`
-2. `ANTHROPIC_API_KEY`
-3. `[providers.anthropic].api_key`
+2. `[providers.anthropic].api_key`
 
 Prefer environment variables for local and CI use. Do not commit configs that contain plaintext `api_key` values.
 
@@ -51,7 +49,6 @@ Prefer environment variables for local and CI use. Do not commit configs that co
 
 | Variable | Overrides |
 | --- | --- |
-| `SIGIL_ANTHROPIC_MODEL` | `[providers.anthropic].model` |
 | `SIGIL_ANTHROPIC_BASE_URL` | `[providers.anthropic].base_url` |
 | `SIGIL_ANTHROPIC_VERSION` | `[providers.anthropic].anthropic_version` |
 | `SIGIL_ANTHROPIC_MAX_TOKENS` | `[providers.anthropic].max_tokens` |
@@ -78,5 +75,5 @@ Check provider name, model, `anthropic_version`, base URL, and API key source.
 | --- | --- |
 | Request rejected for version/header reasons | Confirm `anthropic_version` and `beta_headers`. |
 | Output stops early | Review `max_tokens` and model limits. |
-| Auth uses the wrong key | Check whether `SIGIL_ANTHROPIC_API_KEY` overrides `ANTHROPIC_API_KEY`. |
+| Auth uses the wrong key | Confirm `SIGIL_ANTHROPIC_API_KEY` or `[providers.anthropic].api_key` is set to the intended value. |
 | Tool-use behavior differs from another provider | Compare provider support and keep permission policy unchanged while testing. |

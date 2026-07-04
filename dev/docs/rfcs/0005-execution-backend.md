@@ -69,11 +69,11 @@ pub trait ExecutionBackend {
 ## 5. Implementation Progress
 
 - 已新增 kernel-level `ExecutionBackend`、`ExecutionRequest`、`ExecutionReceipt`、`ExecutionBackendKind` 和 `ExecutionBackendCapabilities`。
-- 已新增 kernel-level `ExecutionConfig` 与 `ExecutionIsolationPolicy`：
-  - 默认 `backend = "local"`。
-  - 默认 `isolation = "allow_local"`。
-  - 显式 `isolation = "require_sandbox"` 要求 backend 提供 filesystem 和 process isolation。
-- 已新增 `backend = "macos_seatbelt"`，在 macOS 上通过 `/usr/bin/sandbox-exec` 执行非交互命令。
+- 已新增 kernel-level `ExecutionConfig` strategy：
+  - 默认 `strategy = "local"`。
+  - `strategy = "sandbox"` 必须配置 `[execution.sandbox]`。
+  - sandbox strategy 要求 backend 提供 filesystem 和 process isolation。
+- 已新增 `[execution.sandbox].backend = "macos_seatbelt"`，在 macOS 上通过 `/usr/bin/sandbox-exec` 执行非交互命令。
   - profile 允许全文件系统读取。
   - profile 只允许写入命令 working directory。
   - backend 不声明 `network_isolation`；因此 `Sandboxed` verification policy 不会把该 backend 当成已证明强制禁网。
@@ -130,8 +130,8 @@ pub trait ExecutionBackend {
   - backend selection failure 能携带 requested backend、profile、missing capabilities、availability reason 和 fallback decision。
   - `fallback = "deny"` 默认 fail closed；`fallback = "prompt"` 在非交互 builder 中仍 fail closed；只有显式 `fallback = "unconfined"` 才可降级到 local。
 - 已实现 E05.9 Docker backend MVP：
-  - 新增 `backend = "docker"`。
-  - Docker backend 必须显式配置 `[execution].container_image`，不会隐式选择或拉取镜像。
+  - 新增 `[execution.sandbox].backend = "docker"`。
+  - Docker backend 必须显式配置 `[execution.sandbox].container_image`，不会隐式选择或拉取镜像。
   - backend selection 会先检查 Docker daemon 和 configured image；missing daemon / missing image 会 fail closed。
   - command 通过 `docker run --rm --workdir <cwd> --mount type=bind,src=<cwd>,dst=<cwd>` 执行。
   - `network_allowed = false` 的 profile 会添加 `--network none`。
@@ -149,7 +149,7 @@ pub trait ExecutionBackend {
   - Local non-interactive backend timeout path 使用 process group 做 best-effort cleanup，并把结果写入 receipt。
   - verification durable check payload 记录 `execution_resources`，TUI bash tool card 显示 timeout/cleanup 简短事实。
 - 已实现 E05.8 Linux Bubblewrap backend code path：
-  - 新增 `backend = "linux_bubblewrap"`。
+  - 新增 `[execution.sandbox].backend = "linux_bubblewrap"`。
   - backend selection 在非 Linux、缺 `bwrap` 或 namespace smoke check 失败时 fail closed。
   - non-interactive command path 使用 bwrap 构造 read-only host root、writable workspace/cwd、writable `$SIGIL_SCRATCH_DIR`、tmpfs `/tmp`、PID namespace、die-with-parent 和 offline `--unshare-net`。
   - bwrap args 先挂载 tmpfs `/tmp`，再创建 `/tmp` 下 bind destination 父目录并绑定 workspace/scratch，避免 tempfile workspace 被 tmpfs 遮住。

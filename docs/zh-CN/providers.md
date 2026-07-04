@@ -26,21 +26,21 @@ model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
+# Provider 区块只放 endpoint、认证和 provider 专项字段。
 ```
 
-Provider 级 `model` 通常应和 `[agent].model` 保持一致。计划任务中的 planner、executor 或 subagent role 仍可单独覆盖继承到的 agent provider/model。
+`[agent].model` 是唯一聊天模型配置。计划任务中的 planner、executor 或 subagent role 仍可单独覆盖继承到的 agent provider/model。
 
 ## 认证优先级
 
 凭据优先使用环境变量。明文 `api_key` 字段仍然支持本地私有配置，但当 key 只来自配置文件时，`doctor` 会给出 warning。
 
-| Provider | 最高优先级 key | 备用来源 |
+| Provider | 环境变量 key | 配置文件备用 |
 | --- | --- | --- |
-| DeepSeek | `SIGIL_API_KEY` | `DEEPSEEK_API_KEY`，然后 `api_key` |
-| OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `OPENAI_API_KEY`，然后 `api_key` |
-| Anthropic | `SIGIL_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY`，然后 `api_key` |
-| Gemini | `SIGIL_GEMINI_API_KEY` | `GEMINI_API_KEY`、`GOOGLE_API_KEY`，然后 `api_key` |
+| DeepSeek | `SIGIL_API_KEY` | `[providers.deepseek].api_key` |
+| OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `[providers.openai_compat].api_key` |
+| Anthropic | `SIGIL_ANTHROPIC_API_KEY` | `[providers.anthropic].api_key` |
+| Gemini | `SIGIL_GEMINI_API_KEY` | `[providers.gemini].api_key` |
 
 修改凭据后运行：
 

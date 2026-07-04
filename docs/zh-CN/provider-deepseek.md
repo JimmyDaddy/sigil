@@ -29,7 +29,6 @@ stream_idle_timeout_secs = 180
 base_url = "https://api.deepseek.com"
 beta_base_url = "https://api.deepseek.com/beta"
 anthropic_base_url = "https://api.deepseek.com/anthropic"
-model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
 # 推荐优先使用 SIGIL_API_KEY；如果写在这里，会以 plaintext 保存。
 # api_key = "sk-..."
@@ -44,8 +43,7 @@ strict_tools_mode = "auto"
 Sigil 按这个顺序解析 DeepSeek 认证：
 
 1. `SIGIL_API_KEY`
-2. `DEEPSEEK_API_KEY`
-3. `[providers.deepseek].api_key`
+2. `[providers.deepseek].api_key`
 
 本地 shell 和 CI 优先用 `SIGIL_API_KEY`。如果通过 `/config` 保存 `api_key`，它会以明文写入 `sigil.toml`；请确保该文件不会被提交。
 
@@ -53,7 +51,6 @@ Sigil 按这个顺序解析 DeepSeek 认证：
 
 | 字段 | 用途 |
 | --- | --- |
-| `model` | Agent 默认使用的主 chat model，除非 role 单独覆盖。 |
 | `fim_model` | 可用时用于 DeepSeek FIM 相关流程的模型。 |
 | `base_url` | DeepSeek 主 API endpoint。 |
 | `beta_base_url` | 需要 beta 能力时使用的 DeepSeek beta endpoint。 |
@@ -79,6 +76,6 @@ sigil doctor
 | --- | --- |
 | Sigil 又进入 setup | 确认配置查找顺序找到了预期 `sigil.toml`。 |
 | 认证失败 | 确认 `SIGIL_API_KEY` 设置在启动 `sigil` 的同一个 shell 中。 |
-| 使用了错误 model | 同时检查 `[agent].model` 和 `[providers.deepseek].model`。 |
+| 使用了错误 model | 检查 `[agent].model` 和 role-specific task model override。 |
 | 响应慢或中断 | 检查网络，并考虑 `[model_request].stream_idle_timeout_secs`。 |
 | FIM 行为不可用 | 确认 `fim_model` 已配置且 endpoint 支持。 |

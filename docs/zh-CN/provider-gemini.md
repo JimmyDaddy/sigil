@@ -27,8 +27,7 @@ stream_idle_timeout_secs = 180
 
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
-model = "gemini-2.5-pro"
-# 优先使用 SIGIL_GEMINI_API_KEY、GEMINI_API_KEY 或 GOOGLE_API_KEY。
+# 优先使用 SIGIL_GEMINI_API_KEY。
 # api_key = "..."
 ```
 
@@ -39,9 +38,7 @@ model = "gemini-2.5-pro"
 Sigil 按这个顺序解析 Gemini 认证：
 
 1. `SIGIL_GEMINI_API_KEY`
-2. `GEMINI_API_KEY`
-3. `GOOGLE_API_KEY`
-4. `[providers.gemini].api_key`
+2. `[providers.gemini].api_key`
 
 如果希望 Sigil 使用专属凭据，同时不影响同一个 shell 里的其他 Google 工具，优先使用 `SIGIL_GEMINI_API_KEY`。
 
@@ -49,14 +46,13 @@ Sigil 按这个顺序解析 Gemini 认证：
 
 | 变量 | 覆盖 |
 | --- | --- |
-| `SIGIL_GEMINI_MODEL` | `[providers.gemini].model` |
 | `SIGIL_GEMINI_BASE_URL` | `[providers.gemini].base_url` |
 
 ## 行为说明
 
 Sigil 会在 provider crate 内把 provider-neutral messages、tool specs、function calls、function responses、usage 和 block reasons 映射到 Gemini 协议细节。Gemini 专属的 `systemInstruction`、`functionDeclarations` 和 `functionResponse` 细节不进入 `sigil-kernel`。
 
-Gemini model 名称和 endpoint 可用性可能随账号和区域变化。自动化使用时，请在配置里显式写明 model 名称。
+Gemini model 名称和 endpoint 可用性可能随账号和区域变化。自动化使用时，请显式配置 `[agent].model`。
 
 ## 验证
 
@@ -72,7 +68,7 @@ sigil doctor
 
 | 现象 | 检查 |
 | --- | --- |
-| 认证失败 | 确认 `SIGIL_GEMINI_API_KEY`、`GEMINI_API_KEY` 或 `GOOGLE_API_KEY` 哪一个对 `sigil` 进程可见。 |
+| 认证失败 | 确认 `SIGIL_GEMINI_API_KEY` 或 `[providers.gemini].api_key` 对 `sigil` 进程可见。 |
 | 找不到 model | 确认 Gemini model 名称和 endpoint version。 |
 | Tool/function calls 失败 | 确认该 model 和 endpoint 对你的账号支持 function calling。 |
 | 请求超时 | 检查网络，并考虑 `[model_request].stream_idle_timeout_secs`。 |

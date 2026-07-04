@@ -19,6 +19,5 @@ read = "allow"
 
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
-model = "gemini-2.5-pro"
-# Prefer SIGIL_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY.
+# Prefer SIGIL_GEMINI_API_KEY.
 # api_key = "..."

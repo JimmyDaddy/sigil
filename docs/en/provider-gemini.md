@@ -27,8 +27,7 @@ stream_idle_timeout_secs = 180
 
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
-model = "gemini-2.5-pro"
-# Prefer SIGIL_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY.
+# Prefer SIGIL_GEMINI_API_KEY.
 # api_key = "..."
 ```
 
@@ -39,9 +38,7 @@ A full starting template is available at [gemini.toml](../examples/config/gemini
 Sigil resolves Gemini authentication in this order:
 
 1. `SIGIL_GEMINI_API_KEY`
-2. `GEMINI_API_KEY`
-3. `GOOGLE_API_KEY`
-4. `[providers.gemini].api_key`
+2. `[providers.gemini].api_key`
 
 Prefer `SIGIL_GEMINI_API_KEY` when you want Sigil-specific credentials without affecting other Google tooling in the same shell.
 
@@ -49,14 +46,13 @@ Prefer `SIGIL_GEMINI_API_KEY` when you want Sigil-specific credentials without a
 
 | Variable | Overrides |
 | --- | --- |
-| `SIGIL_GEMINI_MODEL` | `[providers.gemini].model` |
 | `SIGIL_GEMINI_BASE_URL` | `[providers.gemini].base_url` |
 
 ## Behavior Notes
 
 Sigil maps provider-neutral messages, tool specs, function calls, function responses, usage, and block reasons into Gemini protocol details inside the provider crate. Gemini-specific `systemInstruction`, `functionDeclarations`, and `functionResponse` details stay out of `sigil-kernel`.
 
-Gemini model names and endpoint availability can vary by account and region. Keep the model name explicit in config when using this provider in automation.
+Gemini model names and endpoint availability can vary by account and region. Keep `[agent].model` explicit when using this provider in automation.
 
 ## Verify
 
@@ -72,7 +68,7 @@ Check provider name, model, base URL and API key source.
 
 | Symptom | Check |
 | --- | --- |
-| Authentication fails | Confirm which of `SIGIL_GEMINI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY` is visible to the `sigil` process. |
+| Authentication fails | Confirm `SIGIL_GEMINI_API_KEY` or `[providers.gemini].api_key` is visible to the `sigil` process. |
 | Model not found | Confirm the exact Gemini model name and endpoint version. |
 | Tool/function calls fail | Confirm the model and endpoint support function calling for your account. |
 | Requests time out | Check network access and consider `[model_request].stream_idle_timeout_secs`. |

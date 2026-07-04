@@ -62,7 +62,7 @@ DeepSeek 推荐：
 export SIGIL_API_KEY="sk-..."
 ```
 
-旧环境变量 `DEEPSEEK_API_KEY` 仍作为 DeepSeek provider 的 fallback。
+通用 `DEEPSEEK_API_KEY` 会被忽略。请使用 `SIGIL_API_KEY` 或 `[providers.deepseek].api_key`。
 
 OpenAI-compatible provider 推荐：
 
@@ -70,7 +70,7 @@ OpenAI-compatible provider 推荐：
 export SIGIL_OPENAI_COMPATIBLE_API_KEY="sk-..."
 ```
 
-`OPENAI_API_KEY` 是 OpenAI-compatible provider 的 fallback。
+通用 `OPENAI_API_KEY` 会被忽略。请使用 `SIGIL_OPENAI_COMPATIBLE_API_KEY` 或 `[providers.openai_compat].api_key`。
 
 Anthropic 推荐：
 
@@ -78,7 +78,7 @@ Anthropic 推荐：
 export SIGIL_ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-`ANTHROPIC_API_KEY` 是 Anthropic provider 的 fallback。
+通用 `ANTHROPIC_API_KEY` 会被忽略。请使用 `SIGIL_ANTHROPIC_API_KEY` 或 `[providers.anthropic].api_key`。
 
 Gemini 推荐：
 
@@ -86,7 +86,7 @@ Gemini 推荐：
 export SIGIL_GEMINI_API_KEY="..."
 ```
 
-`GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 是 Gemini provider 的 fallback。
+通用 `GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 会被忽略。请使用 `SIGIL_GEMINI_API_KEY` 或 `[providers.gemini].api_key`。
 
 如果通过 `/config` 保存 key，它会以明文写入 `sigil.toml`。私有本地配置可以这样做，但不要提交。
 

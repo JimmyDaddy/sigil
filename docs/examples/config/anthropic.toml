@@ -19,8 +19,7 @@ read = "allow"
 
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
-model = "claude-sonnet-4-5"
 anthropic_version = "2023-06-01"
 max_tokens = 4096
-# Prefer SIGIL_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY.
+# Prefer SIGIL_ANTHROPIC_API_KEY.
 # api_key = "sk-ant-..."
