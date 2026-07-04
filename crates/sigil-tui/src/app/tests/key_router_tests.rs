@@ -30,7 +30,7 @@ fn key_router_maps_activity_agent_list_keys_without_sidebar_fallback() {
 }
 
 #[test]
-fn key_router_maps_approval_keys_before_legacy_fallbacks() {
+fn key_router_maps_approval_keys_before_text_fallbacks() {
     assert_eq!(
         resolve_binding(InputContext::ApprovalModal, key(KeyCode::Enter)),
         Some(RoutedKeyCommand::ApprovalSelect)

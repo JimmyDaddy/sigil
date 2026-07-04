@@ -23,9 +23,8 @@ use crate::{
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        if let SessionStreamRecord::Stored(event) = record {
-            event_types.push(event.event_type);
-        }
+        let SessionStreamRecord::Stored(event) = record;
+        event_types.push(event.event_type);
     }
     Ok(event_types)
 }
@@ -53,9 +52,8 @@ fn artifact_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn first_prepared_payload(store: &JsonlSessionStore) -> Result<MutationPrepared> {
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        if let SessionStreamRecord::Stored(event) = record
-            && event.event_type == DurableEventType::MutationPrepared.as_str()
-        {
+        let SessionStreamRecord::Stored(event) = record;
+        if event.event_type == DurableEventType::MutationPrepared.as_str() {
             return serde_json::from_value(event.payload)
                 .map_err(|error| anyhow::anyhow!("failed to decode mutation prepared: {error}"));
         }
@@ -66,9 +64,8 @@ fn first_prepared_payload(store: &JsonlSessionStore) -> Result<MutationPrepared>
 fn checkpoint_restored_payloads(store: &JsonlSessionStore) -> Result<Vec<CheckpointRestored>> {
     let mut payloads = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        if let SessionStreamRecord::Stored(event) = record
-            && event.event_type == DurableEventType::CheckpointRestored.as_str()
-        {
+        let SessionStreamRecord::Stored(event) = record;
+        if event.event_type == DurableEventType::CheckpointRestored.as_str() {
             payloads.push(serde_json::from_value(event.payload)?);
         }
     }
@@ -80,9 +77,8 @@ fn artifact_lifecycle_payloads(
 ) -> Result<Vec<MutationArtifactLifecycleRecorded>> {
     let mut payloads = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        if let SessionStreamRecord::Stored(event) = record
-            && event.event_type == DurableEventType::MutationArtifactLifecycleRecorded.as_str()
-        {
+        let SessionStreamRecord::Stored(event) = record;
+        if event.event_type == DurableEventType::MutationArtifactLifecycleRecorded.as_str() {
             payloads.push(serde_json::from_value(event.payload)?);
         }
     }
@@ -94,9 +90,8 @@ fn artifact_cleanup_request_payloads(
 ) -> Result<Vec<MutationArtifactCleanupRequested>> {
     let mut payloads = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        if let SessionStreamRecord::Stored(event) = record
-            && event.event_type == DurableEventType::MutationArtifactCleanupRequested.as_str()
-        {
+        let SessionStreamRecord::Stored(event) = record;
+        if event.event_type == DurableEventType::MutationArtifactCleanupRequested.as_str() {
             payloads.push(serde_json::from_value(event.payload)?);
         }
     }
@@ -116,9 +111,8 @@ fn captured_artifact_id(
         .coordinator(workspace, file_name, None)?
         .prepare_file(file_name, &target, Some(bytes_hash(new_content.as_bytes())))?;
     for record in JsonlSessionStore::read_event_records(recorder.store.path())? {
-        if let SessionStreamRecord::Stored(event) = record
-            && event.event_type == DurableEventType::MutationPrepared.as_str()
-        {
+        let SessionStreamRecord::Stored(event) = record;
+        if event.event_type == DurableEventType::MutationPrepared.as_str() {
             let payload = serde_json::from_value::<MutationPrepared>(event.payload)?;
             if payload.operation_id != prepared.operation_id {
                 continue;
@@ -904,7 +898,6 @@ fn controlled_directory_delete_rejects_non_empty_before_prepare() -> Result<()> 
             SessionStreamRecord::Stored(event) => {
                 event.event_type == DurableEventType::MutationPrepared.as_str()
             }
-            SessionStreamRecord::Legacy { .. } => false,
         })
         .count();
     assert_eq!(prepared_events, 0);
@@ -1207,12 +1200,12 @@ fn checkpoint_restore_rejects_subject_absolute_path_mismatch_before_read() -> Re
 }
 
 #[test]
-fn legacy_workspace_session_artifacts_default_outside_workspace_sigil_dir() -> Result<()> {
+fn workspace_local_session_artifacts_default_outside_workspace_sigil_dir() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
-    let legacy_session = workspace.join(".sigil/sessions/session.jsonl");
+    let workspace_local_session = workspace.join(".sigil/sessions/session.jsonl");
 
-    let root = super::default_mutation_artifact_root(&legacy_session);
+    let root = super::default_mutation_artifact_root(&workspace_local_session);
 
     assert!(!root.starts_with(workspace.join(".sigil")));
     assert!(root.ends_with(Path::new("artifacts").join("mutations")));
@@ -1220,7 +1213,7 @@ fn legacy_workspace_session_artifacts_default_outside_workspace_sigil_dir() -> R
 }
 
 #[test]
-fn no_recorder_paths_keep_legacy_write_and_delete_behavior() -> Result<()> {
+fn no_recorder_paths_reject_workspace_mutations() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -1229,44 +1222,44 @@ fn no_recorder_paths_keep_legacy_write_and_delete_behavior() -> Result<()> {
     let write = write_file_with_mutation(
         None,
         &workspace,
-        "tool-call-legacy",
+        "tool-call",
         "nested/note.txt",
         &target,
-        b"legacy",
-    )?;
-    assert!(write.is_none());
-    assert_eq!(fs::read_to_string(&target)?, "legacy");
-
-    let delete = delete_file_with_mutation(
-        None,
-        &workspace,
-        "tool-call-legacy",
-        "nested/note.txt",
-        &target,
-    )?;
-    assert!(delete.is_none());
+        b"content",
+    )
+    .expect_err("missing recorder should reject file writes");
+    assert!(write.to_string().contains("mutation recorder is required"));
     assert!(!target.exists());
 
-    let legacy_dir = workspace.join("legacy-dir");
-    let created_dir = create_directory_with_mutation(
-        None,
-        &workspace,
-        "tool-call-legacy-dir",
-        "legacy-dir",
-        &legacy_dir,
-    )?;
-    assert!(created_dir.is_none());
-    assert!(legacy_dir.is_dir());
+    fs::create_dir_all(target.parent().expect("nested parent"))?;
+    fs::write(&target, "content")?;
+    let delete =
+        delete_file_with_mutation(None, &workspace, "tool-call", "nested/note.txt", &target)
+            .expect_err("missing recorder should reject file deletes");
+    assert!(delete.to_string().contains("mutation recorder is required"));
+    assert!(target.exists());
 
-    let deleted_dir = delete_directory_with_mutation(
-        None,
-        &workspace,
-        "tool-call-legacy-dir",
-        "legacy-dir",
-        &legacy_dir,
-    )?;
-    assert!(deleted_dir.is_none());
-    assert!(!legacy_dir.exists());
+    let dir = workspace.join("tracked-dir");
+    let created_dir =
+        create_directory_with_mutation(None, &workspace, "tool-call-dir", "tracked-dir", &dir)
+            .expect_err("missing recorder should reject directory creates");
+    assert!(
+        created_dir
+            .to_string()
+            .contains("mutation recorder is required")
+    );
+    assert!(!dir.exists());
+
+    fs::create_dir(&dir)?;
+    let deleted_dir =
+        delete_directory_with_mutation(None, &workspace, "tool-call-dir", "tracked-dir", &dir)
+            .expect_err("missing recorder should reject directory deletes");
+    assert!(
+        deleted_dir
+            .to_string()
+            .contains("mutation recorder is required")
+    );
+    assert!(dir.exists());
     Ok(())
 }
 
@@ -1562,17 +1555,11 @@ fn reconciliation_covers_terminal_not_applied_intended_and_conflict_states() -> 
 }
 
 #[test]
-fn reconciliation_skips_legacy_records_and_marks_workspace_subject_unknown() -> Result<()> {
+fn reconciliation_marks_workspace_subject_unknown_without_prior_workspace_snapshot() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
-    let store_path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy entry"));
-    fs::write(
-        &store_path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
-    let store = JsonlSessionStore::new(store_path)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let recorder = MutationEventRecorder::new(store.clone());
     recorder.append_prepared(&crate::MutationPrepared {
         operation_id: "operation-workspace".to_owned(),
@@ -1642,13 +1629,7 @@ fn file_hash_reports_unreadable_non_file_paths() -> Result<()> {
 #[test]
 fn defensive_helpers_and_latest_revision_cover_error_edges() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let store_path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy entry"));
-    fs::write(
-        &store_path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
-    let store = JsonlSessionStore::new(store_path)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     store.append_event(
         DurableEventType::MutationReconciled,
         EventClass::Critical,
@@ -1949,14 +1930,14 @@ fn execution_mutation_profile_captures_pre_execution_snapshot() -> Result<()> {
 }
 
 #[test]
-fn execution_mutation_profile_reconcile_skips_legacy_records() -> Result<()> {
+fn execution_mutation_profile_reconcile_ignores_prior_session_entries_when_clean() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
     fs::write(workspace.join("note.txt"), "same")?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     store.append(&SessionLogEntry::User(ModelMessage::user(
-        "legacy before profile",
+        "raw before profile",
     )))?;
     let recorder = MutationEventRecorder::new(store);
     let scope = VerificationScope::all_tracked("scope-main");

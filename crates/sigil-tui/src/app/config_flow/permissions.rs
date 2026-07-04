@@ -4,6 +4,10 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     lines.push("[permissions]".to_owned());
     lines.push(render_config_value_row(
         config_state,
+        ConfigField::PermissionsPreset,
+    ));
+    lines.push(render_config_value_row(
+        config_state,
         ConfigField::PermissionsDefaultMode,
     ));
     lines.push(String::new());

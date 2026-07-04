@@ -64,7 +64,7 @@ pub struct ProviderCapabilityView {
     pub rows: Vec<ProviderCapabilityRow>,
 }
 
-/// Returns static provider capabilities for a configured provider name or alias.
+/// Returns static provider capabilities for a configured provider name.
 #[must_use]
 pub fn provider_capabilities_for_name(provider_name: &str) -> Option<ProviderCapabilities> {
     match provider_config_key(provider_name) {
@@ -263,7 +263,10 @@ pub fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProvider
         .get("deepseek")
         .cloned()
         .ok_or_else(|| anyhow!("missing [providers.deepseek] in sigil.toml"))?;
-    serde_json::from_value(provider_config_value).context("invalid deepseek provider config")
+    let mut config: DeepSeekProviderConfig = serde_json::from_value(provider_config_value)
+        .context("invalid deepseek provider config")?;
+    config.model = root_config.agent.model.clone();
+    Ok(config)
 }
 
 /// Parses the OpenAI-compatible provider block from the shared root config.
@@ -279,7 +282,10 @@ pub fn load_openai_compat_config(
         .get("openai_compat")
         .cloned()
         .ok_or_else(|| anyhow!("missing [providers.openai_compat] in sigil.toml"))?;
-    serde_json::from_value(provider_config_value).context("invalid openai_compat provider config")
+    let mut config: OpenAiCompatibleProviderConfig = serde_json::from_value(provider_config_value)
+        .context("invalid openai_compat provider config")?;
+    config.model = root_config.agent.model.clone();
+    Ok(config)
 }
 
 /// Parses the Anthropic provider block from the shared root config.
@@ -293,7 +299,10 @@ pub fn load_anthropic_config(root_config: &RootConfig) -> Result<AnthropicProvid
         .get("anthropic")
         .cloned()
         .ok_or_else(|| anyhow!("missing [providers.anthropic] in sigil.toml"))?;
-    serde_json::from_value(provider_config_value).context("invalid anthropic provider config")
+    let mut config: AnthropicProviderConfig = serde_json::from_value(provider_config_value)
+        .context("invalid anthropic provider config")?;
+    config.model = root_config.agent.model.clone();
+    Ok(config)
 }
 
 /// Parses the Gemini provider block from the shared root config.
@@ -307,7 +316,10 @@ pub fn load_gemini_config(root_config: &RootConfig) -> Result<GeminiProviderConf
         .get("gemini")
         .cloned()
         .ok_or_else(|| anyhow!("missing [providers.gemini] in sigil.toml"))?;
-    serde_json::from_value(provider_config_value).context("invalid gemini provider config")
+    let mut config: GeminiProviderConfig =
+        serde_json::from_value(provider_config_value).context("invalid gemini provider config")?;
+    config.model = root_config.agent.model.clone();
+    Ok(config)
 }
 
 /// Source used for a resolved runtime secret.
@@ -377,13 +389,11 @@ pub fn resolve_deepseek_api_key_with_session(
     config: &DeepSeekProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    for name in [SIGIL_API_KEY_ENV, LEGACY_DEEPSEEK_API_KEY_ENV] {
-        if let Some(value) = read_secret_env(name) {
-            return Some(SecretResolution {
-                value,
-                source: SecretSource::Environment(name),
-            });
-        }
+    if let Some(value) = read_secret_env(SIGIL_API_KEY_ENV) {
+        return Some(SecretResolution {
+            value,
+            source: SecretSource::Environment(SIGIL_API_KEY_ENV),
+        });
     }
     if let Some(value) = session_value
         .map(str::trim)
@@ -417,13 +427,11 @@ pub fn resolve_openai_compat_api_key_with_session(
     config: &OpenAiCompatibleProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    for name in [OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_API_KEY_ENV] {
-        if let Some(value) = read_secret_env(name) {
-            return Some(SecretResolution {
-                value,
-                source: SecretSource::Environment(name),
-            });
-        }
+    if let Some(value) = read_secret_env(OPENAI_COMPATIBLE_API_KEY_ENV) {
+        return Some(SecretResolution {
+            value,
+            source: SecretSource::Environment(OPENAI_COMPATIBLE_API_KEY_ENV),
+        });
     }
     if let Some(value) = session_value
         .map(str::trim)
@@ -455,13 +463,11 @@ pub fn resolve_anthropic_api_key_with_session(
     config: &AnthropicProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    for name in [SIGIL_ANTHROPIC_API_KEY_ENV, ANTHROPIC_API_KEY_ENV] {
-        if let Some(value) = read_secret_env(name) {
-            return Some(SecretResolution {
-                value,
-                source: SecretSource::Environment(name),
-            });
-        }
+    if let Some(value) = read_secret_env(SIGIL_ANTHROPIC_API_KEY_ENV) {
+        return Some(SecretResolution {
+            value,
+            source: SecretSource::Environment(SIGIL_ANTHROPIC_API_KEY_ENV),
+        });
     }
     if let Some(value) = session_value
         .map(str::trim)
@@ -493,17 +499,11 @@ pub fn resolve_gemini_api_key_with_session(
     config: &GeminiProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    for name in [
-        SIGIL_GEMINI_API_KEY_ENV,
-        GEMINI_API_KEY_ENV,
-        GOOGLE_API_KEY_ENV,
-    ] {
-        if let Some(value) = read_secret_env(name) {
-            return Some(SecretResolution {
-                value,
-                source: SecretSource::Environment(name),
-            });
-        }
+    if let Some(value) = read_secret_env(SIGIL_GEMINI_API_KEY_ENV) {
+        return Some(SecretResolution {
+            value,
+            source: SecretSource::Environment(SIGIL_GEMINI_API_KEY_ENV),
+        });
     }
     if let Some(value) = session_value
         .map(str::trim)
@@ -568,22 +568,11 @@ fn root_config_with_role_agent(
     }
     if let Some(model) = role_config.model.as_deref() {
         resolved.agent.model = model.to_owned();
-        let provider_key = provider_config_key(&resolved.agent.provider).to_owned();
-        if let Some(provider_config) = resolved.providers.get_mut(&provider_key)
-            && let Some(object) = provider_config.as_object_mut()
-        {
-            object.insert("model".to_owned(), Value::String(model.to_owned()));
-        }
     }
     resolved
 }
 
 #[must_use]
 pub fn provider_config_key(provider: &str) -> &str {
-    match provider {
-        "openai-compatible" | "openai_compatible" => "openai_compat",
-        "claude" => "anthropic",
-        "google" | "google_gemini" | "google-gemini" => "gemini",
-        other => other,
-    }
+    provider.trim()
 }

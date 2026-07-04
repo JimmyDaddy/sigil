@@ -12,8 +12,8 @@ use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
     EventHandler, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess, ToolCall,
-    ToolCategory, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolProgressEvent, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
+    ToolCategory, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
+    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
 };
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tokio::{
@@ -195,7 +195,7 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
     );
 
     let progress = render_run_event(RunEvent::ToolProgress(ToolProgressEvent {
-        execution_id: "execution-1".to_owned(),
+        execution_id: ToolExecutionId::new("execution-1").expect("valid tool execution id"),
         call_id: "call-1".to_owned(),
         tool_name: "terminal_start".to_owned(),
         sequence: 1,
@@ -881,7 +881,6 @@ request_timeout_secs = 5
 base_url = "{base_url}"
 beta_base_url = "{base_url}"
 anthropic_base_url = "{base_url}"
-model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
 api_key = "test-key"
 strict_tools_mode = "auto"

@@ -165,7 +165,6 @@ pub(super) fn agent_profile_source_summary(source: &AgentProfileSource) -> Strin
         AgentProfileSource::Plugin { plugin_id } => format!("plugin:{plugin_id}"),
         AgentProfileSource::Compatibility { provider } => format!("compat:{provider}"),
         AgentProfileSource::System => "system".to_owned(),
-        AgentProfileSource::LegacyTask => "legacy_task".to_owned(),
         AgentProfileSource::Unknown => "unknown".to_owned(),
     }
 }

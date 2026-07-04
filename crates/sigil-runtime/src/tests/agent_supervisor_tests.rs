@@ -262,7 +262,6 @@ fn root_config() -> RootConfig {
             "deepseek".to_owned(),
             json!({
                 "base_url": "https://example.com",
-                "model": "deepseek-v4-flash",
             }),
         )]),
         mcp_servers: Vec::new(),
@@ -580,8 +579,7 @@ fn chat_child_start_rejects_write_capable_profile_without_lease_support() -> Res
 fn record_chat_child_failure_appends_failed_status_and_releases_budget() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_parallel_readonly = 2;
-    budget.max_threads = 2;
+    budget.max_subagents = 2;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -614,8 +612,7 @@ fn record_chat_child_failure_appends_failed_status_and_releases_budget() -> Resu
 fn record_chat_child_result_persists_final_answer_ref_and_releases_budget() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_parallel_readonly = 2;
-    budget.max_threads = 2;
+    budget.max_subagents = 2;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -664,9 +661,7 @@ fn record_chat_child_result_persists_final_answer_ref_and_releases_budget() -> R
 fn send_agent_message_reports_inactive_thread_and_missing_mailbox() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_threads = 2;
-    budget.max_parallel_readonly = 2;
-    budget.max_background_threads = 1;
+    budget.max_subagents = 2;
     let supervisor = supervisor_with_budget(budget)?;
 
     let inactive_error = supervisor
@@ -730,9 +725,7 @@ fn send_agent_message_reports_inactive_thread_and_missing_mailbox() -> Result<()
 async fn route_agent_message_records_mailbox_delivery_state() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_threads = 2;
-    budget.max_parallel_readonly = 2;
-    budget.max_background_threads = 1;
+    budget.max_subagents = 2;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -776,12 +769,10 @@ async fn route_agent_message_records_mailbox_delivery_state() -> Result<()> {
 }
 
 #[test]
-fn foreground_background_request_reports_budget_and_missing_foreground() -> Result<()> {
+fn foreground_background_request_reports_missing_foreground() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_threads = 2;
-    budget.max_parallel_readonly = 2;
-    budget.max_background_threads = 1;
+    budget.max_subagents = 2;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -799,10 +790,13 @@ fn foreground_background_request_reports_budget_and_missing_foreground() -> Resu
     background_start.invocation_mode = AgentInvocationMode::Background;
     supervisor.begin_chat_child_thread(&mut session, &mut handler, background_start)?;
 
-    let budget_error = supervisor
+    let missing_foreground = supervisor
         .request_foreground_background()
-        .expect_err("background budget should be enforced before searching foreground children");
-    assert!(budget_error.contains("[task].max_background_threads=1"));
+        .expect_err("background-only state has no foreground child to move");
+    assert_eq!(
+        missing_foreground,
+        "no foreground child agent is currently running"
+    );
     Ok(())
 }
 
@@ -862,12 +856,10 @@ fn supervisor_enforces_nested_depth_from_parent_thread() -> Result<()> {
 }
 
 #[test]
-fn supervisor_enforces_max_spawn_fanout_per_turn() -> Result<()> {
+fn supervisor_enforces_max_subagents() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_parallel_readonly = 2;
-    budget.max_threads = 3;
-    budget.max_spawn_fanout_per_turn = 1;
+    budget.max_subagents = 1;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -883,37 +875,50 @@ fn supervisor_enforces_max_spawn_fanout_per_turn() -> Result<()> {
             &mut handler,
             child_start(step("two")?, temp.path().to_path_buf())?,
         )
-        .expect_err("fanout limit denies second spawn");
+        .expect_err("max_subagents denies second active child");
 
     assert!(error.to_string().contains("agent budget denied"));
+    assert!(
+        error
+            .to_string()
+            .contains("agent thread budget exceeded: [task].max_subagents=1")
+    );
     assert_eq!(supervisor.active_profile_ids().len(), 1);
     Ok(())
 }
 
 #[test]
-fn reset_turn_budget_allows_next_spawn_window() -> Result<()> {
+fn release_allows_next_spawn_after_max_subagents_slot_opens() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_parallel_readonly = 2;
-    budget.max_threads = 2;
-    budget.max_spawn_fanout_per_turn = 1;
+    budget.max_subagents = 1;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
 
-    supervisor.begin_task_child_thread(
+    let first = supervisor.begin_task_child_thread(
         &mut session,
         &mut handler,
         child_start(step("one")?, temp.path().to_path_buf())?,
     )?;
-    supervisor.reset_turn_budget();
+    supervisor.record_task_child_result(
+        &mut session,
+        &mut handler,
+        &first,
+        SessionRef::new_relative("children/task_1/one.jsonl")?,
+        TaskChildSessionStatus::Completed,
+        "one done",
+        &AgentRunOutcome::default(),
+        None,
+        None,
+    )?;
     supervisor.begin_task_child_thread(
         &mut session,
         &mut handler,
         child_start(step("two")?, temp.path().to_path_buf())?,
     )?;
 
-    assert_eq!(supervisor.active_profile_ids().len(), 2);
+    assert_eq!(supervisor.active_profile_ids().len(), 1);
     Ok(())
 }
 
@@ -921,8 +926,7 @@ fn reset_turn_budget_allows_next_spawn_window() -> Result<()> {
 fn cancel_foreground_run_releases_active_child_and_appends_audit() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_parallel_readonly = 2;
-    budget.max_threads = 2;
+    budget.max_subagents = 2;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -967,102 +971,43 @@ fn cancel_foreground_run_releases_active_child_and_appends_audit() -> Result<()>
 }
 
 #[test]
-fn budget_policy_from_config_exposes_parallel_readonly_and_accessors() -> Result<()> {
+fn budget_policy_from_config_exposes_max_subagents_and_accessors() -> Result<()> {
     let mut config = root_config();
-    config.task.max_child_sessions = 3;
-    config.task.allow_parallel_readonly_subagents = true;
-    config.task.max_parallel_readonly = Some(2);
-    config.task.max_parallel_write = Some(1);
-    config.task.max_background_threads = Some(2);
-    config.task.max_spawn_fanout_per_turn = Some(2);
-    config.task.max_agent_tokens_per_task = Some(123_456);
+    config.task.max_subagents = 3;
     let budget = AgentBudgetPolicy::from_root_config(&config);
 
-    assert_eq!(budget.max_threads, 3);
-    assert_eq!(budget.max_parallel_readonly, 2);
-    assert_eq!(budget.max_parallel_write, 1);
-    assert_eq!(budget.max_background_threads, 2);
-    assert_eq!(budget.max_spawn_fanout_per_turn, 2);
-    assert_eq!(budget.max_agent_tokens_per_task, 123_456);
+    assert_eq!(budget.max_subagents, 3);
 
     let supervisor = AgentSupervisor::new(
         AgentProfileRegistry::from_root_config(&config)?,
         budget,
         provider_capabilities(),
     );
-    assert_eq!(supervisor.budget().max_threads, 3);
+    assert_eq!(supervisor.budget().max_subagents, 3);
     assert_eq!(supervisor.registry().profiles().len(), 4);
 
     let mut default_config = root_config();
-    default_config.task.max_child_sessions = 4;
-    default_config.task.allow_parallel_readonly_subagents = true;
+    default_config.task.max_subagents = 4;
     let default_budget = AgentBudgetPolicy::from_root_config(&default_config);
-    assert_eq!(default_budget.max_threads, 4);
-    assert_eq!(default_budget.max_parallel_readonly, 3);
-    assert_eq!(default_budget.max_spawn_fanout_per_turn, 4);
-    assert_eq!(default_budget.max_agent_tokens_per_task, 200_000);
+    assert_eq!(default_budget.max_subagents, 4);
 
-    default_config.task.allow_parallel_readonly_subagents = false;
-    let serialized_readonly_budget = AgentBudgetPolicy::from_root_config(&default_config);
-    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 3);
     Ok(())
 }
 
 #[test]
 fn budget_policy_uses_default_limits_when_config_values_are_omitted() {
-    let mut config = root_config();
-    config.task.max_child_sessions = 4;
-    config.task.allow_parallel_readonly_subagents = true;
-    config.task.max_parallel_readonly = None;
-    config.task.max_spawn_fanout_per_turn = None;
-    config.task.max_agent_tokens_per_task = None;
+    let config = root_config();
 
     let default_budget = AgentBudgetPolicy::from_root_config(std::hint::black_box(&config));
 
-    assert_eq!(default_budget.max_parallel_readonly, 3);
-    assert_eq!(default_budget.max_spawn_fanout_per_turn, 4);
-    assert_eq!(default_budget.max_agent_tokens_per_task, 200_000);
-
-    config.task.allow_parallel_readonly_subagents = false;
-    let serialized_readonly_budget =
-        AgentBudgetPolicy::from_root_config(std::hint::black_box(&config));
-
-    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 3);
+    assert_eq!(default_budget.max_subagents, 8);
 }
 
 #[test]
-fn supervisor_denies_before_spawn_when_task_token_budget_is_exhausted() -> Result<()> {
+fn supervisor_enforces_max_subagents_for_background_read_child() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_agent_tokens_per_task = 0;
-    let supervisor = supervisor_with_budget(budget)?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    let mut handler = RecordingEventHandler::default();
-
-    let error = supervisor
-        .begin_task_child_thread(
-            &mut session,
-            &mut handler,
-            child_start(step("blocked")?, temp.path().to_path_buf())?,
-        )
-        .expect_err("zero token budget denies child before spawn");
-
-    assert!(error.to_string().contains("agent budget denied"));
-    let projection = session.agent_thread_state_projection();
-    assert!(projection.threads.values().any(|thread| {
-        thread
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("token budget exceeded before spawn"))
-    }));
-    Ok(())
-}
-
-#[test]
-fn supervisor_enforces_background_read_budget() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_background_threads = 0;
+    budget.max_subagents = 0;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -1079,16 +1024,16 @@ fn supervisor_enforces_background_read_budget() -> Result<()> {
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("[task].max_background_threads=0"))
+            .is_some_and(|reason| reason.contains("[task].max_subagents=0"))
     }));
     Ok(())
 }
 
 #[test]
-fn supervisor_enforces_parallel_readonly_budget() -> Result<()> {
+fn supervisor_enforces_max_subagents_for_readonly_child() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_parallel_readonly = 0;
+    budget.max_subagents = 0;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -1107,18 +1052,18 @@ fn supervisor_enforces_parallel_readonly_budget() -> Result<()> {
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("[task].max_parallel_readonly=0"))
+            .is_some_and(|reason| reason.contains("[task].max_subagents=0"))
     }));
     Ok(())
 }
 
 #[test]
-fn supervisor_enforces_parallel_write_budget_for_readonly_scoped_writer() -> Result<()> {
+fn supervisor_enforces_max_subagents_for_readonly_scoped_writer() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = false;
     let mut budget = AgentBudgetPolicy::from_root_config(&config);
-    budget.max_parallel_write = 0;
+    budget.max_subagents = 0;
     let supervisor = AgentSupervisor::new(
         AgentProfileRegistry::from_root_config(&config)?,
         budget,
@@ -1139,7 +1084,7 @@ fn supervisor_enforces_parallel_write_budget_for_readonly_scoped_writer() -> Res
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("[task].max_parallel_write=0"))
+            .is_some_and(|reason| reason.contains("[task].max_subagents=0"))
     }));
     Ok(())
 }
@@ -1149,12 +1094,9 @@ fn supervisor_allows_background_write_role_when_scope_is_readonly() -> Result<()
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = false;
-    let mut budget = AgentBudgetPolicy::from_root_config(&config);
-    budget.max_background_threads = 1;
-    budget.max_parallel_write = 1;
     let supervisor = AgentSupervisor::new(
         AgentProfileRegistry::from_root_config(&config)?,
-        budget,
+        AgentBudgetPolicy::from_root_config(&config),
         provider_capabilities(),
     );
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
@@ -1180,7 +1122,7 @@ fn supervisor_allows_background_write_role_when_scope_is_readonly() -> Result<()
 fn supervisor_denied_budget_appends_control_entry() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_threads = 0;
+    budget.max_subagents = 0;
     let supervisor = supervisor_with_budget(budget)?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
@@ -1261,11 +1203,9 @@ fn supervisor_denies_background_write_agents() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = true;
-    let mut budget = AgentBudgetPolicy::from_root_config(&config);
-    budget.max_background_threads = 2;
     let supervisor = AgentSupervisor::new(
         AgentProfileRegistry::from_root_config(&config)?,
-        budget,
+        AgentBudgetPolicy::from_root_config(&config),
         provider_capabilities(),
     );
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
@@ -1500,11 +1440,9 @@ fn provider_background_resume_defaults_to_interrupted() -> Result<()> {
 }
 
 #[tokio::test]
-async fn supervisor_records_post_run_token_budget_warning_without_failing_child() -> Result<()> {
+async fn supervisor_records_post_run_usage_without_budget_warning() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_agent_tokens_per_task = 10;
-    let supervisor = supervisor_with_budget(budget)?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
     let runner = AgentSupervisorTaskChildRunner::new(
         supervisor,
         Agent::new(Box::new(UsageProvider), ToolRegistry::new()),
@@ -1545,18 +1483,24 @@ async fn supervisor_records_post_run_token_budget_warning_without_failing_child(
     let projection = session.agent_thread_state_projection();
     let thread = projection.latest_thread().expect("child thread");
     assert_eq!(thread.status, sigil_kernel::AgentThreadStatus::Completed);
-    assert!(handler.events.iter().any(|event| {
-        matches!(event, RunEvent::Notice(message) if message.contains("agent budget warning after child completion"))
+    assert_eq!(
+        thread
+            .result
+            .as_ref()
+            .and_then(|result| result.usage.as_ref())
+            .map(|usage| usage.total_tokens),
+        Some(13)
+    );
+    assert!(!handler.events.iter().any(|event| {
+        matches!(event, RunEvent::Notice(message) if message.contains("agent budget warning"))
     }));
     Ok(())
 }
 
 #[tokio::test]
-async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
+async fn supervisor_records_cumulative_agent_tokens_without_denial() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
-    budget.max_agent_tokens_per_task = 20;
-    let supervisor = supervisor_with_budget(budget)?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
     let runner = AgentSupervisorTaskChildRunner::new(
         supervisor,
         Agent::new(Box::new(UsageProvider), ToolRegistry::new()),
@@ -1615,7 +1559,7 @@ async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
         )
         .await?;
 
-    let result = runner
+    runner
         .run_child_session(
             &mut session,
             TaskChildSessionRunRequest {
@@ -1635,20 +1579,27 @@ async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
             &mut handler,
             &mut approval,
         )
-        .await;
+        .await?;
 
-    let error = result.expect_err("cumulative task usage above budget must deny next spawn");
-    assert!(
-        error
-            .to_string()
-            .contains("agent budget denied child session")
-    );
     let projection = session.agent_thread_state_projection();
-    assert!(projection.threads.values().any(|thread| {
+    let completed_usage = projection
+        .threads
+        .values()
+        .filter(|thread| thread.status == sigil_kernel::AgentThreadStatus::Completed)
+        .filter_map(|thread| {
+            thread
+                .result
+                .as_ref()
+                .and_then(|result| result.usage.as_ref())
+                .map(|usage| usage.total_tokens)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed_usage, vec![13, 13, 13]);
+    assert!(!projection.threads.values().any(|thread| {
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("token budget exceeded before spawn"))
+            .is_some_and(|reason| reason.contains("token budget"))
     }));
     Ok(())
 }
@@ -1704,7 +1655,7 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
     let thread = projection
         .threads
         .values()
-        .find(|thread| !thread.legacy_task)
+        .next()
         .expect("agent thread projected");
     assert_eq!(
         thread
@@ -1766,22 +1717,7 @@ async fn direct_child_skill_uses_supervisor() -> Result<()> {
 
     assert_eq!(output.final_text, "child done");
     let agent_projection = session.agent_thread_state_projection();
-    assert_eq!(
-        agent_projection
-            .threads
-            .values()
-            .filter(|thread| !thread.legacy_task)
-            .count(),
-        1
-    );
-    assert_eq!(
-        agent_projection
-            .threads
-            .values()
-            .filter(|thread| thread.legacy_task)
-            .count(),
-        1
-    );
+    assert_eq!(agent_projection.threads.len(), 1);
     let task_projection = session.task_state_projection();
     let task = task_projection
         .tasks

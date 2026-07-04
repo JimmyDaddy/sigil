@@ -70,28 +70,28 @@ fn sidebar_agent_rows_compact_common_status_labels() {
         muted: false,
     };
     let completed_child = SidebarAgentRow {
-        label: "agent child_1".to_owned(),
+        label: "child_1".to_owned(),
         detail: "completed · subagent_read · v1:step_1".to_owned(),
         selected: false,
         active: false,
         muted: false,
     };
     let running_child = SidebarAgentRow {
-        label: "agent child_2".to_owned(),
+        label: "child_2".to_owned(),
         detail: "running · executor · v2:step_2".to_owned(),
         selected: false,
         active: false,
         muted: false,
     };
     let failed_child = SidebarAgentRow {
-        label: "agent child_3".to_owned(),
+        label: "child_3".to_owned(),
         detail: "failed · subagent_write · v3:step_3".to_owned(),
         selected: false,
         active: false,
         muted: false,
     };
     let detailed_child = SidebarAgentRow {
-        label: "agent child_4".to_owned(),
+        label: "child_4".to_owned(),
         detail: "running · explore · foreground chat · deepseek-v4-pro · tools scoped · workspace inherited · heartbeat seen · result pending".to_owned(),
         selected: false,
         active: false,

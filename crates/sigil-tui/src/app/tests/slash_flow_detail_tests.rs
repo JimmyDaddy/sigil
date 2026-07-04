@@ -99,10 +99,6 @@ fn agent_mention_errors_and_private_labels_cover_edge_paths() {
         "compat:claude"
     );
     assert_eq!(
-        agent_profile_source_label(&AgentProfileSource::LegacyTask),
-        "legacy_task"
-    );
-    assert_eq!(
         agent_profile_source_label(&AgentProfileSource::Unknown),
         "unknown"
     );

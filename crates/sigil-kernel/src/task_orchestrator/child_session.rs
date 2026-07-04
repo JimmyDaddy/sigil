@@ -24,13 +24,14 @@ pub trait TaskChildSessionRunner: Send + Sync {
         A: ApprovalHandler + Send;
 }
 
-/// Legacy in-kernel child-session runner retained for compatibility tests and non-runtime callers.
-pub struct LegacyTaskChildSessionRunner {
+#[cfg(test)]
+pub(crate) struct TestAgentTaskChildSessionRunner {
     subagent_read: BoxedAgent,
     subagent_write: BoxedAgent,
 }
 
-impl LegacyTaskChildSessionRunner {
+#[cfg(test)]
+impl TestAgentTaskChildSessionRunner {
     pub fn new(subagent_read: BoxedAgent, subagent_write: BoxedAgent) -> Self {
         Self {
             subagent_read,
@@ -39,8 +40,9 @@ impl LegacyTaskChildSessionRunner {
     }
 }
 
+#[cfg(test)]
 #[async_trait]
-impl TaskChildSessionRunner for LegacyTaskChildSessionRunner {
+impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
     async fn run_child_session<H, A>(
         &self,
         parent_session: &mut Session,
@@ -179,6 +181,7 @@ impl TaskChildSessionRunner for LegacyTaskChildSessionRunner {
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_child_agent_for_step<H, A>(
     agent: &BoxedAgent,
@@ -218,6 +221,7 @@ where
     }
 }
 
+#[cfg(test)]
 struct TaskApprovalRouteHandler<'a, A> {
     inner: &'a mut A,
     parent_session: &'a mut Session,
@@ -227,6 +231,7 @@ struct TaskApprovalRouteHandler<'a, A> {
     child_session_ref: &'a SessionRef,
 }
 
+#[cfg(test)]
 impl<A> ApprovalHandler for TaskApprovalRouteHandler<'_, A>
 where
     A: ApprovalHandler,
@@ -264,6 +269,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) fn append_child_session<H>(
     session: &mut Session,
     handler: &mut H,
@@ -294,6 +300,7 @@ where
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append_approval_route(
     session: &mut Session,
@@ -320,6 +327,7 @@ pub(super) fn append_approval_route(
     ))
 }
 
+#[cfg(test)]
 pub(super) fn build_child_session(
     parent_session: &Session,
     child_session_ref: &SessionRef,

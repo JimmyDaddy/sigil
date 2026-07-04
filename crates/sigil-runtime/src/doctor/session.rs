@@ -62,73 +62,6 @@ pub(super) fn check_storage_paths(report: &mut DoctorReport, paths: &crate::Sigi
     check_session_log_dir(report, &paths.session_log_dir);
 }
 
-pub(super) fn check_legacy_workspace_state(
-    report: &mut DoctorReport,
-    config_path: &Path,
-    paths: &crate::SigilPaths,
-) {
-    let workspace_config = paths.workspace_root.join(WORKSPACE_CONFIG_FILE);
-    if workspace_config.exists() && !same_path(&workspace_config, config_path) {
-        report.push_with_remediation(
-            DoctorStatus::Warn,
-            "config:legacy_workspace",
-            format!(
-                "workspace {} is no longer loaded by default",
-                workspace_config.display()
-            ),
-            Some(format!(
-                "move local config to {}, pass --config explicitly, or delete the workspace copy",
-                config_path.display()
-            )),
-        );
-    }
-
-    let legacy_sessions = paths
-        .workspace_root
-        .join(LEGACY_WORKSPACE_STATE_DIR)
-        .join(LEGACY_SESSIONS_DIR);
-    if legacy_sessions.exists() {
-        report.push_with_remediation(
-            DoctorStatus::Warn,
-            "storage:legacy_sessions",
-            format!(
-                "legacy workspace sessions remain at {}",
-                legacy_sessions.display()
-            ),
-            Some(format!(
-                "migrate sessions to {} and remove the workspace copy",
-                paths.session_log_dir.display()
-            )),
-        );
-    }
-
-    let legacy_input_history = paths
-        .workspace_root
-        .join(LEGACY_WORKSPACE_STATE_DIR)
-        .join(LEGACY_INPUT_HISTORY_FILE);
-    if legacy_input_history.exists() {
-        report.push_with_remediation(
-            DoctorStatus::Warn,
-            "storage:legacy_input_history",
-            format!(
-                "legacy workspace input history remains at {}",
-                legacy_input_history.display()
-            ),
-            Some(format!(
-                "migrate input history to {} and remove the workspace copy",
-                paths.input_history_file.display()
-            )),
-        );
-    }
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
-}
-
 pub(super) fn check_session_log_dir(report: &mut DoctorReport, session_dir: &Path) {
     if session_dir.is_dir() {
         report.push(
@@ -218,11 +151,10 @@ pub(super) fn check_session_streams(report: &mut DoctorReport, session_dir: &Pat
 
     let skipped = total_streams.saturating_sub(session_paths.len());
     let mut message = format!(
-        "{} streams checked, {} records, last_sequence={}, legacy={}, stored={}",
+        "{} streams checked, {} records, last_sequence={}, stored={}",
         session_paths.len().saturating_sub(oversized_skipped),
         summary.records,
         summary.last_sequence,
-        summary.legacy_records,
         summary.stored_records
     );
     if summary.tail_recovery_events > 0 {
@@ -282,7 +214,6 @@ fn session_modified_time(path: &Path) -> std::time::SystemTime {
 #[derive(Debug, Default)]
 struct SessionStreamDoctorSummary {
     records: usize,
-    legacy_records: usize,
     stored_records: usize,
     last_sequence: u64,
     tail_recovery_events: usize,
@@ -294,9 +225,6 @@ impl SessionStreamDoctorSummary {
             self.records += 1;
             self.last_sequence = self.last_sequence.max(record.stream_sequence());
             match record {
-                SessionStreamRecord::Legacy { .. } => {
-                    self.legacy_records += 1;
-                }
                 SessionStreamRecord::Stored(event) => {
                     if event.event_type == DurableEventType::LogTailRecovered.as_str() {
                         self.tail_recovery_events += 1;

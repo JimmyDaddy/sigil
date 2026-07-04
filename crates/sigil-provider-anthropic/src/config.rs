@@ -4,8 +4,6 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 pub const SIGIL_ANTHROPIC_API_KEY_ENV: &str = "SIGIL_ANTHROPIC_API_KEY";
-pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
-pub const SIGIL_ANTHROPIC_MODEL_ENV: &str = "SIGIL_ANTHROPIC_MODEL";
 pub const SIGIL_ANTHROPIC_BASE_URL_ENV: &str = "SIGIL_ANTHROPIC_BASE_URL";
 pub const SIGIL_ANTHROPIC_VERSION_ENV: &str = "SIGIL_ANTHROPIC_VERSION";
 pub const SIGIL_ANTHROPIC_MAX_TOKENS_ENV: &str = "SIGIL_ANTHROPIC_MAX_TOKENS";
@@ -15,7 +13,12 @@ pub const SIGIL_ANTHROPIC_MAX_TOKENS_ENV: &str = "SIGIL_ANTHROPIC_MAX_TOKENS";
 pub struct AnthropicProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
-    #[serde(default = "default_model")]
+    #[serde(
+        rename = "__runtime_model",
+        skip_serializing,
+        skip_deserializing,
+        default = "default_model"
+    )]
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -38,9 +41,6 @@ impl AnthropicProviderConfig {
     pub fn resolved(self) -> Result<Self> {
         let mut resolved = self;
 
-        if let Some(value) = read_env_string(SIGIL_ANTHROPIC_MODEL_ENV) {
-            resolved.model = value;
-        }
         if let Some(value) = read_env_string(SIGIL_ANTHROPIC_BASE_URL_ENV) {
             resolved.base_url = value;
         }
@@ -50,9 +50,7 @@ impl AnthropicProviderConfig {
         if let Some(value) = read_env_u32(SIGIL_ANTHROPIC_MAX_TOKENS_ENV)? {
             resolved.max_tokens = value;
         }
-        if let Some(value) = read_env_string(SIGIL_ANTHROPIC_API_KEY_ENV)
-            .or_else(|| read_env_string(ANTHROPIC_API_KEY_ENV))
-        {
+        if let Some(value) = read_env_string(SIGIL_ANTHROPIC_API_KEY_ENV) {
             resolved.api_key = Some(value);
         }
 

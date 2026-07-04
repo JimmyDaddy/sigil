@@ -14,7 +14,7 @@ fn configured_status_line_matches_disabled_and_enabled_config() {
 
     let config = CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         ..CodeIntelligenceConfig::default()
     };
     assert_eq!(

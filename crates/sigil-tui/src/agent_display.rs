@@ -57,7 +57,6 @@ fn normalized_explicit_label(value: Option<&str>) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    let value = value.strip_prefix("agent ").unwrap_or(value).trim();
     (!value.is_empty()).then(|| value.to_owned())
 }
 
@@ -84,13 +83,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_name_strips_legacy_agent_prefix() {
+    fn explicit_display_name_is_preserved() {
         let name = resolve_agent_display_name(AgentDisplayNameInput {
             display_name: Some("agent explore"),
             ..AgentDisplayNameInput::default()
         });
 
-        assert_eq!(name.label, "explore");
+        assert_eq!(name.label, "agent explore");
     }
 
     #[test]

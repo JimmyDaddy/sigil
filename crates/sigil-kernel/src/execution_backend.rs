@@ -317,19 +317,169 @@ pub struct ExecutionResourceReceipt {
 }
 
 /// User-configurable execution policy.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionConfig {
+    pub strategy: ExecutionStrategyConfig,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            strategy: ExecutionStrategyConfig::Local,
+        }
+    }
+}
+
+impl Serialize for ExecutionConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ExecutionConfigWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecutionConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ExecutionConfigWire::deserialize(deserializer)?;
+        Self::try_from(wire).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct ExecutionConfigWire {
     #[serde(default)]
+    strategy: ExecutionStrategyMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox: Option<ExecutionSandboxStrategyConfig>,
+}
+
+impl From<&ExecutionConfig> for ExecutionConfigWire {
+    fn from(config: &ExecutionConfig) -> Self {
+        match &config.strategy {
+            ExecutionStrategyConfig::Local => Self {
+                strategy: ExecutionStrategyMode::Local,
+                sandbox: None,
+            },
+            ExecutionStrategyConfig::Sandbox(sandbox) => Self {
+                strategy: ExecutionStrategyMode::Sandbox,
+                sandbox: Some(sandbox.clone()),
+            },
+        }
+    }
+}
+
+impl TryFrom<ExecutionConfigWire> for ExecutionConfig {
+    type Error = String;
+
+    fn try_from(wire: ExecutionConfigWire) -> std::result::Result<Self, Self::Error> {
+        match (wire.strategy, wire.sandbox) {
+            (ExecutionStrategyMode::Local, None) => Ok(Self::default()),
+            (ExecutionStrategyMode::Local, Some(_)) => Err(
+                "execution.sandbox is only valid when execution.strategy is \"sandbox\"".to_owned(),
+            ),
+            (ExecutionStrategyMode::Sandbox, None) => Err(
+                "execution.strategy \"sandbox\" requires an [execution.sandbox] table".to_owned(),
+            ),
+            (ExecutionStrategyMode::Sandbox, Some(sandbox)) => {
+                sandbox.validate()?;
+                Ok(Self {
+                    strategy: ExecutionStrategyConfig::Sandbox(sandbox),
+                })
+            }
+        }
+    }
+}
+
+/// Top-level execution strategy. Local preserves ordinary process behavior; sandbox requires an
+/// explicit sandbox backend config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionStrategyConfig {
+    Local,
+    Sandbox(ExecutionSandboxStrategyConfig),
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStrategyMode {
+    #[default]
+    Local,
+    Sandbox,
+}
+
+impl ExecutionStrategyMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Sandbox => "sandbox",
+        }
+    }
+}
+
+/// Advanced sandbox backend configuration used only when `execution.strategy = "sandbox"`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ExecutionSandboxStrategyConfig {
     pub backend: ExecutionBackendKind,
-    #[serde(default)]
-    pub isolation: ExecutionIsolationPolicy,
-    #[serde(default)]
+    #[serde(default = "default_execution_sandbox_profile")]
     pub profile: ExecutionSandboxProfile,
     #[serde(default)]
     pub fallback: ExecutionSandboxFallback,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_image: Option<String>,
+}
+
+impl ExecutionSandboxStrategyConfig {
+    #[must_use]
+    pub fn new(backend: ExecutionBackendKind) -> Self {
+        Self {
+            backend,
+            profile: default_execution_sandbox_profile(),
+            fallback: ExecutionSandboxFallback::default(),
+            container_image: None,
+        }
+    }
+
+    fn validate(&self) -> std::result::Result<(), String> {
+        if self.backend == ExecutionBackendKind::Local {
+            return Err(
+                "execution.strategy \"sandbox\" cannot use execution.sandbox.backend \"local\""
+                    .to_owned(),
+            );
+        }
+        if self.profile == ExecutionSandboxProfile::Unconfined {
+            return Err(
+                "execution.strategy \"sandbox\" cannot use execution.sandbox.profile \"unconfined\""
+                    .to_owned(),
+            );
+        }
+        let has_image = self
+            .container_image
+            .as_deref()
+            .is_some_and(|image| !image.trim().is_empty());
+        if self.backend == ExecutionBackendKind::Docker && !has_image {
+            return Err(
+                "execution.sandbox.backend \"docker\" requires execution.sandbox.container_image"
+                    .to_owned(),
+            );
+        }
+        if self.backend != ExecutionBackendKind::Docker && self.container_image.is_some() {
+            return Err(
+                "execution.sandbox.container_image is only valid for docker execution backend"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn default_execution_sandbox_profile() -> ExecutionSandboxProfile {
+    ExecutionSandboxProfile::WorkspaceWrite
 }
 
 /// Required isolation level for command execution.
@@ -497,10 +647,10 @@ impl ExecutionBackendSelectionDiagnostic {
     #[must_use]
     pub fn selected(config: &ExecutionConfig, capabilities: ExecutionBackendCapabilities) -> Self {
         Self {
-            requested_backend: config.backend,
-            selected_backend: Some(config.backend),
-            requested_profile: config.profile,
-            fallback: config.fallback,
+            requested_backend: config.backend(),
+            selected_backend: Some(config.backend()),
+            requested_profile: config.profile(),
+            fallback: config.fallback(),
             requirements: config.required_capabilities(),
             capabilities: Some(capabilities),
             missing_capabilities: Vec::new(),
@@ -513,16 +663,16 @@ impl ExecutionBackendSelectionDiagnostic {
     #[must_use]
     pub fn unavailable(config: &ExecutionConfig, availability_reason: impl Into<String>) -> Self {
         Self {
-            requested_backend: config.backend,
+            requested_backend: config.backend(),
             selected_backend: None,
-            requested_profile: config.profile,
-            fallback: config.fallback,
+            requested_profile: config.profile(),
+            fallback: config.fallback(),
             requirements: config.required_capabilities(),
             capabilities: None,
             missing_capabilities: Vec::new(),
             platform_available: false,
             availability_reason: Some(availability_reason.into()),
-            decision: match config.fallback {
+            decision: match config.fallback() {
                 ExecutionSandboxFallback::Deny => ExecutionBackendSelectionDecision::FallbackDenied,
                 ExecutionSandboxFallback::Prompt => {
                     ExecutionBackendSelectionDecision::FallbackPromptRequired
@@ -540,16 +690,16 @@ impl ExecutionBackendSelectionDiagnostic {
         capabilities: ExecutionBackendCapabilities,
     ) -> Self {
         Self {
-            requested_backend: config.backend,
+            requested_backend: config.backend(),
             selected_backend: None,
-            requested_profile: config.profile,
-            fallback: config.fallback,
+            requested_profile: config.profile(),
+            fallback: config.fallback(),
             requirements: config.required_capabilities(),
             capabilities: Some(capabilities),
             missing_capabilities: capabilities.missing_requirements(config.required_capabilities()),
             platform_available: true,
             availability_reason: None,
-            decision: match config.fallback {
+            decision: match config.fallback() {
                 ExecutionSandboxFallback::Deny => ExecutionBackendSelectionDecision::FallbackDenied,
                 ExecutionSandboxFallback::Prompt => {
                     ExecutionBackendSelectionDecision::FallbackPromptRequired
@@ -651,14 +801,78 @@ impl ExecutionCoverageSummary {
 
 impl ExecutionConfig {
     #[must_use]
+    pub fn local() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn sandbox(config: ExecutionSandboxStrategyConfig) -> Self {
+        Self {
+            strategy: ExecutionStrategyConfig::Sandbox(config),
+        }
+    }
+
+    #[must_use]
+    pub fn strategy_mode(&self) -> ExecutionStrategyMode {
+        match self.strategy {
+            ExecutionStrategyConfig::Local => ExecutionStrategyMode::Local,
+            ExecutionStrategyConfig::Sandbox(_) => ExecutionStrategyMode::Sandbox,
+        }
+    }
+
+    #[must_use]
+    pub fn backend(&self) -> ExecutionBackendKind {
+        match &self.strategy {
+            ExecutionStrategyConfig::Local => ExecutionBackendKind::Local,
+            ExecutionStrategyConfig::Sandbox(config) => config.backend,
+        }
+    }
+
+    #[must_use]
+    pub fn isolation(&self) -> ExecutionIsolationPolicy {
+        match self.strategy {
+            ExecutionStrategyConfig::Local => ExecutionIsolationPolicy::AllowLocal,
+            ExecutionStrategyConfig::Sandbox(_) => ExecutionIsolationPolicy::RequireSandbox,
+        }
+    }
+
+    #[must_use]
+    pub fn profile(&self) -> ExecutionSandboxProfile {
+        match &self.strategy {
+            ExecutionStrategyConfig::Local => ExecutionSandboxProfile::Unconfined,
+            ExecutionStrategyConfig::Sandbox(config) => config.profile,
+        }
+    }
+
+    #[must_use]
+    pub fn fallback(&self) -> ExecutionSandboxFallback {
+        match &self.strategy {
+            ExecutionStrategyConfig::Local => ExecutionSandboxFallback::Deny,
+            ExecutionStrategyConfig::Sandbox(config) => config.fallback,
+        }
+    }
+
+    #[must_use]
+    pub fn container_image(&self) -> Option<&str> {
+        match &self.strategy {
+            ExecutionStrategyConfig::Local => None,
+            ExecutionStrategyConfig::Sandbox(config) => config
+                .container_image
+                .as_deref()
+                .map(str::trim)
+                .filter(|image| !image.is_empty()),
+        }
+    }
+
+    #[must_use]
     pub fn profile_spec(&self) -> ExecutionSandboxProfileSpec {
-        self.profile.spec()
+        self.profile().spec()
     }
 
     #[must_use]
     pub fn required_capabilities(&self) -> ExecutionCapabilityRequirements {
         let mut requirements = self.profile_spec().requirements;
-        if self.isolation.requires_sandbox() {
+        if self.isolation().requires_sandbox() {
             requirements.filesystem_isolation = true;
             requirements.process_isolation = true;
         }
@@ -674,7 +888,7 @@ impl ExecutionConfig {
 
     #[must_use]
     pub fn requires_sandbox(&self) -> bool {
-        self.isolation.requires_sandbox() || self.required_capabilities().requires_basic_sandbox()
+        self.isolation().requires_sandbox() || self.required_capabilities().requires_basic_sandbox()
     }
 
     pub fn validate_profile_capabilities(
@@ -688,7 +902,7 @@ impl ExecutionConfig {
             return Ok(());
         }
         if self.requires_sandbox() && !capabilities.supports_required_sandbox() {
-            if self.isolation.requires_sandbox() && !spec.requires_sandbox {
+            if self.isolation().requires_sandbox() && !spec.requires_sandbox {
                 return Err(
                     "execution isolation require_sandbox requires filesystem and process isolation"
                         .to_owned(),
@@ -696,7 +910,7 @@ impl ExecutionConfig {
             }
             return Err(format!(
                 "execution profile {:?} requires filesystem and process isolation",
-                self.profile
+                self.profile()
             ));
         }
         if spec.requires_network_isolation
@@ -704,7 +918,7 @@ impl ExecutionConfig {
         {
             return Err(format!(
                 "execution profile {:?} requires network isolation",
-                self.profile
+                self.profile()
             ));
         }
         let missing = missing
@@ -714,7 +928,7 @@ impl ExecutionConfig {
             .join(", ");
         Err(format!(
             "execution profile {:?} requires missing capabilities: {missing}",
-            self.profile
+            self.profile()
         ))
     }
 }

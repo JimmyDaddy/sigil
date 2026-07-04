@@ -841,12 +841,9 @@ fn workspace_agent_profile_from_raw(
         bail!("agent profile id {id:?} must match directory name {fallback_id:?}");
     }
     let profile_id = AgentProfileId::new(id.to_owned())?;
-    let invocation_policy = wire.invocation_policy.unwrap_or_else(|| {
-        AgentInvocationPolicy::from_invocability(
-            wire.user_invocable.unwrap_or(true),
-            wire.model_invocable.unwrap_or(false),
-        )
-    });
+    let invocation_policy = wire
+        .invocation_policy
+        .unwrap_or(AgentInvocationPolicy::ManualOnly);
     let user_invocable = wire
         .user_invocable
         .unwrap_or_else(|| invocation_policy.default_user_invocable());
@@ -931,12 +928,9 @@ fn plugin_agent_profile_from_raw(
         bail!("agent profile id {local_id:?} must match file-derived id {fallback_id:?}");
     }
     let profile_id = namespaced_plugin_agent_profile_id(plugin_id, local_id)?;
-    let invocation_policy = wire.invocation_policy.unwrap_or_else(|| {
-        AgentInvocationPolicy::from_invocability(
-            wire.user_invocable.unwrap_or(true),
-            wire.model_invocable.unwrap_or(false),
-        )
-    });
+    let invocation_policy = wire
+        .invocation_policy
+        .unwrap_or(AgentInvocationPolicy::ManualOnly);
     let user_invocable = wire
         .user_invocable
         .unwrap_or_else(|| invocation_policy.default_user_invocable());
@@ -1395,7 +1389,6 @@ fn agent_profile_source_label(source: &AgentProfileSource) -> &'static str {
         AgentProfileSource::Plugin { .. } => "plugin",
         AgentProfileSource::Compatibility { .. } => "compatibility",
         AgentProfileSource::System => "system",
-        AgentProfileSource::LegacyTask => "legacy_task",
         AgentProfileSource::Unknown => "unknown",
     }
 }

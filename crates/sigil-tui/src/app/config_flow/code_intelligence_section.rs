@@ -8,19 +8,15 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     ));
     lines.push(render_config_value_row(
         config_state,
-        ConfigField::CodeIntelStartup,
+        ConfigField::CodeIntelServerStartup,
     ));
     lines.push(render_config_readonly_row(
-        "Discovery",
-        bool_summary(config_state.draft.code_intelligence_discovery_enabled),
+        "Auto discover",
+        bool_summary(config_state.draft.code_intelligence_auto_discover),
     ));
     lines.push(render_config_readonly_row(
         "Missing reports",
-        bool_summary(
-            config_state
-                .draft
-                .code_intelligence_discovery_report_missing,
-        ),
+        bool_summary(config_state.draft.code_intelligence_report_missing),
     ));
     lines.push(String::new());
     lines.push("[trust]".to_owned());

@@ -523,27 +523,33 @@ impl CheckCommand {
 
 /// User-level verification configuration loaded from `sigil.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct VerificationConfig {
     #[serde(default)]
     pub auto_run: VerificationAutoRunPolicy,
     #[serde(default)]
-    pub scope_profile: VerificationScopeProfile,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra_scope_excludes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub generated_roots: Vec<PathBuf>,
+    pub scope: VerificationScopeConfig,
     #[serde(default)]
     pub checks: Vec<VerificationCheckConfig>,
+}
+
+/// User-facing verification scope controls.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct VerificationScopeConfig {
+    #[serde(default)]
+    pub profile: VerificationScopeProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_excludes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_roots: Vec<PathBuf>,
 }
 
 impl VerificationConfig {
     /// Returns true when no user-level verification behavior is configured.
     pub fn is_empty(&self) -> bool {
         self.auto_run == VerificationAutoRunPolicy::Manual
-            && self.scope_profile == VerificationScopeProfile::Auto
-            && self.extra_scope_excludes.is_empty()
-            && self.generated_roots.is_empty()
+            && self.scope.is_empty()
             && self.checks.is_empty()
     }
 
@@ -552,16 +558,17 @@ impl VerificationConfig {
         &self,
         scope_hash: impl Into<VerificationScopeHash>,
     ) -> VerificationScope {
-        let mut scope = VerificationScope::profiled(scope_hash, self.scope_profile);
+        let mut scope = VerificationScope::profiled(scope_hash, self.scope.profile);
         extend_unique(
             &mut scope.exclude,
             &self
-                .extra_scope_excludes
+                .scope
+                .extra_excludes
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
         );
-        for root in &self.generated_roots {
+        for root in &self.scope.generated_roots {
             if !scope
                 .generated_roots
                 .iter()
@@ -571,6 +578,15 @@ impl VerificationConfig {
             }
         }
         scope
+    }
+}
+
+impl VerificationScopeConfig {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.profile == VerificationScopeProfile::Auto
+            && self.extra_excludes.is_empty()
+            && self.generated_roots.is_empty()
     }
 }
 

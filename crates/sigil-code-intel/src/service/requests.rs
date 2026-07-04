@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::LspContextSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +22,9 @@ pub(super) struct ServiceInner {
     pub(super) clients: Mutex<BTreeMap<String, LanguageServerHandle>>,
     pub(super) status: Mutex<CodeIntelStatus>,
     pub(super) symbol_cache: Mutex<TimedCache<CodeIntelResponse<CodeSymbol>>>,
+    pub(super) workspace_symbol_cache: Mutex<TimedCache<CodeIntelResponse<CodeSymbol>>>,
+    pub(super) diagnostic_cache: Mutex<TimedCache<CodeIntelResponse<CodeDiagnostic>>>,
+    pub(super) reference_cache: Mutex<TimedCache<CodeIntelResponse<CodeLocation>>>,
 }
 
 impl CodeIntelligenceService {
@@ -45,6 +49,9 @@ impl CodeIntelligenceService {
                 clients: Mutex::new(BTreeMap::new()),
                 status: Mutex::new(status),
                 symbol_cache: Mutex::new(TimedCache::new(Duration::from_secs(300))),
+                workspace_symbol_cache: Mutex::new(TimedCache::new(Duration::from_secs(300))),
+                diagnostic_cache: Mutex::new(TimedCache::new(Duration::from_secs(300))),
+                reference_cache: Mutex::new(TimedCache::new(Duration::from_secs(300))),
             }),
         }
     }
@@ -85,10 +92,10 @@ impl CodeIntelligenceService {
     }
 
     pub fn configured_status_line(config: &CodeIntelligenceConfig) -> String {
-        if !config.enabled || config.startup == sigil_kernel::CodeIntelStartup::Off {
+        if !config.enabled || config.server_startup == sigil_kernel::CodeIntelStartup::Off {
             "off".to_owned()
         } else {
-            config.startup.as_str().to_owned()
+            config.server_startup.as_str().to_owned()
         }
     }
 
@@ -100,8 +107,71 @@ impl CodeIntelligenceService {
         resolve_workspace_file(&self.inner.workspace_root, requested)
     }
 
+    pub async fn warm_lsp_context_snapshot(
+        &self,
+        _query: &str,
+        max_results: usize,
+        timeout: Duration,
+    ) -> LspContextSnapshot {
+        let timeout_ms = timeout.as_millis().min(u128::from(u64::MAX)) as u64;
+        match tokio::time::timeout(timeout, self.warm_lsp_context_snapshot_inner(max_results)).await
+        {
+            Ok(snapshot) => snapshot,
+            Err(_) => LspContextSnapshot::timed_out(timeout_ms),
+        }
+    }
+
+    async fn warm_lsp_context_snapshot_inner(&self, max_results: usize) -> LspContextSnapshot {
+        if !self.enabled() {
+            return LspContextSnapshot::unavailable("code intelligence disabled");
+        }
+
+        let limit = self.limit(max_results);
+        let mut symbols = Vec::new();
+        for response in self.inner.symbol_cache.lock().await.values() {
+            if is_warm_lsp_response(&response) {
+                symbols.extend(response.results);
+            }
+        }
+        for response in self.inner.workspace_symbol_cache.lock().await.values() {
+            if is_warm_lsp_response(&response) {
+                symbols.extend(response.results);
+            }
+        }
+
+        let mut diagnostics = Vec::new();
+        for response in self.inner.diagnostic_cache.lock().await.values() {
+            if is_warm_lsp_response(&response) {
+                diagnostics.extend(response.results);
+            }
+        }
+
+        let mut references = Vec::new();
+        for response in self.inner.reference_cache.lock().await.values() {
+            if is_warm_lsp_response(&response) {
+                references.extend(response.results);
+            }
+        }
+
+        dedupe_symbols(&mut symbols);
+        dedupe_diagnostics(&mut diagnostics);
+        dedupe_locations(&mut references);
+        symbols.truncate(limit);
+        diagnostics.truncate(limit);
+        references.truncate(limit);
+
+        if symbols.is_empty() && diagnostics.is_empty() && references.is_empty() {
+            return LspContextSnapshot::unavailable("no warm lsp context cache");
+        }
+
+        LspContextSnapshot::ready()
+            .with_symbols(symbols)
+            .with_diagnostics(diagnostics)
+            .with_references(references)
+    }
+
     async fn ensure_server_plan(&self) {
-        if !config_enabled(&self.inner.config) || !self.inner.config.discovery.enabled {
+        if !config_enabled(&self.inner.config) || !self.inner.config.auto_discover {
             return;
         }
         if self.server_plan_snapshot().discovery_loaded {
@@ -248,7 +318,22 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         self.ensure_server_plan().await;
         let limit = self.limit(max_results);
+        let cache_key = format!("workspace-symbols:{query}:{limit}");
+        if let Some(response) = self
+            .inner
+            .workspace_symbol_cache
+            .lock()
+            .await
+            .get(&cache_key)
+        {
+            return Ok(response);
+        }
         if let Ok(result) = self.lsp_workspace_symbols(query, limit, started).await {
+            self.inner
+                .workspace_symbol_cache
+                .lock()
+                .await
+                .insert(cache_key, result.clone());
             return Ok(result);
         }
         let mut symbols = Vec::new();
@@ -296,7 +381,7 @@ impl CodeIntelligenceService {
             count,
             count > limit,
         ));
-        Ok(self.with_discovery_statuses(response_with_statuses(
+        let result = self.with_discovery_statuses(response_with_statuses(
             "tree-sitter-rust".to_owned(),
             "tree_sitter/workspace_symbols".to_owned(),
             symbols,
@@ -304,7 +389,13 @@ impl CodeIntelligenceService {
             limit,
             started,
             0,
-        )))
+        ));
+        self.inner
+            .workspace_symbol_cache
+            .lock()
+            .await
+            .insert(cache_key, result.clone());
+        Ok(result)
     }
 
     pub async fn definition(
@@ -349,6 +440,13 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
+        let cache_key = format!(
+            "references:{}:{line}:{character}:{include_declaration}:{limit}",
+            path.display()
+        );
+        if let Some(response) = self.inner.reference_cache.lock().await.get(&cache_key) {
+            return Ok(response);
+        }
         self.ensure_server_plan().await;
         let mut params = position_params(&path, line, character);
         params["context"] = json!({ "includeDeclaration": include_declaration });
@@ -361,7 +459,7 @@ impl CodeIntelligenceService {
             )
             .await?;
         let (locations, filtered) = self.parse_locations(response_array(response.value)).await?;
-        Ok(self.with_discovery_statuses(response_with_filtered(
+        let result = self.with_discovery_statuses(response_with_filtered(
             response.server_name,
             response.languages,
             "textDocument/references".to_owned(),
@@ -369,7 +467,13 @@ impl CodeIntelligenceService {
             limit,
             started,
             filtered,
-        )))
+        ));
+        self.inner
+            .reference_cache
+            .lock()
+            .await
+            .insert(cache_key, result.clone());
+        Ok(result)
     }
 
     pub async fn code_actions(
@@ -528,6 +632,10 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         self.ensure_server_plan().await;
         let limit = self.limit(max_results);
+        let cache_key = format!("diagnostics:{requested_paths:?}:{severity:?}:{limit}");
+        if let Some(response) = self.inner.diagnostic_cache.lock().await.get(&cache_key) {
+            return Ok(response);
+        }
         let mut diagnostics = Vec::new();
         let mut server_name = "tree-sitter-rust".to_owned();
         let mut capability = "tree_sitter/diagnostics".to_owned();
@@ -600,7 +708,7 @@ impl CodeIntelligenceService {
             diagnostics.retain(|diagnostic| diagnostic.severity == filter);
         }
 
-        Ok(self.with_discovery_statuses(response_with_statuses(
+        let result = self.with_discovery_statuses(response_with_statuses(
             server_name,
             capability,
             diagnostics,
@@ -608,7 +716,13 @@ impl CodeIntelligenceService {
             limit,
             started,
             0,
-        )))
+        ));
+        self.inner
+            .diagnostic_cache
+            .lock()
+            .await
+            .insert(cache_key, result.clone());
+        Ok(result)
     }
 
     pub(super) async fn lsp_document_symbols(
@@ -1031,4 +1145,38 @@ impl CodeIntelligenceService {
             requested.min(self.inner.config.max_results)
         }
     }
+}
+
+fn is_warm_lsp_response<T>(response: &CodeIntelResponse<T>) -> bool {
+    response.capability == "workspace/symbol" || response.capability.starts_with("textDocument/")
+}
+
+fn dedupe_symbols(symbols: &mut Vec<CodeSymbol>) {
+    let mut seen = BTreeSet::new();
+    symbols.retain(|symbol| {
+        seen.insert(format!(
+            "{}:{}:{}:{}",
+            symbol.path, symbol.name, symbol.range.start_line, symbol.range.start_character
+        ))
+    });
+}
+
+fn dedupe_diagnostics(diagnostics: &mut Vec<CodeDiagnostic>) {
+    let mut seen = BTreeSet::new();
+    diagnostics.retain(|diagnostic| {
+        seen.insert(format!(
+            "{}:{}:{}:{}",
+            diagnostic.path, diagnostic.range.start_line, diagnostic.severity, diagnostic.message
+        ))
+    });
+}
+
+fn dedupe_locations(locations: &mut Vec<CodeLocation>) {
+    let mut seen = BTreeSet::new();
+    locations.retain(|location| {
+        seen.insert(format!(
+            "{}:{}:{}",
+            location.path, location.range.start_line, location.range.start_character
+        ))
+    });
 }

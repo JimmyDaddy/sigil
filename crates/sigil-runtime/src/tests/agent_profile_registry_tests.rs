@@ -54,7 +54,6 @@ fn root_config() -> RootConfig {
             "deepseek".to_owned(),
             json!({
                 "base_url": "https://example.com",
-                "model": "deepseek-v4-flash",
             }),
         )]),
         mcp_servers: Vec::new(),
@@ -104,8 +103,9 @@ slash_names = ["review-agent"]
 "#,
     )?;
 
-    let registry =
-        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let mut config = root_config();
+    config.skills.compatibility_sources = vec!["claude".to_owned()];
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     let review = registry
         .get(&AgentProfileId::new("review")?)
         .expect("native workspace agent exists");
@@ -199,8 +199,9 @@ Use grep to audit the requested scope.
 "#,
     )?;
 
-    let registry =
-        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let mut config = root_config();
+    config.skills.compatibility_sources = vec!["claude".to_owned()];
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     let audit = registry
         .get(&AgentProfileId::new("audit")?)
         .expect("markdown workspace agent exists");
@@ -243,8 +244,9 @@ aliases = ["{alias}"]
         )?;
     }
 
-    let registry =
-        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let mut config = root_config();
+    config.skills.compatibility_sources = vec!["claude".to_owned()];
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
 
     assert!(registry.get(&AgentProfileId::new("review-a")?).is_some());
     assert!(registry.get(&AgentProfileId::new("review-b")?).is_some());
@@ -301,8 +303,9 @@ trust = "trusted"
 "#,
     )?;
 
-    let registry =
-        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let mut config = root_config();
+    config.skills.compatibility_sources = vec!["claude".to_owned()];
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     let self_alias = registry
         .get(&AgentProfileId::new("self-alias")?)
         .expect("self-alias profile should remain");
@@ -589,8 +592,9 @@ Review code through grep only.
 "#,
     )?;
 
-    let registry =
-        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let mut config = root_config();
+    config.skills.compatibility_sources = vec!["claude".to_owned()];
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     let reviewer = registry
         .get(&AgentProfileId::new("reviewer")?)
         .expect("claude compatibility agent exists");
@@ -713,8 +717,9 @@ This compatibility agent subtracts tools.
 "#,
     )?;
 
-    let registry =
-        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let mut config = root_config();
+    config.skills.compatibility_sources = vec!["claude".to_owned()];
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
     assert!(registry.get(&AgentProfileId::new("narrow")?).is_none());
     assert!(registry.warnings().iter().any(|warning| {
         warning.contains("narrow")
@@ -1418,7 +1423,6 @@ fn registry_from_entries_and_child_skill_helpers_cover_projection_edges() -> Res
             },
             "compatibility",
         ),
-        (AgentProfileSource::LegacyTask, "legacy_task"),
         (AgentProfileSource::Unknown, "unknown"),
     ];
     for (source, expected) in labels {

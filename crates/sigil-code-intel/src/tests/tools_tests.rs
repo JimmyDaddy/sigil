@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, fs};
 use anyhow::anyhow;
 use serde_json::json;
 use sigil_kernel::{
-    CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig,
-    LanguageServerConfig, ToolCall, ToolContext, ToolRegistry,
+    CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig, ToolCall, ToolContext,
+    ToolRegistry,
 };
 
 use super::*;
@@ -16,14 +16,12 @@ use crate::workspace::file_uri_from_path;
 fn enabled_config() -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         default_timeout_ms: 50,
         max_results: 10,
         max_payload_bytes: 64 * 1024,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         servers: vec![LanguageServerConfig {
             name: "missing-rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],
@@ -205,14 +203,12 @@ while True:
 fn tooling_lsp_config(script_path: &std::path::Path) -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         default_timeout_ms: 5_000,
         max_results: 10,
         max_payload_bytes: 64 * 1024,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         servers: vec![LanguageServerConfig {
             name: "rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],

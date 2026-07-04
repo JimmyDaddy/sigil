@@ -699,7 +699,7 @@ impl AppState {
             Span::raw(format!(": {active_label}")),
             Span::raw(" · child session"),
         ])];
-        if let Some(thread) = agent_thread.as_ref().filter(|thread| !thread.legacy_task) {
+        if let Some(thread) = agent_thread.as_ref() {
             let session_view_cache = self.session_view_cache();
             let latest_task = session_view_cache.task_projection.latest_task();
             let continuation_unresolved = continuation_projection

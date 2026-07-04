@@ -313,7 +313,7 @@ fn run_input_with_repo_context(
     prompt: String,
 ) -> sigil_kernel::AgentRunInput {
     let runtime_context =
-        sigil_runtime::context_candidates_from_repo_query(workspace_root, &prompt)
+        sigil_runtime::context_candidates_from_safe_sources(workspace_root, &prompt, None)
             .unwrap_or_default();
     sigil_kernel::AgentRunInput::user(prompt).with_runtime_context(runtime_context)
 }

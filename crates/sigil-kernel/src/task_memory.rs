@@ -88,12 +88,8 @@ impl SourcedFact {
         {
             bail!("task memory fact confidence must be 0..=100");
         }
-        if self.model_generated
-            && self.verified
-            && self.source_receipt_id.is_none()
-            && self.source_artifact_id.is_none()
-        {
-            bail!("model-generated task memory fact cannot be verified without durable evidence");
+        if self.verified && self.source_receipt_id.is_none() && self.source_artifact_id.is_none() {
+            bail!("verified task memory fact requires durable receipt or artifact evidence");
         }
         Ok(())
     }
@@ -340,9 +336,8 @@ pub fn extract_task_memory_from_stream_records(
         if let Some(entry) = session_entry_from_stream_record(record)? {
             builder.apply_session_entry(record.event_id(), &entry);
         }
-        if let SessionStreamRecord::Stored(event) = record
-            && event.event_kind() == Some(DurableEventType::MutationCommitted)
-        {
+        let SessionStreamRecord::Stored(event) = record;
+        if event.event_kind() == Some(DurableEventType::MutationCommitted) {
             let committed: MutationCommitted = serde_json::from_value(event.payload.clone())?;
             builder.apply_mutation_committed(record.event_id(), &committed);
         }
@@ -406,6 +401,7 @@ fn task_memory_context_item(
         repo_revision: None,
         token_cost: crate::estimate_context_token_cost(&body),
         score: Some(score),
+        score_breakdown: Vec::new(),
         inclusion_reason: ContextInclusionReason::RetrievalHit,
         body_ref: source_event_id
             .map(ContextBodyRef::DurableEvent)
@@ -417,7 +413,6 @@ fn session_entry_from_stream_record(
     record: &SessionStreamRecord,
 ) -> Result<Option<SessionLogEntry>> {
     match record {
-        SessionStreamRecord::Legacy { entry, .. } => Ok(Some((**entry).clone())),
         SessionStreamRecord::Stored(event) => {
             let Some(value) = event.payload.get("session_log_entry") else {
                 return Ok(None);

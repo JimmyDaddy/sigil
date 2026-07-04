@@ -89,22 +89,31 @@ pub struct ProviderStatusConfig {
 }
 
 #[must_use]
-pub fn normalize_provider_name(provider: &str) -> &'static str {
-    match provider_config_key(provider) {
-        OPENAI_COMPAT_PROVIDER_KEY => OPENAI_COMPAT_PROVIDER_KEY,
-        ANTHROPIC_PROVIDER_KEY => ANTHROPIC_PROVIDER_KEY,
-        GEMINI_PROVIDER_KEY => GEMINI_PROVIDER_KEY,
-        _ => DEEPSEEK_PROVIDER_KEY,
+pub fn normalize_provider_name(provider: &str) -> &str {
+    provider_config_key(provider)
+}
+
+pub fn supported_provider_name(provider: &str) -> Result<&str> {
+    let provider = normalize_provider_name(provider);
+    match provider {
+        DEEPSEEK_PROVIDER_KEY
+        | OPENAI_COMPAT_PROVIDER_KEY
+        | ANTHROPIC_PROVIDER_KEY
+        | GEMINI_PROVIDER_KEY => Ok(provider),
+        other => bail!(
+            "unsupported provider {other}; expected one of deepseek, openai_compat, anthropic, or gemini"
+        ),
     }
 }
 
 #[must_use]
-pub fn provider_api_key_env_name(provider: &str) -> &'static str {
+pub fn provider_api_key_env_name(provider: &str) -> Option<&'static str> {
     match normalize_provider_name(provider) {
-        OPENAI_COMPAT_PROVIDER_KEY => OPENAI_COMPATIBLE_API_KEY_ENV,
-        ANTHROPIC_PROVIDER_KEY => SIGIL_ANTHROPIC_API_KEY_ENV,
-        GEMINI_PROVIDER_KEY => SIGIL_GEMINI_API_KEY_ENV,
-        _ => SIGIL_API_KEY_ENV,
+        DEEPSEEK_PROVIDER_KEY => Some(SIGIL_API_KEY_ENV),
+        OPENAI_COMPAT_PROVIDER_KEY => Some(OPENAI_COMPATIBLE_API_KEY_ENV),
+        ANTHROPIC_PROVIDER_KEY => Some(SIGIL_ANTHROPIC_API_KEY_ENV),
+        GEMINI_PROVIDER_KEY => Some(SIGIL_GEMINI_API_KEY_ENV),
+        _ => None,
     }
 }
 
@@ -129,9 +138,14 @@ pub fn provider_config_fields(
         GEMINI_PROVIDER_KEY => load_gemini_config(root_config)
             .map(provider_config_fields_from_gemini)
             .unwrap_or_else(|_| default_provider_config_fields(provider_name, fallback_model)),
-        _ => load_deepseek_config(root_config)
+        DEEPSEEK_PROVIDER_KEY => load_deepseek_config(root_config)
             .map(provider_config_fields_from_deepseek)
             .unwrap_or_else(|_| default_provider_config_fields(provider_name, fallback_model)),
+        _ => ProviderConfigFields {
+            model: fallback_model.to_owned(),
+            api_key: String::new(),
+            base_url: String::new(),
+        },
     }
 }
 
@@ -147,7 +161,14 @@ pub fn default_provider_config_fields(provider_name: &str, model: &str) -> Provi
         GEMINI_PROVIDER_KEY => {
             provider_config_fields_from_gemini(GeminiProviderConfig::default_for_model(model))
         }
-        _ => provider_config_fields_from_deepseek(DeepSeekProviderConfig::default_for_model(model)),
+        DEEPSEEK_PROVIDER_KEY => {
+            provider_config_fields_from_deepseek(DeepSeekProviderConfig::default_for_model(model))
+        }
+        _ => ProviderConfigFields {
+            model: model.to_owned(),
+            api_key: String::new(),
+            base_url: String::new(),
+        },
     }
 }
 
@@ -173,7 +194,7 @@ pub fn set_provider_config_fields(
     fields: &ProviderConfigFields,
     deepseek_fields: Option<&DeepSeekProviderConfigFields>,
 ) -> Result<()> {
-    let provider_name = normalize_provider_name(provider_name);
+    let provider_name = supported_provider_name(provider_name)?;
     let model = fields.model.trim();
     if model.is_empty() {
         bail!("model cannot be empty");
@@ -221,7 +242,7 @@ pub fn set_provider_config_fields(
                 serialize_provider_config("gemini", &config)?,
             );
         }
-        _ => {
+        DEEPSEEK_PROVIDER_KEY => {
             let extras = deepseek_fields
                 .cloned()
                 .unwrap_or_else(|| deepseek_provider_config_fields(root_config, model));
@@ -253,6 +274,7 @@ pub fn set_provider_config_fields(
                 serialize_provider_config("deepseek", &config)?,
             );
         }
+        _ => unreachable!("supported_provider_name returned an unsupported provider"),
     }
 
     Ok(())
@@ -291,11 +313,11 @@ pub fn set_model_request_config_fields(
 }
 
 pub fn set_active_provider_model(root_config: &mut RootConfig, model: &str) -> Result<()> {
-    let provider_name = normalize_provider_name(&root_config.agent.provider);
-    let mut fields = provider_config_fields(root_config, provider_name, model);
+    let provider_name = normalize_provider_name(&root_config.agent.provider).to_owned();
+    let mut fields = provider_config_fields(root_config, &provider_name, model);
     fields.model = model.to_owned();
     let deepseek_fields = deepseek_provider_config_fields(root_config, model);
-    set_provider_config_fields(root_config, provider_name, &fields, Some(&deepseek_fields))
+    set_provider_config_fields(root_config, &provider_name, &fields, Some(&deepseek_fields))
 }
 
 pub fn deepseek_provider_value_for_setup(model: &str, api_key: Option<&str>) -> Result<Value> {

@@ -24,10 +24,12 @@ use text::{
 pub type ContextItemId = String;
 pub type ContextEgressDecisionId = String;
 pub type ContextRepoRevision = String;
+pub type ContextSourceRef = String;
 pub type SessionArchiveEntryId = String;
 
 pub const DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES: usize = 4096;
 pub const DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES: usize = 8 * 1024;
+pub const UNKNOWN_CONTEXT_REPO_REVISION: &str = "unknown_revision";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +39,7 @@ pub enum ContextSource {
     WorkspaceInstruction,
     RepositoryFile,
     ToolObservation,
+    McpResource,
     DurableEvent,
     EvidenceReceipt,
     MutationEvidence,
@@ -207,8 +210,81 @@ pub struct ContextItem {
     pub token_cost: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub score_breakdown: Vec<ContextScoreComponent>,
     pub inclusion_reason: ContextInclusionReason,
     pub body_ref: ContextBodyRef,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoreComponentKind {
+    StableContext,
+    RequiredContext,
+    ExplicitPath,
+    ExactSymbol,
+    SourcePath,
+    SessionBm25,
+    RetrievalScore,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextScoreComponent {
+    pub kind: ContextScoreComponentKind,
+    pub value: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoreMissingReason {
+    StableContext,
+    RequiredContext,
+    SourceProvidedWithoutScore,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPlacementMissingReason {
+    ExcludedFromPrompt,
+    RuntimePayloadNotRanked,
+}
+
+/// Stable provenance row for Context V0 audit, TUI summary, and quality evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextProvenanceRowV1 {
+    pub item_id: ContextItemId,
+    pub source: ContextSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<ContextSourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub score_breakdown: Vec<ContextScoreComponent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_missing_reason: Option<ContextScoreMissingReason>,
+    pub token_cost: usize,
+    pub trust_level: ContextTrustLevel,
+    pub sensitivity: ContextSensitivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_decision: Option<ContextEgressDecisionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_revision: Option<ContextRepoRevision>,
+    pub inclusion_reason: ContextInclusionReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_included: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_excluded: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ContextPackPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_missing_reason: Option<ContextPlacementMissingReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<ContextTruncation>,
 }
 
 /// Runtime-selected context candidates for one request assembly pass.
@@ -456,6 +532,7 @@ impl SessionArchive {
                 repo_revision: None,
                 token_cost: estimate_context_token_cost(&indexed_body),
                 score: Some(score),
+                score_breakdown: Vec::new(),
                 inclusion_reason,
                 body_ref: ContextBodyRef::inline(&indexed_body),
             };
@@ -511,7 +588,7 @@ pub struct PackedContext {
 }
 
 pub const CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION: u16 = 1;
-pub const CONTEXT_QUALITY_REPORT_SCHEMA_VERSION: u16 = 1;
+pub const CONTEXT_QUALITY_REPORT_SCHEMA_VERSION: u16 = 2;
 
 /// Stable, developer-facing evidence for one Context V0 retrieval and packing run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -545,6 +622,25 @@ pub struct ContextQualityReportManifest {
     pub summary_path: PathBuf,
     pub finding_counts: BTreeMap<String, usize>,
     pub fixture_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matrix_dimensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matrix: Vec<ContextQualityMatrixEntry>,
+}
+
+/// Matrix coverage row for one deterministic Context V0 fixture.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextQualityMatrixEntry {
+    pub fixture_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included_sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finding_kinds: Vec<String>,
 }
 
 /// Paths written by [`write_context_quality_evidence_artifacts`].
@@ -562,18 +658,32 @@ pub struct ContextQualityReportArtifacts {
 pub struct ContextQualityItemEvidence {
     pub id: ContextItemId,
     pub source: ContextSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<ContextSourceRef>,
     pub trust_level: ContextTrustLevel,
     pub sensitivity: ContextSensitivity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_decision: Option<ContextEgressDecisionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_revision: Option<ContextRepoRevision>,
     pub token_cost: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub score_breakdown: Vec<ContextScoreComponent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_missing_reason: Option<ContextScoreMissingReason>,
     pub inclusion_reason: ContextInclusionReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_included: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_excluded: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<ContextPackPlacement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_missing_reason: Option<ContextPlacementMissingReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncation: Option<ContextTruncation>,
     pub body_ref: ContextBodyRef,
@@ -727,6 +837,8 @@ fn build_context_quality_manifest(
 ) -> ContextQualityReportManifest {
     let mut finding_counts = BTreeMap::<String, usize>::new();
     let mut fixture_ids = Vec::<String>::new();
+    let mut matrix_dimensions = BTreeSet::<String>::new();
+    let mut matrix = Vec::<ContextQualityMatrixEntry>::new();
     for pack in packs {
         push_unique_string(&mut fixture_ids, pack.fixture_id.clone());
         for finding in &pack.findings {
@@ -734,6 +846,9 @@ fn build_context_quality_manifest(
                 .entry(serialized_label(&finding.kind))
                 .or_default() += 1;
         }
+        let entry = context_quality_matrix_entry(pack);
+        matrix_dimensions.extend(entry.dimensions.iter().cloned());
+        matrix.push(entry);
     }
 
     ContextQualityReportManifest {
@@ -743,6 +858,8 @@ fn build_context_quality_manifest(
         summary_path,
         finding_counts,
         fixture_ids,
+        matrix_dimensions: matrix_dimensions.into_iter().collect(),
+        matrix,
     }
 }
 
@@ -750,6 +867,37 @@ fn render_context_quality_summary(packs: &[ContextQualityEvidencePack]) -> Strin
     let mut out = String::new();
     out.push_str("# Sigil Context Quality Evidence\n\n");
     out.push_str(&format!("Total packs: {}\n\n", packs.len()));
+    let matrix = packs
+        .iter()
+        .map(context_quality_matrix_entry)
+        .collect::<Vec<_>>();
+    let mut dimensions = BTreeSet::<String>::new();
+    for entry in &matrix {
+        dimensions.extend(entry.dimensions.iter().cloned());
+    }
+    if !matrix.is_empty() {
+        out.push_str("## Matrix Coverage\n\n");
+        out.push_str(&format!(
+            "- covered finding groups: {}\n",
+            dimensions
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        for entry in &matrix {
+            out.push_str(&format!(
+                "- {}: {}\n",
+                entry.fixture_id,
+                if entry.dimensions.is_empty() {
+                    "none".to_owned()
+                } else {
+                    entry.dimensions.join(", ")
+                }
+            ));
+        }
+        out.push('\n');
+    }
     for pack in packs {
         out.push_str(&format!("## {}\n\n", pack.fixture_id));
         out.push_str(&format!("- query: `{}`\n", pack.query));
@@ -772,10 +920,239 @@ fn render_context_quality_summary(packs: &[ContextQualityEvidencePack]) -> Strin
     out
 }
 
+fn context_quality_matrix_entry(pack: &ContextQualityEvidencePack) -> ContextQualityMatrixEntry {
+    let included_sources = pack.included_by_source.keys().cloned().collect::<Vec<_>>();
+    let excluded_reasons = pack.excluded_by_reason.keys().cloned().collect::<Vec<_>>();
+    let finding_kinds = pack
+        .findings
+        .iter()
+        .map(|finding| serialized_label(&finding.kind))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut dimensions = BTreeSet::<String>::new();
+    if !pack.included.is_empty() || !pack.excluded.is_empty() {
+        dimensions.insert("recall".to_owned());
+    }
+    if pack
+        .included
+        .iter()
+        .chain(pack.excluded.iter())
+        .any(|item| item.score.is_some() || !item.score_breakdown.is_empty())
+    {
+        dimensions.insert("ranking".to_owned());
+    }
+    for finding in &pack.findings {
+        match finding.kind {
+            ContextQualityFindingKind::RecallInsufficient => {
+                dimensions.insert("recall".to_owned());
+            }
+            ContextQualityFindingKind::RankingInsufficient => {
+                dimensions.insert("ranking".to_owned());
+            }
+            ContextQualityFindingKind::TokenBudgetPressure => {
+                dimensions.insert("budget".to_owned());
+            }
+            ContextQualityFindingKind::SafetyExclusion => {
+                dimensions.insert("safety".to_owned());
+            }
+        }
+    }
+    for reason in pack.excluded_by_reason.keys() {
+        match reason.as_str() {
+            "excluded_secret" => {
+                dimensions.insert("safety".to_owned());
+            }
+            "excluded_untrusted_workspace" => {
+                dimensions.insert("trust".to_owned());
+            }
+            "excluded_egress_denied" => {
+                dimensions.insert("egress".to_owned());
+            }
+            "excluded_token_budget" => {
+                dimensions.insert("budget".to_owned());
+            }
+            _ => {}
+        }
+    }
+    for source in pack.included_by_source.keys() {
+        if matches!(
+            source.as_str(),
+            "task_digest" | "session_archive" | "evidence_receipt" | "verification_evidence"
+        ) {
+            dimensions.insert("memory_evidence_boundary".to_owned());
+        }
+    }
+    for item in &pack.excluded {
+        let source = serialized_label(&item.source);
+        if matches!(
+            source.as_str(),
+            "task_digest" | "session_archive" | "evidence_receipt" | "verification_evidence"
+        ) {
+            dimensions.insert("memory_evidence_boundary".to_owned());
+        }
+    }
+    ContextQualityMatrixEntry {
+        fixture_id: pack.fixture_id.clone(),
+        dimensions: dimensions.into_iter().collect(),
+        included_sources,
+        excluded_reasons,
+        finding_kinds,
+    }
+}
+
 fn push_unique_string(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
+}
+
+#[must_use]
+pub fn context_provenance_row_v1(
+    item: &ContextItem,
+    placement: Option<ContextPackPlacement>,
+    rank: Option<usize>,
+    truncation: Option<ContextTruncation>,
+) -> ContextProvenanceRowV1 {
+    ContextProvenanceRowV1 {
+        item_id: item.id.clone(),
+        source: item.source.clone(),
+        source_ref: context_source_ref(item),
+        score: item.score,
+        score_breakdown: context_score_breakdown(item),
+        score_missing_reason: context_score_missing_reason(item, placement),
+        token_cost: item.token_cost,
+        trust_level: item.trust_level,
+        sensitivity: item.sensitivity,
+        egress_decision: item.egress_decision.clone(),
+        repo_revision: context_repo_revision(item),
+        inclusion_reason: item.inclusion_reason.clone(),
+        why_included: item
+            .inclusion_reason
+            .is_included()
+            .then(|| serialized_label(&item.inclusion_reason)),
+        why_excluded: (!item.inclusion_reason.is_included())
+            .then(|| serialized_label(&item.inclusion_reason)),
+        placement,
+        rank,
+        placement_missing_reason: context_placement_missing_reason(item, placement, rank),
+        truncation,
+    }
+}
+
+fn context_source_ref(item: &ContextItem) -> Option<ContextSourceRef> {
+    Some(match &item.body_ref {
+        ContextBodyRef::Inline {
+            content_hash,
+            byte_len,
+        } => format!("inline:{content_hash}:{byte_len}"),
+        ContextBodyRef::WorkspacePath(path) => format!("workspace:{}", path.display()),
+        ContextBodyRef::DurableEvent(event_id) => format!("event:{event_id}"),
+        ContextBodyRef::Receipt(receipt_id) => format!("receipt:{receipt_id}"),
+        ContextBodyRef::Artifact(artifact_id) => format!("artifact:{artifact_id}"),
+    })
+}
+
+fn context_score_breakdown(item: &ContextItem) -> Vec<ContextScoreComponent> {
+    if !item.score_breakdown.is_empty() {
+        return item.score_breakdown.clone();
+    }
+    item.score
+        .map(|value| ContextScoreComponent {
+            kind: context_score_component_kind(item),
+            value,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn context_score_component_kind(item: &ContextItem) -> ContextScoreComponentKind {
+    match item.inclusion_reason {
+        ContextInclusionReason::StablePrompt => ContextScoreComponentKind::StableContext,
+        ContextInclusionReason::UserRequest
+        | ContextInclusionReason::RecentTurn
+        | ContextInclusionReason::ActiveFile
+        | ContextInclusionReason::WorkspaceInstruction
+        | ContextInclusionReason::VerificationState
+        | ContextInclusionReason::RequiredEvidence => ContextScoreComponentKind::RequiredContext,
+        ContextInclusionReason::ExactSymbolMatch => ContextScoreComponentKind::ExactSymbol,
+        ContextInclusionReason::SourcePathMatch => ContextScoreComponentKind::SourcePath,
+        ContextInclusionReason::RetrievalHit => match item.source {
+            ContextSource::SessionArchive => ContextScoreComponentKind::SessionBm25,
+            ContextSource::RepositoryFile
+            | ContextSource::McpResource
+            | ContextSource::LspSymbol
+            | ContextSource::LspDiagnostic
+            | ContextSource::LspReference
+            | ContextSource::CurrentDiff => ContextScoreComponentKind::RetrievalScore,
+            _ => ContextScoreComponentKind::Other,
+        },
+        ContextInclusionReason::WarmLspMatch => ContextScoreComponentKind::RetrievalScore,
+        ContextInclusionReason::TokenBudget
+        | ContextInclusionReason::ExcludedUntrustedWorkspace
+        | ContextInclusionReason::ExcludedSecret
+        | ContextInclusionReason::ExcludedEgressDenied
+        | ContextInclusionReason::ExcludedTokenBudget
+        | ContextInclusionReason::ExcludedUnsupported => ContextScoreComponentKind::Other,
+    }
+}
+
+fn context_score_missing_reason(
+    item: &ContextItem,
+    placement: Option<ContextPackPlacement>,
+) -> Option<ContextScoreMissingReason> {
+    if item.score.is_some() {
+        return None;
+    }
+    if placement == Some(ContextPackPlacement::StablePrefix)
+        || item.inclusion_reason == ContextInclusionReason::StablePrompt
+    {
+        return Some(ContextScoreMissingReason::StableContext);
+    }
+    if matches!(
+        item.inclusion_reason,
+        ContextInclusionReason::UserRequest
+            | ContextInclusionReason::RecentTurn
+            | ContextInclusionReason::ActiveFile
+            | ContextInclusionReason::WorkspaceInstruction
+            | ContextInclusionReason::VerificationState
+            | ContextInclusionReason::RequiredEvidence
+    ) {
+        return Some(ContextScoreMissingReason::RequiredContext);
+    }
+    Some(ContextScoreMissingReason::SourceProvidedWithoutScore)
+}
+
+fn context_repo_revision(item: &ContextItem) -> Option<ContextRepoRevision> {
+    item.repo_revision.clone().or_else(|| {
+        context_source_prefers_repo_revision(&item.source)
+            .then(|| UNKNOWN_CONTEXT_REPO_REVISION.to_owned())
+    })
+}
+
+fn context_source_prefers_repo_revision(source: &ContextSource) -> bool {
+    matches!(
+        source,
+        ContextSource::RepositoryFile
+            | ContextSource::LspSymbol
+            | ContextSource::LspDiagnostic
+            | ContextSource::LspReference
+            | ContextSource::CurrentDiff
+    )
+}
+
+fn context_placement_missing_reason(
+    item: &ContextItem,
+    placement: Option<ContextPackPlacement>,
+    rank: Option<usize>,
+) -> Option<ContextPlacementMissingReason> {
+    if placement.is_some() && rank.is_some() {
+        return None;
+    }
+    if !item.inclusion_reason.is_included() {
+        return Some(ContextPlacementMissingReason::ExcludedFromPrompt);
+    }
+    Some(ContextPlacementMissingReason::RuntimePayloadNotRanked)
 }
 
 fn context_quality_item_row(
@@ -784,18 +1161,27 @@ fn context_quality_item_row(
     rank: Option<usize>,
     truncations: &BTreeMap<ContextItemId, ContextTruncation>,
 ) -> ContextQualityItemEvidence {
+    let provenance =
+        context_provenance_row_v1(item, placement, rank, truncations.get(&item.id).cloned());
     ContextQualityItemEvidence {
-        id: item.id.clone(),
-        source: item.source.clone(),
-        trust_level: item.trust_level,
-        sensitivity: item.sensitivity,
-        egress_decision: item.egress_decision.clone(),
-        token_cost: item.token_cost,
-        score: item.score,
-        inclusion_reason: item.inclusion_reason.clone(),
-        placement,
-        rank,
-        truncation: truncations.get(&item.id).cloned(),
+        id: provenance.item_id,
+        source: provenance.source,
+        source_ref: provenance.source_ref,
+        trust_level: provenance.trust_level,
+        sensitivity: provenance.sensitivity,
+        egress_decision: provenance.egress_decision,
+        repo_revision: provenance.repo_revision,
+        token_cost: provenance.token_cost,
+        score: provenance.score,
+        score_breakdown: provenance.score_breakdown,
+        score_missing_reason: provenance.score_missing_reason,
+        inclusion_reason: provenance.inclusion_reason,
+        why_included: provenance.why_included,
+        why_excluded: provenance.why_excluded,
+        placement: provenance.placement,
+        rank: provenance.rank,
+        placement_missing_reason: provenance.placement_missing_reason,
+        truncation: provenance.truncation,
         body_ref: item.body_ref.clone(),
     }
 }
@@ -1007,12 +1393,43 @@ fn stable_context_priority(item: &ContextItem) -> u8 {
 }
 
 fn dynamic_context_order(left: &ContextItem, right: &ContextItem) -> Ordering {
+    let priority_cmp = dynamic_context_priority(left).cmp(&dynamic_context_priority(right));
+    if priority_cmp != Ordering::Equal {
+        return priority_cmp;
+    }
     let score_cmp = right
         .score
         .unwrap_or_default()
         .partial_cmp(&left.score.unwrap_or_default())
         .unwrap_or(Ordering::Equal);
     score_cmp.then_with(|| left.id.cmp(&right.id))
+}
+
+fn dynamic_context_priority(item: &ContextItem) -> u8 {
+    if item
+        .score_breakdown
+        .iter()
+        .any(|component| component.kind == ContextScoreComponentKind::ExplicitPath)
+    {
+        return 0;
+    }
+    if item.inclusion_reason == ContextInclusionReason::ExactSymbolMatch
+        || item
+            .score_breakdown
+            .iter()
+            .any(|component| component.kind == ContextScoreComponentKind::ExactSymbol)
+    {
+        return 1;
+    }
+    if item.inclusion_reason == ContextInclusionReason::SourcePathMatch
+        || item
+            .score_breakdown
+            .iter()
+            .any(|component| component.kind == ContextScoreComponentKind::SourcePath)
+    {
+        return 2;
+    }
+    3
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

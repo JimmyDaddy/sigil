@@ -153,47 +153,13 @@ fn plan_continue_command_points_to_task_continue() -> Result<()> {
 
 #[test]
 fn agent_command_switches_visible_agent_view() -> Result<()> {
-    let task_id = sigil_kernel::TaskId::new("task_1")?;
-    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
     let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.sync_current_session_state(vec![
-        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-            objective: "review workspace".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Running,
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: sigil_kernel::TaskPlanStatus::Accepted,
-            steps: vec![sigil_kernel::TaskStepSpec {
-                step_id: step_id.clone(),
-                title: "让子 agent 检查仓库".to_owned(),
-                display_name: Some("仓库审查".to_owned()),
-                detail: None,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                mode: None,
-                isolation: None,
-            }],
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskChildSession(
-            sigil_kernel::TaskChildSessionEntry {
-                task_id,
-                plan_version: 1,
-                step_id,
-                child_task_id: sigil_kernel::TaskId::new("child_1")?,
-                child_session_ref: child_ref,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                status: sigil_kernel::TaskChildSessionStatus::Completed,
-                summary_hash: None,
-            },
-        )),
-    ]);
+    app.sync_current_session_state(child_agent_entries(
+        Some("仓库审查"),
+        sigil_kernel::AgentThreadStatus::Completed,
+        child_ref,
+    )?);
 
     app.composer.input = "/agent child_1".to_owned();
     assert!(app.submit_input()?.is_none());
@@ -220,52 +186,16 @@ fn agent_command_switches_visible_agent_view() -> Result<()> {
 #[test]
 fn agent_rename_command_persists_child_display_name() -> Result<()> {
     let temp = tempdir()?;
-    let task_id = sigil_kernel::TaskId::new("task_1")?;
-    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
     let mut app = AppState::from_root_config(
         temp.path().join("sigil.toml").as_path(),
         &config_for_workspace(temp.path()),
     );
     app.session_log_path = temp.path().join(".sigil/sessions/current.jsonl");
-    app.sync_current_session_state(vec![
-        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-            objective: "review workspace".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Running,
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: sigil_kernel::TaskPlanStatus::Accepted,
-            steps: vec![sigil_kernel::TaskStepSpec {
-                step_id: step_id.clone(),
-                title: "让子 agent 检查仓库".to_owned(),
-                display_name: Some("仓库审查".to_owned()),
-                detail: None,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                mode: None,
-                isolation: None,
-            }],
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskChildSession(
-            sigil_kernel::TaskChildSessionEntry {
-                task_id,
-                plan_version: 1,
-                step_id,
-                child_task_id: sigil_kernel::TaskId::new("child_1")?,
-                child_session_ref: sigil_kernel::SessionRef::new_relative(
-                    "children/task_1/step_1-child_1.jsonl",
-                )?,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                status: sigil_kernel::TaskChildSessionStatus::Completed,
-                summary_hash: None,
-            },
-        )),
-    ]);
+    app.sync_current_session_state(child_agent_entries(
+        Some("仓库审查"),
+        sigil_kernel::AgentThreadStatus::Completed,
+        sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
+    )?);
 
     app.composer.input = "/agent rename child_1 德语译员".to_owned();
     assert!(app.submit_input()?.is_none());
@@ -277,8 +207,8 @@ fn agent_rename_command_persists_child_display_name() -> Result<()> {
     assert!(persisted.iter().any(|entry| {
         matches!(
             entry,
-            SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
-                if rename.child_task_id.as_str() == "child_1"
+            SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(rename))
+                if rename.thread_id.as_str() == "child_1"
                     && rename.display_name == "德语译员"
         )
     }));
@@ -287,104 +217,37 @@ fn agent_rename_command_persists_child_display_name() -> Result<()> {
 
 #[test]
 fn agent_label_falls_back_to_role_ordinal_without_display_name() -> Result<()> {
-    let task_id = sigil_kernel::TaskId::new("task_1")?;
-    let step_id = sigil_kernel::TaskStepId::new("translate_german")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.sync_current_session_state(vec![
-        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-            objective: "translate".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Running,
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: sigil_kernel::TaskPlanStatus::Accepted,
-            steps: vec![sigil_kernel::TaskStepSpec {
-                step_id: step_id.clone(),
-                title: "让子 agent 翻译为德语".to_owned(),
-                display_name: None,
-                detail: None,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                mode: None,
-                isolation: None,
-            }],
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskChildSession(
-            sigil_kernel::TaskChildSessionEntry {
-                task_id,
-                plan_version: 1,
-                step_id,
-                child_task_id: sigil_kernel::TaskId::new("child_1")?,
-                child_session_ref: sigil_kernel::SessionRef::new_relative(
-                    "children/task_1/translate_german-child_1.jsonl",
-                )?,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                status: sigil_kernel::TaskChildSessionStatus::Completed,
-                summary_hash: None,
-            },
-        )),
-    ]);
+    app.sync_current_session_state(child_agent_entries_with(
+        "translate",
+        "让子 agent 翻译为德语",
+        None,
+        "translate_german",
+        "child_1",
+        sigil_kernel::SessionRef::new_relative("children/task_1/translate_german-child_1.jsonl")?,
+        "subagent_read",
+        sigil_kernel::AgentThreadStatus::Completed,
+    )?);
 
     app.composer.input = "/agent ".to_owned();
     let rows = app.slash_selector_rows();
-    assert!(rows.iter().any(|(label, _)| label == "read 1"));
+    assert!(rows.iter().any(|(label, _)| label == "translate"));
     assert!(!rows.iter().any(|(label, _)| label == "德语译员"));
 
-    app.composer.input = "/agent read 1".to_owned();
+    app.composer.input = "/agent translate".to_owned();
     assert!(app.submit_input()?.is_none());
-    assert_eq!(app.active_agent_label(), "read 1");
+    assert_eq!(app.active_agent_label(), "translate");
     Ok(())
 }
 
 #[test]
 fn agent_command_selector_lists_main_child_and_navigation() -> Result<()> {
-    let task_id = sigil_kernel::TaskId::new("task_1")?;
-    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.sync_current_session_state(vec![
-        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-            objective: "review workspace".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Running,
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: sigil_kernel::TaskPlanStatus::Accepted,
-            steps: vec![sigil_kernel::TaskStepSpec {
-                step_id: step_id.clone(),
-                title: "让子 agent 检查仓库".to_owned(),
-                display_name: Some("仓库审查".to_owned()),
-                detail: None,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                mode: None,
-                isolation: None,
-            }],
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskChildSession(
-            sigil_kernel::TaskChildSessionEntry {
-                task_id,
-                plan_version: 1,
-                step_id,
-                child_task_id: sigil_kernel::TaskId::new("child_1")?,
-                child_session_ref: sigil_kernel::SessionRef::new_relative(
-                    "children/task_1/step_1-child_1.jsonl",
-                )?,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                status: sigil_kernel::TaskChildSessionStatus::Started,
-                summary_hash: None,
-            },
-        )),
-    ]);
+    app.sync_current_session_state(child_agent_entries(
+        Some("仓库审查"),
+        sigil_kernel::AgentThreadStatus::Started,
+        sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
+    )?);
     app.composer.input = "/agent ".to_owned();
 
     let rows = app.slash_selector_rows();
@@ -394,7 +257,7 @@ fn agent_command_selector_lists_main_child_and_navigation() -> Result<()> {
             .any(|(label, description)| label == "main" && description == "◉ current session")
     );
     assert!(rows.iter().any(|(label, description)| label == "仓库审查"
-        && description == "◐ subagent_read · v1:step_1 · result pending"));
+        && description == "◐ subagent_read · background task · result pending"));
     assert!(!rows.iter().any(|(label, _)| label == "next"));
     assert!(!rows.iter().any(|(label, _)| label == "prev"));
     assert_eq!(app.slash_selector_title(), Some("Agent"));

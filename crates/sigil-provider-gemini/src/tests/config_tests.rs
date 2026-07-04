@@ -11,9 +11,8 @@ impl EnvScope {
     fn set_many(values: &[(&'static str, &str)]) -> Self {
         let names = [
             SIGIL_GEMINI_API_KEY_ENV,
-            GEMINI_API_KEY_ENV,
-            GOOGLE_API_KEY_ENV,
-            SIGIL_GEMINI_MODEL_ENV,
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
             SIGIL_GEMINI_BASE_URL_ENV,
         ];
         let previous = names
@@ -60,16 +59,15 @@ fn default_config_has_stable_endpoint_and_model() {
 }
 
 #[test]
-fn resolved_config_prefers_sigil_env_then_gemini_then_google() -> anyhow::Result<()> {
+fn resolved_config_uses_sigil_env_and_ignores_provider_envs() -> anyhow::Result<()> {
     let _guard = test_env::lock();
     let base = GeminiProviderConfig::default();
 
     {
         let _scope = EnvScope::set_many(&[
             (SIGIL_GEMINI_API_KEY_ENV, "sigil-key"),
-            (GEMINI_API_KEY_ENV, "gemini-key"),
-            (GOOGLE_API_KEY_ENV, "google-key"),
-            (SIGIL_GEMINI_MODEL_ENV, "gemini-test"),
+            ("GEMINI_API_KEY", "gemini-key"),
+            ("GOOGLE_API_KEY", "google-key"),
             (
                 SIGIL_GEMINI_BASE_URL_ENV,
                 "https://gemini.example.com/v1beta",
@@ -77,30 +75,40 @@ fn resolved_config_prefers_sigil_env_then_gemini_then_google() -> anyhow::Result
         ]);
         let resolved = base.clone().resolved()?;
         assert_eq!(resolved.api_key.as_deref(), Some("sigil-key"));
-        assert_eq!(resolved.model, "gemini-test");
+        assert_eq!(resolved.model, "gemini-2.5-pro");
         assert_eq!(resolved.base_url, "https://gemini.example.com/v1beta");
     }
 
     {
         let _scope = EnvScope::set_many(&[
             (SIGIL_GEMINI_API_KEY_ENV, " "),
-            (GEMINI_API_KEY_ENV, "gemini-key"),
-            (GOOGLE_API_KEY_ENV, "google-key"),
+            ("GEMINI_API_KEY", "gemini-key"),
+            ("GOOGLE_API_KEY", "google-key"),
         ]);
         let resolved = base.clone().resolved()?;
-        assert_eq!(resolved.api_key.as_deref(), Some("gemini-key"));
+        assert_eq!(resolved.api_key, None);
     }
 
     {
         let _scope = EnvScope::set_many(&[
             (SIGIL_GEMINI_API_KEY_ENV, " "),
-            (GEMINI_API_KEY_ENV, " "),
-            (GOOGLE_API_KEY_ENV, "google-key"),
+            ("GEMINI_API_KEY", " "),
+            ("GOOGLE_API_KEY", "google-key"),
         ]);
         let resolved = base.resolved()?;
-        assert_eq!(resolved.api_key.as_deref(), Some("google-key"));
+        assert_eq!(resolved.api_key, None);
     }
     Ok(())
+}
+
+#[test]
+fn config_rejects_provider_model_field() {
+    let error = serde_json::from_value::<GeminiProviderConfig>(serde_json::json!({
+        "model": "gemini-2.5-pro"
+    }))
+    .expect_err("provider model field should be rejected");
+
+    assert!(error.to_string().contains("model"));
 }
 
 #[test]

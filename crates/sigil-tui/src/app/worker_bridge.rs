@@ -394,13 +394,22 @@ impl AppState {
                 entries,
             } => {
                 self.sync_current_session_state(entries);
-                let summary = if let Some(next) = items.first() {
+                let visible_target = self.active_conversation_queue_target();
+                let visible_items = items
+                    .iter()
+                    .filter(|item| {
+                        visible_target
+                            .as_ref()
+                            .is_some_and(|target| item.queued.target == *target)
+                    })
+                    .collect::<Vec<_>>();
+                let summary = if let Some(next) = visible_items.first() {
                     let noun = queued_prompt_summary_noun(&next.queued.target);
-                    let plural = if items.len() == 1 { "" } else { "s" };
+                    let plural = if visible_items.len() == 1 { "" } else { "s" };
                     format!(
                         "{} {} {noun}{plural} · next {}",
                         if paused { "paused" } else { "pending" },
-                        items.len(),
+                        visible_items.len(),
                         summarize_queued_prompt(&next.queued.prompt)
                     )
                 } else {

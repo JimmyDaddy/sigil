@@ -17,24 +17,31 @@ use crate::{
     MergeReviewRequested, ModelMessage, MutationCommitted, MutationPrepared, MutationReconciled,
     MutationResolution, MutationSubject, Provider, ReadinessEvaluatedEntry, ReadinessInput,
     RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry, SessionStreamRecord,
-    StoredEvent, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolErrorKind,
-    ToolExecutionStatus, ToolRegistry, ToolRegistryScope, ToolResultMeta, ToolSpec,
-    VerificationAutoRunPolicy, VerificationCheckRunEntry, VerificationCheckRunRequest,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationReceipt, VerificationScope,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    StoredEvent, ToolAccess, ToolCategory, ToolErrorKind, ToolExecutionStatus, ToolRegistry,
+    ToolRegistryScope, ToolResultMeta, ToolSpec, VerificationAutoRunPolicy,
+    VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
+    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationVerdict,
+    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
     WorkspaceMutationEvidence, WorkspaceTrust, WriteIsolationMode, WriteLeaseAcquired,
     WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope,
     build_workspace_snapshot_for_event, evaluate_readiness, run_verification_check,
     session::ControlEntry,
     stable_event_uuid, stable_workspace_id,
     task::{
-        AgentRole, SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-        TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
-        TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry,
+        AgentRole, SessionRef, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+        TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRunEntry,
         TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
-        TaskStepStatus, TaskSubagentApprovalRouteEntry, child_session_ref,
+        TaskStepStatus,
     },
     verification_check_run_id,
+};
+#[cfg(test)]
+use crate::{
+    ToolApproval, ToolCall,
+    task::{
+        TaskChildSessionEntry, TaskChildSessionStatus, TaskRouteId, TaskRouteStatus,
+        TaskSubagentApprovalRouteEntry, child_session_ref,
+    },
 };
 
 type BoxedAgent = Agent<Box<dyn Provider>>;
@@ -54,7 +61,7 @@ pub use changeset_only::{
     changeset_only_child_tool_registry, changeset_only_child_tool_scope,
     decode_changeset_only_child_output, validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
-pub use child_session::{LegacyTaskChildSessionRunner, TaskChildSessionRunner};
+pub use child_session::TaskChildSessionRunner;
 pub use runner::SequentialTaskOrchestrator;
 pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
@@ -84,15 +91,17 @@ use readiness::{
     latest_relevant_successful_verification_sequence, relevant_verification_receipts,
     task_step_default_policy, task_step_readiness,
 };
+#[cfg(test)]
+use scheduler::child_status_from_output;
 use scheduler::{
-    append_cancelled_dependent_steps, cancels_dependent_steps, child_status_from_output,
-    latest_executable_plan, run_status_from_step_status, runnable_steps_for_continue,
-    step_reason_from_output, step_status_after_readiness, step_status_from_outcome,
-    step_terminal_reason, task_status_from_step_status,
+    append_cancelled_dependent_steps, cancels_dependent_steps, latest_executable_plan,
+    run_status_from_step_status, runnable_steps_for_continue, step_reason_from_output,
+    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
+    task_status_from_step_status,
 };
-use shared::{
-    append_task_control, append_task_run, append_task_step, hash_text, route_id_for_call,
-};
+use shared::{append_task_control, append_task_run, append_task_step};
+#[cfg(test)]
+use shared::{hash_text, route_id_for_call};
 use types::StepRunOutput;
 use write_lease::{
     acquire_task_write_lease, release_task_write_lease, write_lease_release_status_from_step_status,

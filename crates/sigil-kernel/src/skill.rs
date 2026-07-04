@@ -144,7 +144,7 @@ impl<'de> Deserialize<'de> for SkillIndexSnapshot {
 
         let Wire {
             descriptors,
-            fingerprint: _legacy_fingerprint,
+            fingerprint: _stored_fingerprint,
         } = Wire::deserialize(deserializer)?;
         let mut descriptors = descriptors;
         sort_skill_descriptors(&mut descriptors);

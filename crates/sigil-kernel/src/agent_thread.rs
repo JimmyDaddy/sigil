@@ -7,10 +7,7 @@ use crate::{
     permission::PermissionConfig,
     provider::ReasoningEffort,
     session::{ControlEntry, SessionLogEntry},
-    task::{
-        AgentRole, SessionRef, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-        TaskChildSessionStatus, TaskId, TaskStepId,
-    },
+    task::SessionRef,
     tool::ToolRegistryScope,
 };
 
@@ -176,7 +173,6 @@ pub enum AgentProfileSource {
         provider: String,
     },
     System,
-    LegacyTask,
     #[serde(other)]
     Unknown,
 }
@@ -370,12 +366,9 @@ impl<'de> Deserialize<'de> for AgentProfile {
         D: Deserializer<'de>,
     {
         let wire = AgentProfileWire::deserialize(deserializer)?;
-        let invocation_policy = wire.invocation_policy.unwrap_or_else(|| {
-            AgentInvocationPolicy::from_invocability(
-                wire.user_invocable.unwrap_or(true),
-                wire.model_invocable.unwrap_or(false),
-            )
-        });
+        let invocation_policy = wire
+            .invocation_policy
+            .ok_or_else(|| serde::de::Error::missing_field("invocation_policy"))?;
         let user_invocable = wire
             .user_invocable
             .unwrap_or_else(|| invocation_policy.default_user_invocable());
@@ -1060,7 +1053,6 @@ pub struct AgentThreadStateProjection {
     pub message_routes: BTreeMap<AgentRouteId, AgentThreadMessageRoutedEntry>,
     pub mailbox_messages: BTreeMap<AgentRouteId, AgentMailboxMessageEntry>,
     pub closed_routes: BTreeMap<AgentRouteId, AgentRouteClosedEntry>,
-    pub legacy_task_thread_ids: BTreeSet<AgentThreadId>,
 }
 
 impl AgentThreadStateProjection {
@@ -1241,10 +1233,6 @@ impl AgentThreadStateProjection {
                 thread.reason = entry.reason.clone();
                 thread.closed = true;
             }
-            ControlEntry::TaskChildSession(entry) => self.apply_legacy_child_session(entry),
-            ControlEntry::TaskChildSessionDisplayName(entry) => {
-                self.apply_legacy_child_display_name(entry);
-            }
             _ => {}
         }
     }
@@ -1344,53 +1332,6 @@ impl AgentThreadStateProjection {
         thread.display_name = Some(entry.display_name.clone());
     }
 
-    fn apply_legacy_child_session(&mut self, entry: &TaskChildSessionEntry) {
-        let thread_id = legacy_task_agent_thread_id(
-            &entry.task_id,
-            entry.plan_version,
-            &entry.step_id,
-            &entry.child_task_id,
-        );
-        self.legacy_task_thread_ids.insert(thread_id.clone());
-        self.record_thread_replay(&thread_id);
-        let thread = self
-            .threads
-            .entry(thread_id.clone())
-            .or_insert_with(|| AgentThreadProjection::legacy_from_task_child(&thread_id, entry));
-        thread.legacy_task = true;
-        thread.invocation_source = Some(AgentInvocationSource::Task);
-        thread.thread_session_ref = Some(entry.child_session_ref.clone());
-        thread.profile_id = Some(legacy_profile_id_for_role(entry.role));
-        thread.objective = format!(
-            "legacy task {} step {}",
-            entry.task_id.as_str(),
-            entry.step_id.as_str()
-        );
-        thread.unresolved = false;
-        thread.status = match entry.status {
-            TaskChildSessionStatus::Started => AgentThreadStatus::Started,
-            TaskChildSessionStatus::Completed => AgentThreadStatus::Completed,
-            TaskChildSessionStatus::Failed => AgentThreadStatus::Failed,
-            TaskChildSessionStatus::Cancelled => AgentThreadStatus::Cancelled,
-            TaskChildSessionStatus::Interrupted => AgentThreadStatus::Interrupted,
-            TaskChildSessionStatus::Unavailable => AgentThreadStatus::Unavailable,
-        };
-    }
-
-    fn apply_legacy_child_display_name(&mut self, entry: &TaskChildSessionDisplayNameEntry) {
-        let thread_id = legacy_task_agent_thread_id(
-            &entry.task_id,
-            entry.plan_version,
-            &entry.step_id,
-            &entry.child_task_id,
-        );
-        self.legacy_task_thread_ids.insert(thread_id.clone());
-        let thread = self.ensure_thread(&thread_id);
-        thread.legacy_task = true;
-        thread.invocation_source = Some(AgentInvocationSource::Task);
-        thread.display_name = Some(entry.display_name.clone());
-    }
-
     fn ensure_thread(&mut self, thread_id: &AgentThreadId) -> &mut AgentThreadProjection {
         self.threads
             .entry(thread_id.clone())
@@ -1404,7 +1345,7 @@ impl AgentThreadStateProjection {
 
     pub(crate) fn finalize_replay(&mut self) {
         for thread in self.threads.values_mut() {
-            if thread.legacy_task || thread.unresolved {
+            if thread.unresolved {
                 continue;
             }
             if thread.status.is_terminal() {
@@ -1476,7 +1417,6 @@ pub struct AgentThreadProjection {
     pub attempts: BTreeMap<AgentRunAttemptId, AgentRunAttemptProjection>,
     pub merge_safe_points: Vec<AgentMergeSafePointEntry>,
     pub duplicate_terminal_entries: usize,
-    pub legacy_task: bool,
     pub closed: bool,
     pub unresolved: bool,
     pub profile_snapshot_missing: bool,
@@ -1506,41 +1446,6 @@ impl AgentThreadProjection {
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
             duplicate_terminal_entries: 0,
-            legacy_task: false,
-            closed: false,
-            unresolved: false,
-            profile_snapshot_missing: false,
-            profile_snapshot_mismatch: false,
-        }
-    }
-
-    fn legacy_from_task_child(thread_id: &AgentThreadId, entry: &TaskChildSessionEntry) -> Self {
-        Self {
-            thread_id: thread_id.clone(),
-            parent_thread_id: None,
-            parent_session_ref: None,
-            thread_session_ref: Some(entry.child_session_ref.clone()),
-            profile_id: Some(legacy_profile_id_for_role(entry.role)),
-            profile_snapshot_id: None,
-            run_context: None,
-            objective: format!(
-                "legacy task {} step {}",
-                entry.task_id.as_str(),
-                entry.step_id.as_str()
-            ),
-            prompt_hash: String::new(),
-            invocation_mode: Some(AgentInvocationMode::Foreground),
-            invocation_source: Some(AgentInvocationSource::Task),
-            display_name: None,
-            status: AgentThreadStatus::Started,
-            reason: None,
-            result: None,
-            result_delivered: false,
-            result_delivery_call_ids: Vec::new(),
-            attempts: BTreeMap::new(),
-            merge_safe_points: Vec::new(),
-            duplicate_terminal_entries: 0,
-            legacy_task: true,
             closed: false,
             unresolved: false,
             profile_snapshot_missing: false,
@@ -1570,7 +1475,6 @@ impl AgentThreadProjection {
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
             duplicate_terminal_entries: 0,
-            legacy_task: false,
             closed: false,
             unresolved: true,
             profile_snapshot_missing: false,
@@ -1730,32 +1634,6 @@ pub fn interrupted_agent_mailbox_messages(
             })
         })
         .collect()
-}
-
-fn legacy_task_agent_thread_id(
-    task_id: &TaskId,
-    plan_version: u32,
-    step_id: &TaskStepId,
-    child_task_id: &TaskId,
-) -> AgentThreadId {
-    AgentThreadId::new(format!(
-        "legacy_{}_v{}_{}_{}",
-        task_id.as_str(),
-        plan_version,
-        step_id.as_str(),
-        child_task_id.as_str()
-    ))
-    .expect("task ids are stable ids")
-}
-
-fn legacy_profile_id_for_role(role: AgentRole) -> AgentProfileId {
-    let suffix = match role {
-        AgentRole::Planner => "planner",
-        AgentRole::Executor => "executor",
-        AgentRole::SubagentRead => "subagent_read",
-        AgentRole::SubagentWrite => "subagent_write",
-    };
-    AgentProfileId::new(format!("legacy_{suffix}")).expect("static profile id is valid")
 }
 
 fn validate_stable_id(label: &str, value: &str) -> Result<()> {

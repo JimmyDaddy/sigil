@@ -33,7 +33,7 @@ pub(super) fn initial_server_plan(
     config: &CodeIntelligenceConfig,
     workspace_root: &Path,
 ) -> ServerPlanState {
-    if config.startup == CodeIntelStartup::Lazy && config.discovery.enabled {
+    if config.server_startup == CodeIntelStartup::Lazy && config.auto_discover {
         return ServerPlanState {
             servers: config.servers.clone(),
             discovery_statuses: config

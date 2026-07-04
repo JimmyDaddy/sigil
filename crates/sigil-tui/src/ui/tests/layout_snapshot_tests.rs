@@ -201,31 +201,65 @@ fn layout_snapshot_exposes_live_text_rows() {
 
 #[test]
 fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
-    let task_id = sigil_kernel::TaskId::new("task_1")?;
-    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(140, 32);
-    app.handle(RunEvent::Control(ControlEntry::TaskRun(
-        sigil_kernel::TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-            objective: "review workspace".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Running,
-            reason: None,
+    let thread_id = sigil_kernel::AgentThreadId::new("child_1")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("subagent_read")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_child_1")?;
+    app.handle(RunEvent::Control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: sigil_kernel::AgentTrustState::Trusted,
+            },
         },
     )))?;
-    app.handle(RunEvent::Control(ControlEntry::TaskChildSession(
-        sigil_kernel::TaskChildSessionEntry {
-            task_id,
-            plan_version: 1,
-            step_id,
-            child_task_id: sigil_kernel::TaskId::new("child_1")?,
-            child_session_ref: sigil_kernel::SessionRef::new_relative(
+    app.handle(RunEvent::Control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: thread_id.clone(),
+            parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: sigil_kernel::SessionRef::new_relative(
                 "children/task_1/step_1-child_1.jsonl",
             )?,
-            role: sigil_kernel::AgentRole::SubagentRead,
-            status: sigil_kernel::TaskChildSessionStatus::Started,
-            summary_hash: None,
+            profile_id,
+            profile_snapshot_id: snapshot_id.clone(),
+            run_context: sigil_kernel::AgentRunContextSnapshot {
+                profile_snapshot_id: snapshot_id,
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-pro".to_owned(),
+                reasoning_effort: None,
+                workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
+                effective_tool_scope_hash: "sha256:tools".to_owned(),
+                effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                provider_capability_hash: "sha256:provider".to_owned(),
+                model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+                budget_policy_hash: "sha256:budget".to_owned(),
+                provider_background_handle_ref: None,
+            },
+            objective: "review workspace".to_owned(),
+            prompt_hash: "sha256:prompt".to_owned(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: sigil_kernel::AgentInvocationSource::Task,
+            display_name: Some("仓库审查".to_owned()),
+            created_at_ms: Some(42),
+        },
+    )))?;
+    app.handle(RunEvent::Control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id,
+            status: sigil_kernel::AgentThreadStatus::Started,
+            reason: None,
+            updated_at_ms: None,
         },
     )))?;
 

@@ -3,9 +3,7 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use serde_json::Value;
-use sigil_kernel::{
-    CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig,
-};
+use sigil_kernel::{CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig};
 
 pub fn python3_available() -> bool {
     std::process::Command::new("python3")
@@ -303,14 +301,12 @@ pub fn write_fake_lsp_scenario(path: &Path, scenario: &Value) {
 pub fn fake_lsp_server_config(script_path: &Path, scenario_path: &Path) -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         default_timeout_ms: 250,
         max_results: 20,
         max_payload_bytes: 64 * 1024,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         servers: vec![fake_server(
             "rust-analyzer",
             &["rust"],
@@ -333,14 +329,12 @@ pub fn fake_lsp_server_config_with_env(
     env.insert("SIGIL_FAKE_LSP_MODE".to_owned(), mode.to_owned());
     CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         default_timeout_ms,
         max_results: 20,
         max_payload_bytes: 64 * 1024,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         servers: vec![LanguageServerConfig {
             name: "rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
-    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
+    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, PermissionPreset,
     PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, SyntaxThemeId,
     TerminalKeyboardEnhancement, ThemeId, UsageCostCurrency, VerificationAutoRunPolicy,
 };
@@ -14,7 +14,7 @@ use sigil_runtime::{
     DeepSeekProviderConfigFields, ModelRequestConfigFields, ProviderConfigFields,
     ProviderStrictToolsMode, ResolvedAgentProfile, deepseek_provider_config_fields,
     default_provider_config_fields, model_request_config_fields, provider_config_fields,
-    set_model_request_config_fields, set_provider_config_fields,
+    set_model_request_config_fields, set_provider_config_fields, supported_provider_name,
 };
 
 use crate::ui::theme::{COLOR_TOKEN_GROUPS, COLOR_TOKEN_NAMES, ColorTokenGroup};
@@ -185,6 +185,7 @@ pub(crate) enum ConfigField {
     ProviderBaseUrl,
     #[allow(dead_code)]
     ProviderFimModel,
+    PermissionsPreset,
     PermissionsDefaultMode,
     // Verification auto-run is a policy-file concern. Task status owns
     // immediate run/retry actions in the product surface.
@@ -197,13 +198,13 @@ pub(crate) enum ConfigField {
     CompactionContextWindowTokens,
     CompactionTailMessages,
     CodeIntelEnabled,
-    CodeIntelStartup,
+    CodeIntelServerStartup,
     // Discovery details stay in sigil.toml / doctor; the default TUI keeps only
     // the main code-intelligence mode controls.
     #[allow(dead_code)]
-    CodeIntelDiscoveryEnabled,
+    CodeIntelAutoDiscover,
     #[allow(dead_code)]
-    CodeIntelDiscoveryReportMissing,
+    CodeIntelReportMissing,
     // Terminal compatibility knobs stay in sigil.toml / doctor guidance rather
     // than the default configuration flow.
     #[allow(dead_code)]
@@ -246,7 +247,7 @@ impl ConfigField {
         Self::ProviderName,
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
-    const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsDefaultMode];
+    const PERMISSION_FIELDS: [Self; 2] = [Self::PermissionsPreset, Self::PermissionsDefaultMode];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
         Self::CompactionEnabled,
@@ -255,7 +256,8 @@ impl ConfigField {
         Self::CompactionHardThresholdRatio,
         Self::CompactionTailMessages,
     ];
-    const CODE_INTELLIGENCE_FIELDS: [Self; 2] = [Self::CodeIntelEnabled, Self::CodeIntelStartup];
+    const CODE_INTELLIGENCE_FIELDS: [Self; 2] =
+        [Self::CodeIntelEnabled, Self::CodeIntelServerStartup];
     const TERMINAL_FIELDS: [Self; 0] = [];
     const APPEARANCE_FIELDS: [Self; 3] = [
         Self::AppearanceTheme,
@@ -296,6 +298,7 @@ impl ConfigField {
             Self::ModelRequestStreamIdleTimeoutSecs => "stream_idle_timeout",
             Self::ProviderBaseUrl => "base_url",
             Self::ProviderFimModel => "fim_model",
+            Self::PermissionsPreset => "preset",
             Self::PermissionsDefaultMode => "mode",
             Self::VerificationAutoRun => "checks",
             Self::MemoryEnabled => "enabled",
@@ -305,9 +308,9 @@ impl ConfigField {
             Self::CompactionContextWindowTokens => "fallback_window",
             Self::CompactionTailMessages => "tail_messages",
             Self::CodeIntelEnabled => "enabled",
-            Self::CodeIntelStartup => "startup",
-            Self::CodeIntelDiscoveryEnabled => "discovery",
-            Self::CodeIntelDiscoveryReportMissing => "report_missing",
+            Self::CodeIntelServerStartup => "server_startup",
+            Self::CodeIntelAutoDiscover => "auto_discover",
+            Self::CodeIntelReportMissing => "report_missing",
             Self::TerminalMouseCapture => "mouse_capture",
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
@@ -335,6 +338,7 @@ impl ConfigField {
             Self::ModelRequestStreamIdleTimeoutSecs => "Stream idle timeout",
             Self::ProviderBaseUrl => "Endpoint",
             Self::ProviderFimModel => "FIM model",
+            Self::PermissionsPreset => "Preset",
             Self::PermissionsDefaultMode => "Mode",
             Self::VerificationAutoRun => "Checks",
             Self::MemoryEnabled => "Memory",
@@ -344,9 +348,9 @@ impl ConfigField {
             Self::CompactionContextWindowTokens => "Fallback window",
             Self::CompactionTailMessages => "Tail messages",
             Self::CodeIntelEnabled => "Code intelligence",
-            Self::CodeIntelStartup => "Startup",
-            Self::CodeIntelDiscoveryEnabled => "Discovery",
-            Self::CodeIntelDiscoveryReportMissing => "Missing reports",
+            Self::CodeIntelServerStartup => "Server startup",
+            Self::CodeIntelAutoDiscover => "Auto discover",
+            Self::CodeIntelReportMissing => "Missing reports",
             Self::TerminalMouseCapture => "Mouse capture",
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
@@ -388,6 +392,9 @@ impl ConfigField {
             Self::ProviderFimModel => {
                 "DeepSeek-only model used by prefix/FIM helpers. Chat runs use Model."
             }
+            Self::PermissionsPreset => {
+                "Coarse safety profile. Read-only caps all non-read tools before detailed rules."
+            }
             Self::PermissionsDefaultMode => {
                 "Default safety posture for tool calls that do not have a more specific rule."
             }
@@ -415,13 +422,13 @@ impl ConfigField {
             Self::CodeIntelEnabled => {
                 "Registers read-only workspace symbol, definition, reference, and diagnostics tools."
             }
-            Self::CodeIntelStartup => {
+            Self::CodeIntelServerStartup => {
                 "Controls whether code intelligence is off, lazily started, or prepared eagerly."
             }
-            Self::CodeIntelDiscoveryEnabled => {
+            Self::CodeIntelAutoDiscover => {
                 "Uses safe built-in discovery to add common language servers found on PATH."
             }
-            Self::CodeIntelDiscoveryReportMissing => {
+            Self::CodeIntelReportMissing => {
                 "Shows missing discovered language servers as readiness warnings."
             }
             Self::TerminalMouseCapture => {
@@ -490,9 +497,10 @@ impl ConfigField {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
             Self::ProviderName => "Enter cycle",
             Self::ProviderApiKey => "Enter input",
-            Self::PermissionsDefaultMode
+            Self::PermissionsPreset
+            | Self::PermissionsDefaultMode
             | Self::VerificationAutoRun
-            | Self::CodeIntelStartup
+            | Self::CodeIntelServerStartup
             | Self::AppearanceTheme
             | Self::AppearanceSyntaxTheme => "Enter cycle",
             Self::AppearanceUsageCostCurrency => "Enter cycle",
@@ -500,8 +508,8 @@ impl ConfigField {
             Self::MemoryEnabled
             | Self::CompactionEnabled
             | Self::CodeIntelEnabled
-            | Self::CodeIntelDiscoveryEnabled
-            | Self::CodeIntelDiscoveryReportMissing
+            | Self::CodeIntelAutoDiscover
+            | Self::CodeIntelReportMissing
             | Self::TerminalMouseCapture
             | Self::TerminalOsc52Clipboard => "Enter toggle",
             Self::TerminalScrollSensitivity => "Enter input",
@@ -713,6 +721,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) provider_fim_model: String,
     pub(crate) model_request_timeout_secs: String,
     pub(crate) model_request_stream_idle_timeout_secs: String,
+    pub(crate) permission_preset: PermissionPreset,
     pub(crate) permission_default_mode: ApprovalMode,
     pub(crate) verification_auto_run: VerificationAutoRunPolicy,
     pub(crate) memory_enabled: bool,
@@ -722,9 +731,9 @@ pub(crate) struct ConfigDraft {
     pub(crate) compaction_context_window_tokens: String,
     pub(crate) compaction_tail_messages: String,
     pub(crate) code_intelligence_enabled: bool,
-    pub(crate) code_intelligence_startup: CodeIntelStartup,
-    pub(crate) code_intelligence_discovery_enabled: bool,
-    pub(crate) code_intelligence_discovery_report_missing: bool,
+    pub(crate) code_intelligence_server_startup: CodeIntelStartup,
+    pub(crate) code_intelligence_auto_discover: bool,
+    pub(crate) code_intelligence_report_missing: bool,
     pub(crate) terminal_keyboard_enhancement: TerminalKeyboardEnhancement,
     pub(crate) terminal_mouse_capture: bool,
     pub(crate) terminal_osc52_clipboard: bool,
@@ -772,7 +781,9 @@ impl ConfigDraft {
         let current_provider_draft = provider_drafts
             .get(provider_name.as_str())
             .cloned()
-            .expect("normalized provider has an initialized draft");
+            .unwrap_or_else(|| {
+                default_provider_field_draft(&provider_name, &root_config.agent.model)
+            });
         let model_request_fields = model_request_config_fields(root_config);
         Self {
             base_root_config: root_config.clone(),
@@ -788,6 +799,7 @@ impl ConfigDraft {
             provider_fim_model: deepseek_fields.fim_model,
             model_request_timeout_secs: model_request_fields.request_timeout_secs,
             model_request_stream_idle_timeout_secs: model_request_fields.stream_idle_timeout_secs,
+            permission_preset: root_config.permission.preset,
             permission_default_mode: root_config.permission.default_mode,
             verification_auto_run: root_config.verification.auto_run,
             memory_enabled: root_config.memory.enabled,
@@ -807,12 +819,9 @@ impl ConfigDraft {
                 .unwrap_or_default(),
             compaction_tail_messages: root_config.compaction.tail_messages.to_string(),
             code_intelligence_enabled: root_config.code_intelligence.enabled,
-            code_intelligence_startup: root_config.code_intelligence.startup,
-            code_intelligence_discovery_enabled: root_config.code_intelligence.discovery.enabled,
-            code_intelligence_discovery_report_missing: root_config
-                .code_intelligence
-                .discovery
-                .report_missing,
+            code_intelligence_server_startup: root_config.code_intelligence.server_startup,
+            code_intelligence_auto_discover: root_config.code_intelligence.auto_discover,
+            code_intelligence_report_missing: root_config.code_intelligence.report_missing,
             terminal_keyboard_enhancement: root_config.terminal.keyboard_enhancement,
             terminal_mouse_capture: root_config.terminal.mouse_capture,
             terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
@@ -865,6 +874,7 @@ impl ConfigDraft {
 
     pub(crate) fn to_root_config(&self) -> Result<RootConfig> {
         let provider_name = normalize_provider_name(&self.provider_name);
+        supported_provider_name(provider_name)?;
         let model = self.provider_model.trim();
         if model.is_empty() {
             bail!("model cannot be empty");
@@ -945,6 +955,7 @@ impl ConfigDraft {
         let mut root_config = self.base_root_config.clone();
         root_config.agent.provider = provider_name.to_owned();
         root_config.agent.model = model.to_owned();
+        root_config.permission.preset = self.permission_preset;
         root_config.permission.default_mode = self.permission_default_mode;
         root_config.verification.auto_run = self.verification_auto_run;
         root_config.memory.enabled = self.memory_enabled;
@@ -997,9 +1008,9 @@ impl ConfigDraft {
     pub(crate) fn code_intelligence_config(&self) -> CodeIntelligenceConfig {
         let mut config = self.base_root_config.code_intelligence.clone();
         config.enabled = self.code_intelligence_enabled;
-        config.startup = self.code_intelligence_startup;
-        config.discovery.enabled = self.code_intelligence_discovery_enabled;
-        config.discovery.report_missing = self.code_intelligence_discovery_report_missing;
+        config.server_startup = self.code_intelligence_server_startup;
+        config.auto_discover = self.code_intelligence_auto_discover;
+        config.report_missing = self.code_intelligence_report_missing;
         config
     }
 
@@ -1731,14 +1742,15 @@ impl ConfigState {
             ConfigField::McpStartupTimeoutSecs => self
                 .selected_mcp_server()
                 .map(|server| server.startup_timeout_secs.as_str()),
-            ConfigField::PermissionsDefaultMode
+            ConfigField::PermissionsPreset
+            | ConfigField::PermissionsDefaultMode
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
             | ConfigField::CodeIntelEnabled
-            | ConfigField::CodeIntelStartup
-            | ConfigField::CodeIntelDiscoveryEnabled
-            | ConfigField::CodeIntelDiscoveryReportMissing
+            | ConfigField::CodeIntelServerStartup
+            | ConfigField::CodeIntelAutoDiscover
+            | ConfigField::CodeIntelReportMissing
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::AppearanceTheme
@@ -1789,14 +1801,15 @@ impl ConfigState {
             ConfigField::McpStartupTimeoutSecs => self
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.startup_timeout_secs),
-            ConfigField::PermissionsDefaultMode
+            ConfigField::PermissionsPreset
+            | ConfigField::PermissionsDefaultMode
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
             | ConfigField::CodeIntelEnabled
-            | ConfigField::CodeIntelStartup
-            | ConfigField::CodeIntelDiscoveryEnabled
-            | ConfigField::CodeIntelDiscoveryReportMissing
+            | ConfigField::CodeIntelServerStartup
+            | ConfigField::CodeIntelAutoDiscover
+            | ConfigField::CodeIntelReportMissing
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::AppearanceTheme
@@ -1834,6 +1847,9 @@ impl ConfigState {
                     .map(|plugin| plugin.plugin_id.clone())
                     .unwrap_or_else(|| "none".to_owned());
             }
+            ConfigField::PermissionsPreset => {
+                return permission_preset_label(self.draft.permission_preset).to_owned();
+            }
             ConfigField::PermissionsDefaultMode => {
                 return permission_mode_label(self.draft.permission_default_mode).to_owned();
             }
@@ -1849,15 +1865,18 @@ impl ConfigState {
             ConfigField::CodeIntelEnabled => {
                 return bool_label(self.draft.code_intelligence_enabled).to_owned();
             }
-            ConfigField::CodeIntelStartup => {
-                return self.draft.code_intelligence_startup.as_str().to_owned();
-            }
-            ConfigField::CodeIntelDiscoveryEnabled => {
-                return bool_label(self.draft.code_intelligence_discovery_enabled).to_owned();
-            }
-            ConfigField::CodeIntelDiscoveryReportMissing => {
-                return bool_label(self.draft.code_intelligence_discovery_report_missing)
+            ConfigField::CodeIntelServerStartup => {
+                return self
+                    .draft
+                    .code_intelligence_server_startup
+                    .as_str()
                     .to_owned();
+            }
+            ConfigField::CodeIntelAutoDiscover => {
+                return bool_label(self.draft.code_intelligence_auto_discover).to_owned();
+            }
+            ConfigField::CodeIntelReportMissing => {
+                return bool_label(self.draft.code_intelligence_report_missing).to_owned();
             }
             ConfigField::TerminalMouseCapture => {
                 return bool_label(self.draft.terminal_mouse_capture).to_owned();
@@ -1972,14 +1991,15 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         ConfigField::SkillId | ConfigField::PluginId => false,
         ConfigField::ProviderApiKey
         | ConfigField::ProviderName
+        | ConfigField::PermissionsPreset
         | ConfigField::PermissionsDefaultMode
         | ConfigField::VerificationAutoRun
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled
         | ConfigField::CodeIntelEnabled
-        | ConfigField::CodeIntelStartup
-        | ConfigField::CodeIntelDiscoveryEnabled
-        | ConfigField::CodeIntelDiscoveryReportMissing
+        | ConfigField::CodeIntelServerStartup
+        | ConfigField::CodeIntelAutoDiscover
+        | ConfigField::CodeIntelReportMissing
         | ConfigField::TerminalMouseCapture
         | ConfigField::TerminalOsc52Clipboard
         | ConfigField::AppearanceTheme
@@ -1999,6 +2019,13 @@ fn mask_secret(value: &str) -> String {
 
 fn bool_label(enabled: bool) -> &'static str {
     if enabled { "yes" } else { "no" }
+}
+
+fn permission_preset_label(preset: PermissionPreset) -> &'static str {
+    match preset {
+        PermissionPreset::Balanced => "balanced",
+        PermissionPreset::ReadOnly => "read only",
+    }
 }
 
 fn permission_mode_label(mode: sigil_kernel::ApprovalMode) -> &'static str {

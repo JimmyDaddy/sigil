@@ -389,18 +389,14 @@ fn verification_projection_snapshot_roundtrips_all_entry_vectors() -> Result<()>
 }
 
 #[test]
-fn session_list_projection_rebuilds_mixed_stream_metadata() -> Result<()> {
+fn session_list_projection_rebuilds_v2_stream_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::Control(ControlEntry::SessionIdentity {
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
-    });
-    std::fs::write(
-        &session_path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
-    let store = JsonlSessionStore::new(&session_path)?;
+    }))?;
     store.append(&SessionLogEntry::User(crate::ModelMessage::user(
         "Investigate session projection",
     )))?;
@@ -489,14 +485,14 @@ fn file_projection_store_rebuilds_session_list_projection() -> Result<()> {
 fn agent_graph_projection_rebuilds_mixed_stream_and_store() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
-    let legacy_profile = SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+    let raw_profile = SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
         AgentProfileCapturedEntry {
             snapshot: sample_agent_profile_snapshot()?,
         },
     ));
     std::fs::write(
         &session_path,
-        format!("{}\n", serde_json::to_string(&legacy_profile)?),
+        format!("{}\n", serde_json::to_string(&raw_profile)?),
     )?;
     let session_store = JsonlSessionStore::new(&session_path)?;
     session_store.append_session_entry_event(&SessionLogEntry::Control(
@@ -731,15 +727,9 @@ fn dispatch_trace_projection_redacts_payload_and_replays_idempotently() -> Resul
 fn file_projection_store_rebuilds_verification_projection_from_jsonl() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(
-        workspace_trust_entry("workspace-legacy", "legacy-trust-event"),
-    ));
-    std::fs::write(
-        &session_path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
     let session_store = JsonlSessionStore::new(&session_path)?;
-    append_trust_event(&session_store, "workspace-v2", "v2-trust-event")?;
+    append_trust_event(&session_store, "workspace-a", "trust-event-a")?;
+    append_trust_event(&session_store, "workspace-b", "trust-event-b")?;
     let records = read_records(&session_store)?;
     let projection_store = FileProjectionStore::<VerificationStateProjectionSnapshot>::verification(
         temp.path().join("verification.projection.json"),
@@ -751,10 +741,10 @@ fn file_projection_store_rebuilds_verification_projection_from_jsonl() -> Result
     let expected_projection = {
         let mut projection = VerificationStateProjection::default();
         projection.apply_control_entry(&ControlEntry::WorkspaceTrustDecision(
-            workspace_trust_entry("workspace-legacy", "legacy-trust-event"),
+            workspace_trust_entry("workspace-a", "trust-event-a"),
         ));
         projection.apply_control_entry(&ControlEntry::WorkspaceTrustDecision(
-            workspace_trust_entry("workspace-v2", "v2-trust-event"),
+            workspace_trust_entry("workspace-b", "trust-event-b"),
         ));
         projection
     };

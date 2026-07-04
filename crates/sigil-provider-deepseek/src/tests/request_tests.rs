@@ -125,6 +125,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         content: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
+        assistant_kind: None,
         id: "assistant-1".to_owned(),
     };
     let tool = ModelMessage {
@@ -132,6 +133,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         content: Some("done".to_owned()),
         tool_calls: Vec::new(),
         tool_call_id: Some("call-1".to_owned()),
+        assistant_kind: None,
         id: "tool-1".to_owned(),
     };
     let request = sigil_kernel::CompletionRequest {

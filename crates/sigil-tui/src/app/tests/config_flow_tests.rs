@@ -724,7 +724,7 @@ fn config_left_right_switches_steps() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Permissions"));
-    assert_eq!(app.config_selected_field_label(), Some("Mode"));
+    assert_eq!(app.config_selected_field_label(), Some("Preset"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
@@ -818,6 +818,7 @@ fn config_permissions_step_uses_policy_summary_and_details() {
     let detail = app.config_detail_lines().join("\n");
 
     assert!(detail.contains("[permissions]"));
+    assert!(detail.contains("Preset: balanced"));
     assert!(detail.contains("Mode: standard"));
     assert!(!detail.contains("Checks: manual"));
     assert!(detail.contains("[workspace]"));
@@ -838,13 +839,13 @@ fn config_permissions_step_uses_policy_summary_and_details() {
     assert!(detail.contains("Generated roots: none"));
     assert!(detail.contains("Advanced overrides: 0 excludes, 0 generated roots"));
     assert!(detail.contains("[details]"));
-    assert!(detail.contains("selected: Mode"));
-    assert!(detail.contains("key: mode"));
+    assert!(detail.contains("selected: Preset"));
+    assert!(detail.contains("key: preset"));
     assert!(detail.contains("controls: Tab section"));
     assert!(!detail.lines().any(|line| line.starts_with("overrides:")));
     assert!(!detail.contains("subject="));
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("Permissions: Enter cycle mode"));
+    assert!(nav.contains("Permissions: Enter cycle preset/mode"));
     assert!(nav.contains("Permissions: task checks run from task status"));
     assert!(!nav.contains("footer approve"));
 }
@@ -1178,7 +1179,7 @@ fn config_compaction_step_uses_fallback_for_unknown_provider_window() {
 fn config_code_intelligence_step_shows_trust_and_readiness() {
     let mut config = test_config();
     config.code_intelligence.enabled = true;
-    config.code_intelligence.discovery.enabled = false;
+    config.code_intelligence.auto_discover = false;
     config.code_intelligence.servers = vec![sigil_kernel::LanguageServerConfig {
         name: "missing-lsp".to_owned(),
         languages: vec!["rust".to_owned()],
@@ -1203,8 +1204,8 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
     assert!(detail.contains("Code Intel 6/12 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
-    assert!(detail.contains("Startup: lazy"));
-    assert!(detail.contains("Discovery: no"));
+    assert!(detail.contains("Server startup: lazy"));
+    assert!(detail.contains("Auto discover: no"));
     assert!(detail.contains("Missing reports: yes"));
     assert!(detail.contains("[trust]"));
     assert!(detail.contains("- Tool access: read-only"));
@@ -2984,15 +2985,16 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.provider_base_url = "https://example.invalid/api".to_owned();
     state.draft.provider_user_id_strategy = "stable_per_workspace".to_owned();
     state.draft.provider_fim_model = "deepseek-v4-flash".to_owned();
+    state.draft.permission_preset = sigil_kernel::PermissionPreset::ReadOnly;
     state.draft.permission_default_mode = ApprovalMode::Allow;
     state.draft.memory_enabled = false;
     state.draft.compaction_soft_threshold_ratio = "0.40".to_owned();
     state.draft.compaction_hard_threshold_ratio = "0.75".to_owned();
     state.draft.compaction_context_window_tokens = "64000".to_owned();
     state.draft.code_intelligence_enabled = true;
-    state.draft.code_intelligence_startup = sigil_kernel::CodeIntelStartup::Eager;
-    state.draft.code_intelligence_discovery_enabled = false;
-    state.draft.code_intelligence_discovery_report_missing = true;
+    state.draft.code_intelligence_server_startup = sigil_kernel::CodeIntelStartup::Eager;
+    state.draft.code_intelligence_auto_discover = false;
+    state.draft.code_intelligence_report_missing = true;
     state.draft.terminal_mouse_capture = false;
     state.draft.terminal_osc52_clipboard = false;
     state.draft.terminal_scroll_sensitivity = "6".to_owned();
@@ -3004,6 +3006,10 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
         panic!("expected config save action");
     };
     assert_eq!(root_config.agent.model, "deepseek-v4-pro");
+    assert_eq!(
+        root_config.permission.preset,
+        sigil_kernel::PermissionPreset::ReadOnly
+    );
     assert_eq!(root_config.permission.default_mode, ApprovalMode::Allow);
     assert!(!root_config.memory.enabled);
     assert_eq!(root_config.compaction.soft_threshold_ratio, 0.40);
@@ -3011,11 +3017,11 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert_eq!(root_config.compaction.context_window_tokens, Some(64_000));
     assert!(root_config.code_intelligence.enabled);
     assert_eq!(
-        root_config.code_intelligence.startup,
+        root_config.code_intelligence.server_startup,
         sigil_kernel::CodeIntelStartup::Eager
     );
-    assert!(!root_config.code_intelligence.discovery.enabled);
-    assert!(root_config.code_intelligence.discovery.report_missing);
+    assert!(!root_config.code_intelligence.auto_discover);
+    assert!(root_config.code_intelligence.report_missing);
     assert!(!root_config.terminal.mouse_capture);
     assert!(!root_config.terminal.osc52_clipboard);
     assert_eq!(root_config.terminal.scroll_sensitivity, 6);
@@ -3025,6 +3031,10 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
 
     let saved = RootConfig::load(&config_path)?;
     assert_eq!(saved.agent.model, "deepseek-v4-pro");
+    assert_eq!(
+        saved.permission.preset,
+        sigil_kernel::PermissionPreset::ReadOnly
+    );
     assert_eq!(saved.permission.default_mode, ApprovalMode::Allow);
     assert!(!saved.memory.enabled);
     assert_eq!(saved.compaction.soft_threshold_ratio, 0.40);
@@ -3032,11 +3042,11 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert_eq!(saved.compaction.context_window_tokens, Some(64_000));
     assert!(saved.code_intelligence.enabled);
     assert_eq!(
-        saved.code_intelligence.startup,
+        saved.code_intelligence.server_startup,
         sigil_kernel::CodeIntelStartup::Eager
     );
-    assert!(!saved.code_intelligence.discovery.enabled);
-    assert!(saved.code_intelligence.discovery.report_missing);
+    assert!(!saved.code_intelligence.auto_discover);
+    assert!(saved.code_intelligence.report_missing);
     assert!(!saved.terminal.mouse_capture);
     assert!(!saved.terminal.osc52_clipboard);
     assert_eq!(saved.terminal.scroll_sensitivity, 6);
@@ -3047,13 +3057,12 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
             .lines()
             .any(|line| line.trim_start().starts_with("context_window_tokens ="))
     );
-    assert_eq!(
+    assert_eq!(saved.agent.model, "deepseek-v4-pro");
+    assert!(
         saved
             .providers
             .get("deepseek")
-            .and_then(|value| value.get("model"))
-            .and_then(|value| value.as_str()),
-        Some("deepseek-v4-pro")
+            .is_some_and(|value| value.get("model").is_none())
     );
     assert_eq!(
         saved
@@ -3770,6 +3779,25 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Permissions);
+        state.selected_field = Some(ConfigField::PermissionsPreset);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(
+        state.draft.permission_preset,
+        sigil_kernel::PermissionPreset::ReadOnly
+    );
+    assert!(state.dirty);
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Permissions);
         state.selected_field = Some(ConfigField::PermissionsDefaultMode);
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -3852,14 +3880,14 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
     app.config_state
         .as_mut()
         .expect("config state should exist")
-        .selected_field = Some(ConfigField::CodeIntelStartup);
+        .selected_field = Some(ConfigField::CodeIntelServerStartup);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(
         app.config_state
             .as_ref()
             .expect("config state should exist")
             .draft
-            .code_intelligence_startup,
+            .code_intelligence_server_startup,
         sigil_kernel::CodeIntelStartup::Eager
     );
     {
@@ -3867,8 +3895,8 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .config_state
             .as_mut()
             .expect("config state should exist");
-        assert!(!state.focus_field(ConfigField::CodeIntelDiscoveryEnabled));
-        assert!(!state.focus_field(ConfigField::CodeIntelDiscoveryReportMissing));
+        assert!(!state.focus_field(ConfigField::CodeIntelAutoDiscover));
+        assert!(!state.focus_field(ConfigField::CodeIntelReportMissing));
     }
 
     {

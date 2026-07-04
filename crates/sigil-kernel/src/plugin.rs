@@ -702,6 +702,7 @@ pub fn plugin_hook_output_context_items(
         repo_revision: options.repo_revision,
         token_cost: estimate_context_token_cost(&content),
         score: options.score,
+        score_breakdown: Vec::new(),
         inclusion_reason,
         body_ref: ContextBodyRef::inline(&content),
     };
@@ -1009,8 +1010,7 @@ pub fn validate_plugin_version(plugin_id: &str, version: &str) -> Result<()> {
 
 /// Validates a plugin manifest content digest.
 ///
-/// New snapshots use `sha256:<64 lowercase hex>`. Bare 64-character SHA-256 values are accepted
-/// only for compatibility with manifests captured before the prefix was introduced.
+/// Snapshots use `sha256:<64 lowercase hex>`.
 ///
 /// # Errors
 ///
@@ -1056,7 +1056,7 @@ pub fn validate_plugin_hook_schema_digest(
 
 /// Returns true when two manifest digests identify the same content.
 ///
-/// This accepts prefixed-vs-bare SHA-256 compatibility but does not match malformed digests.
+/// Malformed digests do not match.
 #[must_use]
 pub fn plugin_manifest_digests_match(left: &str, right: &str) -> bool {
     let Some(left) = normalize_plugin_manifest_digest(left) else {
@@ -1072,10 +1072,7 @@ fn normalize_plugin_manifest_digest(digest: &str) -> Option<&str> {
     if digest.is_empty() || digest.trim() != digest {
         return None;
     }
-    let value = digest;
-    let value = value
-        .strip_prefix(PLUGIN_MANIFEST_DIGEST_PREFIX)
-        .unwrap_or(value);
+    let value = digest.strip_prefix(PLUGIN_MANIFEST_DIGEST_PREFIX)?;
     if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Some(value)
     } else {

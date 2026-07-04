@@ -217,7 +217,7 @@ impl Session {
         PlanArtifactProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds plan artifact state directly from the durable mixed-format event stream.
+    /// Rebuilds plan artifact state directly from the durable v2 event stream.
     pub fn try_plan_artifact_projection_from_durable(
         &self,
     ) -> Result<Option<PlanArtifactProjection>> {
@@ -233,7 +233,7 @@ impl Session {
         Ok(Some(projection))
     }
 
-    /// Rebuilds plan approval state directly from the durable mixed-format event stream.
+    /// Rebuilds plan approval state directly from the durable v2 event stream.
     pub fn try_plan_approval_projection_from_durable(
         &self,
     ) -> Result<Option<PlanApprovalProjection>> {
@@ -262,7 +262,7 @@ impl Session {
         crate::resume::ResumeJobStateProjection::from_entries(&self.entries, now_ms)
     }
 
-    /// Rebuilds resume job state directly from the durable mixed-format event stream.
+    /// Rebuilds resume job state directly from the durable v2 event stream.
     pub fn try_resume_job_state_projection_from_durable(
         &self,
         now_ms: u64,
@@ -286,7 +286,7 @@ impl Session {
         Ok(Some(projection))
     }
 
-    /// Rebuilds task state directly from the durable mixed-format event stream.
+    /// Rebuilds task state directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for task projection. It preserves the existing infallible
     /// `task_state_projection` API while giving callers and tests a fail-closed durable replay
@@ -309,8 +309,7 @@ impl Session {
         AgentThreadStateProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds the session list row for this session directly from the durable mixed-format
-    /// event stream.
+    /// Rebuilds the session list row for this session directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for the productized session-list projection. It preserves
     /// the UI/query projection boundary without requiring callers to manually read JSONL records.
@@ -324,7 +323,7 @@ impl Session {
         crate::projection::session_list_projection_from_records(&records).map(Some)
     }
 
-    /// Rebuilds agent thread state directly from the durable mixed-format event stream.
+    /// Rebuilds agent thread state directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for the agent graph projection. It preserves the existing
     /// infallible `agent_thread_state_projection` API while giving callers and tests a fail-closed
@@ -345,7 +344,7 @@ impl Session {
         Ok(Some(projection))
     }
 
-    /// Rebuilds the agent graph projection directly from the durable mixed-format event stream.
+    /// Rebuilds the agent graph projection directly from the durable v2 event stream.
     ///
     /// This is a product-surface alias for `try_agent_thread_state_projection_from_durable`, which
     /// remains the lower-level domain name for the same projection state.
@@ -355,11 +354,11 @@ impl Session {
         self.try_agent_thread_state_projection_from_durable()
     }
 
-    /// Rebuilds the dispatch trace projection directly from the durable mixed-format event stream.
+    /// Rebuilds the dispatch trace projection directly from the durable v2 event stream.
     ///
     /// Dispatch traces are a redacted materialized view over tool, agent, usage, readiness and
     /// egress events. This method keeps new state adoption on the durable replay path instead of
-    /// requiring callers to project from in-memory legacy entries.
+    /// requiring callers to project from in-memory session entries.
     pub fn try_dispatch_trace_projection_from_durable(
         &self,
     ) -> Result<Option<crate::projection::DispatchTraceProjectionSnapshot>> {
@@ -375,7 +374,7 @@ impl Session {
         AgentProfileTrustProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds agent profile trust decisions directly from the durable mixed-format event stream.
+    /// Rebuilds agent profile trust decisions directly from the durable v2 event stream.
     pub fn try_agent_profile_trust_projection_from_durable(
         &self,
     ) -> Result<Option<AgentProfileTrustProjection>> {
@@ -396,7 +395,7 @@ impl Session {
         AgentProfilePolicyProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds agent profile policy decisions directly from the durable mixed-format event stream.
+    /// Rebuilds agent profile policy decisions directly from the durable v2 event stream.
     pub fn try_agent_profile_policy_projection_from_durable(
         &self,
     ) -> Result<Option<AgentProfilePolicyProjection>> {
@@ -417,7 +416,7 @@ impl Session {
         SkillStateProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds skill state directly from the durable mixed-format event stream.
+    /// Rebuilds skill state directly from the durable v2 event stream.
     pub fn try_skill_state_projection_from_durable(&self) -> Result<Option<SkillStateProjection>> {
         let Some(store) = &self.store else {
             return Ok(None);
@@ -436,7 +435,7 @@ impl Session {
         PluginStateProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds plugin state directly from the durable mixed-format event stream.
+    /// Rebuilds plugin state directly from the durable v2 event stream.
     pub fn try_plugin_state_projection_from_durable(
         &self,
     ) -> Result<Option<PluginStateProjection>> {
@@ -457,7 +456,7 @@ impl Session {
         ChangeSetProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds change set state directly from the durable mixed-format event stream.
+    /// Rebuilds change set state directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for changeset projection. It preserves the existing
     /// infallible `changeset_projection` API while giving callers and tests a fail-closed durable
@@ -480,7 +479,7 @@ impl Session {
         WriteIsolationProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds write-isolation state directly from the durable mixed-format event stream.
+    /// Rebuilds write-isolation state directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for RFC-0014 write lease, isolated workspace, changeset
     /// output, and merge review facts. It does not enforce scheduling by itself.
@@ -504,7 +503,7 @@ impl Session {
         VerificationStateProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds verification state directly from the durable mixed-format event stream.
+    /// Rebuilds verification state directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for verification projection. It preserves the existing
     /// infallible `verification_state_projection` API while giving callers and tests a fail-closed
@@ -529,7 +528,7 @@ impl Session {
         TerminalTaskProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds terminal task state directly from the durable mixed-format event stream.
+    /// Rebuilds terminal task state directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for terminal task projection. It preserves the existing
     /// infallible `terminal_task_projection` API while giving callers and tests a fail-closed
@@ -553,7 +552,7 @@ impl Session {
         ConversationQueueProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds conversation queue state directly from the durable mixed-format event stream.
+    /// Rebuilds conversation queue state directly from the durable v2 event stream.
     pub fn try_conversation_queue_projection_from_durable(
         &self,
     ) -> Result<Option<ConversationQueueProjection>> {
@@ -573,7 +572,7 @@ impl Session {
         AgentResultContinuationProjection::from_entries(&self.entries)
     }
 
-    /// Rebuilds agent result continuation state directly from the durable mixed-format event stream.
+    /// Rebuilds agent result continuation state directly from the durable v2 event stream.
     pub fn try_agent_result_continuation_projection_from_durable(
         &self,
     ) -> Result<Option<AgentResultContinuationProjection>> {
@@ -888,7 +887,7 @@ impl Session {
     /// Returns the next session-stream sequence for synthetic evidence tied to this session.
     ///
     /// Durable-only domain events do not appear in `Session::entries`, so callers that need
-    /// stream ordering must read the mixed-format JSONL stream when a store is present.
+    /// stream ordering must read the durable v2 JSONL stream when a store is present.
     pub fn next_stream_sequence_hint(&self) -> Result<u64> {
         let Some(path) = self.store_path() else {
             return Ok((self.entries.len() as u64).saturating_add(1));
@@ -905,7 +904,7 @@ impl Session {
         &mut self.stats
     }
 
-    /// Rebuilds usage and cost statistics directly from the durable mixed-format event stream.
+    /// Rebuilds usage and cost statistics directly from the durable v2 event stream.
     ///
     /// This is the RFC-0001 replay path for token/cost projection. It preserves the existing
     /// infallible `stats` API while giving callers and tests a fail-closed durable replay option.

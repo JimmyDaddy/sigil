@@ -18,7 +18,6 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
         "deepseek".to_owned(),
         json!({
             "base_url": "https://example.com",
-            "model": "deepseek-v4-flash",
             "api_key": "super-secret-test-key"
         }),
     );

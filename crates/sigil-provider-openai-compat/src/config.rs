@@ -4,8 +4,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub const OPENAI_COMPATIBLE_API_KEY_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_API_KEY";
-pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
-pub const OPENAI_COMPATIBLE_MODEL_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_MODEL";
 pub const OPENAI_COMPATIBLE_BASE_URL_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_BASE_URL";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +11,12 @@ pub const OPENAI_COMPATIBLE_BASE_URL_ENV: &str = "SIGIL_OPENAI_COMPATIBLE_BASE_U
 pub struct OpenAiCompatibleProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
-    #[serde(default = "default_model")]
+    #[serde(
+        rename = "__runtime_model",
+        skip_serializing,
+        skip_deserializing,
+        default = "default_model"
+    )]
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -34,15 +37,10 @@ impl OpenAiCompatibleProviderConfig {
     pub fn resolved(self) -> Result<Self> {
         let mut resolved = self;
 
-        if let Some(value) = read_env_string(OPENAI_COMPATIBLE_MODEL_ENV) {
-            resolved.model = value;
-        }
         if let Some(value) = read_env_string(OPENAI_COMPATIBLE_BASE_URL_ENV) {
             resolved.base_url = value;
         }
-        if let Some(value) = read_env_string(OPENAI_COMPATIBLE_API_KEY_ENV)
-            .or_else(|| read_env_string(OPENAI_API_KEY_ENV))
-        {
+        if let Some(value) = read_env_string(OPENAI_COMPATIBLE_API_KEY_ENV) {
             resolved.api_key = Some(value);
         }
 

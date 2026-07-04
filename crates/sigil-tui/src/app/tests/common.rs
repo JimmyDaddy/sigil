@@ -94,6 +94,149 @@ pub(crate) fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Res
     Ok(())
 }
 
+pub(crate) fn child_agent_entries(
+    display_name: Option<&str>,
+    thread_status: sigil_kernel::AgentThreadStatus,
+    child_session_ref: sigil_kernel::SessionRef,
+) -> Result<Vec<SessionLogEntry>> {
+    child_agent_entries_with(
+        "review workspace",
+        "Inspect repository",
+        display_name,
+        "step_1",
+        "child_1",
+        child_session_ref,
+        "subagent_read",
+        thread_status,
+    )
+}
+
+pub(crate) fn child_agent_entries_with(
+    objective: &str,
+    step_title: &str,
+    display_name: Option<&str>,
+    step_id: &str,
+    child_id: &str,
+    child_session_ref: sigil_kernel::SessionRef,
+    profile_id: &str,
+    thread_status: sigil_kernel::AgentThreadStatus,
+) -> Result<Vec<SessionLogEntry>> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new(step_id)?;
+    let child_task_id = sigil_kernel::TaskId::new(child_id)?;
+    let thread_id = sigil_kernel::AgentThreadId::new(child_id)?;
+    let profile_id = sigil_kernel::AgentProfileId::new(profile_id)?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new(format!("snapshot_{}", child_id))?;
+    let task_child_status = match thread_status {
+        sigil_kernel::AgentThreadStatus::Completed => {
+            sigil_kernel::TaskChildSessionStatus::Completed
+        }
+        sigil_kernel::AgentThreadStatus::Failed => sigil_kernel::TaskChildSessionStatus::Failed,
+        sigil_kernel::AgentThreadStatus::Cancelled => {
+            sigil_kernel::TaskChildSessionStatus::Cancelled
+        }
+        sigil_kernel::AgentThreadStatus::Interrupted => {
+            sigil_kernel::TaskChildSessionStatus::Interrupted
+        }
+        sigil_kernel::AgentThreadStatus::Unavailable => {
+            sigil_kernel::TaskChildSessionStatus::Unavailable
+        }
+        _ => sigil_kernel::TaskChildSessionStatus::Started,
+    };
+
+    Ok(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: objective.to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: step_title.to_owned(),
+                display_name: display_name.map(ToOwned::to_owned),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id,
+                child_session_ref: child_session_ref.clone(),
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: task_child_status,
+                summary_hash: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::System,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: child_session_ref,
+                profile_id,
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id,
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
+                    effective_tool_scope_hash: "sha256:tools".to_owned(),
+                    effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                    effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    provider_capability_hash: "sha256:provider".to_owned(),
+                    model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+                    budget_policy_hash: "sha256:budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: objective.to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+                invocation_source: sigil_kernel::AgentInvocationSource::Task,
+                display_name: display_name.map(ToOwned::to_owned),
+                created_at_ms: Some(42),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id,
+                status: thread_status,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+    ])
+}
+
 pub(crate) fn sample_approval_preview() -> ToolPreview {
     ToolPreview {
         title: "Update note.txt".to_owned(),

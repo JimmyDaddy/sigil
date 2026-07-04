@@ -602,11 +602,12 @@ fn non_empty_or_none(lines: &[String], label: &str) -> Vec<String> {
 }
 
 fn fact_source_marker(fact: &SourcedFact) -> &'static str {
-    match (fact.model_generated, fact.verified) {
-        (true, false) => " [model/unverified]",
-        (true, true) => " [model/verified]",
-        (false, true) => " [verified]",
-        (false, false) => "",
+    if fact.model_generated {
+        " [model summary context]"
+    } else if fact.source_receipt_id.is_some() || fact.source_artifact_id.is_some() {
+        " [memory context]"
+    } else {
+        ""
     }
 }
 
@@ -758,22 +759,27 @@ fn context_items_from_payload_array(value: &Value) -> Vec<ContextItem> {
 
 #[allow(dead_code)]
 fn context_source_summary(items: &[&ContextItem], limit: usize) -> Vec<String> {
-    let mut groups = BTreeMap::<&'static str, (usize, usize)>::new();
-    for item in items {
-        let entry = groups
-            .entry(context_source_label(&item.source))
-            .or_default();
-        entry.0 += 1;
-        entry.1 += item.token_cost;
-    }
-    let mut rows = groups
-        .into_iter()
-        .map(|(source, (count, tokens))| (source, count, tokens))
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(right.0)));
+    let mut rows = items.iter().enumerate().collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .1
+            .token_cost
+            .cmp(&left.1.token_cost)
+            .then_with(|| {
+                context_source_label(&left.1.source).cmp(context_source_label(&right.1.source))
+            })
+            .then_with(|| left.0.cmp(&right.0))
+    });
     rows.into_iter()
         .take(limit)
-        .map(|(source, count, tokens)| format!("{source} · {count} item(s) · {tokens} tokens"))
+        .map(|(_, item)| {
+            format!(
+                "{} · {} · {} tokens",
+                context_source_label(&item.source),
+                context_included_reason_label(&item.inclusion_reason),
+                item.token_cost
+            )
+        })
         .collect()
 }
 
@@ -839,17 +845,41 @@ fn context_source_label(source: &ContextSource) -> &'static str {
         ContextSource::WorkspaceInstruction => "workspace instruction",
         ContextSource::RepositoryFile => "repo file",
         ContextSource::ToolObservation => "tool",
+        ContextSource::McpResource => "mcp resource",
         ContextSource::DurableEvent => "event",
-        ContextSource::EvidenceReceipt => "evidence",
+        ContextSource::EvidenceReceipt => "evidence receipt",
         ContextSource::MutationEvidence => "mutation",
-        ContextSource::VerificationEvidence => "verification",
+        ContextSource::VerificationEvidence => "verification evidence",
         ContextSource::LspSymbol => "symbol",
         ContextSource::LspDiagnostic => "diagnostic",
         ContextSource::LspReference => "reference",
         ContextSource::CurrentDiff => "diff",
         ContextSource::SessionArchive => "session archive",
-        ContextSource::TaskDigest => "task digest",
+        ContextSource::TaskDigest => "memory context",
         ContextSource::ExtensionProvided => "extension",
+    }
+}
+
+#[allow(dead_code)]
+fn context_included_reason_label(reason: &ContextInclusionReason) -> &'static str {
+    match reason {
+        ContextInclusionReason::StablePrompt => "stable prompt",
+        ContextInclusionReason::UserRequest => "user request",
+        ContextInclusionReason::RecentTurn => "recent turn",
+        ContextInclusionReason::ActiveFile => "active file",
+        ContextInclusionReason::WorkspaceInstruction => "workspace instruction",
+        ContextInclusionReason::VerificationState => "verification state",
+        ContextInclusionReason::RetrievalHit => "retrieval hit",
+        ContextInclusionReason::ExactSymbolMatch => "exact symbol match",
+        ContextInclusionReason::SourcePathMatch => "source path match",
+        ContextInclusionReason::WarmLspMatch => "warm lsp match",
+        ContextInclusionReason::RequiredEvidence => "required evidence",
+        ContextInclusionReason::TokenBudget => "token budget",
+        ContextInclusionReason::ExcludedUntrustedWorkspace
+        | ContextInclusionReason::ExcludedSecret
+        | ContextInclusionReason::ExcludedEgressDenied
+        | ContextInclusionReason::ExcludedTokenBudget
+        | ContextInclusionReason::ExcludedUnsupported => "excluded",
     }
 }
 

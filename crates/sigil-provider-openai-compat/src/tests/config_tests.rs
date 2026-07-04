@@ -1,8 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_COMPATIBLE_BASE_URL_ENV,
-    OPENAI_COMPATIBLE_MODEL_ENV, OpenAiCompatibleProviderConfig,
+    OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_COMPATIBLE_BASE_URL_ENV, OpenAiCompatibleProviderConfig,
 };
 
 #[test]
@@ -23,16 +22,15 @@ fn default_for_model_overrides_only_model() {
 }
 
 #[test]
-fn resolved_config_prefers_sigil_specific_env_over_openai_key() -> Result<()> {
+fn resolved_config_uses_sigil_specific_env() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
-        (OPENAI_COMPATIBLE_MODEL_ENV, "env-model"),
         (
             OPENAI_COMPATIBLE_BASE_URL_ENV,
             "https://proxy.example.test/v1",
         ),
         (OPENAI_COMPATIBLE_API_KEY_ENV, "sigil-key"),
-        (OPENAI_API_KEY_ENV, "openai-key"),
+        ("OPENAI_API_KEY", "openai-key"),
     ]);
 
     let resolved = OpenAiCompatibleProviderConfig {
@@ -43,26 +41,35 @@ fn resolved_config_prefers_sigil_specific_env_over_openai_key() -> Result<()> {
     }
     .resolved()?;
 
-    assert_eq!(resolved.model, "env-model");
+    assert_eq!(resolved.model, "config-model");
     assert_eq!(resolved.base_url, "https://proxy.example.test/v1");
     assert_eq!(resolved.api_key.as_deref(), Some("sigil-key"));
     Ok(())
 }
 
 #[test]
-fn resolved_config_uses_openai_api_key_fallback_and_skips_blank_env() -> Result<()> {
+fn resolved_config_ignores_openai_api_key_and_skips_blank_env() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
         (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
-        (OPENAI_API_KEY_ENV, "openai-key"),
-        (OPENAI_COMPATIBLE_MODEL_ENV, "   "),
+        ("OPENAI_API_KEY", "openai-key"),
     ]);
 
     let resolved = OpenAiCompatibleProviderConfig::default_for_model("config-model").resolved()?;
 
     assert_eq!(resolved.model, "config-model");
-    assert_eq!(resolved.api_key.as_deref(), Some("openai-key"));
+    assert_eq!(resolved.api_key, None);
     Ok(())
+}
+
+#[test]
+fn config_rejects_provider_model_field() {
+    let error = serde_json::from_value::<OpenAiCompatibleProviderConfig>(serde_json::json!({
+        "model": "gpt-4.1"
+    }))
+    .expect_err("provider model field should be rejected");
+
+    assert!(error.to_string().contains("model"));
 }
 
 #[test]

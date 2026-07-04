@@ -4,9 +4,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub const SIGIL_GEMINI_API_KEY_ENV: &str = "SIGIL_GEMINI_API_KEY";
-pub const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
-pub const GOOGLE_API_KEY_ENV: &str = "GOOGLE_API_KEY";
-pub const SIGIL_GEMINI_MODEL_ENV: &str = "SIGIL_GEMINI_MODEL";
 pub const SIGIL_GEMINI_BASE_URL_ENV: &str = "SIGIL_GEMINI_BASE_URL";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,7 +11,12 @@ pub const SIGIL_GEMINI_BASE_URL_ENV: &str = "SIGIL_GEMINI_BASE_URL";
 pub struct GeminiProviderConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
-    #[serde(default = "default_model")]
+    #[serde(
+        rename = "__runtime_model",
+        skip_serializing,
+        skip_deserializing,
+        default = "default_model"
+    )]
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -31,16 +33,10 @@ impl GeminiProviderConfig {
     pub fn resolved(self) -> Result<Self> {
         let mut resolved = self;
 
-        if let Some(value) = read_env_string(SIGIL_GEMINI_MODEL_ENV) {
-            resolved.model = value;
-        }
         if let Some(value) = read_env_string(SIGIL_GEMINI_BASE_URL_ENV) {
             resolved.base_url = value;
         }
-        if let Some(value) = read_env_string(SIGIL_GEMINI_API_KEY_ENV)
-            .or_else(|| read_env_string(GEMINI_API_KEY_ENV))
-            .or_else(|| read_env_string(GOOGLE_API_KEY_ENV))
-        {
+        if let Some(value) = read_env_string(SIGIL_GEMINI_API_KEY_ENV) {
             resolved.api_key = Some(value);
         }
 

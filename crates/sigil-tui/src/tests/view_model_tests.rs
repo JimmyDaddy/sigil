@@ -65,6 +65,7 @@ fn context_item(
         repo_revision: None,
         token_cost,
         score: None,
+        score_breakdown: Vec::new(),
         inclusion_reason,
         body_ref: ContextBodyRef::inline("context"),
     }
@@ -109,15 +110,49 @@ fn task_memory_inspect_view_model_summarizes_without_tool_output_replay() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("decision: Use a targeted edit [model/unverified]"))
+            .any(|line| line.contains("decision: Use a targeted edit [model summary context]"))
     );
     assert!(lines.iter().any(|line| line == "file: README.md"));
     assert!(lines.iter().any(|line| line == "check: check-readme"));
+    assert!(lines.iter().any(|line| {
+        line.contains("unresolved: Run docs link check later [model summary context]")
+    }));
+    assert!(lines.iter().all(|line| !line.contains("[verified]")));
+}
+
+#[test]
+fn task_memory_inspect_view_model_labels_receipt_backed_facts_as_memory_context() {
+    let mut receipt_fact = SourcedFact::system_derived("Use verification receipt", "event-1");
+    receipt_fact.verified = true;
+    receipt_fact.source_receipt_id = Some("receipt-1".to_owned());
+    let memory = TaskMemoryV1 {
+        memory_id: "memory-receipt".to_owned(),
+        branch_id: None,
+        valid_for_snapshot: "snapshot-receipt".to_owned(),
+        supersedes: None,
+        source_event_ids: vec!["event-1".to_owned()],
+        objective: "Keep memory distinct from verification evidence".to_owned(),
+        constraints: Vec::new(),
+        decisions: vec![SourcedDecision {
+            decision: receipt_fact,
+            rationale: None,
+        }],
+        files_changed: Vec::new(),
+        commands_run: Vec::new(),
+        verification_results: Vec::new(),
+        failed_attempts: Vec::new(),
+        risks: Vec::new(),
+        unresolved_issues: Vec::new(),
+    };
+
+    let lines = TaskMemoryInspectViewModel::from_task_memory(&memory).lines();
+
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("unresolved: Run docs link check later [model/unverified]"))
+            .any(|line| line.contains("decision: Use verification receipt [memory context]"))
     );
+    assert!(lines.iter().all(|line| !line.contains("[verified]")));
 }
 
 #[test]
@@ -326,8 +361,8 @@ fn context_provenance_summary_reports_budget_sources_and_exclusions() {
     assert_eq!(
         summary.top_sources,
         vec![
-            "symbol · 1 item(s) · 6 tokens".to_owned(),
-            "system · 1 item(s) · 4 tokens".to_owned()
+            "symbol · retrieval hit · 6 tokens".to_owned(),
+            "system · stable prompt · 4 tokens".to_owned()
         ]
     );
     assert!(
@@ -395,6 +430,7 @@ fn context_provenance_summary_covers_remaining_source_and_exclusion_labels() {
         ContextSource::UserMessage,
         ContextSource::WorkspaceInstruction,
         ContextSource::ToolObservation,
+        ContextSource::McpResource,
         ContextSource::DurableEvent,
         ContextSource::EvidenceReceipt,
         ContextSource::MutationEvidence,
@@ -449,14 +485,15 @@ fn context_provenance_summary_covers_remaining_source_and_exclusion_labels() {
         "user",
         "workspace instruction",
         "tool",
+        "mcp resource",
         "event",
-        "evidence",
+        "evidence receipt",
         "mutation",
-        "verification",
+        "verification evidence",
         "diagnostic",
         "reference",
         "diff",
-        "task digest",
+        "memory context",
         "extension",
     ] {
         assert!(
@@ -578,8 +615,8 @@ fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result
     let detail = UiViewModel::from_app(&app);
     let usage = detail.info_rail.usage_lines.join("\n");
     assert!(usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
-    assert!(usage.contains("source: task digest · 1 item(s) · 7 tokens"));
-    assert!(usage.contains("source: session archive · 1 item(s) · 4 tokens"));
+    assert!(usage.contains("source: memory context · retrieval hit · 7 tokens"));
+    assert!(usage.contains("source: session archive · retrieval hit · 4 tokens"));
     assert!(usage.contains("excluded: secret · 1 item(s)"));
     assert!(usage.contains("action: review egress"));
     Ok(())
@@ -709,7 +746,7 @@ fn ui_view_model_projects_enabled_code_intelligence_status() {
     let mut config = test_config();
     config.code_intelligence = CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         ..CodeIntelligenceConfig::default()
     };
     let app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);

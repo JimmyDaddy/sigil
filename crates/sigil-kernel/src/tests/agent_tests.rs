@@ -1630,7 +1630,6 @@ impl Tool for ExecuteFailingWriteTool {
 
 struct PreviewFallbackProvider;
 struct UnknownToolProvider;
-struct DirectTaskToolProvider;
 struct ExecuteFailingProvider;
 struct TextOnlyContinuationProvider;
 struct ToolContinuationProvider;
@@ -1758,59 +1757,6 @@ impl Provider for UnknownToolProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
-    }
-}
-
-#[async_trait]
-impl Provider for DirectTaskToolProvider {
-    fn name(&self) -> &str {
-        "mock-direct-task-tool"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            exact_prefix_cache: false,
-            reports_cache_tokens: false,
-            reasoning_stream: ReasoningStreamSupport::Native,
-            supports_reasoning_effort: true,
-            supports_tool_stream: true,
-            supports_background_tasks: false,
-            supports_response_handles: false,
-            supports_reasoning_artifacts: false,
-            supports_structured_output: false,
-            supports_assistant_prefix_seed: false,
-            supports_schema_constrained_tools: false,
-            supports_agent_background_resume: false,
-            supports_agent_thread_usage: false,
-            supports_agent_result_replay: false,
-            supports_infill_completion: false,
-            supports_system_fingerprint: false,
-            tool_name_max_chars: 64,
-        }
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let tool_used = request
-            .messages
-            .iter()
-            .any(|message| matches!(message.role, MessageRole::Tool));
-        if tool_used {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta("done".to_owned())),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-task-1".to_owned(),
-                name: "task".to_owned(),
-                args_json: r#"{"prompt":"review this"}"#.to_owned(),
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
     }
 }
 
@@ -2571,9 +2517,8 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
     let records = JsonlSessionStore::read_event_records(&path)?;
     let event_types = records
         .iter()
-        .filter_map(|record| match record {
-            SessionStreamRecord::Stored(event) => Some(event.event_type.as_str()),
-            SessionStreamRecord::Legacy { .. } => None,
+        .map(|record| match record {
+            SessionStreamRecord::Stored(event) => event.event_type.as_str(),
         })
         .collect::<Vec<_>>();
     assert!(event_types.contains(&DurableEventType::RunStatusChanged.as_str()));
@@ -5541,60 +5486,6 @@ async fn agent_returns_internal_tool_result_for_unknown_registered_name() -> Res
                 if execution.call_id == "call-missing-1"
                     && execution.status == ToolExecutionStatus::Failed
                     && execution.error.as_ref().is_some_and(|error| error.kind == ToolErrorKind::Internal)
-        )
-    }));
-    Ok(())
-}
-
-#[tokio::test]
-async fn agent_guides_direct_task_tool_calls_without_hard_error() -> Result<()> {
-    let agent = Agent::new(DirectTaskToolProvider, ToolRegistry::new());
-    let mut session = Session::new("mock-direct-task-tool", "mock-model");
-    let mut handler = RecordingEventHandler::default();
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            AgentRunInput::user("delegate to a subagent"),
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(2),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig { enabled: false },
-                compaction_config: CompactionConfig::default(),
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(output.result.final_text, "done");
-    assert!(output.outcome.tool_errors.is_empty());
-    assert!(session.messages().iter().any(|message| {
-        matches!(message.role, MessageRole::Tool)
-            && message.tool_call_id.as_deref() == Some("call-task-1")
-            && message.content.as_deref().is_some_and(|content| {
-                content.contains("legacy aliases")
-                    && content.contains("spawn_agent")
-                    && content.contains("wait_agent")
-                    && content.contains("close_agent")
-                    && content.contains("message_agent")
-                    && content.contains("active background child-agent mailbox")
-                    && content.contains("next safe point")
-                    && !content.contains("/plan <objective>")
-            })
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.call_id == "call-task-1"
-                    && execution.tool_name == "task"
-                    && execution.status == ToolExecutionStatus::Completed
         )
     }));
     Ok(())

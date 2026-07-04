@@ -327,7 +327,6 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
     config.providers.insert(
         "deepseek".to_owned(),
         serde_json::json!({
-            "model": "deepseek-model",
             "api_key": "deepseek-key",
             "base_url": "https://deepseek.example.com",
             "beta_base_url": "https://deepseek.example.com/beta",
@@ -338,7 +337,6 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
     config.providers.insert(
         "openai_compat".to_owned(),
         serde_json::json!({
-            "model": "openai-model",
             "api_key": "openai-key",
             "base_url": "https://openai.example.com/v1"
         }),
@@ -346,7 +344,6 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
     config.providers.insert(
         "anthropic".to_owned(),
         serde_json::json!({
-            "model": "anthropic-model",
             "api_key": "anthropic-key",
             "base_url": "https://anthropic.example.com"
         }),
@@ -354,28 +351,28 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
     config.providers.insert(
         "gemini".to_owned(),
         serde_json::json!({
-            "model": "gemini-model",
             "api_key": "gemini-key",
             "base_url": "https://gemini.example.com/v1beta"
         }),
     );
 
     let mut state = ConfigState::from_root_config(&config);
-    assert_eq!(state.draft.provider_model, "deepseek-model");
+    assert_eq!(state.draft.provider_model, config.agent.model);
     assert_eq!(state.draft.provider_api_key, "deepseek-key");
 
     state.draft.cycle_provider();
     assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
-    assert_eq!(state.draft.provider_model, "openai-model");
+    assert_eq!(state.draft.provider_model, config.agent.model);
     state.draft.provider_model = "openai-edited".to_owned();
     state.draft.provider_api_key = "openai-edited-key".to_owned();
 
     state.draft.cycle_provider();
     assert_eq!(state.draft.provider_name, ANTHROPIC_PROVIDER_KEY);
-    assert_eq!(state.draft.provider_model, "anthropic-model");
+    assert_eq!(state.draft.provider_model, config.agent.model);
     assert_eq!(state.draft.provider_api_key, "anthropic-key");
     let saved = state.draft.to_root_config()?;
     assert_eq!(saved.agent.provider, ANTHROPIC_PROVIDER_KEY);
+    assert_eq!(saved.agent.model, config.agent.model);
     assert_eq!(
         saved.providers["anthropic"]["api_key"],
         serde_json::Value::String("anthropic-key".to_owned())
@@ -387,10 +384,10 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
 
     state.draft.cycle_provider();
     assert_eq!(state.draft.provider_name, GEMINI_PROVIDER_KEY);
-    assert_eq!(state.draft.provider_model, "gemini-model");
+    assert_eq!(state.draft.provider_model, config.agent.model);
     state.draft.cycle_provider();
     assert_eq!(state.draft.provider_name, DEEPSEEK_PROVIDER_KEY);
-    assert_eq!(state.draft.provider_model, "deepseek-model");
+    assert_eq!(state.draft.provider_model, config.agent.model);
     state.draft.cycle_provider();
     assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
     assert_eq!(state.draft.provider_model, "openai-edited");
@@ -444,11 +441,17 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::fields_for_section(ConfigSection::Storage), &[]);
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Permissions),
-        &[ConfigField::PermissionsDefaultMode]
+        &[
+            ConfigField::PermissionsPreset,
+            ConfigField::PermissionsDefaultMode
+        ]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
-        &[ConfigField::CodeIntelEnabled, ConfigField::CodeIntelStartup]
+        &[
+            ConfigField::CodeIntelEnabled,
+            ConfigField::CodeIntelServerStartup
+        ]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Compaction),
@@ -487,12 +490,16 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     );
 
     assert_eq!(ConfigField::McpCommand.label(), "command");
+    assert_eq!(ConfigField::PermissionsPreset.label(), "preset");
     assert_eq!(ConfigField::PermissionsDefaultMode.label(), "mode");
     assert_eq!(ConfigField::VerificationAutoRun.label(), "checks");
     assert_eq!(ConfigField::SkillId.label(), "skill");
     assert_eq!(ConfigField::PluginId.label(), "plugin");
     assert_eq!(ConfigField::McpArgsCsv.label(), "args_csv");
-    assert_eq!(ConfigField::CodeIntelStartup.label(), "startup");
+    assert_eq!(
+        ConfigField::CodeIntelServerStartup.label(),
+        "server_startup"
+    );
     assert_eq!(
         ConfigField::TerminalScrollSensitivity.label(),
         "scroll_sensitivity"
@@ -514,7 +521,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::VerificationAutoRun.action_label(),
         "Enter cycle"
     );
-    assert_eq!(ConfigField::CodeIntelStartup.action_label(), "Enter cycle");
+    assert_eq!(
+        ConfigField::CodeIntelServerStartup.action_label(),
+        "Enter cycle"
+    );
     assert_eq!(ConfigField::CodeIntelEnabled.action_label(), "Enter toggle");
     assert_eq!(
         ConfigField::TerminalMouseCapture.action_label(),
@@ -605,17 +615,17 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     );
     assert!(ConfigField::PluginId.help_text().contains("manifest hash"));
     assert!(
-        ConfigField::CodeIntelDiscoveryEnabled
+        ConfigField::CodeIntelAutoDiscover
             .help_text()
             .contains("language servers")
     );
     assert!(
-        ConfigField::CodeIntelStartup
+        ConfigField::CodeIntelServerStartup
             .help_text()
             .contains("lazily started")
     );
     assert!(
-        ConfigField::CodeIntelDiscoveryReportMissing
+        ConfigField::CodeIntelReportMissing
             .help_text()
             .contains("readiness warnings")
     );
@@ -860,12 +870,12 @@ fn config_state_handles_mcp_collection_navigation_and_mutation() {
         Some("node")
     );
     assert_eq!(
-        state.field_text_value(ConfigField::CodeIntelDiscoveryReportMissing),
+        state.field_text_value(ConfigField::CodeIntelReportMissing),
         None
     );
     assert!(
         state
-            .field_text_value_mut(ConfigField::CodeIntelDiscoveryReportMissing)
+            .field_text_value_mut(ConfigField::CodeIntelReportMissing)
             .is_none()
     );
     assert_eq!(
@@ -1062,6 +1072,7 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     draft.provider_fim_model = " deepseek-v4-pro ".to_owned();
     draft.model_request_timeout_secs = "60".to_owned();
     draft.model_request_stream_idle_timeout_secs = "90".to_owned();
+    draft.permission_preset = sigil_kernel::PermissionPreset::ReadOnly;
     draft.permission_default_mode = sigil_kernel::ApprovalMode::Deny;
     draft.memory_enabled = true;
     draft.compaction_enabled = true;
@@ -1083,6 +1094,10 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
 
     assert_eq!(config.agent.model, "deepseek-v4-pro");
     assert_eq!(
+        config.permission.preset,
+        sigil_kernel::PermissionPreset::ReadOnly
+    );
+    assert_eq!(
         config.permission.default_mode,
         sigil_kernel::ApprovalMode::Deny
     );
@@ -1103,13 +1118,12 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
 #[test]
 fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
     let mut root_config = test_root_config();
-    root_config.agent.provider = "openai-compatible".to_owned();
+    root_config.agent.provider = OPENAI_COMPAT_PROVIDER_KEY.to_owned();
     root_config.agent.model = "gpt-old".to_owned();
     root_config.providers.insert(
         "openai_compat".to_owned(),
         serde_json::json!({
             "base_url": "https://openai.example.com/v1",
-            "model": "gpt-old",
             "api_key": "old-key"
         }),
     );
@@ -1134,7 +1148,7 @@ fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
 
     assert_eq!(config.agent.provider, OPENAI_COMPAT_PROVIDER_KEY);
     assert_eq!(config.agent.model, "gpt-new");
-    assert_eq!(provider["model"], "gpt-new");
+    assert!(provider.get("model").is_none());
     assert_eq!(provider["api_key"], "new-key");
     assert_eq!(provider["base_url"], "https://proxy.example.test/v1");
     assert_eq!(config.model_request.request_timeout_secs, 45);
@@ -1151,7 +1165,6 @@ fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
         "anthropic".to_owned(),
         serde_json::json!({
             "base_url": "https://anthropic.example.com",
-            "model": "claude-old",
             "api_key": "old-key",
             "anthropic_version": "2023-06-01",
             "max_tokens": 1024
@@ -1177,7 +1190,7 @@ fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
 
     assert_eq!(config.agent.provider, ANTHROPIC_PROVIDER_KEY);
     assert_eq!(config.agent.model, "claude-new");
-    assert_eq!(provider["model"], "claude-new");
+    assert!(provider.get("model").is_none());
     assert_eq!(provider["api_key"], "new-key");
     assert_eq!(provider["base_url"], "https://proxy.example.test");
     assert_eq!(provider["anthropic_version"], "2023-06-01");
@@ -1196,7 +1209,6 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
         "gemini".to_owned(),
         serde_json::json!({
             "base_url": "https://gemini.example.com/v1beta",
-            "model": "gemini-old",
             "api_key": "old-key"
         }),
     );
@@ -1220,7 +1232,7 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
 
     assert_eq!(config.agent.provider, GEMINI_PROVIDER_KEY);
     assert_eq!(config.agent.model, "gemini-new");
-    assert_eq!(provider["model"], "gemini-new");
+    assert!(provider.get("model").is_none());
     assert_eq!(provider["api_key"], "new-key");
     assert_eq!(provider["base_url"], "https://proxy.example.test/v1beta");
     assert_eq!(config.model_request.request_timeout_secs, 46);
@@ -1229,18 +1241,17 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
 }
 
 #[test]
-fn provider_name_helpers_normalize_aliases_and_cycle_known_providers() {
+fn provider_name_helpers_preserve_unknown_names_and_cycle_known_providers() {
+    assert_eq!(normalize_provider_name("deepseek"), "deepseek");
+    assert_eq!(normalize_provider_name("openai_compat"), "openai_compat");
+    assert_eq!(normalize_provider_name("anthropic"), "anthropic");
+    assert_eq!(normalize_provider_name("gemini"), "gemini");
     assert_eq!(
         normalize_provider_name("openai-compatible"),
-        "openai_compat"
+        "openai-compatible"
     );
-    assert_eq!(
-        normalize_provider_name("openai_compatible"),
-        "openai_compat"
-    );
-    assert_eq!(normalize_provider_name("claude"), "anthropic");
-    assert_eq!(normalize_provider_name("google"), "gemini");
-    assert_eq!(normalize_provider_name("deepseek"), "deepseek");
+    assert_eq!(normalize_provider_name("claude"), "claude");
+    assert_eq!(normalize_provider_name("google"), "google");
     assert_eq!(cycle_provider_name("deepseek"), "openai_compat");
     assert_eq!(cycle_provider_name("openai_compat"), "anthropic");
     assert_eq!(cycle_provider_name("anthropic"), "gemini");
@@ -1261,6 +1272,14 @@ fn config_draft_validates_provider_and_compaction_values() {
             let mut draft = base.clone();
             draft.provider_base_url = " ".to_owned();
             (draft, "base_url cannot be empty")
+        },
+        {
+            let mut draft = base.clone();
+            draft.provider_name = "claude".to_owned();
+            (
+                draft,
+                "unsupported provider claude; expected one of deepseek, openai_compat, anthropic, or gemini",
+            )
         },
         {
             let mut draft = base.clone();
@@ -1452,7 +1471,8 @@ fn config_field_character_filter_matches_field_kind() {
 #[test]
 fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::Result<()> {
     let serialized = sigil_runtime::deepseek_provider_value_for_setup("deepseek-v4-test", None)?;
-    assert_eq!(serialized["model"], "deepseek-v4-test");
+    assert!(serialized.get("model").is_none());
+    assert_eq!(serialized["fim_model"], "deepseek-v4-pro");
     assert!(
         !serialized
             .as_object()
@@ -1515,10 +1535,15 @@ fn config_display_helpers_cover_permission_and_verification_labels() {
     );
 
     let mut config = test_root_config();
+    config.permission.preset = sigil_kernel::PermissionPreset::ReadOnly;
     config.permission.default_mode = sigil_kernel::ApprovalMode::Allow;
     config.verification.auto_run = sigil_kernel::VerificationAutoRunPolicy::TrustedOnly;
     let mut state = ConfigState::from_root_config(&config);
 
+    assert_eq!(
+        state.display_value(ConfigField::PermissionsPreset),
+        "read only"
+    );
     assert_eq!(
         state.display_value(ConfigField::PermissionsDefaultMode),
         "full access"
@@ -1528,8 +1553,13 @@ fn config_display_helpers_cover_permission_and_verification_labels() {
         "auto trusted"
     );
 
+    state.draft.permission_preset = sigil_kernel::PermissionPreset::Balanced;
     state.draft.permission_default_mode = sigil_kernel::ApprovalMode::Deny;
     state.draft.verification_auto_run = sigil_kernel::VerificationAutoRunPolicy::Never;
+    assert_eq!(
+        state.display_value(ConfigField::PermissionsPreset),
+        "balanced"
+    );
     assert_eq!(
         state.display_value(ConfigField::PermissionsDefaultMode),
         "locked down"

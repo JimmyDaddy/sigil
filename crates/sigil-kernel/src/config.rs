@@ -2,16 +2,13 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Context, Result};
-use serde::{
-    Deserialize, Deserializer, Serialize, Serializer,
-    de::{self, Visitor},
-};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::{
@@ -144,20 +141,22 @@ impl Default for ModelRequestTimeouts {
 /// This config is parsed by the shared root config so entrypoints preserve it while
 /// `sigil-code-intel` owns the actual LSP lifecycle and language analysis behavior.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct CodeIntelligenceConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub startup: CodeIntelStartup,
+    pub server_startup: CodeIntelStartup,
     #[serde(default = "default_code_intel_timeout_ms")]
     pub default_timeout_ms: u64,
     #[serde(default = "default_code_intel_max_results")]
     pub max_results: usize,
     #[serde(default = "default_code_intel_max_payload_bytes")]
     pub max_payload_bytes: usize,
-    #[serde(default)]
-    pub discovery: CodeIntelligenceDiscoveryConfig,
+    #[serde(default = "default_code_intel_auto_discover")]
+    pub auto_discover: bool,
+    #[serde(default = "default_code_intel_report_missing")]
+    pub report_missing: bool,
     #[serde(default)]
     pub servers: Vec<LanguageServerConfig>,
 }
@@ -166,31 +165,13 @@ impl Default for CodeIntelligenceConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            startup: CodeIntelStartup::default(),
+            server_startup: CodeIntelStartup::default(),
             default_timeout_ms: default_code_intel_timeout_ms(),
             max_results: default_code_intel_max_results(),
             max_payload_bytes: default_code_intel_max_payload_bytes(),
-            discovery: CodeIntelligenceDiscoveryConfig::default(),
+            auto_discover: default_code_intel_auto_discover(),
+            report_missing: default_code_intel_report_missing(),
             servers: Vec::new(),
-        }
-    }
-}
-
-/// Automatic language server discovery controls.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct CodeIntelligenceDiscoveryConfig {
-    #[serde(default = "default_code_intel_discovery_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_code_intel_discovery_report_missing")]
-    pub report_missing: bool,
-}
-
-impl Default for CodeIntelligenceDiscoveryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_code_intel_discovery_enabled(),
-            report_missing: default_code_intel_discovery_report_missing(),
         }
     }
 }
@@ -226,7 +207,7 @@ impl Default for TerminalConfig {
 ///
 /// `auto` probes the current terminal before requesting enhanced key reporting,
 /// `on` forces the request, and `off` keeps the baseline keyboard protocol.
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalKeyboardEnhancement {
     #[default]
@@ -242,48 +223,6 @@ impl TerminalKeyboardEnhancement {
             Self::On => "on",
             Self::Off => "off",
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for TerminalKeyboardEnhancement {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct KeyboardEnhancementVisitor;
-
-        impl Visitor<'_> for KeyboardEnhancementVisitor {
-            type Value = TerminalKeyboardEnhancement;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("auto, on, off, or a legacy boolean")
-            }
-
-            fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(if value {
-                    TerminalKeyboardEnhancement::On
-                } else {
-                    TerminalKeyboardEnhancement::Off
-                })
-            }
-
-            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                match value {
-                    "auto" => Ok(TerminalKeyboardEnhancement::Auto),
-                    "on" => Ok(TerminalKeyboardEnhancement::On),
-                    "off" => Ok(TerminalKeyboardEnhancement::Off),
-                    _ => Err(E::unknown_variant(value, &["auto", "on", "off"])),
-                }
-            }
-        }
-
-        deserializer.deserialize_any(KeyboardEnhancementVisitor)
     }
 }
 
@@ -661,16 +600,6 @@ fn user_home_dir() -> Result<PathBuf> {
     )
 }
 
-fn legacy_user_config_dir() -> Result<PathBuf> {
-    legacy_user_config_dir_from_env(
-        current_config_platform(),
-        env::var_os("HOME"),
-        env::var_os("USERPROFILE"),
-        env::var_os("APPDATA"),
-        env::var_os("XDG_CONFIG_HOME"),
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum ConfigPlatform {
@@ -707,35 +636,6 @@ fn user_home_dir_from_env(
     }
 }
 
-fn legacy_user_config_dir_from_env(
-    platform: ConfigPlatform,
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    appdata: Option<OsString>,
-    xdg_config_home: Option<OsString>,
-) -> Result<PathBuf> {
-    match platform {
-        ConfigPlatform::Windows => appdata
-            .map(|app_data| PathBuf::from(app_data).join("sigil"))
-            .ok_or_else(|| anyhow::anyhow!("missing APPDATA for legacy sigil config directory")),
-        ConfigPlatform::Macos => home
-            .map(|home| {
-                PathBuf::from(home)
-                    .join("Library")
-                    .join("Application Support")
-                    .join("sigil")
-            })
-            .ok_or_else(|| anyhow::anyhow!("missing HOME for legacy sigil config directory")),
-        ConfigPlatform::Other => {
-            if let Some(xdg) = xdg_config_home {
-                return Ok(PathBuf::from(xdg).join("sigil"));
-            }
-            user_home_dir_from_env(ConfigPlatform::Other, home, userprofile)
-                .map(|home| home.join(".config").join("sigil"))
-        }
-    }
-}
-
 /// Returns the visible per-user config file path for sigil.
 ///
 /// # Errors
@@ -745,17 +645,9 @@ pub fn default_user_config_path() -> Result<PathBuf> {
     Ok(default_user_config_dir()?.join("sigil.toml"))
 }
 
-fn legacy_user_config_path() -> Option<PathBuf> {
-    legacy_user_config_dir()
-        .ok()
-        .map(|dir| dir.join("sigil.toml"))
-}
-
 /// Resolves the config path that entrypoints should prefer on startup.
 ///
-/// Explicit paths always win. Otherwise Sigil uses `~/.sigil/sigil.toml`. If the new file does not
-/// exist yet and a legacy per-platform user config exists, Sigil copies the legacy file to the new
-/// path before returning it.
+/// Explicit paths always win. Otherwise Sigil uses `~/.sigil/sigil.toml`.
 ///
 /// Workspace-local `sigil.toml` files are intentionally not discovered implicitly because they
 /// often contain personal provider, permission, and MCP settings that should not be committed.
@@ -765,59 +657,20 @@ fn legacy_user_config_path() -> Option<PathBuf> {
 /// Returns an error when the implicit per-user config directory cannot be determined.
 pub fn preferred_config_path(explicit: Option<&Path>, _cwd: &Path) -> Result<PathBuf> {
     let default_path = default_user_config_path()?;
-    preferred_config_path_for_known_paths(explicit, default_path, legacy_user_config_path())
+    Ok(preferred_config_path_for_known_paths(
+        explicit,
+        default_path,
+    ))
 }
 
 fn preferred_config_path_for_known_paths(
     explicit: Option<&Path>,
     default_path: PathBuf,
-    legacy_path: Option<PathBuf>,
-) -> Result<PathBuf> {
+) -> PathBuf {
     if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
+        return path.to_path_buf();
     }
-
-    let Some(legacy_path) = legacy_path else {
-        return Ok(default_path);
-    };
-    preferred_implicit_config_path(&default_path, &legacy_path)
-}
-
-fn preferred_implicit_config_path(default_path: &Path, legacy_path: &Path) -> Result<PathBuf> {
-    if default_path.exists() || !legacy_path.exists() {
-        return Ok(default_path.to_path_buf());
-    }
-
-    if let Some(parent) = default_path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create migrated sigil config directory {}",
-                parent.display()
-            )
-        })?;
-    }
-
-    copy_file_without_overwrite(legacy_path, default_path).with_context(|| {
-        format!(
-            "failed to migrate sigil config from {} to {}",
-            legacy_path.display(),
-            default_path.display()
-        )
-    })?;
-    Ok(default_path.to_path_buf())
-}
-
-fn copy_file_without_overwrite(source: &Path, destination: &Path) -> Result<()> {
-    let mut source = fs::File::open(source)
-        .with_context(|| format!("failed to open legacy config {}", source.display()))?;
-    let mut destination_file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
-        .with_context(|| format!("failed to create migrated config {}", destination.display()))?;
-    io::copy(&mut source, &mut destination_file)
-        .with_context(|| format!("failed to copy config to {}", destination.display()))?;
-    Ok(())
+    default_path
 }
 
 /// Resolves the effective workspace root for one launch.
@@ -1005,7 +858,7 @@ pub struct AgentConfig {
 
 /// Planner/executor task mode configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct TaskConfig {
     #[serde(default = "default_task_enabled")]
     pub enabled: bool,
@@ -1023,22 +876,8 @@ pub struct TaskConfig {
     pub max_plan_steps: usize,
     #[serde(default = "default_max_replans")]
     pub max_replans: usize,
-    #[serde(default = "default_max_child_sessions")]
-    pub max_child_sessions: usize,
-    /// Deprecated compatibility flag. Current readonly fan-out is controlled by
-    /// `max_parallel_readonly`.
-    #[serde(default)]
-    pub allow_parallel_readonly_subagents: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_parallel_readonly: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_parallel_write: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_background_threads: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_spawn_fanout_per_turn: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_agent_tokens_per_task: Option<u64>,
+    #[serde(default = "default_max_subagents")]
+    pub max_subagents: usize,
     #[serde(default = "default_allow_write_subagents")]
     pub allow_write_subagents: bool,
 }
@@ -1054,13 +893,7 @@ impl Default for TaskConfig {
             subagent_write: RoleModelConfig::default(),
             max_plan_steps: default_max_plan_steps(),
             max_replans: default_max_replans(),
-            max_child_sessions: default_max_child_sessions(),
-            allow_parallel_readonly_subagents: false,
-            max_parallel_readonly: None,
-            max_parallel_write: None,
-            max_background_threads: None,
-            max_spawn_fanout_per_turn: None,
-            max_agent_tokens_per_task: None,
+            max_subagents: default_max_subagents(),
             allow_write_subagents: default_allow_write_subagents(),
         }
     }
@@ -1171,7 +1004,7 @@ impl Default for SkillConfig {
 
 /// Context compaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct CompactionConfig {
     #[serde(default = "default_compaction_enabled")]
     pub enabled: bool,
@@ -1183,7 +1016,6 @@ pub struct CompactionConfig {
     #[serde(
         default,
         rename = "fallback_context_window_tokens",
-        alias = "context_window_tokens",
         skip_serializing_if = "Option::is_none"
     )]
     pub context_window_tokens: Option<u32>,
@@ -1381,7 +1213,7 @@ fn default_max_replans() -> usize {
     2
 }
 
-fn default_max_child_sessions() -> usize {
+fn default_max_subagents() -> usize {
     8
 }
 
@@ -1413,11 +1245,11 @@ fn default_code_intel_max_payload_bytes() -> usize {
     64 * 1024
 }
 
-fn default_code_intel_discovery_enabled() -> bool {
+fn default_code_intel_auto_discover() -> bool {
     true
 }
 
-fn default_code_intel_discovery_report_missing() -> bool {
+fn default_code_intel_report_missing() -> bool {
     true
 }
 
@@ -1474,7 +1306,7 @@ fn default_skill_user_agents() -> bool {
 }
 
 fn default_skill_compatibility_sources() -> Vec<String> {
-    vec!["claude".to_owned()]
+    Vec::new()
 }
 
 fn default_compaction_enabled() -> bool {

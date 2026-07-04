@@ -16,8 +16,8 @@ use anyhow::Context;
 use sigil_kernel::{
     AgentResultContinuationProjection, AgentThreadDisplayNameEntry, AgentThreadId,
     AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus, ControlEntry,
-    JsonlSessionStore, SessionLogEntry, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskRunProjection, TaskStateProjection, normalize_task_agent_display_name,
+    JsonlSessionStore, SessionLogEntry, TaskRunProjection, TaskStateProjection,
+    normalize_task_agent_display_name,
 };
 
 use super::{
@@ -103,13 +103,6 @@ impl AppState {
 
     pub(super) fn blur_composer_agent_panel(&mut self) {
         self.composer.agent_panel_focused = false;
-    }
-
-    pub(super) fn selected_composer_agent_is_first(&self) -> bool {
-        let items = self.agent_sidebar_items();
-        selectable_agent_indexes(&items)
-            .first()
-            .is_some_and(|index| *index == self.sidebar_agent_selected)
     }
 
     pub(super) fn move_composer_agent_selection(&mut self, next: bool) -> bool {
@@ -521,6 +514,8 @@ impl AppState {
         };
         self.sidebar_agent_selected = index;
         self.active_agent_view = target;
+        self.blur_composer_queue_panel();
+        self.refresh_conversation_queue_selection();
         if self.active_pane == super::PaneFocus::Composer && self.composer_agent_panel_available() {
             self.composer.agent_panel_focused = true;
         }
@@ -559,28 +554,6 @@ impl AppState {
             self.last_notice = Some(format!("agent not found: {}", args.target));
             return Ok(());
         };
-        if let Some(child) = self.child_session_for_agent_view(&target) {
-            let entry = TaskChildSessionDisplayNameEntry {
-                task_id: child.task_id.clone(),
-                plan_version: child.plan_version,
-                step_id: child.step_id.clone(),
-                child_task_id: child.child_task_id.clone(),
-                display_name: display_name.clone(),
-            };
-            self.append_control_to_current_session(ControlEntry::TaskChildSessionDisplayName(
-                entry,
-            ))?;
-            self.last_notice = Some(format!(
-                "agent renamed: {} -> {display_name}",
-                child.child_task_id.as_str()
-            ));
-            self.push_event(
-                "agent:rename",
-                format!("{} -> {display_name}", child.child_task_id.as_str()),
-            );
-            return Ok(());
-        }
-
         let Some(thread_id) = self.agent_thread_id_for_view(&target) else {
             self.last_notice = Some(format!("agent rename unavailable: {}", args.target));
             return Ok(());
@@ -632,26 +605,6 @@ impl AppState {
                     || normalized == ordinal)
                     .then_some(index)
             })
-    }
-
-    fn child_session_for_agent_view(&self, view: &AgentView) -> Option<TaskChildSessionEntry> {
-        let AgentView::Child {
-            child_task_id,
-            child_session_ref,
-        } = view
-        else {
-            return None;
-        };
-        self.session_view_cache()
-            .task_projection
-            .latest_task()
-            .and_then(|task| {
-                task.child_sessions.values().find(|child| {
-                    child.child_task_id.as_str() == child_task_id
-                        && child.child_session_ref == *child_session_ref
-                })
-            })
-            .cloned()
     }
 
     fn agent_thread_id_for_view(&self, view: &AgentView) -> Option<AgentThreadId> {
@@ -953,23 +906,19 @@ fn bounded_composer_agent_rows(rows: Vec<SidebarAgentRow>) -> Vec<SidebarAgentRo
         return rows;
     }
 
-    let mut selected_indexes = std::collections::BTreeSet::new();
-    selected_indexes.insert(0usize);
-    for (index, row) in rows.iter().enumerate() {
-        if row.active || row.selected {
-            selected_indexes.insert(index);
-        }
-    }
-    for index in (0..rows.len()).rev() {
-        if selected_indexes.len() >= COMPOSER_AGENT_VISIBLE_ROWS {
-            break;
-        }
-        selected_indexes.insert(index);
-    }
+    let anchor = rows
+        .iter()
+        .position(|row| row.selected)
+        .or_else(|| rows.iter().position(|row| row.active))
+        .unwrap_or(0);
+    let start = anchor
+        .saturating_add(1)
+        .saturating_sub(COMPOSER_AGENT_VISIBLE_ROWS)
+        .min(rows.len() - COMPOSER_AGENT_VISIBLE_ROWS);
 
     rows.into_iter()
-        .enumerate()
-        .filter_map(|(index, row)| selected_indexes.contains(&index).then_some(row))
+        .skip(start)
+        .take(COMPOSER_AGENT_VISIBLE_ROWS)
         .collect()
 }
 
@@ -1012,20 +961,12 @@ fn agent_sidebar_item_from_thread(
     ordinal: usize,
     continuation_unresolved: bool,
 ) -> AgentSidebarItem {
-    let legacy_child = latest_task.and_then(|task| legacy_child_for_thread(task, thread));
-    let label = if let (Some(task), Some(child)) = (latest_task, legacy_child.as_ref()) {
-        task_child_agent_display_name(task, child, ordinal)
-    } else {
-        agent_thread_display_name(thread, ordinal)
-    };
+    let label = agent_thread_display_name(thread, ordinal);
     let detail = agent_thread_sidebar_detail(thread, latest_task, continuation_unresolved);
     let session_ref = thread.thread_session_ref.clone();
-    let command_value = legacy_child
-        .as_ref()
-        .map(|child| child.child_task_id.as_str().to_owned())
-        .unwrap_or_else(|| thread.thread_id.as_str().to_owned());
+    let command_value = thread.thread_id.as_str().to_owned();
     AgentSidebarItem {
-        label: format!("agent {label}"),
+        label,
         detail,
         target: session_ref.map(|child_session_ref| AgentView::Child {
             child_task_id: command_value,
@@ -1041,13 +982,9 @@ pub(super) fn agent_thread_sidebar_detail(
     latest_task: Option<&TaskRunProjection>,
     continuation_unresolved: bool,
 ) -> String {
-    let legacy_child = latest_task.and_then(|task| legacy_child_for_thread(task, thread));
+    let _ = latest_task;
     let status = agent_thread_effective_status(thread, continuation_unresolved);
-    if let Some(child) = legacy_child {
-        legacy_child_agent_detail(thread, child, status, continuation_unresolved)
-    } else {
-        agent_thread_detail(thread, status, continuation_unresolved)
-    }
+    agent_thread_detail(thread, status, continuation_unresolved)
 }
 
 fn agent_thread_effective_status(
@@ -1059,19 +996,6 @@ fn agent_thread_effective_status(
     } else {
         thread.status
     }
-}
-
-fn legacy_child_for_thread<'a>(
-    task: &'a TaskRunProjection,
-    thread: &AgentThreadProjection,
-) -> Option<&'a TaskChildSessionEntry> {
-    if !thread.legacy_task {
-        return None;
-    }
-    let session_ref = thread.thread_session_ref.as_ref()?;
-    task.child_sessions
-        .values()
-        .find(|child| &child.child_session_ref == session_ref)
 }
 
 fn agent_thread_display_name(thread: &AgentThreadProjection, ordinal: usize) -> String {
@@ -1133,28 +1057,6 @@ fn agent_thread_detail(
         parts.push(heartbeat.to_owned());
     }
     parts.push(agent_thread_result_label(thread, status, continuation_unresolved).to_owned());
-    parts.join(" · ")
-}
-
-fn legacy_child_agent_detail(
-    thread: &AgentThreadProjection,
-    child: &TaskChildSessionEntry,
-    status: AgentThreadStatus,
-    continuation_unresolved: bool,
-) -> String {
-    let mut parts = vec![
-        agent_thread_status_label(status).to_owned(),
-        child.role.as_str().to_owned(),
-        format!("v{}:{}", child.plan_version, child.step_id.as_str()),
-    ];
-    let result_label = if continuation_unresolved || !status.is_terminal() {
-        "result pending"
-    } else if child.summary_hash.is_some() || thread.result.is_some() {
-        "result ready"
-    } else {
-        "result missing"
-    };
-    parts.push(result_label.to_owned());
     parts.join(" · ")
 }
 
@@ -1220,7 +1122,7 @@ fn agent_command_value(item: &AgentSidebarItem) -> Option<String> {
 }
 
 fn agent_display_label(item: &AgentSidebarItem) -> &str {
-    item.label.strip_prefix("agent ").unwrap_or(&item.label)
+    &item.label
 }
 
 const COMPOSER_AGENT_VISIBLE_ROWS: usize = 4;
@@ -1315,50 +1217,13 @@ fn agent_rename_is_entering_display_name(value: &str) -> bool {
     rest.trim_start().split_once(char::is_whitespace).is_some()
 }
 
-fn task_child_agent_display_name(
-    task: &TaskRunProjection,
-    child: &TaskChildSessionEntry,
-    ordinal: usize,
-) -> String {
-    let explicit = task.display_name_for_child_session(child);
-    if explicit.is_some() {
-        return resolve_agent_display_name(AgentDisplayNameInput {
-            display_name: explicit,
-            role: Some(child.role),
-            ordinal: Some(ordinal),
-            ..AgentDisplayNameInput::default()
-        })
-        .label;
-    }
-    if let Some(display_name) = task.plans.get(&child.plan_version).and_then(|plan| {
-        plan.steps
-            .iter()
-            .find(|step| step.step_id == child.step_id)
-            .and_then(|step| step.display_name.as_deref())
-    }) && let Ok(display_name) = normalize_task_agent_display_name(display_name)
-    {
-        return display_name;
-    }
-    resolve_agent_display_name(AgentDisplayNameInput {
-        display_name: explicit,
-        role: Some(child.role),
-        ordinal: Some(ordinal),
-        ..AgentDisplayNameInput::default()
-    })
-    .label
-}
-
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/agent_flow_detail_tests.rs"]
 mod detail_tests;
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 mod tests {
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        fs,
-        path::Path,
-    };
+    use std::{collections::BTreeMap, fs, path::Path};
 
     use super::*;
     use sigil_kernel::{
@@ -1433,7 +1298,6 @@ mod tests {
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
             duplicate_terminal_entries: 0,
-            legacy_task: false,
             closed: false,
             unresolved: false,
             profile_snapshot_missing: false,
@@ -1446,7 +1310,7 @@ mod tests {
     {
         let objective = test_thread("thread_objective", "Review kernel", Some("reader"))?;
         let from_objective = agent_sidebar_item_from_thread(&objective, None, 1, false);
-        assert_eq!(from_objective.label, "agent Review kernel");
+        assert_eq!(from_objective.label, "Review kernel");
         assert_eq!(
             from_objective.detail,
             "started · reader · unknown · result pending"
@@ -1454,7 +1318,7 @@ mod tests {
 
         let profile = test_thread("thread_profile", "   ", Some("reader-agent"))?;
         let from_profile = agent_sidebar_item_from_thread(&profile, None, 2, false);
-        assert_eq!(from_profile.label, "agent reader agent");
+        assert_eq!(from_profile.label, "reader agent");
         assert_eq!(
             from_profile.detail,
             "started · reader-agent · unknown · result pending"
@@ -1462,38 +1326,11 @@ mod tests {
 
         let ordinal = test_thread("thread_ordinal", "   ", None)?;
         let from_ordinal = agent_sidebar_item_from_thread(&ordinal, None, 3, false);
-        assert_eq!(from_ordinal.label, "agent agent 3");
+        assert_eq!(from_ordinal.label, "agent 3");
         assert_eq!(
             from_ordinal.detail,
             "started · agent · unknown · result pending"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn legacy_child_for_thread_ignores_non_legacy_threads() -> anyhow::Result<()> {
-        let thread = test_thread("thread_non_legacy", "Review", Some("reader"))?;
-        let task = TaskRunProjection {
-            task_id: sigil_kernel::TaskId::new("task_1")?,
-            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-            objective: "task".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Running,
-            reason: None,
-            latest_plan_version: None,
-            plans: BTreeMap::new(),
-            steps: BTreeMap::new(),
-            current_step: None,
-            child_sessions: BTreeMap::new(),
-            child_display_names: BTreeMap::new(),
-            approval_routes: BTreeMap::new(),
-            elicitation_routes: BTreeMap::new(),
-            duplicate_terminal_entries: 0,
-            superseded_plan_versions: BTreeSet::new(),
-            route_unverified: false,
-            child_unavailable: false,
-        };
-
-        assert!(legacy_child_for_thread(&task, &thread).is_none());
         Ok(())
     }
 
@@ -1559,15 +1396,12 @@ mod tests {
         assert!(!missing_recent.truncated);
 
         let valid = temp.path().join("valid.jsonl");
-        let lines = (0..4)
-            .map(|index| {
-                serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(format!(
-                    "child prompt {index}"
-                ))))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        fs::write(&valid, format!("{lines}\n"))?;
+        let store = JsonlSessionStore::new(&valid)?;
+        for index in 0..4 {
+            store.append(&SessionLogEntry::User(ModelMessage::user(format!(
+                "child prompt {index}"
+            ))))?;
+        }
         let valid_signature = child_transcript_file_signature(&valid)?;
         let recent = read_recent_session_entries(&valid, 2, valid_signature)?;
         assert_eq!(recent.entries.len(), 2);

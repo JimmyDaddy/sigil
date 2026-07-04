@@ -471,7 +471,7 @@ pub(in crate::runner) fn chat_agent_run_input_with_repo_context(
     background_ready_context: Vec<ModelMessage>,
 ) -> AgentRunInput {
     let runtime_context =
-        sigil_runtime::context_candidates_from_repo_query(workspace_root, &prompt)
+        sigil_runtime::context_candidates_from_safe_sources(workspace_root, &prompt, None)
             .unwrap_or_default();
     let input = if plan_mode {
         let mut transient_context = plan_mode_transient_context(prompt);

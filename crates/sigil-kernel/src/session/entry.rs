@@ -5,51 +5,39 @@ use super::*;
 #[allow(clippy::large_enum_variant)] // Keep the durable JSONL shape unboxed across control variants.
 #[serde(rename_all = "snake_case")]
 pub enum SessionLogEntry {
-    #[serde(alias = "User")]
     User(ModelMessage),
-    #[serde(alias = "Assistant")]
     Assistant(ModelMessage),
-    #[serde(alias = "ToolResult")]
     ToolResult(ModelMessage),
-    #[serde(alias = "Control")]
     Control(ControlEntry),
 }
 
-/// One physical record in a mixed legacy/v2 session stream.
+/// One physical record in the durable v2 session stream.
 #[derive(Debug, Clone)]
 pub enum SessionStreamRecord {
-    Legacy {
-        event: LegacyEvent,
-        entry: Box<SessionLogEntry>,
-    },
     Stored(StoredEvent),
 }
 
 impl SessionStreamRecord {
     pub fn stream_sequence(&self) -> u64 {
         match self {
-            Self::Legacy { event, .. } => event.stream_sequence,
             Self::Stored(event) => event.stream_sequence,
         }
     }
 
     pub fn session_id(&self) -> &str {
         match self {
-            Self::Legacy { event, .. } => &event.session_id,
             Self::Stored(event) => &event.session_id,
         }
     }
 
     pub fn event_id(&self) -> &str {
         match self {
-            Self::Legacy { event, .. } => &event.event_id,
             Self::Stored(event) => &event.event_id,
         }
     }
 
     pub fn record_checksum(&self) -> &str {
         match self {
-            Self::Legacy { event, .. } => &event.raw_line_hash,
             Self::Stored(event) => &event.record_checksum,
         }
     }
@@ -66,7 +54,6 @@ impl SessionStreamRecord {
 
     pub fn domain_event_record(&self) -> Result<Option<DomainEventRecord>> {
         let domain_event = match self {
-            Self::Legacy { event, .. } => Some(DomainEvent::Legacy(event.clone())),
             Self::Stored(event) => match decode_stored_event(event.clone())? {
                 StoredEventDecode::Known(event) => Some(event),
                 StoredEventDecode::UnknownNonCritical(_) => None,
@@ -79,9 +66,7 @@ impl SessionStreamRecord {
     }
 
     pub fn typed_domain_event_record(&self) -> Result<Option<TypedDomainEventRecord>> {
-        let Self::Stored(event) = self else {
-            return Ok(None);
-        };
+        let Self::Stored(event) = self;
         let typed_event = match decode_typed_stored_event(event.clone())? {
             TypedStoredEventDecode::Known(event) => Some(*event),
             TypedStoredEventDecode::UnknownNonCritical(_) => None,
@@ -166,162 +151,85 @@ pub struct ContextAssemblySkippedEntry {
 #[allow(clippy::large_enum_variant)] // Boxing variants would churn append-only control projection matches.
 #[serde(rename_all = "snake_case")]
 pub enum ControlEntry {
-    #[serde(alias = "SessionIdentity")]
     SessionIdentity {
         provider_name: String,
         model_name: String,
     },
-    #[serde(alias = "ContinuationStateSaved")]
     ContinuationStateSaved(ProviderContinuationState),
-    #[serde(alias = "ResponseHandleTracked")]
     ResponseHandleTracked(crate::provider::ResponseHandle),
-    #[serde(alias = "BackgroundTaskTracked")]
     BackgroundTaskTracked(crate::provider::BackgroundTaskHandle),
-    #[serde(alias = "PrefixSnapshotCaptured")]
     PrefixSnapshotCaptured(PrefixSnapshot),
-    #[serde(alias = "MemorySnapshotCaptured")]
     MemorySnapshotCaptured(MemorySnapshot),
-    #[serde(alias = "ContextAssemblySkipped")]
     ContextAssemblySkipped(ContextAssemblySkippedEntry),
-    #[serde(alias = "UsageSnapshot")]
     UsageSnapshot(UsageStats),
-    #[serde(alias = "ToolApproval")]
     ToolApproval(ToolApprovalEntry),
-    #[serde(alias = "ToolApprovalSessionGrant")]
     ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry),
-    #[serde(alias = "ToolExecution")]
     ToolExecution(Box<ToolExecutionEntry>),
-    #[serde(alias = "ToolEgress")]
     ToolEgress(Box<ToolEgressEntry>),
-    #[serde(alias = "McpElicitation")]
     McpElicitation(Box<McpElicitationEntry>),
-    #[serde(alias = "ToolPreviewCaptured")]
     ToolPreviewCaptured(ToolPreviewSnapshot),
-    #[serde(alias = "SkillIndexCaptured")]
     SkillIndexCaptured(SkillIndexSnapshot),
-    #[serde(alias = "SkillLoaded")]
     SkillLoaded(SkillLoadEntry),
-    #[serde(alias = "PluginManifestCaptured")]
     PluginManifestCaptured(PluginManifestSnapshot),
-    #[serde(alias = "PluginTrustDecision")]
     PluginTrustDecision(PluginTrustEntry),
-    #[serde(alias = "PluginHookExecutionStarted")]
     PluginHookExecutionStarted(PluginHookExecutionStartedEntry),
-    #[serde(alias = "PluginHookExecutionFinished")]
     PluginHookExecutionFinished(PluginHookExecutionFinishedEntry),
-    #[serde(alias = "ChangeSetProposed")]
     ChangeSetProposed(ChangeSet),
-    #[serde(alias = "ChangeSetApplied")]
     ChangeSetApplied(ChangeSetResult),
-    #[serde(alias = "TerminalTask")]
     TerminalTask(TerminalTaskEntry),
-    #[serde(alias = "CompactionApplied")]
     CompactionApplied(CompactionRecord),
-    #[serde(alias = "PlanApproved")]
     PlanApproved(PlanApprovedEntry),
-    #[serde(alias = "PlanDraftCreated")]
     PlanDraftCreated(PlanDraftCreatedEntry),
-    #[serde(alias = "PlanDecisionRecorded")]
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
-    #[serde(alias = "PlanPermissionGranted")]
     PlanPermissionGranted(PlanPermissionGrantedEntry),
-    #[serde(alias = "TaskCreatedFromPlan")]
     TaskCreatedFromPlan(TaskCreatedFromPlanEntry),
-    #[serde(alias = "TaskRun")]
     TaskRun(TaskRunEntry),
-    #[serde(alias = "TaskPlan")]
     TaskPlan(TaskPlanEntry),
-    #[serde(alias = "TaskStep")]
     TaskStep(TaskStepEntry),
-    #[serde(alias = "TaskChildSession")]
     TaskChildSession(TaskChildSessionEntry),
-    #[serde(alias = "TaskChildSessionDisplayName")]
     TaskChildSessionDisplayName(TaskChildSessionDisplayNameEntry),
-    #[serde(alias = "TaskSubagentApprovalRoute")]
     TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry),
-    #[serde(alias = "TaskSubagentElicitationRoute")]
     TaskSubagentElicitationRoute(TaskSubagentElicitationRouteEntry),
-    #[serde(alias = "JobIntentRecorded")]
     JobIntentRecorded(crate::resume::JobIntentEntry),
-    #[serde(alias = "StepLeaseRecorded")]
     StepLeaseRecorded(crate::resume::StepLeaseEntry),
-    #[serde(alias = "StepLeaseHeartbeatRecorded")]
     StepLeaseHeartbeatRecorded(crate::resume::StepLeaseHeartbeatEntry),
-    #[serde(alias = "CheckSpecRecorded")]
     CheckSpecRecorded(CheckSpecRecordedEntry),
-    #[serde(alias = "VerificationPolicyChanged")]
     VerificationPolicyChanged(VerificationPolicyChangedEntry),
-    #[serde(alias = "VerificationCheckRun")]
     VerificationCheckRun(VerificationCheckRunEntry),
-    #[serde(alias = "VerificationRecorded")]
     VerificationRecorded(VerificationRecordedEntry),
-    #[serde(alias = "ReadinessEvaluated")]
     ReadinessEvaluated(ReadinessEvaluatedEntry),
-    #[serde(alias = "ChildVerificationReceiptLinked")]
     ChildVerificationReceiptLinked(ChildVerificationReceiptLinked),
-    #[serde(alias = "WorkspaceTrustDecision")]
     WorkspaceTrustDecision(WorkspaceTrustDecisionEntry),
-    #[serde(alias = "WriteLeaseAcquired")]
     WriteLeaseAcquired(WriteLeaseAcquired),
-    #[serde(alias = "WriteLeaseReleased")]
     WriteLeaseReleased(WriteLeaseReleased),
-    #[serde(alias = "IsolatedWorkspaceCreated")]
     IsolatedWorkspaceCreated(IsolatedWorkspaceCreated),
-    #[serde(alias = "IsolatedChangeSetProduced")]
     IsolatedChangeSetProduced(IsolatedChangeSetProduced),
-    #[serde(alias = "MergeReviewRequested")]
     MergeReviewRequested(MergeReviewRequested),
-    #[serde(alias = "MergeReviewResolved")]
     MergeReviewResolved(MergeReviewResolved),
-    #[serde(alias = "AgentProfileCaptured")]
     AgentProfileCaptured(AgentProfileCapturedEntry),
-    #[serde(alias = "AgentProfileTrustDecision")]
     AgentProfileTrustDecision(AgentProfileTrustEntry),
-    #[serde(alias = "AgentProfilePolicyDecision")]
     AgentProfilePolicyDecision(AgentProfilePolicyEntry),
-    #[serde(alias = "AgentThreadStarted")]
     AgentThreadStarted(AgentThreadStartedEntry),
-    #[serde(alias = "AgentThreadStatusChanged")]
     AgentThreadStatusChanged(AgentThreadStatusChangedEntry),
-    #[serde(alias = "AgentThreadMessageRouted")]
     AgentThreadMessageRouted(AgentThreadMessageRoutedEntry),
-    #[serde(alias = "AgentMailboxMessage")]
     AgentMailboxMessage(AgentMailboxMessageEntry),
-    #[serde(alias = "AgentThreadResultRecorded")]
     AgentThreadResultRecorded(AgentThreadResultRecordedEntry),
-    #[serde(alias = "AgentThreadResultDelivered")]
     AgentThreadResultDelivered(AgentThreadResultDeliveredEntry),
-    #[serde(alias = "AgentResultContinuation")]
     AgentResultContinuation(AgentResultContinuationEntry),
-    #[serde(alias = "AgentThreadDisplayName")]
     AgentThreadDisplayName(AgentThreadDisplayNameEntry),
-    #[serde(alias = "AgentApprovalRoute")]
     AgentApprovalRoute(AgentApprovalRouteEntry),
-    #[serde(alias = "AgentElicitationRoute")]
     AgentElicitationRoute(AgentElicitationRouteEntry),
-    #[serde(alias = "AgentRunAttemptStarted")]
     AgentRunAttemptStarted(AgentRunAttemptStartedEntry),
-    #[serde(alias = "AgentRunHeartbeat")]
     AgentRunHeartbeat(AgentRunHeartbeatEntry),
-    #[serde(alias = "AgentRunInterrupted")]
     AgentRunInterrupted(AgentRunInterruptedEntry),
-    #[serde(alias = "AgentRouteClosed")]
     AgentRouteClosed(AgentRouteClosedEntry),
-    #[serde(alias = "AgentMergeSafePoint")]
     AgentMergeSafePoint(AgentMergeSafePointEntry),
-    #[serde(alias = "AgentThreadClosed")]
     AgentThreadClosed(AgentThreadClosedEntry),
-    #[serde(alias = "ConversationInputQueued")]
     ConversationInputQueued(ConversationInputQueuedEntry),
-    #[serde(alias = "ConversationInputQueueControl")]
     ConversationInputQueueControl(ConversationInputQueueControlEntry),
-    #[serde(alias = "ConversationInputEdited")]
     ConversationInputEdited(ConversationInputEditedEntry),
-    #[serde(alias = "ConversationInputReordered")]
     ConversationInputReordered(ConversationInputReorderedEntry),
-    #[serde(alias = "ConversationInputStatusChanged")]
     ConversationInputStatusChanged(ConversationInputStatusEntry),
-    #[serde(alias = "Note")]
     Note {
         kind: String,
         data: serde_json::Value,

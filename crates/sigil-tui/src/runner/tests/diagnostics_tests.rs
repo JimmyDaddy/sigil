@@ -175,7 +175,7 @@ fn check_changed_files_runs_real_code_diagnostics_and_audits_control_state() -> 
     let session_log_path = workspace_root.join(".sigil/sessions/session-diagnostics.jsonl");
     let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
     root_config.code_intelligence.enabled = true;
-    root_config.code_intelligence.discovery.enabled = false;
+    root_config.code_intelligence.auto_discover = false;
     root_config.code_intelligence.servers = vec![LanguageServerConfig {
         name: "missing-rust-analyzer".to_owned(),
         languages: vec!["rust".to_owned()],

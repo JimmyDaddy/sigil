@@ -14,8 +14,7 @@ use crate::{
     AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
     ControlEntry, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, SessionRef,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskStepId, WorkspaceRootSnapshot,
+    WorkspaceRootSnapshot,
 };
 
 fn profile_id(value: &str) -> Result<AgentProfileId> {
@@ -40,14 +39,6 @@ fn route_id(value: &str) -> Result<AgentRouteId> {
 
 fn session_ref(value: &str) -> Result<SessionRef> {
     SessionRef::new_relative(value)
-}
-
-fn task_id(value: &str) -> Result<TaskId> {
-    TaskId::new(value)
-}
-
-fn step_id(value: &str) -> Result<TaskStepId> {
-    TaskStepId::new(value)
 }
 
 fn sample_snapshot() -> Result<AgentProfileSnapshot> {
@@ -173,22 +164,16 @@ fn agent_profile_defaults_keep_model_invocation_disabled() -> Result<()> {
 }
 
 #[test]
-fn agent_profile_deserializes_legacy_invocation_flags_into_policy() -> Result<()> {
-    let decoded: AgentProfile = serde_json::from_value(serde_json::json!({
+fn agent_profile_rejects_missing_invocation_policy() {
+    let error = serde_json::from_value::<AgentProfile>(serde_json::json!({
         "id": "explore",
         "kind": "subagent",
         "user_invocable": true,
         "model_invocable": true
-    }))?;
+    }))
+    .expect_err("invocation_policy is required");
 
-    assert_eq!(
-        decoded.invocation_policy,
-        AgentInvocationPolicy::ModelAllowed
-    );
-    assert_eq!(decoded.result_policy, AgentResultPolicy::SummaryWithPageRef);
-    assert!(decoded.user_invocation_allowed());
-    assert!(decoded.model_invocation_allowed());
-    Ok(())
+    assert!(error.to_string().contains("invocation_policy"));
 }
 
 #[test]
@@ -835,133 +820,6 @@ fn agent_result_continuation_projection_drops_completed_threads() -> Result<()> 
     let projection = crate::AgentResultContinuationProjection::from_entries(&entries);
 
     assert!(projection.pending_thread_ids.is_empty());
-    Ok(())
-}
-
-#[test]
-fn legacy_task_child_session_projects_as_agent_thread() -> Result<()> {
-    let mut session = Session::new("deepseek", "deepseek-v4-pro");
-    let child = TaskChildSessionEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        step_id: step_id("step_1")?,
-        child_task_id: task_id("child_1")?,
-        child_session_ref: session_ref("children/task_1/step_1-child_1.jsonl")?,
-        role: crate::AgentRole::SubagentRead,
-        status: TaskChildSessionStatus::Completed,
-        summary_hash: Some("sha256:summary".to_owned()),
-    };
-    session.append_control(ControlEntry::TaskChildSession(child))?;
-    session.append_control(ControlEntry::TaskChildSessionDisplayName(
-        TaskChildSessionDisplayNameEntry {
-            task_id: task_id("task_1")?,
-            plan_version: 1,
-            step_id: step_id("step_1")?,
-            child_task_id: task_id("child_1")?,
-            display_name: "kernel map".to_owned(),
-        },
-    ))?;
-
-    let projection = session.agent_thread_state_projection();
-    let thread = projection.latest_thread().expect("legacy thread");
-
-    assert!(thread.legacy_task);
-    assert_eq!(thread.status, AgentThreadStatus::Completed);
-    assert_eq!(
-        thread.profile_id.as_ref().map(AgentProfileId::as_str),
-        Some("legacy_subagent_read")
-    );
-    assert_eq!(thread.display_name.as_deref(), Some("kernel map"));
-    assert_eq!(projection.legacy_task_thread_ids.len(), 1);
-    Ok(())
-}
-
-#[test]
-fn legacy_task_child_session_projects_all_statuses() -> Result<()> {
-    let cases = [
-        (TaskChildSessionStatus::Started, AgentThreadStatus::Started),
-        (TaskChildSessionStatus::Failed, AgentThreadStatus::Failed),
-        (
-            TaskChildSessionStatus::Cancelled,
-            AgentThreadStatus::Cancelled,
-        ),
-        (
-            TaskChildSessionStatus::Interrupted,
-            AgentThreadStatus::Interrupted,
-        ),
-        (
-            TaskChildSessionStatus::Unavailable,
-            AgentThreadStatus::Unavailable,
-        ),
-    ];
-
-    for (index, (legacy_status, expected_status)) in cases.into_iter().enumerate() {
-        let task_name = format!("task_{index}");
-        let step_name = format!("step_{index}");
-        let child_name = format!("child_{index}");
-        let child_session_path = format!("children/task_{index}.jsonl");
-        let task = task_id(&task_name)?;
-        let step = step_id(&step_name)?;
-        let child = task_id(&child_name)?;
-        let entries = vec![SessionLogEntry::Control(ControlEntry::TaskChildSession(
-            TaskChildSessionEntry {
-                task_id: task,
-                plan_version: 1,
-                step_id: step,
-                child_task_id: child,
-                child_session_ref: session_ref(&child_session_path)?,
-                role: crate::AgentRole::SubagentWrite,
-                status: legacy_status,
-                summary_hash: None,
-            },
-        ))];
-
-        let projection = crate::AgentThreadStateProjection::from_entries(&entries);
-        let thread = projection.latest_thread().expect("legacy thread");
-
-        assert_eq!(thread.status, expected_status);
-        assert_eq!(
-            thread.profile_id.as_ref().map(AgentProfileId::as_str),
-            Some("legacy_subagent_write")
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn legacy_task_display_name_before_child_entry_still_projects_legacy_thread() -> Result<()> {
-    let entries = vec![
-        SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(
-            TaskChildSessionDisplayNameEntry {
-                task_id: task_id("task_1")?,
-                plan_version: 1,
-                step_id: step_id("step_1")?,
-                child_task_id: task_id("child_1")?,
-                display_name: "kernel map".to_owned(),
-            },
-        )),
-        SessionLogEntry::Control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
-            task_id: task_id("task_1")?,
-            plan_version: 1,
-            step_id: step_id("step_1")?,
-            child_task_id: task_id("child_1")?,
-            child_session_ref: session_ref("children/task_1/step_1-child_1.jsonl")?,
-            role: crate::AgentRole::SubagentRead,
-            status: TaskChildSessionStatus::Completed,
-            summary_hash: None,
-        })),
-    ];
-
-    let projection = crate::AgentThreadStateProjection::from_entries(&entries);
-    let thread = projection.latest_thread().expect("legacy thread");
-
-    assert!(thread.legacy_task);
-    assert_eq!(thread.invocation_source, Some(AgentInvocationSource::Task));
-    assert_eq!(thread.display_name.as_deref(), Some("kernel map"));
-    assert_eq!(
-        thread.profile_id.as_ref().map(AgentProfileId::as_str),
-        Some("legacy_subagent_read")
-    );
     Ok(())
 }
 

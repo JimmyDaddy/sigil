@@ -139,23 +139,20 @@ fn child_transcript_readers_cover_invalid_paths_blank_lines_and_tail_truncation(
     );
 
     let path = temp.path().join("child.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("hello")))?;
-    fs::write(&path, format!("\n{valid}\n"))?;
+    fs::write(&path, "\n")?;
+    JsonlSessionStore::new(&path)?.append(&SessionLogEntry::User(ModelMessage::user("hello")))?;
     let signature = child_transcript_file_signature(&path)?;
     let recent = read_recent_session_entries(&path, 8, signature)?;
     assert_eq!(recent.entries.len(), 1);
     assert!(!recent.truncated);
 
     let long_path = temp.path().join("long.jsonl");
-    let mut long_body = String::new();
-    for index in 0..1300 {
-        let line = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(format!(
+    let long_store = JsonlSessionStore::new(&long_path)?;
+    for index in 0..96 {
+        long_store.append(&SessionLogEntry::User(ModelMessage::user(format!(
             "line {index}"
         ))))?;
-        long_body.push_str(&line);
-        long_body.push('\n');
     }
-    fs::write(&long_path, long_body)?;
     let signature = child_transcript_file_signature(&long_path)?;
     let recent = read_recent_session_entries(&long_path, 2, signature)?;
     assert_eq!(recent.entries.len(), 2);
@@ -164,13 +161,13 @@ fn child_transcript_readers_cover_invalid_paths_blank_lines_and_tail_truncation(
 }
 
 #[test]
-fn bounded_composer_agent_rows_keeps_main_active_selected_and_recent() {
+fn bounded_composer_agent_rows_uses_contiguous_window_around_selection() {
     let rows = (0..6)
         .map(|index| SidebarAgentRow {
             label: if index == 0 {
                 "main".to_owned()
             } else {
-                format!("agent {index}")
+                format!("child {index}")
             },
             detail: if index == 0 {
                 "idle in current session".to_owned()
@@ -190,6 +187,33 @@ fn bounded_composer_agent_rows_keeps_main_active_selected_and_recent() {
             .iter()
             .map(|row| row.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["main", "agent 2", "agent 3", "agent 5"]
+        vec!["main", "child 1", "child 2", "child 3"]
+    );
+}
+
+#[test]
+fn bounded_composer_agent_rows_scrolls_to_late_selection() {
+    let rows = (0..7)
+        .map(|index| SidebarAgentRow {
+            label: if index == 0 {
+                "main".to_owned()
+            } else {
+                format!("child {index}")
+            },
+            detail: "agent".to_owned(),
+            selected: index == 6,
+            active: index == 2,
+            muted: false,
+        })
+        .collect::<Vec<_>>();
+
+    let bounded = bounded_composer_agent_rows(rows);
+
+    assert_eq!(
+        bounded
+            .iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["child 3", "child 4", "child 5", "child 6"]
     );
 }

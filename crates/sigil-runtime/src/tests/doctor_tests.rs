@@ -10,7 +10,9 @@ use std::{
 
 use anyhow::Result;
 use sigil_kernel::{
-    DurableEventType, EventClass, JsonlSessionStore, PluginTrustDecision, PluginTrustEntry,
+    DurableEventType, EventClass, ExecutionBackendKind, ExecutionConfig, ExecutionSandboxFallback,
+    ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, JsonlSessionStore,
+    PluginTrustDecision, PluginTrustEntry,
 };
 use tempfile::tempdir;
 
@@ -101,7 +103,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -145,7 +146,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -195,7 +195,6 @@ root_markers = ["Cargo.toml"]
 base_url = "https://example.com"
 beta_base_url = "https://example.com/beta"
 anthropic_base_url = "https://example.com/anthropic"
-model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
 api_key = "test-secret-key"
 
@@ -302,7 +301,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -339,7 +337,7 @@ api_key = "test-secret-key"
 }
 
 #[test]
-fn doctor_reports_execution_sandbox_backend_errors() -> Result<()> {
+fn doctor_reports_invalid_execution_sandbox_config() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
@@ -352,13 +350,14 @@ root = "."
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[execution]
-backend = "docker"
-isolation = "require_sandbox"
-profile = "build_offline"
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "docker"
+	profile = "build_offline"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -366,17 +365,18 @@ api_key = "test-secret-key"
     let report = build_doctor_report(&config_path, &workspace);
 
     assert!(report.has_errors(), "{report:#?}");
-    assert!(report.checks.iter().any(|check| {
-        check.name == "execution:sandbox"
-            && check.status == DoctorStatus::Error
-            && check
-                .message
-                .contains("docker execution backend requires [execution].container_image")
-            && check
-                .remediation
-                .as_deref()
-                .is_some_and(|text| text.contains("container_image"))
-    }));
+    assert!(
+        report.checks.iter().any(|check| {
+            check.name == "config:load"
+                && check.status == DoctorStatus::Error
+                && check.message.contains("failed to parse")
+                && check
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|text| text.contains("sigil.toml"))
+        }),
+        "{report:#?}"
+    );
     Ok(())
 }
 
@@ -394,18 +394,17 @@ root = "."
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[execution]
-backend = "docker"
-isolation = "require_sandbox"
-fallback = "unconfined"
-
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 "#,
     )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
+    let mut root_config = RootConfig::load(&config_path)?;
+    let mut sandbox = ExecutionSandboxStrategyConfig::new(ExecutionBackendKind::Docker);
+    sandbox.profile = ExecutionSandboxProfile::WorkspaceWrite;
+    sandbox.fallback = ExecutionSandboxFallback::Unconfined;
+    root_config.execution = ExecutionConfig::sandbox(sandbox);
+    let mut report = DoctorReport::default();
+    check_execution_backend(&mut report, &root_config);
 
     assert!(report.checks.iter().any(|check| {
         check.name == "execution:sandbox"
@@ -436,7 +435,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -463,7 +461,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -499,7 +496,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 
 [[mcp_servers]]
@@ -537,66 +533,6 @@ pin_version = true
                 && check.message.contains("secrets=allowed")
                 && check.message.contains("pin=required"))
     );
-    Ok(())
-}
-
-#[test]
-fn doctor_warns_about_legacy_workspace_state_without_fallback() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace = temp.path().to_path_buf();
-    let user_config_dir = temp.path().join("user-config");
-    fs::create_dir_all(&user_config_dir)?;
-    let config_path = user_config_dir.join("sigil.toml");
-    fs::create_dir_all(workspace.join(".sigil").join("sessions"))?;
-    fs::write(
-        workspace.join(".sigil").join("input-history.jsonl"),
-        "old\n",
-    )?;
-    fs::write(workspace.join("sigil.toml"), "# old workspace config\n")?;
-    fs::write(
-        &config_path,
-        format!(
-            r#"[workspace]
-root = "{}"
-
-[agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[providers.deepseek]
-model = "deepseek-v4-flash"
-api_key = "test-secret-key"
-"#,
-            workspace.display()
-        ),
-    )?;
-
-    let report = build_doctor_report(&config_path, &workspace);
-
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "config:legacy_workspace"
-                && check.status == DoctorStatus::Warn
-                && check.message.contains("no longer loaded by default"))
-    );
-    assert!(report.checks.iter().any(|check| {
-        check.name == "storage:legacy_sessions"
-            && check.status == DoctorStatus::Warn
-            && check
-                .remediation
-                .as_deref()
-                .is_some_and(|remediation| remediation.contains("sessions"))
-    }));
-    assert!(report.checks.iter().any(|check| {
-        check.name == "storage:legacy_input_history"
-            && check.status == DoctorStatus::Warn
-            && check
-                .remediation
-                .as_deref()
-                .is_some_and(|remediation| remediation.contains("input-history.jsonl"))
-    }));
     Ok(())
 }
 
@@ -814,7 +750,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 
 [[mcp_servers]]
@@ -863,7 +798,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 base_url = 123
 "#,
     )?;
@@ -953,7 +887,6 @@ model = "gpt-test"
 
 [providers.openai_compat]
 base_url = "https://openai.example.com/v1"
-model = "gpt-test"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -1006,7 +939,6 @@ model = "claude-test"
 
 [providers.anthropic]
 base_url = "https://anthropic.example.com"
-model = "claude-test"
 api_key = "test-secret-key"
 max_tokens = 2048
 "#,
@@ -1041,7 +973,7 @@ max_tokens = 2048
 }
 
 #[test]
-fn doctor_supports_claude_provider_alias() -> Result<()> {
+fn doctor_rejects_provider_aliases() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
@@ -1056,21 +988,23 @@ model = "claude-test"
 
 [providers.anthropic]
 base_url = "https://anthropic.example.com"
-model = "claude-test"
-api_key = "test-secret-key"
-"#,
+	api_key = "test-secret-key"
+	"#,
     )?;
 
     let report = build_doctor_report(&config_path, &workspace);
 
     assert!(report.checks.iter().any(|check| {
-        check.name == "provider:anthropic"
-            && check.status == DoctorStatus::Ok
-            && check.message.contains("model=claude-test")
+        check.name == "provider"
+            && check.status == DoctorStatus::Error
+            && check.message.contains("unsupported provider claude")
     }));
     assert!(report.checks.iter().any(|check| {
-        check.name == "provider:anthropic:capability:tool_calls"
-            && check.message.contains("supported")
+        check.name == "provider"
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|value| value.contains("\"anthropic\""))
     }));
     Ok(())
 }
@@ -1091,7 +1025,6 @@ model = "gemini-test"
 
 [providers.gemini]
 base_url = "https://gemini.example.com/v1beta"
-model = "gemini-test"
 api_key = "test-secret-key"
 "#,
     )?;
@@ -1183,16 +1116,13 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 
-[code_intelligence]
-enabled = true
-
-[code_intelligence.discovery]
-enabled = true
-report_missing = false
-"#,
+	[code_intelligence]
+	enabled = true
+	auto_discover = true
+	report_missing = false
+	"#,
     )?;
 
     let report = build_doctor_report(&config_path, &workspace);
@@ -1304,7 +1234,6 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 
 [providers.deepseek]
-model = "deepseek-v4-flash"
 api_key = "test-secret-key"
 
 [code_intelligence]

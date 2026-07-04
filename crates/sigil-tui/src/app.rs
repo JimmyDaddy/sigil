@@ -1472,6 +1472,8 @@ impl AppState {
         }
 
         if self.runtime.is_busy {
+            let (kind, target) = self.active_conversation_queue_submission();
+            self.push_optimistic_conversation_queue_item(prompt.clone(), kind, target.clone());
             self.composer.input.clear();
             self.composer.input_cursor = 0;
             self.composer.input_paste_spans.clear();
@@ -1479,8 +1481,8 @@ impl AppState {
             self.last_notice = Some("follow-up will run next".to_owned());
             return Ok(Some(AppAction::QueueConversationInput {
                 prompt,
-                kind: ConversationInputKind::Chat,
-                target: ConversationInputTarget::MainThread,
+                kind,
+                target,
             }));
         }
 

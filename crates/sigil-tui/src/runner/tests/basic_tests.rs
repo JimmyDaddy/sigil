@@ -820,8 +820,7 @@ fn spawn_agent_worker_reports_eager_mcp_failure_without_stopping_worker() -> Res
     root_config.providers.insert(
         "deepseek".to_owned(),
         serde_json::json!({
-            "api_key": "test-key",
-            "model": "deepseek-v4-flash"
+            "api_key": "test-key"
         }),
     );
     root_config.mcp_servers.push(McpServerConfig {

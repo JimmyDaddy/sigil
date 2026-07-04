@@ -272,7 +272,7 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
         Some(Rect::new(7, 2, 9, 1))
     );
     let muted = SidebarAgentRow {
-        label: "agent quiet reviewer".to_owned(),
+        label: "quiet reviewer".to_owned(),
         detail: "completed · subagent_read · v1:step_1".to_owned(),
         selected: false,
         active: false,
@@ -321,7 +321,7 @@ fn render_agent_panel_shows_agent_rows() -> anyhow::Result<()> {
                 muted: false,
             },
             SidebarAgentRow {
-                label: "agent repo audit".to_owned(),
+                label: "repo audit".to_owned(),
                 detail: "completed · subagent_read · v1:step_1".to_owned(),
                 selected: true,
                 active: true,
@@ -377,7 +377,7 @@ fn render_agent_panel_omits_queue_rows_from_agent_surface() -> anyhow::Result<()
                 muted: false,
             },
             SidebarAgentRow {
-                label: "agent explore".to_owned(),
+                label: "explore".to_owned(),
                 detail: "running · explore · chat".to_owned(),
                 selected: false,
                 active: false,
@@ -428,7 +428,7 @@ fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
                 muted: false,
             },
             SidebarAgentRow {
-                label: "agent repo audit".to_owned(),
+                label: "repo audit".to_owned(),
                 detail: "completed · subagent_read · v1:step_1".to_owned(),
                 selected: true,
                 active: false,

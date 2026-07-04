@@ -10,8 +10,7 @@ mod stream;
 
 pub use capabilities::openai_compatible_capabilities;
 pub use config::{
-    OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_COMPATIBLE_BASE_URL_ENV,
-    OPENAI_COMPATIBLE_MODEL_ENV, OpenAiCompatibleProviderConfig,
+    OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_COMPATIBLE_BASE_URL_ENV, OpenAiCompatibleProviderConfig,
 };
 pub use provider::OpenAiCompatibleProvider;
 

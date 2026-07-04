@@ -114,31 +114,6 @@ fn skill_control_entries_roundtrip_with_snake_case_payloads() -> Result<()> {
 }
 
 #[test]
-fn skill_control_entries_accept_legacy_pascal_case_aliases() -> Result<()> {
-    let captured_json = r#"{"control":{"SkillIndexCaptured":{"descriptors":[{"id":"repo-review","name":"Repo Review","description":"Review code","root":".sigil/skills/repo-review","entrypoint":".sigil/skills/repo-review/SKILL.md","source":{"kind":"workspace"},"sha256":"hash","enabled":true,"trust":"trusted","model_invocable":true,"user_invocable":false,"run_as":"inline","allowed_tools":{"names":["read_file"],"prefixes":[]},"disallowed_tools":{"names":[],"prefixes":[]},"path_patterns":["crates/**"]}],"fingerprint":"legacy-fingerprint"}}}"#;
-    let loaded_json = r#"{"control":{"SkillLoaded":{"skill_id":"repo-review","sha256":"hash","source":{"kind":"workspace"},"entrypoint":".sigil/skills/repo-review/SKILL.md","byte_count":128,"line_count":7,"loaded_at_ms":42}}}"#;
-    let restored_captured: SessionLogEntry = serde_json::from_str(captured_json)?;
-    let restored_loaded: SessionLogEntry = serde_json::from_str(loaded_json)?;
-
-    assert!(matches!(
-        restored_captured,
-        SessionLogEntry::Control(ControlEntry::SkillIndexCaptured(snapshot))
-            if snapshot.descriptors[0].id == "repo-review"
-                && snapshot.descriptors[0].trust == SkillTrustState::Trusted
-                && !snapshot.descriptors[0].user_invocable
-                && snapshot.fingerprint != "legacy-fingerprint"
-    ));
-    assert!(matches!(
-        restored_loaded,
-        SessionLogEntry::Control(ControlEntry::SkillLoaded(entry))
-            if entry.skill_id == "repo-review"
-                && entry.byte_count == 128
-                && entry.line_count == 7
-    ));
-    Ok(())
-}
-
-#[test]
 fn skill_descriptor_missing_optional_fields_defaults_safely() -> Result<()> {
     let descriptor: SkillDescriptor = serde_json::from_str(r#"{"id":"repo-review"}"#)?;
 
@@ -157,7 +132,7 @@ fn skill_descriptor_missing_optional_fields_defaults_safely() -> Result<()> {
 #[test]
 fn skill_index_snapshot_fingerprint_is_recomputed_on_restore() -> Result<()> {
     let restored: SkillIndexSnapshot = serde_json::from_str(
-        r#"{"descriptors":[{"id":"repo-review","name":"Repo Review","description":"Review code"}],"fingerprint":"legacy-fingerprint"}"#,
+        r#"{"descriptors":[{"id":"repo-review","name":"Repo Review","description":"Review code"}],"fingerprint":"stored-fingerprint"}"#,
     )?;
     let expected = SkillIndexSnapshot::new(vec![SkillDescriptor {
         id: "repo-review".to_owned(),
@@ -167,7 +142,7 @@ fn skill_index_snapshot_fingerprint_is_recomputed_on_restore() -> Result<()> {
     }])?;
 
     assert_eq!(restored.fingerprint, expected.fingerprint);
-    assert_ne!(restored.fingerprint, "legacy-fingerprint");
+    assert_ne!(restored.fingerprint, "stored-fingerprint");
     Ok(())
 }
 

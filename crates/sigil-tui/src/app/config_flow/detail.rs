@@ -64,7 +64,8 @@ pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec
     ];
 
     if matches!(field, ConfigField::ProviderApiKey) {
-        let env_name = provider_api_key_env_name(&config_state.draft.provider_name);
+        let env_name = provider_api_key_env_name(&config_state.draft.provider_name)
+            .unwrap_or("unsupported provider");
         lines.push(format!("override: {env_name}"));
         lines.push("storage: saved api_key is plaintext in sigil.toml".to_owned());
     }

@@ -1,6 +1,9 @@
 use std::{cell::RefCell, collections::BTreeMap};
 
-use sigil_kernel::{ConversationInputQueueId, ReasoningEffort, SessionLogEntry, SessionStats};
+use sigil_kernel::{
+    ConversationInputQueueId, ConversationInputQueuedEntry, ReasoningEffort, SessionLogEntry,
+    SessionStats,
+};
 use sigil_runtime::BalanceSnapshot;
 
 use crate::{
@@ -58,6 +61,8 @@ pub(crate) struct ComposerState {
     pub(crate) queue_selected: usize,
     pub(crate) queue_action_selected: ComposerQueueAction,
     pub(crate) queue_edit_target: Option<ConversationInputQueueId>,
+    pub(crate) optimistic_queue_items: Vec<ConversationInputQueuedEntry>,
+    pub(crate) next_optimistic_queue_id: u64,
     pub(crate) input_cursor: usize,
     pub(in crate::app) input_paste_spans: Vec<ComposerPasteSpan>,
     pub(crate) input_history_index: Option<usize>,
@@ -78,6 +83,8 @@ impl Default for ComposerState {
             queue_selected: 0,
             queue_action_selected: ComposerQueueAction::KeepNext,
             queue_edit_target: None,
+            optimistic_queue_items: Vec::new(),
+            next_optimistic_queue_id: 1,
             input_cursor: 0,
             input_paste_spans: Vec::new(),
             input_history_index: None,

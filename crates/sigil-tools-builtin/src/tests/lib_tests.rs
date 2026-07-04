@@ -10,9 +10,10 @@ use serde_json::json;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
-    ExecutionConfig, ExecutionIsolationPolicy, ExecutionNetworkPolicy, ExecutionReceipt,
-    ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxProfile, ExecutionTimeoutSource,
-    JsonlSessionStore, MutationEventRecorder, PathTrustZone, PermissionRisk, SessionStreamRecord,
+    ExecutionConfig, ExecutionNetworkPolicy, ExecutionReceipt, ExecutionRequest,
+    ExecutionResourceLimitKind, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    ExecutionSandboxStrategyConfig, ExecutionTimeoutSource, JsonlSessionStore,
+    MutationEventRecorder, PathTrustZone, PermissionRisk, SessionStreamRecord,
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
     TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCall,
     ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
@@ -38,6 +39,25 @@ fn bash_tool(test_root: &Path) -> BashTool {
         scratch_label: "cache/tmp".to_owned(),
         backend: Arc::new(LocalExecutionBackend),
     }
+}
+
+fn sandbox_execution_config(
+    backend: ExecutionBackendKind,
+    profile: ExecutionSandboxProfile,
+    fallback: ExecutionSandboxFallback,
+    container_image: Option<String>,
+) -> ExecutionConfig {
+    let mut sandbox = ExecutionSandboxStrategyConfig::new(backend);
+    sandbox.profile = profile;
+    sandbox.fallback = fallback;
+    sandbox.container_image = container_image;
+    ExecutionConfig::sandbox(sandbox)
+}
+
+fn tool_context_with_mutation_recorder(workspace: &Path, timeout_secs: u64) -> Result<ToolContext> {
+    let store = JsonlSessionStore::new(workspace.join("session.jsonl"))?;
+    Ok(ToolContext::new(workspace.to_path_buf(), timeout_secs)
+        .with_mutation_recorder(MutationEventRecorder::new(store)))
 }
 
 struct RecordingProgressSink {
@@ -96,18 +116,19 @@ fn local_execution_backend_policy_fails_closed_when_sandbox_required() -> Result
     let backend = super::build_execution_backend(&ExecutionConfig::default())?;
     assert_eq!(backend.kind(), ExecutionBackendKind::Local);
 
-    let result = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::Local,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        ..ExecutionConfig::default()
-    });
+    let result = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::Local,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    ));
     let Err(error) = result else {
         panic!("local backend cannot satisfy required sandbox policy");
     };
     assert!(
-        error.to_string().contains(
-            "execution isolation require_sandbox requires filesystem and process isolation"
-        )
+        error
+            .to_string()
+            .contains("execution profile WorkspaceWrite requires filesystem and process isolation")
     );
     Ok(())
 }
@@ -134,11 +155,12 @@ fn long_lived_stdio_process_plan_local_unconfined_is_outside_sandbox() -> Result
 fn long_lived_stdio_process_plan_local_required_sandbox_fails_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let result = super::long_lived_stdio_process_plan(
-        &ExecutionConfig {
-            backend: ExecutionBackendKind::Local,
-            isolation: ExecutionIsolationPolicy::RequireSandbox,
-            ..ExecutionConfig::default()
-        },
+        &sandbox_execution_config(
+            ExecutionBackendKind::Local,
+            ExecutionSandboxProfile::WorkspaceWrite,
+            ExecutionSandboxFallback::Deny,
+            None,
+        ),
         "sh",
         &["-c".to_owned(), "true".to_owned()],
         temp.path(),
@@ -160,12 +182,12 @@ fn long_lived_stdio_process_plan_local_required_sandbox_fails_closed() -> Result
 fn long_lived_stdio_process_plan_docker_fails_closed_for_stdio_mcp() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let result = super::long_lived_stdio_process_plan(
-        &ExecutionConfig {
-            backend: ExecutionBackendKind::Docker,
-            profile: ExecutionSandboxProfile::WorkspaceWrite,
-            container_image: Some("redis:8-alpine".to_owned()),
-            ..ExecutionConfig::default()
-        },
+        &sandbox_execution_config(
+            ExecutionBackendKind::Docker,
+            ExecutionSandboxProfile::WorkspaceWrite,
+            ExecutionSandboxFallback::Deny,
+            Some("redis:8-alpine".to_owned()),
+        ),
         "sh",
         &["-c".to_owned(), "true".to_owned()],
         temp.path(),
@@ -251,11 +273,12 @@ fn macos_seatbelt_backend_default_and_custom_paths_are_stable() {
 #[test]
 #[cfg(target_os = "macos")]
 fn macos_seatbelt_backend_satisfies_required_sandbox_policy() -> Result<()> {
-    let backend = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::MacosSeatbelt,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        ..ExecutionConfig::default()
-    })?;
+    let backend = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::MacosSeatbelt,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    ))?;
 
     assert_eq!(backend.kind(), ExecutionBackendKind::MacosSeatbelt);
     let capabilities = backend.capabilities();
@@ -270,12 +293,12 @@ fn macos_seatbelt_backend_satisfies_required_sandbox_policy() -> Result<()> {
 #[test]
 fn macos_seatbelt_backend_does_not_satisfy_offline_build_profile() {
     let backend = MacosSeatbeltExecutionBackend::default();
-    let config = ExecutionConfig {
-        backend: ExecutionBackendKind::MacosSeatbelt,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        profile: sigil_kernel::ExecutionSandboxProfile::BuildOffline,
-        ..ExecutionConfig::default()
-    };
+    let config = sandbox_execution_config(
+        ExecutionBackendKind::MacosSeatbelt,
+        sigil_kernel::ExecutionSandboxProfile::BuildOffline,
+        ExecutionSandboxFallback::Deny,
+        None,
+    );
 
     let error = config
         .validate_profile_capabilities(backend.capabilities())
@@ -301,11 +324,12 @@ fn linux_bubblewrap_backend_declares_enforced_mvp_capabilities() {
 #[test]
 #[cfg(not(target_os = "linux"))]
 fn linux_bubblewrap_backend_fails_closed_on_non_linux() {
-    let result = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::LinuxBubblewrap,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        ..ExecutionConfig::default()
-    });
+    let result = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::LinuxBubblewrap,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    ));
     let Err(error) = result else {
         panic!("linux_bubblewrap backend must fail closed on non-Linux");
     };
@@ -425,12 +449,12 @@ fn linux_bubblewrap_args_keep_tmp_workspace_visible_after_tmpfs() {
 #[ignore = "requires Linux host with bubblewrap user/mount namespaces and wget"]
 #[cfg(target_os = "linux")]
 async fn linux_bubblewrap_execution_backend_real_conformance() -> Result<()> {
-    let backend = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::LinuxBubblewrap,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        profile: sigil_kernel::ExecutionSandboxProfile::BuildOffline,
-        ..ExecutionConfig::default()
-    })?;
+    let backend = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::LinuxBubblewrap,
+        sigil_kernel::ExecutionSandboxProfile::BuildOffline,
+        ExecutionSandboxFallback::Deny,
+        None,
+    ))?;
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace)?;
@@ -486,11 +510,12 @@ async fn linux_bubblewrap_execution_backend_real_conformance() -> Result<()> {
 
 #[test]
 fn docker_backend_requires_explicit_container_image() {
-    let result = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::Docker,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        ..ExecutionConfig::default()
-    });
+    let result = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::Docker,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    ));
 
     let Err(error) = result else {
         panic!("docker backend must fail closed without explicit container image");
@@ -499,29 +524,29 @@ fn docker_backend_requires_explicit_container_image() {
     assert!(
         error
             .to_string()
-            .contains("docker execution backend requires [execution].container_image")
+            .contains("docker execution backend requires execution.sandbox.container_image")
     );
 }
 
 #[test]
 fn backend_selection_only_unconfined_fallback_relaxes_to_local() -> Result<()> {
-    let prompt_result = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::Docker,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        fallback: sigil_kernel::ExecutionSandboxFallback::Prompt,
-        ..ExecutionConfig::default()
-    });
+    let prompt_result = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::Docker,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        sigil_kernel::ExecutionSandboxFallback::Prompt,
+        None,
+    ));
     let Err(error) = prompt_result else {
         panic!("prompt fallback should not relax inside non-interactive backend builder");
     };
     assert!(error.to_string().contains("fallback requires user prompt"));
 
-    let backend = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::Docker,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        fallback: sigil_kernel::ExecutionSandboxFallback::Unconfined,
-        ..ExecutionConfig::default()
-    })?;
+    let backend = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::Docker,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        sigil_kernel::ExecutionSandboxFallback::Unconfined,
+        None,
+    ))?;
 
     assert_eq!(backend.kind(), ExecutionBackendKind::Local);
     Ok(())
@@ -669,13 +694,12 @@ async fn docker_execution_backend_networked_receipt_allows_network() -> Result<(
 async fn docker_execution_backend_real_daemon_conformance() -> Result<()> {
     let image = std::env::var("SIGIL_DOCKER_CONFORMANCE_IMAGE")
         .context("set SIGIL_DOCKER_CONFORMANCE_IMAGE to a local image with sh and wget")?;
-    let backend = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::Docker,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        profile: sigil_kernel::ExecutionSandboxProfile::BuildOffline,
-        container_image: Some(image),
-        ..ExecutionConfig::default()
-    })?;
+    let backend = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::Docker,
+        sigil_kernel::ExecutionSandboxProfile::BuildOffline,
+        ExecutionSandboxFallback::Deny,
+        Some(image),
+    ))?;
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("input.txt"), "from-host")?;
 
@@ -742,11 +766,12 @@ fn macos_seatbelt_backend_missing_binary_fails_closed_during_validation() {
 #[test]
 #[cfg(not(target_os = "macos"))]
 fn macos_seatbelt_backend_fails_closed_on_non_macos() {
-    let result = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::MacosSeatbelt,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        ..ExecutionConfig::default()
-    });
+    let result = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::MacosSeatbelt,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    ));
 
     let Err(error) = result else {
         panic!("macos_seatbelt backend must fail closed on non-macOS");
@@ -951,19 +976,20 @@ fn sandbox_conformance_local_backend_does_not_claim_sandbox_capabilities() {
 
 #[test]
 fn sandbox_conformance_local_backend_fails_closed_for_required_sandbox() {
-    let result = super::build_execution_backend(&ExecutionConfig {
-        backend: ExecutionBackendKind::Local,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        ..ExecutionConfig::default()
-    });
+    let result = super::build_execution_backend(&sandbox_execution_config(
+        ExecutionBackendKind::Local,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    ));
 
     let Err(error) = result else {
         panic!("local backend must not satisfy required sandbox policy");
     };
     assert!(
-        error.to_string().contains(
-            "execution isolation require_sandbox requires filesystem and process isolation"
-        )
+        error
+            .to_string()
+            .contains("execution profile WorkspaceWrite requires filesystem and process isolation")
     );
 }
 
@@ -1229,9 +1255,8 @@ fn apply_changeset_tool() -> ApplyChangeSetTool {
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        if let SessionStreamRecord::Stored(event) = record {
-            event_types.push(event.event_type);
-        }
+        let SessionStreamRecord::Stored(event) = record;
+        event_types.push(event.event_type);
     }
     Ok(event_types)
 }
@@ -1389,7 +1414,7 @@ async fn read_and_edit_file_tool_work() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("note.txt");
     fs::write(&file, "hello old")?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
     let read = ReadFileTool
         .execute(ctx.clone(), "1".to_owned(), json!({ "path": "note.txt" }))
         .await?;
@@ -1591,7 +1616,7 @@ async fn delete_file_execute_deletes_regular_file() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("note.txt");
     fs::write(&file, "alpha\nbeta\n")?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
 
     let result = DeleteFileTool
         .execute(ctx, "delete".to_owned(), json!({ "path": "note.txt" }))
@@ -3263,7 +3288,7 @@ async fn grep_skips_non_utf8_files_without_panicking() -> Result<()> {
 #[tokio::test]
 async fn write_file_execute_creates_missing_parent_directories() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
 
     let result = WriteFileTool
         .execute(
@@ -3812,7 +3837,7 @@ async fn apply_changeset_full_update_accepts_matching_mtime() -> Result<()> {
     fs::write(&file, "old\n")?;
     let before_mtime_ms = super::metadata_mtime_ms(&fs::metadata(&file)?)
         .expect("regular file metadata should include mtime");
-    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
+    let ctx = tool_context_with_mutation_recorder(workspace.path(), 5)?;
     let args = json!({
         "id": "change-full-update",
         "summary": "Replace note contents",
@@ -4340,7 +4365,7 @@ async fn apply_changeset_partial_apply_reports_applied_and_skipped_files() -> Re
 #[tokio::test]
 async fn write_file_execute_creates_parent_dirs_and_reports_bytes() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
 
     let result = WriteFileTool
         .execute(

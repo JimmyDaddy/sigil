@@ -749,7 +749,9 @@ fn restored_session_view_shows_typed_task_memory_summary() -> Result<()> {
     assert!(lines.contains("file: README.md"));
     assert!(lines.contains("check: receipt-readme-check"));
     assert!(
-        lines.contains("unresolved: Decide whether docs links need checking [model/unverified]")
+        lines.contains(
+            "unresolved: Decide whether docs links need checking [model summary context]"
+        )
     );
     let view_model = crate::view_model::UiViewModel::from_app(&app);
     assert!(
@@ -1111,13 +1113,10 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
 
     let beta_path = session_dir.join("session-beta.jsonl");
     let oversized = "x".repeat(300_000);
-    std::fs::write(
-        &beta_path,
-        format!(
-            "{oversized}\n{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("beta plan")))?
-        ),
-    )?;
+    JsonlSessionStore::new(&beta_path)?
+        .append(&SessionLogEntry::User(ModelMessage::user("beta plan")))?;
+    let mut beta_file = std::fs::OpenOptions::new().append(true).open(&beta_path)?;
+    std::io::Write::write_all(&mut beta_file, format!("{oversized}\n").as_bytes())?;
 
     let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
     app.session_log_path = current_path.clone();
@@ -1653,7 +1652,7 @@ fn restore_latest_session_returns_false_when_history_is_empty() {
 }
 
 #[test]
-fn restore_session_path_returns_false_for_invalid_log() -> Result<()> {
+fn restore_session_path_ignores_non_session_rows_without_raw_decode() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
         workspace: WorkspaceConfig {
@@ -1667,23 +1666,27 @@ fn restore_session_path_returns_false_for_invalid_log() -> Result<()> {
             .parent()
             .expect("session log path should have a parent"),
     )?;
-    std::fs::write(
-        &invalid_path,
-        format!(
-            "{{\"not\":\"a session entry\"}}\n{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("valid tail")))?
-        ),
-    )?;
+    std::fs::write(&invalid_path, "{\"not\":\"a session entry\"}\n")?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
-    assert!(!app.restore_session_path_from_disk(
-        invalid_path,
+    assert!(app.restore_session_path_from_disk(
+        invalid_path.clone(),
         "fallback-provider",
         "fallback-model",
         "restore failed"
     ));
-    assert_ne!(app.last_notice(), Some("restore failed"));
+    assert_eq!(app.session_log_path, invalid_path);
+    assert!(
+        app.session_browser
+            .current_entries
+            .iter()
+            .all(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+            ))
+    );
+    assert_eq!(app.last_notice(), Some("restore failed"));
     Ok(())
 }
 

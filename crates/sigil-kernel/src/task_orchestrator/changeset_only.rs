@@ -285,7 +285,6 @@ pub fn decode_changeset_only_child_output(final_text: &str) -> Result<TaskChildC
 
 #[derive(Deserialize)]
 struct TaskChildChangeSetProposalEnvelope {
-    #[serde(alias = "changeset")]
     change_set: ChangeSet,
     artifact: TaskChildChangeSetArtifactWire,
 }

@@ -19,12 +19,12 @@ use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfileSnapshot,
     AgentProfileSource, AgentProfileTrustEntry, AgentTrustState, AppearanceConfig, ApprovalMode,
     CodeIntelStartup, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
-    JsonlSessionStore, McpServerConfig, McpServerStartup, MutationEventRecorder, PluginCapability,
-    PluginManifestSnapshot, PluginStateProjection, PluginTrustDecision, PluginTrustEntry,
-    RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState,
-    SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope, VerificationStateProjection,
-    WorkspaceTrust, default_user_config_dir, discover_candidate_checks_with_user_config,
-    stable_workspace_id,
+    JsonlSessionStore, McpServerConfig, McpServerStartup, MutationEventRecorder, PermissionPreset,
+    PluginCapability, PluginManifestSnapshot, PluginStateProjection, PluginTrustDecision,
+    PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
+    SkillTrustState, SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope,
+    VerificationStateProjection, WorkspaceTrust, default_user_config_dir,
+    discover_candidate_checks_with_user_config, stable_workspace_id,
 };
 use sigil_runtime::{
     AgentProfileRegistry, ContextWindowSource, ResolvedAgentProfile,
@@ -648,6 +648,13 @@ impl AppState {
                                 config_state.draft.provider_api_key.clone(),
                             ));
                         }
+                        ConfigField::PermissionsPreset => {
+                            config_state.draft.permission_preset =
+                                cycle_permission_preset(config_state.draft.permission_preset);
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
                         ConfigField::PermissionsDefaultMode => {
                             config_state.draft.permission_default_mode =
                                 cycle_approval_mode(config_state.draft.permission_default_mode);
@@ -682,25 +689,25 @@ impl AppState {
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
-                        ConfigField::CodeIntelStartup => {
-                            config_state.draft.code_intelligence_startup = cycle_code_intel_startup(
-                                config_state.draft.code_intelligence_startup,
-                            );
+                        ConfigField::CodeIntelServerStartup => {
+                            config_state.draft.code_intelligence_server_startup =
+                                cycle_code_intel_startup(
+                                    config_state.draft.code_intelligence_server_startup,
+                                );
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
-                        ConfigField::CodeIntelDiscoveryEnabled => {
-                            config_state.draft.code_intelligence_discovery_enabled =
-                                !config_state.draft.code_intelligence_discovery_enabled;
+                        ConfigField::CodeIntelAutoDiscover => {
+                            config_state.draft.code_intelligence_auto_discover =
+                                !config_state.draft.code_intelligence_auto_discover;
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
-                        ConfigField::CodeIntelDiscoveryReportMissing => {
-                            let report_missing = &mut config_state
-                                .draft
-                                .code_intelligence_discovery_report_missing;
+                        ConfigField::CodeIntelReportMissing => {
+                            let report_missing =
+                                &mut config_state.draft.code_intelligence_report_missing;
                             *report_missing = !*report_missing;
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
@@ -1779,6 +1786,13 @@ impl AppState {
             lines.push(format!("... {} more checks", checks.len() - 4));
         }
         lines
+    }
+}
+
+fn cycle_permission_preset(preset: PermissionPreset) -> PermissionPreset {
+    match preset {
+        PermissionPreset::Balanced => PermissionPreset::ReadOnly,
+        PermissionPreset::ReadOnly => PermissionPreset::Balanced,
     }
 }
 

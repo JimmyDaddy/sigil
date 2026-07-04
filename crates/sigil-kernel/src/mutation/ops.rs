@@ -4,15 +4,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 
 use crate::{stable_event_uuid, verification::FileType};
 
 use super::{
     CheckpointRestored, CommittedDirectoryMutation, CommittedFileMutation, MutationBatchId,
     MutationEventRecorder, MutationSubject, OperationId, RestoredFileMutation, SnapshotCoverage,
-    atomic_replace, bytes_hash, directory_present_hash, ensure_empty_directory, file_content_hash,
-    read_mutation_artifact_content, sync_parent,
+    bytes_hash, directory_present_hash, ensure_empty_directory, file_content_hash,
+    read_mutation_artifact_content,
 };
 
 pub fn write_file_with_mutation(
@@ -34,11 +34,7 @@ pub fn write_file_with_mutation(
     )
 }
 
-/// Writes a file with RFC-0002 mutation evidence when a recorder is available.
-///
-/// `recorder = None` is a legacy compatibility path for non-durable callers and tests. Durable
-/// agent/tool runs must pass a recorder; otherwise the file write cannot produce
-/// `MutationPrepared` / `MutationCommitted` evidence and must not be treated as verified-clean.
+/// Writes a file with RFC-0002 mutation evidence.
 pub fn write_file_with_mutation_in_batch(
     recorder: Option<&MutationEventRecorder>,
     workspace_root: &Path,
@@ -48,15 +44,7 @@ pub fn write_file_with_mutation_in_batch(
     absolute_path: impl Into<PathBuf>,
     content: &[u8],
 ) -> Result<Option<CommittedFileMutation>> {
-    let Some(recorder) = recorder else {
-        let absolute_path = absolute_path.into();
-        if let Some(parent) = absolute_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        atomic_replace(&absolute_path, content)?;
-        return Ok(None);
-    };
+    let recorder = require_mutation_recorder(recorder)?;
     let coordinator = recorder.coordinator(workspace_root, tool_call_id.to_owned(), batch_id)?;
     let relative_path = normalize_relative_path(relative_path.into())?;
     let absolute_path = absolute_path.into();
@@ -79,12 +67,7 @@ pub fn create_directory_with_mutation(
     absolute_path: impl Into<PathBuf>,
 ) -> Result<Option<CommittedDirectoryMutation>> {
     let absolute_path = absolute_path.into();
-    let Some(recorder) = recorder else {
-        fs::create_dir(&absolute_path)
-            .with_context(|| format!("failed to create {}", absolute_path.display()))?;
-        sync_parent(&absolute_path)?;
-        return Ok(None);
-    };
+    let recorder = require_mutation_recorder(recorder)?;
     let coordinator = recorder.coordinator(workspace_root, tool_call_id.to_owned(), None)?;
     let prepared = coordinator.prepare_directory(
         relative_path,
@@ -102,12 +85,7 @@ pub fn delete_directory_with_mutation(
     absolute_path: impl Into<PathBuf>,
 ) -> Result<Option<CommittedDirectoryMutation>> {
     let absolute_path = absolute_path.into();
-    let Some(recorder) = recorder else {
-        fs::remove_dir(&absolute_path)
-            .with_context(|| format!("failed to delete {}", absolute_path.display()))?;
-        sync_parent(&absolute_path)?;
-        return Ok(None);
-    };
+    let recorder = require_mutation_recorder(recorder)?;
     ensure_empty_directory(&absolute_path)?;
     let coordinator = recorder.coordinator(workspace_root, tool_call_id.to_owned(), None)?;
     let prepared = coordinator.prepare_directory(relative_path, &absolute_path, None)?;
@@ -131,11 +109,7 @@ pub fn delete_file_with_mutation(
     )
 }
 
-/// Deletes a file with RFC-0002 mutation evidence when a recorder is available.
-///
-/// `recorder = None` is a legacy compatibility path for non-durable callers and tests. Durable
-/// agent/tool runs must pass a recorder; otherwise the delete cannot produce
-/// `MutationPrepared` / `MutationCommitted` evidence and must not be treated as verified-clean.
+/// Deletes a file with RFC-0002 mutation evidence.
 pub fn delete_file_with_mutation_in_batch(
     recorder: Option<&MutationEventRecorder>,
     workspace_root: &Path,
@@ -145,15 +119,16 @@ pub fn delete_file_with_mutation_in_batch(
     absolute_path: impl Into<PathBuf>,
 ) -> Result<Option<CommittedFileMutation>> {
     let absolute_path = absolute_path.into();
-    let Some(recorder) = recorder else {
-        fs::remove_file(&absolute_path)
-            .with_context(|| format!("failed to delete {}", absolute_path.display()))?;
-        sync_parent(&absolute_path)?;
-        return Ok(None);
-    };
+    let recorder = require_mutation_recorder(recorder)?;
     let coordinator = recorder.coordinator(workspace_root, tool_call_id.to_owned(), batch_id)?;
     let prepared = coordinator.prepare_file(relative_path, &absolute_path, None)?;
     coordinator.commit_delete(&prepared).map(Some)
+}
+
+fn require_mutation_recorder(
+    recorder: Option<&MutationEventRecorder>,
+) -> Result<&MutationEventRecorder> {
+    recorder.ok_or_else(|| anyhow!("mutation recorder is required for workspace mutations"))
 }
 
 pub fn restore_file_from_snapshot_with_mutation(

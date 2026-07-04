@@ -22,10 +22,6 @@ use crate::{
     resolve_sigil_paths,
 };
 
-const WORKSPACE_CONFIG_FILE: &str = "sigil.toml";
-const LEGACY_WORKSPACE_STATE_DIR: &str = ".sigil";
-const LEGACY_SESSIONS_DIR: &str = "sessions";
-const LEGACY_INPUT_HISTORY_FILE: &str = "input-history.jsonl";
 const MAX_SESSION_STREAMS_DOCTOR_SCAN: usize = 20;
 const MAX_SESSION_STREAM_DOCTOR_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -39,9 +35,7 @@ pub use code_intel::build_code_intelligence_checks;
 use code_intel::check_code_intelligence;
 use mcp::{CommandStatus, check_mcp_servers, check_plugin_hooks, command_status};
 use providers::{check_execution_backend, check_provider};
-use session::{
-    check_legacy_workspace_state, check_session_streams, check_storage_paths, check_workspace,
-};
+use session::{check_session_streams, check_storage_paths, check_workspace};
 use terminal::check_terminal;
 
 #[cfg(test)]
@@ -200,7 +194,6 @@ pub fn build_doctor_report_with_options(
     let sigil_paths =
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     check_storage_paths(&mut report, &sigil_paths);
-    check_legacy_workspace_state(&mut report, config_path, &sigil_paths);
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
     check_provider(&mut report, &root_config);
     check_mcp_servers(&mut report, &root_config, &workspace_root);

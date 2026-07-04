@@ -280,9 +280,9 @@ pub(crate) struct ApplyChangeSetFileArg {
     pub old_text: Option<String>,
     #[serde(default)]
     pub new_text: Option<String>,
-    #[serde(default, alias = "expected_before_hash")]
+    #[serde(default)]
     pub before_hash: Option<String>,
-    #[serde(default, alias = "expected_mtime_ms")]
+    #[serde(default)]
     pub before_mtime_ms: Option<u64>,
 }
 

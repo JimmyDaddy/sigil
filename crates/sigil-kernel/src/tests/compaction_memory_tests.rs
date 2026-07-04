@@ -4,13 +4,15 @@ use serde_json::json;
 use crate::{
     ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus, ChangeSetId,
     ChangeSetResult, ChangeSetResultStatus, CompactionRecord, ControlEntry, DurableEventType,
-    EventClass, EvidenceReceipt, EvidenceScope, FileChangeRef, FileType, LegacyEvent,
+    EventClass, EvidenceReceipt, EvidenceScope, FileChangeRef, FileType,
     ModelAssistedMemoryDecision, ModelAssistedMemoryFact, ModelAssistedTaskMemorySummary,
-    MutationCommitted, MutationSubject, ReceiptStatus, RedactionState, SessionLogEntry,
-    SessionStreamRecord, SourcedDecision, SourcedFact, StoredEvent, TaskMemoryExtractionInput,
-    TaskMemoryV1, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus, ToolExecutionEntry,
+    MutationCommitted, MutationSubject, ReadinessEvaluatedEntry, ReadinessEvaluation,
+    ReceiptStatus, RedactionState, RunStatus, SessionLogEntry, SessionStreamRecord,
+    SourcedDecision, SourcedFact, StoredEvent, TaskMemoryExtractionInput, TaskMemoryV1,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus, ToolExecutionEntry,
     ToolExecutionStatus, ToolResultMeta, VerificationBinding, VerificationReceipt,
-    VerificationRecordedEntry, extract_task_memory_from_stream_records, task_memory_context_items,
+    VerificationRecordedEntry, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState, extract_task_memory_from_stream_records, task_memory_context_items,
 };
 
 fn sample_task_memory() -> TaskMemoryV1 {
@@ -41,7 +43,7 @@ fn sample_task_memory() -> TaskMemoryV1 {
         verification_results: vec!["check-1".to_owned()],
         failed_attempts: Vec::new(),
         risks: vec![SourcedFact::model_inferred(
-            "Legacy trust entries may not contain capability digests",
+            "Trust entries without capability digests are harder to audit",
             "event-5",
         )],
         unresolved_issues: vec![SourcedFact::system_derived(
@@ -69,26 +71,9 @@ fn compaction_memory_task_memory_v1_roundtrips_with_sources() -> Result<()> {
 }
 
 #[test]
-fn compaction_memory_record_preserves_legacy_summary_fallback() -> Result<()> {
-    let legacy_json = r#"{
-        "summary": "legacy local summary",
-        "compacted_message_count": 3,
-        "retained_tail_message_count": 2
-    }"#;
-
-    let restored: CompactionRecord = serde_json::from_str(legacy_json)?;
-
-    assert_eq!(restored.summary, "legacy local summary");
-    assert_eq!(restored.compacted_message_count, 3);
-    assert_eq!(restored.retained_tail_message_count, 2);
-    assert!(restored.task_memory.is_none());
-    Ok(())
-}
-
-#[test]
 fn compaction_memory_record_can_attach_typed_task_memory() -> Result<()> {
     let record = CompactionRecord {
-        summary: "legacy local summary".to_owned(),
+        summary: "local summary".to_owned(),
         compacted_message_count: 4,
         retained_tail_message_count: 2,
         task_memory: Some(sample_task_memory()),
@@ -119,8 +104,31 @@ fn compaction_memory_model_generated_fact_cannot_create_verified_evidence() {
     assert!(
         error
             .to_string()
-            .contains("cannot be verified without durable evidence")
+            .contains("requires durable receipt or artifact evidence")
     );
+}
+
+#[test]
+fn compaction_memory_verified_fact_requires_receipt_or_artifact() {
+    let mut system_fact = SourcedFact::system_derived("tests passed", "event-system-summary");
+    system_fact.verified = true;
+
+    let error = system_fact
+        .validate()
+        .expect_err("verified system fact without durable evidence should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("requires durable receipt or artifact evidence")
+    );
+
+    system_fact.source_receipt_id = Some("receipt-tests".to_owned());
+    assert!(system_fact.validate().is_ok());
+
+    let mut model_fact = SourcedFact::model_inferred("lint passed", "event-model-summary");
+    model_fact.verified = true;
+    model_fact.source_artifact_id = Some("artifact-lint".to_owned());
+    assert!(model_fact.validate().is_ok());
 }
 
 #[test]
@@ -173,6 +181,58 @@ fn compaction_model_summary_marks_imported_facts_unverified() -> Result<()> {
                 .as_ref()
                 .is_some_and(|rationale| rationale.model_generated && !rationale.verified)
     }));
+    Ok(())
+}
+
+#[test]
+fn compaction_model_summary_text_does_not_update_verification_verdict() -> Result<()> {
+    let mut memory = sample_task_memory();
+    memory.merge_model_summary(ModelAssistedTaskMemorySummary {
+        source_event_id: "event-model-summary".to_owned(),
+        constraints: Vec::new(),
+        decisions: Vec::new(),
+        risks: Vec::new(),
+        unresolved_issues: vec![ModelAssistedMemoryFact {
+            text: "tests passed and verification succeeded".to_owned(),
+            confidence_percent: Some(90),
+        }],
+    })?;
+    let scope = EvidenceScope::Task("task-1".to_owned());
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(ReadinessEvaluatedEntry {
+            scope: scope.clone(),
+            evaluation: ReadinessEvaluation {
+                run_status: RunStatus::Completed,
+                verification_verdict: VerificationVerdict::Missing,
+                visible_state: VisibleCompletionState::CompletedUnverified,
+                reasons: Vec::new(),
+                required_actions: Vec::new(),
+            },
+            policy_hash: None,
+            workspace_snapshot_id: Some("snapshot-1".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
+            summary: "model summary says tests passed".to_owned(),
+            compacted_message_count: 8,
+            retained_tail_message_count: 2,
+            task_memory: Some(memory),
+        })),
+    ];
+
+    let projection = VerificationStateProjection::from_entries(&entries);
+    let readiness = projection
+        .latest_readiness(&scope)
+        .expect("readiness should be projected from explicit control entry");
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert_eq!(
+        readiness.evaluation.visible_state,
+        VisibleCompletionState::CompletedUnverified
+    );
+    assert!(projection.receipts.is_empty());
     Ok(())
 }
 
@@ -375,16 +435,16 @@ fn compaction_extraction_keeps_failed_steps_as_attempt_refs_without_verification
 }
 
 #[test]
-fn compaction_extraction_handles_legacy_failed_task_blocked_step_and_changeset() -> Result<()> {
+fn compaction_extraction_handles_failed_task_blocked_step_and_changeset() -> Result<()> {
     let failed_task = SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: crate::TaskId::new("task-legacy")?,
+        task_id: crate::TaskId::new("task-durable")?,
         parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
         objective: "Recover failed task".to_owned(),
         status: TaskRunStatus::Failed,
         reason: Some("planner failed".to_owned()),
     }));
     let blocked_step = SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: crate::TaskId::new("task-legacy")?,
+        task_id: crate::TaskId::new("task-durable")?,
         plan_version: 1,
         step_id: crate::TaskStepId::new("verify")?,
         role: crate::AgentRole::Executor,
@@ -406,7 +466,7 @@ fn compaction_extraction_handles_legacy_failed_task_blocked_step_and_changeset()
         message: Some("changeset failed".to_owned()),
     }));
     let records = vec![
-        legacy_session_entry(1, "event-legacy-task", failed_task),
+        stored_session_entry(1, "event-failed-task", failed_task)?,
         stored_session_entry(2, "event-blocked-step", blocked_step)?,
         stored_session_entry(3, "event-changeset", changeset)?,
     ];
@@ -414,8 +474,8 @@ fn compaction_extraction_handles_legacy_failed_task_blocked_step_and_changeset()
     let memory = extract_task_memory_from_stream_records(
         &records,
         TaskMemoryExtractionInput {
-            memory_id: "memory-legacy".to_owned(),
-            valid_for_snapshot: "snapshot-legacy".to_owned(),
+            memory_id: "memory-durable".to_owned(),
+            valid_for_snapshot: "snapshot-durable".to_owned(),
             branch_id: None,
             supersedes: None,
             objective: None,
@@ -426,17 +486,17 @@ fn compaction_extraction_handles_legacy_failed_task_blocked_step_and_changeset()
     assert!(
         memory
             .source_event_ids
-            .contains(&"event-legacy-task".to_owned())
+            .contains(&"event-failed-task".to_owned())
     );
     assert!(memory.unresolved_issues.iter().any(|issue| {
         issue.text == "missing check"
             && issue.source_event_id.as_deref() == Some("event-blocked-step")
     }));
     assert!(memory.failed_attempts.iter().any(|attempt| {
-        attempt.attempt_id == "task-legacy" && attempt.summary.as_deref() == Some("planner failed")
+        attempt.attempt_id == "task-durable" && attempt.summary.as_deref() == Some("planner failed")
     }));
     assert!(memory.failed_attempts.iter().any(|attempt| {
-        attempt.attempt_id == "task-legacy:verify"
+        attempt.attempt_id == "task-durable:verify"
             && attempt.summary.as_deref() == Some("missing check")
     }));
     assert!(memory.failed_attempts.iter().any(|attempt| {
@@ -519,23 +579,6 @@ fn stored_session_entry(
         json!({ "session_log_entry": entry }),
     )?;
     Ok(SessionStreamRecord::Stored(event))
-}
-
-fn legacy_session_entry(
-    sequence: u64,
-    event_id: &str,
-    entry: SessionLogEntry,
-) -> SessionStreamRecord {
-    SessionStreamRecord::Legacy {
-        event: LegacyEvent {
-            event_id: event_id.to_owned(),
-            session_id: "session-1".to_owned(),
-            stream_sequence: sequence,
-            raw_line_hash: format!("sha256:{event_id}"),
-            payload: json!({ "legacy": true }),
-        },
-        entry: Box::new(entry),
-    }
 }
 
 fn stored_mutation_committed(

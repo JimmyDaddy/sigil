@@ -52,27 +52,6 @@ fn changeset_control_entries_roundtrip_with_snake_case_payloads() -> Result<()> 
 }
 
 #[test]
-fn changeset_control_entries_accept_legacy_pascal_case_aliases() -> Result<()> {
-    let proposed_json = r#"{"control":{"ChangeSetProposed":{"id":"change-1","title":"Update README","summary":"Update project overview","risk":"low","files":[],"validations":[]}}}"#;
-    let result_json = r#"{"control":{"ChangeSetApplied":{"id":"change-1","status":"applied","file_results":[]}}}"#;
-    let restored_proposed: SessionLogEntry = serde_json::from_str(proposed_json)?;
-    let restored_result: SessionLogEntry = serde_json::from_str(result_json)?;
-
-    assert!(matches!(
-        restored_proposed,
-        SessionLogEntry::Control(ControlEntry::ChangeSetProposed(change_set))
-            if change_set.id.as_str() == "change-1"
-    ));
-    assert!(matches!(
-        restored_result,
-        SessionLogEntry::Control(ControlEntry::ChangeSetApplied(result))
-            if result.id.as_str() == "change-1"
-                && result.status == ChangeSetResultStatus::Applied
-    ));
-    Ok(())
-}
-
-#[test]
 fn changeset_projection_replays_proposal_and_result() {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::ChangeSetProposed(sample_change_set())),

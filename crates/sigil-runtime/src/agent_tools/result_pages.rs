@@ -49,11 +49,11 @@ pub(super) fn read_agent_result_page(
         return Ok(slice_result_page(&result.summary, request));
     };
     let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
-    let session_ref = result
+    let final_answer_ref = result
         .final_answer_ref
         .as_ref()
-        .map(|reference| &reference.session_ref)
-        .unwrap_or(&result.session_ref);
+        .ok_or_else(|| anyhow!("child agent result is missing final_answer_ref"))?;
+    let session_ref = &final_answer_ref.session_ref;
     let child_path = session_ref.resolve(parent_dir);
     let entries = JsonlSessionStore::read_entries(&child_path).with_context(|| {
         format!(
@@ -61,21 +61,12 @@ pub(super) fn read_agent_result_page(
             child_path.display()
         )
     })?;
-    let final_text = if let Some(final_answer_ref) = result.final_answer_ref.as_ref() {
-        agent_final_text_from_ref(&entries, final_answer_ref).with_context(|| {
-            format!(
-                "failed to read final answer from child agent session {}",
-                child_path.display()
-            )
-        })?
-    } else {
-        agent_final_text_from_entries(&entries, &result.output_hash).with_context(|| {
-            format!(
-                "failed to read legacy final answer from child agent session {}",
-                child_path.display()
-            )
-        })?
-    };
+    let final_text = agent_final_text_from_ref(&entries, final_answer_ref).with_context(|| {
+        format!(
+            "failed to read final answer from child agent session {}",
+            child_path.display()
+        )
+    })?;
     Ok(slice_result_page(&final_text, request))
 }
 
@@ -108,31 +99,6 @@ pub(super) fn agent_final_text_from_ref(
         ));
     }
     Ok(content.clone())
-}
-
-pub(super) fn agent_final_text_from_entries(
-    entries: &[SessionLogEntry],
-    output_hash: &str,
-) -> Result<String> {
-    let mut latest_assistant_text = None;
-    for entry in entries {
-        let SessionLogEntry::Assistant(message) = entry else {
-            continue;
-        };
-        let Some(content) = message
-            .content
-            .as_ref()
-            .filter(|content| !content.is_empty())
-        else {
-            continue;
-        };
-        if hash_text(content) == output_hash {
-            return Ok(content.clone());
-        }
-        latest_assistant_text = Some(content.clone());
-    }
-    latest_assistant_text
-        .ok_or_else(|| anyhow!("child agent session has no assistant final answer"))
 }
 
 pub(super) fn slice_result_page(full_text: &str, request: ResultPageRequest) -> ResultPage {
@@ -517,17 +483,8 @@ pub(super) fn agent_budget_denied_details(reason: &str) -> Option<Value> {
 
 pub(super) fn agent_budget_denied_config_paths(reason: &str) -> Vec<&'static str> {
     let mut paths = Vec::new();
-    if reason.contains("[task].max_background_threads") {
-        paths.push("[task].max_background_threads");
-    }
-    if reason.contains("[task].max_parallel_readonly") {
-        paths.push("[task].max_parallel_readonly");
-    }
-    if reason.contains("fan-out budget") || reason.contains("max_spawn_fanout_per_turn") {
-        paths.push("[task].max_spawn_fanout_per_turn");
-    }
-    if reason.contains("token budget") || reason.contains("max_agent_tokens_per_task") {
-        paths.push("[task].max_agent_tokens_per_task");
+    if reason.contains("[task].max_subagents") || reason.contains("agent thread budget") {
+        paths.push("[task].max_subagents");
     }
     if paths.is_empty() {
         paths.push("[task]");

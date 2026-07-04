@@ -144,10 +144,10 @@ pub fn project_asset_dir(
     workspace_root: &Path,
     project_assets_root: &Path,
     configured: &str,
-    legacy_default: &str,
+    default_configured: &str,
     default_leaf: &str,
 ) -> PathBuf {
-    if configured.trim() == legacy_default {
+    if configured.trim() == default_configured {
         return project_assets_root.join(default_leaf);
     }
     resolve_configured_path(configured, workspace_root)

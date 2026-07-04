@@ -37,46 +37,52 @@ fn test_root_config() -> RootConfig {
 }
 
 #[test]
-fn provider_helpers_normalize_aliases_and_env_labels() {
+fn provider_helpers_use_only_canonical_names_and_env_labels() {
+    assert_eq!(normalize_provider_name("deepseek"), DEEPSEEK_PROVIDER_KEY);
     assert_eq!(
-        normalize_provider_name("openai-compatible"),
+        normalize_provider_name("openai_compat"),
         OPENAI_COMPAT_PROVIDER_KEY
     );
-    assert_eq!(normalize_provider_name("claude"), ANTHROPIC_PROVIDER_KEY);
+    assert_eq!(normalize_provider_name("anthropic"), ANTHROPIC_PROVIDER_KEY);
+    assert_eq!(normalize_provider_name("gemini"), GEMINI_PROVIDER_KEY);
+    assert_eq!(normalize_provider_name("unknown"), "unknown");
     assert_eq!(
-        normalize_provider_name("google-gemini"),
-        GEMINI_PROVIDER_KEY
+        normalize_provider_name("openai-compatible"),
+        "openai-compatible"
     );
-    assert_eq!(normalize_provider_name("unknown"), DEEPSEEK_PROVIDER_KEY);
 
-    assert_eq!(provider_api_key_env_name("deepseek"), "SIGIL_API_KEY");
+    assert_eq!(provider_api_key_env_name("deepseek"), Some("SIGIL_API_KEY"));
     assert_eq!(
-        provider_api_key_env_name("openai_compatible"),
-        "SIGIL_OPENAI_COMPATIBLE_API_KEY"
+        provider_api_key_env_name("openai_compat"),
+        Some("SIGIL_OPENAI_COMPATIBLE_API_KEY")
     );
     assert_eq!(
-        provider_api_key_env_name("claude"),
-        "SIGIL_ANTHROPIC_API_KEY"
+        provider_api_key_env_name("anthropic"),
+        Some("SIGIL_ANTHROPIC_API_KEY")
     );
-    assert_eq!(provider_api_key_env_name("google"), "SIGIL_GEMINI_API_KEY");
+    assert_eq!(
+        provider_api_key_env_name("gemini"),
+        Some("SIGIL_GEMINI_API_KEY")
+    );
+    assert_eq!(provider_api_key_env_name("claude"), None);
 }
 
 #[test]
 fn provider_config_fields_read_defaults_and_update_provider_blocks() -> anyhow::Result<()> {
     let mut config = test_root_config();
-    config.agent.provider = "claude".to_owned();
+    config.agent.provider = "anthropic".to_owned();
+    config.agent.model = "claude-old".to_owned();
     config.providers.insert(
         ANTHROPIC_PROVIDER_KEY.to_owned(),
         json!({
             "base_url": "https://anthropic.example.com",
-            "model": "claude-old",
             "api_key": "old-key",
             "anthropic_version": "2023-06-01",
             "max_tokens": 2048
         }),
     );
 
-    let draft = provider_config_fields(&config, "claude", "fallback");
+    let draft = provider_config_fields(&config, "anthropic", "fallback");
     assert_eq!(draft.model, "claude-old");
     assert_eq!(draft.api_key, "old-key");
 
@@ -85,20 +91,37 @@ fn provider_config_fields_read_defaults_and_update_provider_blocks() -> anyhow::
         api_key: " new-key ".to_owned(),
         base_url: " https://anthropic-proxy.example.com ".to_owned(),
     };
-    set_provider_config_fields(&mut config, "claude", &fields, None)?;
+    set_provider_config_fields(&mut config, "anthropic", &fields, None)?;
 
     let provider = config.providers[ANTHROPIC_PROVIDER_KEY]
         .as_object()
         .expect("provider should serialize as object");
     assert_eq!(config.agent.provider, ANTHROPIC_PROVIDER_KEY);
     assert_eq!(config.agent.model, "claude-new");
-    assert_eq!(provider["model"], "claude-new");
+    assert!(provider.get("model").is_none());
     assert_eq!(provider["api_key"], "new-key");
     assert_eq!(provider["base_url"], "https://anthropic-proxy.example.com");
     assert_eq!(provider["anthropic_version"], "2023-06-01");
     assert_eq!(provider["max_tokens"], 2048);
     assert!(provider.get("request_timeout_secs").is_none());
     Ok(())
+}
+
+#[test]
+fn set_provider_config_fields_rejects_unknown_provider_names() {
+    let mut config = test_root_config();
+    let fields = ProviderConfigFields {
+        model: "test-model".to_owned(),
+        api_key: String::new(),
+        base_url: "https://provider.example.com".to_owned(),
+    };
+
+    let error = set_provider_config_fields(&mut config, "claude", &fields, None)
+        .expect_err("provider aliases should not be accepted");
+
+    assert!(error.to_string().contains(
+        "unsupported provider claude; expected one of deepseek, openai_compat, anthropic, or gemini"
+    ));
 }
 
 #[test]
@@ -127,7 +150,8 @@ fn deepseek_config_fields_update_provider_specific_surface() -> anyhow::Result<(
     let provider = config.providers[DEEPSEEK_PROVIDER_KEY]
         .as_object()
         .expect("provider should serialize as object");
-    assert_eq!(provider["model"], "deepseek-v4-pro");
+    assert_eq!(config.agent.model, "deepseek-v4-pro");
+    assert!(provider.get("model").is_none());
     assert!(provider.get("api_key").is_none());
     assert!(provider.get("user_id_strategy").is_none());
     assert_eq!(provider["strict_tools_mode"], "always");

@@ -84,9 +84,9 @@ impl TerminalExecutionConfig {
     #[must_use]
     pub fn from_execution_config(config: &ExecutionConfig) -> Self {
         Self {
-            backend: config.backend,
-            profile: config.profile,
-            fallback: config.fallback,
+            backend: config.backend(),
+            profile: config.profile(),
+            fallback: config.fallback(),
             requires_sandbox: config.requires_sandbox(),
             network_allowed: config.profile_spec().network_allowed,
         }
@@ -206,16 +206,13 @@ impl TerminalExecutionConfig {
         &self,
         capabilities: ExecutionBackendCapabilities,
     ) -> Result<()> {
-        let config = ExecutionConfig {
-            backend: self.backend,
-            isolation: if self.requires_sandbox {
-                sigil_kernel::ExecutionIsolationPolicy::RequireSandbox
-            } else {
-                sigil_kernel::ExecutionIsolationPolicy::AllowLocal
-            },
-            profile: self.profile,
-            fallback: self.fallback,
-            container_image: None,
+        let config = if self.requires_sandbox {
+            let mut sandbox = sigil_kernel::ExecutionSandboxStrategyConfig::new(self.backend);
+            sandbox.profile = self.profile;
+            sandbox.fallback = self.fallback;
+            ExecutionConfig::sandbox(sandbox)
+        } else {
+            ExecutionConfig::local()
         };
         let requirements = config.required_capabilities_for_persistent_pty();
         let missing = capabilities.missing_requirements(requirements);

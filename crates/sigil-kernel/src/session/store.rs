@@ -57,7 +57,7 @@ impl JsonlSessionStore {
         &self.path
     }
 
-    /// Reads all mixed-format records from `path`.
+    /// Reads all durable v2 records from `path`.
     pub fn read_event_records(path: impl AsRef<Path>) -> Result<Vec<SessionStreamRecord>> {
         let path = path.as_ref();
         if !path.exists() {
@@ -73,7 +73,7 @@ impl JsonlSessionStore {
         read_stream_records_from_file(&mut file, path)
     }
 
-    /// Reads all mixed-format records in writer mode, performing tail recovery when needed.
+    /// Reads all durable v2 records in writer mode, performing tail recovery when needed.
     pub fn read_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
         let _guard = SESSION_LOG_IO_LOCK
             .lock()
@@ -142,21 +142,17 @@ impl JsonlSessionStore {
 
     /// Decodes one JSONL record into a session entry when the record carries one.
     ///
-    /// This accepts both legacy `SessionLogEntry` lines and v2 `StoredEvent` lines. Unknown
-    /// non-critical v2 records are skipped so product surfaces can tail mixed session streams
+    /// Unknown non-critical v2 records are skipped so product surfaces can tail session streams
     /// without learning each durable event payload shape.
     ///
     /// # Errors
     ///
-    /// Returns an error when the line is neither a legacy session entry nor a valid stored event,
-    /// or when a stored event's embedded session entry payload is malformed.
+    /// Returns an error when the line is not a valid stored event, or when a stored event's
+    /// embedded session entry payload is malformed.
     pub fn session_entry_from_json_line(line: &str) -> Result<Option<SessionLogEntry>> {
         let line = line.trim();
         if line.is_empty() {
             return Ok(None);
-        }
-        if let Ok(entry) = serde_json::from_str::<SessionLogEntry>(line) {
-            return Ok(Some(entry));
         }
         let event = StoredEvent::from_json_str(line)
             .context("failed to decode stored event from session JSONL line")?;
@@ -266,77 +262,26 @@ pub(super) fn read_stream_records_from_str(
         return Ok(Vec::new());
     }
 
-    let first_v2 = raw_records
-        .iter()
-        .position(|(_, line)| line_is_v2_stored_event(line).unwrap_or(false));
-    if first_v2.is_some()
-        && raw_records
-            .iter()
-            .skip(first_v2.unwrap_or_default())
-            .any(|(_, line)| !line_is_v2_stored_event(line).unwrap_or(false))
-    {
-        let path = path.display();
-        bail!("legacy session entry appears after v2 stored event in {path}");
-    }
-
-    let legacy_prefix_lines = match first_v2 {
-        Some(index) => &raw_records[..index],
-        None => raw_records.as_slice(),
-    };
-    let legacy_session_id = (!legacy_prefix_lines.is_empty()).then(|| {
-        let mut prefix = String::new();
-        for (_, line) in legacy_prefix_lines {
-            prefix.push_str(line);
-            prefix.push('\n');
-        }
-        stable_event_uuid(
-            "sigil-legacy-session",
-            &stable_event_hash(prefix.as_bytes()),
-        )
-    });
-
     let mut records = Vec::with_capacity(raw_records.len());
     let mut expected_session_id = None;
     for (record_ordinal, (physical_line, line)) in raw_records.iter().enumerate() {
         let stream_sequence = record_ordinal as u64 + 1;
-        if line_is_v2_stored_event(line)? {
-            let event = StoredEvent::from_json_str(line)
-                .with_context(|| stream_line_context("stored event", *physical_line, path))?;
-            validate_stream_record_identity(
-                *physical_line,
-                stream_sequence,
-                &event.session_id,
-                event.stream_sequence,
-                &mut expected_session_id,
-            )?;
-            records.push(SessionStreamRecord::Stored(event));
-            continue;
+        if !line_is_v2_stored_event(line)? {
+            bail!(
+                "{}",
+                stream_line_context("stored event", *physical_line, path)
+            );
         }
-
-        let session_id = legacy_session_id
-            .as_ref()
-            .expect("legacy session id is derived when legacy records are present");
-        let entry: SessionLogEntry = serde_json::from_str(line)
-            .with_context(|| stream_line_context("session entry", *physical_line, path))?;
+        let event = StoredEvent::from_json_str(line)
+            .with_context(|| stream_line_context("stored event", *physical_line, path))?;
         validate_stream_record_identity(
             *physical_line,
             stream_sequence,
-            session_id,
-            stream_sequence,
+            &event.session_id,
+            event.stream_sequence,
             &mut expected_session_id,
         )?;
-        let raw_line_hash = stable_event_hash(line.as_bytes());
-        let event_id = stable_event_uuid(session_id, &format!("{stream_sequence}:{raw_line_hash}"));
-        let payload = serde_json::to_value(&entry).context("failed to serialize legacy entry")?;
-        let event = LegacyEvent {
-            event_id,
-            session_id: session_id.clone(),
-            stream_sequence,
-            raw_line_hash,
-            payload,
-        };
-        let entry = Box::new(entry);
-        records.push(SessionStreamRecord::Legacy { event, entry });
+        records.push(SessionStreamRecord::Stored(event));
     }
     Ok(records)
 }
@@ -557,7 +502,7 @@ pub(super) fn tool_execution_event_type(status: ToolExecutionStatus) -> DurableE
 pub(super) fn session_entry_from_stored_event(
     event: &StoredEvent,
 ) -> Result<Option<SessionLogEntry>> {
-    if matches!(event.event_kind(), None | Some(DurableEventType::Legacy)) {
+    if event.event_kind().is_none() {
         return Ok(None);
     }
     let Some(value) = event.payload.get("session_log_entry") else {
@@ -571,14 +516,9 @@ pub(super) fn session_entry_from_stored_event(
 pub(crate) fn session_entry_from_domain_event(
     event: &DomainEvent,
 ) -> Result<Option<SessionLogEntry>> {
-    if let DomainEvent::Legacy(event) = event {
-        let entry = serde_json::from_value(event.payload.clone())
-            .context("failed to decode session entry from legacy domain event payload")?;
-        return Ok(Some(entry));
-    }
     let payload = event
         .payload()
-        .unwrap_or_else(|| unreachable!("non-legacy domain event must carry payload"));
+        .unwrap_or_else(|| unreachable!("domain event must carry payload"));
     let Some(value) = payload.payload.get("session_log_entry") else {
         return Ok(None);
     };

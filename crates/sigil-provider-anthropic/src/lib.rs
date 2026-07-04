@@ -10,9 +10,8 @@ mod stream;
 
 pub use capabilities::anthropic_capabilities;
 pub use config::{
-    ANTHROPIC_API_KEY_ENV, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV,
-    SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_ANTHROPIC_MAX_TOKENS_ENV, SIGIL_ANTHROPIC_MODEL_ENV,
-    SIGIL_ANTHROPIC_VERSION_ENV,
+    AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV,
+    SIGIL_ANTHROPIC_MAX_TOKENS_ENV, SIGIL_ANTHROPIC_VERSION_ENV,
 };
 pub use provider::AnthropicProvider;
 

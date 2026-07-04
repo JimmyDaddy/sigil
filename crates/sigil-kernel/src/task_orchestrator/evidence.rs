@@ -18,9 +18,7 @@ pub(super) fn durable_workspace_mutation_evidence(
     );
     let mut prepared_tool_calls = BTreeMap::<String, Option<String>>::new();
     for record in &records {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let SessionStreamRecord::Stored(event) = record;
         if DurableEventType::from_event_type(&event.event_type)
             == Some(DurableEventType::MutationPrepared)
             && let Ok(payload) = serde_json::from_value::<MutationPrepared>(event.payload.clone())
@@ -32,9 +30,7 @@ pub(super) fn durable_workspace_mutation_evidence(
     let mut evidence = records
         .into_iter()
         .filter_map(|record| {
-            let SessionStreamRecord::Stored(event) = record else {
-                return None;
-            };
+            let SessionStreamRecord::Stored(event) = record;
             match DurableEventType::from_event_type(&event.event_type) {
                 Some(DurableEventType::MutationCommitted) => {
                     let payload =
@@ -186,9 +182,7 @@ pub(super) fn running_execution_mutation_evidence(
     let mut active_terminals = BTreeMap::<String, ActiveTerminalTask>::new();
 
     for record in records {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let SessionStreamRecord::Stored(event) = record;
         let Some(entry) = session_entry_from_event(event) else {
             continue;
         };
@@ -394,9 +388,7 @@ pub(super) fn task_started_stream_sequence(
     task_id: &TaskId,
 ) -> Option<u64> {
     records.iter().find_map(|record| {
-        let SessionStreamRecord::Stored(event) = record else {
-            return None;
-        };
+        let SessionStreamRecord::Stored(event) = record;
         let payload = event.payload.get("session_log_entry")?.clone();
         let entry = serde_json::from_value::<crate::SessionLogEntry>(payload).ok()?;
         let crate::SessionLogEntry::Control(ControlEntry::TaskRun(task)) = entry else {

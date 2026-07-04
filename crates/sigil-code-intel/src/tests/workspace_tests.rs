@@ -1,8 +1,6 @@
 use std::{collections::BTreeMap, fs};
 
-use sigil_kernel::{
-    CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig,
-};
+use sigil_kernel::{CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig};
 
 use crate::discovery::{DiscoveredLanguageServer, DiscoverySource, ServerAvailability};
 
@@ -12,10 +10,8 @@ use super::*;
 fn effective_servers_defaults_to_rust_analyzer_when_discovery_is_disabled() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let config = CodeIntelligenceConfig {
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         ..CodeIntelligenceConfig::default()
     };
     let servers = effective_servers(&config, temp.path());
@@ -65,10 +61,8 @@ fn effective_server_plan_reports_degraded_status_when_discovery_fails() {
     let missing_root = std::env::temp_dir().join("sigil-code-intel-missing-root");
     let config = CodeIntelligenceConfig {
         enabled: true,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: true,
-            report_missing: true,
-        },
+        auto_discover: true,
+        report_missing: true,
         ..CodeIntelligenceConfig::default()
     };
 
@@ -92,10 +86,8 @@ fn effective_server_plan_uses_successful_discovery_results() {
     .expect("cargo file should write");
     let config = CodeIntelligenceConfig {
         enabled: true,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: true,
-            report_missing: true,
-        },
+        auto_discover: true,
+        report_missing: true,
         ..CodeIntelligenceConfig::default()
     };
 
@@ -249,12 +241,12 @@ fn config_enabled_respects_enabled_and_startup_flags() {
     assert!(!config_enabled(&CodeIntelligenceConfig::default()));
     assert!(!config_enabled(&CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Off,
+        server_startup: CodeIntelStartup::Off,
         ..CodeIntelligenceConfig::default()
     }));
     assert!(config_enabled(&CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         ..CodeIntelligenceConfig::default()
     }));
 }

@@ -783,30 +783,6 @@ where
                         accepted_task_plan = accepted_task_plan || accepted;
                         continue;
                     }
-                    if let Some(mut result) =
-                        direct_task_tool_guidance_result(&call, task_plan_update.is_some())
-                    {
-                        attach_tool_call_context(&mut result, &call, &[]);
-                        append_tool_execution_audit(
-                            session,
-                            &call,
-                            &[],
-                            ToolExecutionStatus::Started,
-                            None,
-                            None,
-                        )?;
-                        append_tool_execution_audit(
-                            session,
-                            &call,
-                            &[],
-                            ToolExecutionStatus::Completed,
-                            None,
-                            Some(&result),
-                        )?;
-                        session.append_tool_message(result.to_model_message())?;
-                        handler.handle(RunEvent::ToolResult(result))?;
-                        continue;
-                    }
                     let mut execution_subjects = Vec::new();
                     let mut tool_registered = false;
                     let mut tool_is_agent_category = false;
@@ -1447,26 +1423,6 @@ where
             });
         }
     }
-}
-
-fn direct_task_tool_guidance_result(
-    call: &ToolCall,
-    task_plan_update_available: bool,
-) -> Option<ToolResult> {
-    if !matches!(call.name.as_str(), "task" | "subagent" | "sub_agent") {
-        return None;
-    }
-    let content = if task_plan_update_available {
-        "direct task/subagent tool calls are not supported in the planner; delegate work by calling task_plan_update with an accepted plan and step roles subagent_read or subagent_write"
-    } else {
-        "direct task/subagent tool calls are legacy aliases; use the model-visible agent tools spawn_agent, wait_agent, read_agent_result, message_agent, and close_agent when the user explicitly asks for delegation; message_agent only sends follow-up instructions to an active background child-agent mailbox at the next safe point"
-    };
-    Some(ToolResult::ok(
-        call.id.clone(),
-        call.name.clone(),
-        content,
-        ToolResultMeta::default(),
-    ))
 }
 
 fn count_agent_tool_calls(tools: &ToolRegistry, calls: &[ToolCall]) -> usize {
@@ -2598,9 +2554,7 @@ fn agent_run_workspace_mutation_evidence(
     let records = JsonlSessionStore::read_event_records(path)?;
     let mut prepared_tool_calls = BTreeMap::<String, Option<String>>::new();
     for record in &records {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let SessionStreamRecord::Stored(event) = record;
         if DurableEventType::from_event_type(&event.event_type)
             == Some(DurableEventType::MutationPrepared)
             && let Ok(payload) =
@@ -2613,9 +2567,7 @@ fn agent_run_workspace_mutation_evidence(
     let mut evidence = records
         .iter()
         .filter_map(|record| {
-            let SessionStreamRecord::Stored(event) = record else {
-                return None;
-            };
+            let SessionStreamRecord::Stored(event) = record;
             match DurableEventType::from_event_type(&event.event_type) {
                 Some(DurableEventType::MutationCommitted) => {
                     let payload =
@@ -2724,9 +2676,7 @@ fn active_terminal_mutation_evidence(
     let mut active_terminals = BTreeMap::<String, (String, u64)>::new();
 
     for record in records {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let SessionStreamRecord::Stored(event) = record;
         let Some(entry) = session_entry_from_stored_event(event) else {
             continue;
         };

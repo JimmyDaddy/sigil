@@ -49,7 +49,7 @@ pub(super) fn render_config_nav_lines(config_state: Option<&ConfigState>) -> Vec
         lines.push("Plugins: PgUp/PgDn wrap".to_owned());
         lines.push("Plugins: footer approve/deny".to_owned());
     } else if state.selected_section == ConfigSection::Permissions {
-        lines.push("Permissions: Enter cycle mode".to_owned());
+        lines.push("Permissions: Enter cycle preset/mode".to_owned());
         lines.push("Permissions: task checks run from task status".to_owned());
     } else if state.selected_section == ConfigSection::Appearance {
         lines.push("Appearance: Enter cycle".to_owned());

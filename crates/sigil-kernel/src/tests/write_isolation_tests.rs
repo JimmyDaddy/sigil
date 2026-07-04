@@ -54,9 +54,8 @@ fn note_diff() -> String {
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        if let SessionStreamRecord::Stored(event) = record {
-            event_types.push(event.event_type);
-        }
+        let SessionStreamRecord::Stored(event) = record;
+        event_types.push(event.event_type);
     }
     Ok(event_types)
 }
@@ -290,9 +289,10 @@ fn typed_event_decode_covers_write_isolation_family() {
 }
 
 #[test]
-fn write_isolation_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn write_isolation_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let acquired = acquired_entry();
     let review = MergeReviewRequested {
         review_id: review_id(),
@@ -304,13 +304,9 @@ fn write_isolation_projection_replays_mixed_durable_stream_records() -> Result<(
         decision: MergeDecision::Rejected,
         reason: Some("conflicts with parent".to_owned()),
     };
-    let legacy_acquired =
-        SessionLogEntry::Control(ControlEntry::WriteLeaseAcquired(acquired.clone()));
-    std::fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_acquired)?),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::WriteLeaseAcquired(acquired.clone()),
+    ))?;
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::MergeReviewRequested(review.clone()),
     ))?;

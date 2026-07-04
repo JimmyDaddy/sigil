@@ -3,9 +3,9 @@ use std::{env, ffi::OsString};
 use anyhow::Result;
 
 use super::{
-    DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV,
-    SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV,
-    SIGIL_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV, SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
+    DeepSeekProviderConfig, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV,
+    SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV,
+    SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
 };
 
 #[test]
@@ -52,7 +52,6 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
         (SIGIL_API_KEY_ENV, "env-key"),
-        (SIGIL_MODEL_ENV, "env-model"),
         (SIGIL_BASE_URL_ENV, "https://example.invalid/openai"),
         (SIGIL_BETA_BASE_URL_ENV, "https://example.invalid/beta"),
         (
@@ -77,7 +76,7 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
     .resolved()?;
 
     assert_eq!(resolved.api_key.as_deref(), Some("env-key"));
-    assert_eq!(resolved.model, "env-model");
+    assert_eq!(resolved.model, "file-model");
     assert_eq!(resolved.base_url, "https://example.invalid/openai");
     assert_eq!(resolved.beta_base_url, "https://example.invalid/beta");
     assert_eq!(
@@ -94,13 +93,13 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
 }
 
 #[test]
-fn resolved_uses_legacy_api_key_when_sigil_api_key_is_missing() -> Result<()> {
+fn resolved_ignores_deepseek_api_key_when_sigil_api_key_is_missing() -> Result<()> {
     let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(LEGACY_DEEPSEEK_API_KEY_ENV, "legacy-key")]);
+    let _scope = EnvScope::set_many(&[("DEEPSEEK_API_KEY", "legacy-key")]);
 
     let resolved = file_config().resolved()?;
 
-    assert_eq!(resolved.api_key.as_deref(), Some("legacy-key"));
+    assert_eq!(resolved.api_key, None);
     Ok(())
 }
 
@@ -130,13 +129,19 @@ fn config_rejects_legacy_provider_timeout_field() {
 }
 
 #[test]
+fn config_rejects_provider_model_field() {
+    let error = serde_json::from_value::<DeepSeekProviderConfig>(serde_json::json!({
+        "model": "deepseek-v4-pro"
+    }))
+    .expect_err("provider model field should be rejected");
+
+    assert!(error.to_string().contains("model"));
+}
+
+#[test]
 fn resolved_ignores_blank_string_env_overrides() -> Result<()> {
     let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[
-        (SIGIL_API_KEY_ENV, "   "),
-        (SIGIL_MODEL_ENV, "   "),
-        (SIGIL_BASE_URL_ENV, "   "),
-    ]);
+    let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "   "), (SIGIL_BASE_URL_ENV, "   ")]);
 
     let resolved = DeepSeekProviderConfig {
         api_key: Some("file-key".to_owned()),

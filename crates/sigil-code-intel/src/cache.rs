@@ -38,6 +38,14 @@ impl<V: Clone> TimedCache<V> {
         self.values.get(key).map(|value| value.value.clone())
     }
 
+    pub fn values(&mut self) -> Vec<V> {
+        self.remove_expired();
+        self.values
+            .values()
+            .map(|value| value.value.clone())
+            .collect()
+    }
+
     pub fn remove(&mut self, key: &str) {
         self.values.remove(key);
     }

@@ -199,7 +199,7 @@ pub struct TaskCreatedFromPlanEntry {
     pub created_at_ms: u64,
 }
 
-/// Legacy append-only permission grant for one plan-mode result.
+/// Append-only permission grant for one plan-mode result.
 ///
 /// This record predates durable plan artifacts. It records a scoped permission decision for a
 /// read-only planning result; it is not a plan acceptance decision and does not create or
@@ -572,10 +572,10 @@ struct RawStructuredPlanDraft {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct RawPlanDraftStep {
-    #[serde(default, alias = "id")]
+    #[serde(default)]
     step_id: Option<String>,
     title: String,
-    #[serde(default, alias = "description")]
+    #[serde(default)]
     detail: Option<String>,
     #[serde(default)]
     mode: Option<String>,

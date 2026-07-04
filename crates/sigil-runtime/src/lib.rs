@@ -20,20 +20,17 @@ pub use sigil_mcp::{
     McpRuntimeEventHandler, McpToolRegistrationReport,
 };
 use sigil_provider_anthropic::{
-    ANTHROPIC_API_KEY_ENV, AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV,
-    anthropic_capabilities,
+    AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV, anthropic_capabilities,
 };
 use sigil_provider_deepseek::{
-    DeepSeekProvider, DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV,
-    deepseek_capabilities,
+    DeepSeekProvider, DeepSeekProviderConfig, SIGIL_API_KEY_ENV, deepseek_capabilities,
 };
 use sigil_provider_gemini::{
-    GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, GeminiProvider, GeminiProviderConfig,
-    SIGIL_GEMINI_API_KEY_ENV, gemini_capabilities,
+    GeminiProvider, GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV, gemini_capabilities,
 };
 use sigil_provider_openai_compat::{
-    OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider,
-    OpenAiCompatibleProviderConfig, openai_compatible_capabilities,
+    OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig,
+    openai_compatible_capabilities,
 };
 use tokio::process::Command;
 
@@ -73,7 +70,10 @@ pub use agent_tools::{
     register_agent_tools_with_workspace_and_entries,
 };
 pub use context::{
-    context_candidates_from_repo_query, context_items_from_plugin_hook_output,
+    ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,
+    McpResourceContextProvider, PluginHookContextProvider, collect_context_from_source_provider,
+    collect_context_from_source_providers, context_candidates_from_repo_query,
+    context_candidates_from_safe_sources, context_items_from_plugin_hook_output,
     context_items_from_task_memory,
 };
 pub use context_window::{
@@ -107,7 +107,7 @@ pub use provider_config::{
     default_provider_config_fields, default_setup_provider_model, model_request_config_fields,
     normalize_provider_name, provider_api_key_env_name, provider_config_fields,
     provider_status_config_from_fields, set_active_provider_model, set_model_request_config_fields,
-    set_provider_config_fields,
+    set_provider_config_fields, supported_provider_name,
 };
 pub use provider_debug::{
     DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest, ProviderDebugStream,

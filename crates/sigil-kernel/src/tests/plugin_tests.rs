@@ -530,16 +530,12 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
 }
 
 #[test]
-fn plugin_manifest_digest_validation_accepts_canonical_and_legacy_sha256() {
+fn plugin_manifest_digest_validation_accepts_canonical_sha256() {
     assert!(validate_plugin_manifest_digest("repo-review", VALID_PLUGIN_DIGEST).is_ok());
-    assert!(validate_plugin_manifest_digest("repo-review", VALID_PLUGIN_DIGEST_BARE).is_ok());
-    assert!(plugin_manifest_digests_match(
-        VALID_PLUGIN_DIGEST,
-        VALID_PLUGIN_DIGEST_BARE
-    ));
+    assert!(validate_plugin_manifest_digest("repo-review", VALID_PLUGIN_DIGEST_BARE).is_err());
     assert!(plugin_manifest_digests_match(
         "sha256:ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
-        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     ));
     assert!(validate_plugin_manifest_digest("repo-review", "sha256:too-short").is_err());
     assert!(
@@ -596,30 +592,6 @@ fn plugin_manifest_snapshot_and_trust_entries_roundtrip() -> Result<()> {
         restored_trusted,
         SessionLogEntry::Control(ControlEntry::PluginTrustDecision(restored))
             if restored == trust
-    ));
-    Ok(())
-}
-
-#[test]
-fn plugin_control_entries_accept_legacy_pascal_case_aliases() -> Result<()> {
-    let captured_json = r#"{"control":{"PluginManifestCaptured":{"plugin_id":"repo-review","name":"Repository Review","version":"0.1.0","manifest_path":".sigil/plugins/repo-review/plugin.toml","manifest_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","capabilities":[{"kind":"skill","path":"skills/review/SKILL.md"}],"trust":"needs_review"}}}"#;
-    let trusted_json = r#"{"control":{"PluginTrustDecision":{"plugin_id":"repo-review","manifest_path":".sigil/plugins/repo-review/plugin.toml","manifest_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","decision":"trusted","reviewed_at_ms":42}}}"#;
-    let restored_captured: SessionLogEntry = serde_json::from_str(captured_json)?;
-    let restored_trusted: SessionLogEntry = serde_json::from_str(trusted_json)?;
-
-    assert!(matches!(
-        restored_captured,
-        SessionLogEntry::Control(ControlEntry::PluginManifestCaptured(snapshot))
-            if snapshot.plugin_id == "repo-review"
-                && snapshot.capabilities.len() == 1
-                && snapshot.trust == PluginTrustDecision::NeedsReview
-    ));
-    assert!(matches!(
-        restored_trusted,
-        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(entry))
-            if entry.plugin_id == "repo-review"
-                && entry.decision == PluginTrustDecision::Trusted
-                && entry.reviewed_at_ms == 42
     ));
     Ok(())
 }

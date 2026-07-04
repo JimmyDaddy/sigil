@@ -11,8 +11,7 @@ impl EnvScope {
     fn set_many(values: &[(&'static str, &str)]) -> Self {
         let names = [
             SIGIL_ANTHROPIC_API_KEY_ENV,
-            ANTHROPIC_API_KEY_ENV,
-            SIGIL_ANTHROPIC_MODEL_ENV,
+            "ANTHROPIC_API_KEY",
             SIGIL_ANTHROPIC_BASE_URL_ENV,
             SIGIL_ANTHROPIC_VERSION_ENV,
             SIGIL_ANTHROPIC_MAX_TOKENS_ENV,
@@ -60,12 +59,11 @@ fn default_config_has_stable_endpoint_model_and_limits() {
 }
 
 #[test]
-fn resolved_config_prefers_sigil_env_over_provider_env() -> anyhow::Result<()> {
+fn resolved_config_uses_sigil_env_and_ignores_provider_env() -> anyhow::Result<()> {
     let _guard = test_env::lock();
     let _scope = EnvScope::set_many(&[
-        (ANTHROPIC_API_KEY_ENV, "provider-key"),
+        ("ANTHROPIC_API_KEY", "provider-key"),
         (SIGIL_ANTHROPIC_API_KEY_ENV, "sigil-key"),
-        (SIGIL_ANTHROPIC_MODEL_ENV, "claude-test"),
         (
             SIGIL_ANTHROPIC_BASE_URL_ENV,
             "https://anthropic.example.com",
@@ -77,7 +75,7 @@ fn resolved_config_prefers_sigil_env_over_provider_env() -> anyhow::Result<()> {
     let resolved = AnthropicProviderConfig::default().resolved()?;
 
     assert_eq!(resolved.api_key.as_deref(), Some("sigil-key"));
-    assert_eq!(resolved.model, "claude-test");
+    assert_eq!(resolved.model, "claude-sonnet-4-5");
     assert_eq!(resolved.base_url, "https://anthropic.example.com");
     assert_eq!(resolved.anthropic_version, "2024-01-01");
     assert_eq!(resolved.max_tokens, 1234);
@@ -92,6 +90,16 @@ fn config_rejects_legacy_provider_timeout_field() {
     .expect_err("provider timeout field should be rejected");
 
     assert!(error.to_string().contains("request_timeout_secs"));
+}
+
+#[test]
+fn config_rejects_provider_model_field() {
+    let error = serde_json::from_value::<AnthropicProviderConfig>(serde_json::json!({
+        "model": "claude-sonnet-4-5"
+    }))
+    .expect_err("provider model field should be rejected");
+
+    assert!(error.to_string().contains("model"));
 }
 
 #[test]

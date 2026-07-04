@@ -11,8 +11,7 @@ use sigil_kernel::{
 };
 
 use crate::{
-    OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider,
-    OpenAiCompatibleProviderConfig,
+    OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig,
 };
 
 fn new_openai_compatible_provider(
@@ -27,7 +26,7 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
         let _guard = crate::test_env::lock();
         let _scope = EnvScope::set_many(&[
             (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
-            (OPENAI_API_KEY_ENV, "   "),
+            ("OPENAI_API_KEY", "   "),
         ]);
         new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
             api_key: None,

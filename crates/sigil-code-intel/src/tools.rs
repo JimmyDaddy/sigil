@@ -21,7 +21,7 @@ pub fn register_code_intelligence_tools(
     config: &CodeIntelligenceConfig,
     workspace_root: PathBuf,
 ) -> Option<CodeIntelligenceService> {
-    if !config.enabled || config.startup == CodeIntelStartup::Off {
+    if !config.enabled || config.server_startup == CodeIntelStartup::Off {
         return None;
     }
     let service = CodeIntelligenceService::new(workspace_root, config.clone());

@@ -148,12 +148,13 @@ disable-model-invocation: true
 "#,
     );
 
-    let report = discover_skill_index_with_user_dir(
-        workspace.path(),
-        Some(user_config.path()),
-        &SkillConfig::default(),
-    )
-    .expect("discovery should succeed");
+    let config = SkillConfig {
+        compatibility_sources: vec!["claude".to_owned()],
+        ..SkillConfig::default()
+    };
+    let report =
+        discover_skill_index_with_user_dir(workspace.path(), Some(user_config.path()), &config)
+            .expect("discovery should succeed");
 
     assert_eq!(
         report
@@ -254,8 +255,11 @@ paths:
 "#,
     );
 
-    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
-        .expect("discovery should succeed");
+    let config = SkillConfig {
+        compatibility_sources: vec!["claude".to_owned()],
+        ..SkillConfig::default()
+    };
+    let report = discover_skill_index(workspace.path(), &config).expect("discovery should succeed");
 
     assert!(report.warnings.is_empty());
     let reviewer = descriptor(&report, "reviewer");
@@ -295,8 +299,12 @@ description: Compatibility skill.
         discover_skill_index(workspace.path(), &disabled_config).expect("discovery should succeed");
     assert!(disabled.snapshot.descriptors.is_empty());
 
-    let enabled = discover_skill_index(workspace.path(), &SkillConfig::default())
-        .expect("discovery should succeed");
+    let enabled_config = SkillConfig {
+        compatibility_sources: vec!["claude".to_owned()],
+        ..SkillConfig::default()
+    };
+    let enabled =
+        discover_skill_index(workspace.path(), &enabled_config).expect("discovery should succeed");
     assert_eq!(
         descriptor(&enabled, "reviewer").description,
         "Compatibility skill."

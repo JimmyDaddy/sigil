@@ -56,22 +56,6 @@ fn terminal_task_control_entry_roundtrips_with_snake_case_payload() -> Result<()
 }
 
 #[test]
-fn terminal_task_control_entry_accepts_legacy_pascal_case_alias() -> Result<()> {
-    let json = r#"{"control":{"TerminalTask":{"handle":{"task_id":"terminal-1","command":"cargo test","cwd":".","shell":"zsh","log_path":".sigil/terminal/terminal-1/output.log","created_at_ms":100},"status":{"state":"exited","exit_code":0},"output_preview":"ok","output_hash":"sha256:abc","output_truncated":false,"updated_at_ms":120}}}"#;
-
-    let restored: SessionLogEntry = serde_json::from_str(json)?;
-
-    assert!(matches!(
-        restored,
-        SessionLogEntry::Control(ControlEntry::TerminalTask(entry))
-            if entry.handle.task_id.as_str() == "terminal-1"
-                && matches!(entry.status, TerminalTaskStatus::Exited { exit_code: Some(0) })
-                && entry.updated_at_ms == 120
-    ));
-    Ok(())
-}
-
-#[test]
 fn terminal_task_projection_replays_latest_status_and_active_tasks() {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::TerminalTask(sample_entry(

@@ -409,10 +409,6 @@ fn agent_detail_helpers_cover_labels_sources_and_selection_notices() {
         "compat:claude"
     );
     assert_eq!(
-        agent_profile_source_summary(&sigil_kernel::AgentProfileSource::LegacyTask),
-        "legacy_task"
-    );
-    assert_eq!(
         agent_profile_source_summary(&sigil_kernel::AgentProfileSource::Unknown),
         "unknown"
     );
@@ -717,7 +713,7 @@ fn code_intelligence_detail_helpers_cover_status_edges_and_overflow() {
 
     let mut config = test_config();
     config.code_intelligence.enabled = true;
-    config.code_intelligence.discovery.enabled = false;
+    config.code_intelligence.auto_discover = false;
     config.code_intelligence.servers = (0..5)
         .map(|index| sigil_kernel::LanguageServerConfig {
             name: format!("missing-{index}"),

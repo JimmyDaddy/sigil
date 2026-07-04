@@ -140,10 +140,7 @@ fn queue_flow_helpers_cover_kinds_statuses_and_empty_targets() {
     agent_queue_app.sync_current_session_state(vec![sigil_kernel::SessionLogEntry::Control(
         sigil_kernel::ControlEntry::ConversationInputQueued(agent_thread.queued.clone()),
     )]);
-    assert_eq!(
-        agent_queue_app.composer_queue_summary().as_deref(),
-        Some("1 agent message pending · next agent agent_chat_1: queue_agent prompt")
-    );
+    assert_eq!(agent_queue_app.composer_queue_summary().as_deref(), None);
 
     for (status, label, kind) in [
         (

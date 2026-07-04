@@ -56,19 +56,13 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
         .get("preview_kind")
         .and_then(serde_json::Value::as_str)
         .map(ToolPreviewKind::from_value)
-        .or_else(|| object.get("content").map(legacy_tool_preview_kind))
         .unwrap_or_default();
     let preview_language = object
         .get("preview_language")
         .and_then(serde_json::Value::as_str)
         .filter(|language| !language.trim().is_empty())
         .map(str::to_owned);
-    let preview_value = object.get("preview_value").cloned().or_else(|| {
-        object
-            .get("content")
-            .cloned()
-            .filter(|value| matches!(value, Value::Array(_) | Value::Object(_)))
-    });
+    let preview_value = object.get("preview_value").cloned();
     let (preview_lines, hidden_lines) = object
         .get("preview_lines")
         .and_then(serde_json::Value::as_array)
@@ -84,7 +78,7 @@ pub(super) fn parse_tool_summary(text: &str) -> ToolCardRender {
                 .unwrap_or(0) as usize;
             (preview, hidden)
         })
-        .unwrap_or_else(|| legacy_tool_preview(object.get("content"), preview_kind));
+        .unwrap_or_default();
     let diff = object.get("diff").and_then(parse_tool_diff);
 
     ToolCardRender {
@@ -174,39 +168,6 @@ pub(super) fn parse_tool_diff_file(value: &Value) -> Option<ToolCardDiffFile> {
             .unwrap_or(lines.len() as u64) as usize,
         lines,
     })
-}
-
-pub(super) fn legacy_tool_preview_kind(value: &serde_json::Value) -> ToolPreviewKind {
-    match value {
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => ToolPreviewKind::Json,
-        serde_json::Value::String(content)
-            if content.trim_start().starts_with('#')
-                || content.contains("```")
-                || content.contains("\n- ")
-                || content.contains("\n|") =>
-        {
-            ToolPreviewKind::Markdown
-        }
-        _ => ToolPreviewKind::Text,
-    }
-}
-
-pub(super) fn legacy_tool_preview(
-    value: Option<&serde_json::Value>,
-    _preview_kind: ToolPreviewKind,
-) -> (Vec<String>, usize) {
-    let Some(value) = value else {
-        return (Vec::new(), 0);
-    };
-    let source = match value {
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        serde_json::Value::String(text) => text.clone(),
-        _ => value.to_string(),
-    };
-    let lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
-    (lines, 0)
 }
 
 pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {

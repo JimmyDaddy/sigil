@@ -155,7 +155,7 @@ pub(super) fn record_line_is_valid_or_fail_closed(
             .with_context(|| stream_line_context("stored event", physical_line, path))?;
         return Ok(true);
     }
-    Ok(serde_json::from_str::<SessionLogEntry>(line).is_ok())
+    Ok(false)
 }
 
 pub(super) fn append_tail_recovery_event_locked(

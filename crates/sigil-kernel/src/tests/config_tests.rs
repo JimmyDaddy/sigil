@@ -5,9 +5,8 @@ use super::{
     McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
     SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
     SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement, ThemeId,
-    UsageCostCurrency, default_user_config_dir, default_user_config_path,
-    legacy_user_config_dir_from_env, preferred_config_path, preferred_config_path_for_known_paths,
-    preferred_implicit_config_path, resolve_workspace_root, user_home_dir_from_env,
+    UsageCostCurrency, default_user_config_dir, default_user_config_path, preferred_config_path,
+    preferred_config_path_for_known_paths, resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind,
@@ -83,17 +82,17 @@ fn compaction_threshold_status_follows_configured_window() {
 }
 
 #[test]
-fn compaction_window_loads_legacy_key_and_saves_fallback_key() {
+fn compaction_window_loads_and_saves_fallback_key() {
     let raw = r#"
 [agent]
 provider = "deepseek"
 model = "deepseek-v4-pro"
 
 [compaction]
-context_window_tokens = 128000
+fallback_context_window_tokens = 128000
 "#;
 
-    let config: RootConfig = toml::from_str(raw).expect("legacy config should load");
+    let config: RootConfig = toml::from_str(raw).expect("config should load");
     assert_eq!(config.compaction.context_window_tokens, Some(128_000));
 
     let rendered = toml::to_string_pretty(&config).expect("config should serialize");
@@ -106,6 +105,30 @@ context_window_tokens = 128000
 }
 
 #[test]
+fn compaction_window_rejects_legacy_context_window_key() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[compaction]
+context_window_tokens = 128000
+"#;
+
+    let error = toml::from_str::<RootConfig>(raw).expect_err("legacy key should be rejected");
+    assert!(error.to_string().contains("context_window_tokens"));
+}
+
+fn assert_root_config_rejects(raw: &str, expected: &str) {
+    let error = toml::from_str::<RootConfig>(raw).expect_err("config should be rejected");
+    let message = error.to_string();
+    assert!(
+        message.contains(expected),
+        "expected error to contain {expected:?}, got {message:?}"
+    );
+}
+
+#[test]
 fn skill_config_defaults_and_toml_overrides_are_stable() {
     let defaults = SkillConfig::default();
     assert!(defaults.enabled);
@@ -113,7 +136,7 @@ fn skill_config_defaults_and_toml_overrides_are_stable() {
     assert_eq!(defaults.workspace_agents_dir, ".sigil/agents");
     assert!(defaults.user_skills);
     assert!(defaults.user_agents);
-    assert_eq!(defaults.compatibility_sources, vec!["claude"]);
+    assert!(defaults.compatibility_sources.is_empty());
 
     let raw = r#"
 [agent]
@@ -587,94 +610,21 @@ fn config_path_env_helpers_cover_all_platform_rules() {
         Path::new("/Users/alice")
     );
     assert!(user_home_dir_from_env(ConfigPlatform::Other, None, None).is_err());
-
-    assert_eq!(
-        legacy_user_config_dir_from_env(
-            ConfigPlatform::Windows,
-            None,
-            None,
-            Some("C:/Users/Alice/AppData/Roaming".into()),
-            None,
-        )
-        .expect("windows APPDATA should resolve"),
-        Path::new("C:/Users/Alice/AppData/Roaming").join("sigil")
-    );
-    assert!(
-        legacy_user_config_dir_from_env(ConfigPlatform::Windows, None, None, None, None).is_err()
-    );
-    assert_eq!(
-        legacy_user_config_dir_from_env(
-            ConfigPlatform::Macos,
-            Some("/Users/alice".into()),
-            None,
-            None,
-            None,
-        )
-        .expect("mac legacy path should resolve"),
-        Path::new("/Users/alice")
-            .join("Library")
-            .join("Application Support")
-            .join("sigil")
-    );
-    assert!(
-        legacy_user_config_dir_from_env(ConfigPlatform::Macos, None, None, None, None).is_err()
-    );
-    assert_eq!(
-        legacy_user_config_dir_from_env(
-            ConfigPlatform::Other,
-            Some("/home/alice".into()),
-            None,
-            None,
-            Some("/xdg".into()),
-        )
-        .expect("xdg path should win"),
-        Path::new("/xdg").join("sigil")
-    );
-    assert_eq!(
-        legacy_user_config_dir_from_env(
-            ConfigPlatform::Other,
-            Some("/home/alice".into()),
-            None,
-            None,
-            None,
-        )
-        .expect("other platform should fallback to home config"),
-        Path::new("/home/alice").join(".config").join("sigil")
-    );
 }
 
 #[test]
-fn preferred_config_path_known_paths_cover_explicit_missing_and_failure_edges() {
+fn preferred_config_path_known_paths_cover_explicit_and_default_edges() {
     let temp = tempfile::tempdir().expect("tempdir");
     let explicit = temp.path().join("explicit.toml");
     let default_path = temp.path().join("home/.sigil/sigil.toml");
     assert_eq!(
-        preferred_config_path_for_known_paths(Some(&explicit), default_path.clone(), None)
-            .expect("explicit path should win"),
+        preferred_config_path_for_known_paths(Some(&explicit), default_path.clone()),
         explicit
     );
     assert_eq!(
-        preferred_config_path_for_known_paths(None, default_path.clone(), None)
-            .expect("missing legacy should use default path"),
+        preferred_config_path_for_known_paths(None, default_path.clone()),
         default_path
     );
-
-    let legacy = temp.path().join("legacy/sigil.toml");
-    std::fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
-    std::fs::write(&legacy, "legacy = true").expect("legacy config");
-    let blocking_parent = temp.path().join("blocked");
-    std::fs::write(&blocking_parent, "not a directory").expect("blocking file");
-    let blocked_default = blocking_parent.join("sigil.toml");
-    let error = preferred_config_path_for_known_paths(None, blocked_default, Some(legacy))
-        .expect_err("migration should report parent creation failure");
-    assert!(error.to_string().contains("failed to create migrated"));
-
-    let legacy_dir = temp.path().join("legacy-dir/sigil.toml");
-    std::fs::create_dir_all(&legacy_dir).expect("legacy config directory placeholder");
-    let default_path = temp.path().join("default/sigil.toml");
-    let error = preferred_config_path_for_known_paths(None, default_path, Some(legacy_dir))
-        .expect_err("migration should report copy failure");
-    assert!(error.to_string().contains("failed to migrate sigil config"));
 }
 
 #[test]
@@ -794,6 +744,37 @@ prefixes = ["code_intel_"]
 }
 
 #[test]
+fn task_config_rejects_legacy_budget_fields() {
+    for legacy_field in [
+        "max_child_sessions",
+        "allow_parallel_readonly_subagents",
+        "max_parallel_readonly",
+        "max_parallel_write",
+        "max_background_threads",
+        "max_spawn_fanout_per_turn",
+        "max_agent_tokens_per_task",
+    ] {
+        let raw = format!(
+            r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[task]
+{legacy_field} = 1
+"#
+        );
+
+        let error = toml::from_str::<RootConfig>(&raw)
+            .expect_err("legacy task budget field should be rejected");
+        assert!(
+            error.to_string().contains(legacy_field),
+            "expected error to mention {legacy_field}, got {error}"
+        );
+    }
+}
+
+#[test]
 fn task_config_role_config_and_mode_labels_are_stable() {
     let mut config = TaskConfig::default();
     config.planner.model = Some("planner-model".to_owned());
@@ -868,8 +849,8 @@ model = "deepseek-v4-flash"
 }
 
 #[test]
-fn root_config_loads_legacy_bool_terminal_keyboard_enhancement() {
-    let enabled: RootConfig = toml::from_str(
+fn root_config_rejects_bool_terminal_keyboard_enhancement() {
+    let error = toml::from_str::<RootConfig>(
         r#"
 [agent]
 provider = "deepseek"
@@ -879,13 +860,10 @@ model = "deepseek-v4-flash"
 keyboard_enhancement = true
 "#,
     )
-    .expect("legacy true keyboard enhancement should parse");
-    assert_eq!(
-        enabled.terminal.keyboard_enhancement,
-        TerminalKeyboardEnhancement::On
-    );
+    .expect_err("bool keyboard enhancement should be rejected");
+    assert!(error.to_string().contains("keyboard_enhancement"));
 
-    let disabled: RootConfig = toml::from_str(
+    let error = toml::from_str::<RootConfig>(
         r#"
 [agent]
 provider = "deepseek"
@@ -895,11 +873,8 @@ model = "deepseek-v4-flash"
 keyboard_enhancement = false
 "#,
     )
-    .expect("legacy false keyboard enhancement should parse");
-    assert_eq!(
-        disabled.terminal.keyboard_enhancement,
-        TerminalKeyboardEnhancement::Off
-    );
+    .expect_err("bool keyboard enhancement should be rejected");
+    assert!(error.to_string().contains("keyboard_enhancement"));
 }
 
 #[test]
@@ -976,9 +951,9 @@ fn root_config_loads_code_intelligence_config() {
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[code_intelligence]
-enabled = true
-startup = "lazy"
+	[code_intelligence]
+	enabled = true
+	server_startup = "lazy"
 default_timeout_ms = 2500
 max_results = 50
 max_payload_bytes = 32768
@@ -998,10 +973,13 @@ check = { command = "check" }
     let config: RootConfig = toml::from_str(raw).expect("code intelligence config should parse");
 
     assert!(config.code_intelligence.enabled);
-    assert_eq!(config.code_intelligence.startup, CodeIntelStartup::Lazy);
+    assert_eq!(
+        config.code_intelligence.server_startup,
+        CodeIntelStartup::Lazy
+    );
     assert_eq!(config.code_intelligence.default_timeout_ms, 2500);
-    assert!(config.code_intelligence.discovery.enabled);
-    assert!(config.code_intelligence.discovery.report_missing);
+    assert!(config.code_intelligence.auto_discover);
+    assert!(config.code_intelligence.report_missing);
     assert_eq!(config.code_intelligence.servers[0].name, "rust-analyzer");
     assert_eq!(
         config.code_intelligence.servers[0].initialization_options["check"]["command"],
@@ -1010,32 +988,61 @@ check = { command = "check" }
 }
 
 #[test]
-fn root_config_loads_code_intelligence_discovery_config() {
+fn root_config_loads_code_intelligence_auto_discover_config() {
     let raw = r#"
 [agent]
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[code_intelligence]
-enabled = true
-startup = "lazy"
-
-[code_intelligence.discovery]
-enabled = false
-report_missing = false
-"#;
+	[code_intelligence]
+	enabled = true
+	server_startup = "lazy"
+	auto_discover = false
+	report_missing = false
+	"#;
 
     let config: RootConfig =
-        toml::from_str(raw).expect("code intelligence discovery config should parse");
+        toml::from_str(raw).expect("code intelligence auto discover config should parse");
 
     assert!(config.code_intelligence.enabled);
-    assert!(!config.code_intelligence.discovery.enabled);
-    assert!(!config.code_intelligence.discovery.report_missing);
+    assert!(!config.code_intelligence.auto_discover);
+    assert!(!config.code_intelligence.report_missing);
 
     let rendered = toml::to_string_pretty(&config).expect("config should serialize");
-    assert!(rendered.contains("[code_intelligence.discovery]"));
-    assert!(rendered.contains("enabled = false"));
+    assert!(!rendered.contains("[code_intelligence.discovery]"));
+    assert!(rendered.contains("auto_discover = false"));
     assert!(rendered.contains("report_missing = false"));
+}
+
+#[test]
+fn root_config_rejects_legacy_code_intelligence_keys() {
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[code_intelligence]
+	enabled = true
+	startup = "lazy"
+	"#,
+        "startup",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[code_intelligence]
+	enabled = true
+
+	[code_intelligence.discovery]
+	enabled = true
+	"#,
+        "discovery",
+    );
 }
 
 #[test]
@@ -1053,24 +1060,26 @@ model = "deepseek-v4-flash"
         crate::VerificationAutoRunPolicy::Manual
     );
     assert_eq!(
-        default_config.verification.scope_profile,
+        default_config.verification.scope.profile,
         crate::VerificationScopeProfile::Auto
     );
-    assert!(default_config.verification.extra_scope_excludes.is_empty());
-    assert!(default_config.verification.generated_roots.is_empty());
+    assert!(default_config.verification.scope.extra_excludes.is_empty());
+    assert!(default_config.verification.scope.generated_roots.is_empty());
 
     let raw = r#"
 [agent]
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[verification]
-auto_run = "trusted_only"
-scope_profile = "node"
-extra_scope_excludes = ["tmp/generated/**"]
-generated_roots = ["generated"]
+	[verification]
+	auto_run = "trusted_only"
 
-[[verification.checks]]
+	[verification.scope]
+	profile = "node"
+	extra_excludes = ["tmp/generated/**"]
+	generated_roots = ["generated"]
+
+	[[verification.checks]]
 id = "cargo-test"
 command = "cargo"
 args = ["test", "-p", "sigil-kernel"]
@@ -1085,15 +1094,15 @@ effect = "read_only"
         crate::VerificationAutoRunPolicy::TrustedOnly
     );
     assert_eq!(
-        config.verification.scope_profile,
+        config.verification.scope.profile,
         crate::VerificationScopeProfile::Node
     );
     assert_eq!(
-        config.verification.extra_scope_excludes,
+        config.verification.scope.extra_excludes,
         vec!["tmp/generated/**".to_owned()]
     );
     assert_eq!(
-        config.verification.generated_roots,
+        config.verification.scope.generated_roots,
         vec![std::path::PathBuf::from("generated")]
     );
     let scope = config.verification.scope_for_hash("scope-main");
@@ -1116,6 +1125,33 @@ effect = "read_only"
         ]
     );
     assert_eq!(config.verification.checks[0].effect.as_str(), "read_only");
+}
+
+#[test]
+fn root_config_rejects_legacy_verification_scope_keys() {
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[verification]
+	scope_profile = "node"
+	"#,
+        "scope_profile",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[verification]
+	extra_scope_excludes = ["tmp/generated/**"]
+	"#,
+        "extra_scope_excludes",
+    );
 }
 
 #[test]
@@ -1174,23 +1210,26 @@ model = "deepseek-v4-flash"
 
     assert!(config.memory.enabled);
     assert!(!config.code_intelligence.enabled);
-    assert_eq!(config.code_intelligence.startup, CodeIntelStartup::Lazy);
+    assert_eq!(
+        config.code_intelligence.server_startup,
+        CodeIntelStartup::Lazy
+    );
     assert_eq!(config.code_intelligence.default_timeout_ms, 5_000);
     assert_eq!(config.code_intelligence.max_results, 100);
     assert_eq!(config.code_intelligence.max_payload_bytes, 64 * 1024);
-    assert!(config.code_intelligence.discovery.enabled);
-    assert!(config.code_intelligence.discovery.report_missing);
-    assert_eq!(config.execution.backend, ExecutionBackendKind::Local);
+    assert!(config.code_intelligence.auto_discover);
+    assert!(config.code_intelligence.report_missing);
+    assert_eq!(config.execution.backend(), ExecutionBackendKind::Local);
     assert_eq!(
-        config.execution.isolation,
+        config.execution.isolation(),
         ExecutionIsolationPolicy::AllowLocal
     );
     assert_eq!(
-        config.execution.profile,
+        config.execution.profile(),
         ExecutionSandboxProfile::Unconfined
     );
-    assert_eq!(config.execution.fallback, ExecutionSandboxFallback::Deny);
-    assert_eq!(config.execution.container_image, None);
+    assert_eq!(config.execution.fallback(), ExecutionSandboxFallback::Deny);
+    assert_eq!(config.execution.container_image(), None);
 }
 
 #[test]
@@ -1201,25 +1240,33 @@ fn root_config_loads_execution_config() {
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[execution]
-backend = "local"
-isolation = "require_sandbox"
-profile = "build_offline"
-fallback = "prompt"
-"#,
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "macos_seatbelt"
+	profile = "build_offline"
+	fallback = "prompt"
+	"#,
     )
     .expect("execution config should parse");
 
-    assert_eq!(config.execution.backend, ExecutionBackendKind::Local);
     assert_eq!(
-        config.execution.isolation,
+        config.execution.backend(),
+        ExecutionBackendKind::MacosSeatbelt
+    );
+    assert_eq!(
+        config.execution.isolation(),
         ExecutionIsolationPolicy::RequireSandbox
     );
     assert_eq!(
-        config.execution.profile,
+        config.execution.profile(),
         ExecutionSandboxProfile::BuildOffline
     );
-    assert_eq!(config.execution.fallback, ExecutionSandboxFallback::Prompt);
+    assert_eq!(
+        config.execution.fallback(),
+        ExecutionSandboxFallback::Prompt
+    );
 }
 
 #[test]
@@ -1230,20 +1277,26 @@ fn root_config_loads_macos_seatbelt_execution_backend() {
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[execution]
-backend = "macos_seatbelt"
-isolation = "require_sandbox"
-"#,
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "macos_seatbelt"
+	"#,
     )
     .expect("macos seatbelt execution config should parse");
 
     assert_eq!(
-        config.execution.backend,
+        config.execution.backend(),
         ExecutionBackendKind::MacosSeatbelt
     );
     assert_eq!(
-        config.execution.isolation,
+        config.execution.isolation(),
         ExecutionIsolationPolicy::RequireSandbox
+    );
+    assert_eq!(
+        config.execution.profile(),
+        ExecutionSandboxProfile::WorkspaceWrite
     );
 }
 
@@ -1255,24 +1308,26 @@ fn root_config_loads_linux_bubblewrap_execution_backend() {
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[execution]
-backend = "linux_bubblewrap"
-isolation = "require_sandbox"
-profile = "build_offline"
-"#,
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "linux_bubblewrap"
+	profile = "build_offline"
+	"#,
     )
     .expect("linux bubblewrap execution config should parse");
 
     assert_eq!(
-        config.execution.backend,
+        config.execution.backend(),
         ExecutionBackendKind::LinuxBubblewrap
     );
     assert_eq!(
-        config.execution.isolation,
+        config.execution.isolation(),
         ExecutionIsolationPolicy::RequireSandbox
     );
     assert_eq!(
-        config.execution.profile,
+        config.execution.profile(),
         ExecutionSandboxProfile::BuildOffline
     );
 }
@@ -1285,27 +1340,118 @@ fn root_config_loads_docker_execution_backend() {
 provider = "deepseek"
 model = "deepseek-v4-flash"
 
-[execution]
-backend = "docker"
-isolation = "require_sandbox"
-profile = "build_networked"
-container_image = "rust:1.94.1"
-"#,
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "docker"
+	profile = "build_networked"
+	container_image = "rust:1.94.1"
+	"#,
     )
     .expect("docker execution config should parse");
 
-    assert_eq!(config.execution.backend, ExecutionBackendKind::Docker);
+    assert_eq!(config.execution.backend(), ExecutionBackendKind::Docker);
     assert_eq!(
-        config.execution.isolation,
+        config.execution.isolation(),
         ExecutionIsolationPolicy::RequireSandbox
     );
     assert_eq!(
-        config.execution.profile,
+        config.execution.profile(),
         ExecutionSandboxProfile::BuildNetworked
     );
-    assert_eq!(
-        config.execution.container_image.as_deref(),
-        Some("rust:1.94.1")
+    assert_eq!(config.execution.container_image(), Some("rust:1.94.1"));
+}
+
+#[test]
+fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[execution]
+	backend = "docker"
+	isolation = "require_sandbox"
+	"#,
+        "backend",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[execution]
+	strategy = "sandbox"
+	"#,
+        "[execution.sandbox]",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[execution]
+	strategy = "local"
+
+	[execution.sandbox]
+	backend = "macos_seatbelt"
+	"#,
+        "only valid when execution.strategy is \"sandbox\"",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "local"
+	profile = "workspace_write"
+	"#,
+        "cannot use execution.sandbox.backend \"local\"",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "docker"
+	profile = "workspace_write"
+	"#,
+        "requires execution.sandbox.container_image",
+    );
+
+    assert_root_config_rejects(
+        r#"
+	[agent]
+	provider = "deepseek"
+	model = "deepseek-v4-flash"
+
+	[execution]
+	strategy = "sandbox"
+
+	[execution.sandbox]
+	backend = "macos_seatbelt"
+	profile = "workspace_write"
+	container_image = "rust:1.94.1"
+	"#,
+        "container_image is only valid for docker",
     );
 }
 
@@ -1324,10 +1470,7 @@ fn execution_config_profiles_validate_backend_capabilities() {
         ..ExecutionBackendCapabilities::default()
     };
 
-    let workspace_write = crate::ExecutionConfig {
-        profile: ExecutionSandboxProfile::WorkspaceWrite,
-        ..crate::ExecutionConfig::default()
-    };
+    let workspace_write = execution_sandbox_config(ExecutionSandboxProfile::WorkspaceWrite);
     assert!(
         workspace_write
             .validate_profile_capabilities(local_capabilities)
@@ -1338,10 +1481,7 @@ fn execution_config_profiles_validate_backend_capabilities() {
         .validate_profile_capabilities(sandbox_capabilities)
         .expect("workspace_write accepts basic sandbox capabilities");
 
-    let build_offline = crate::ExecutionConfig {
-        profile: ExecutionSandboxProfile::BuildOffline,
-        ..crate::ExecutionConfig::default()
-    };
+    let build_offline = execution_sandbox_config(ExecutionSandboxProfile::BuildOffline);
     assert!(
         build_offline
             .validate_profile_capabilities(sandbox_capabilities)
@@ -1352,10 +1492,7 @@ fn execution_config_profiles_validate_backend_capabilities() {
         .validate_profile_capabilities(offline_capabilities)
         .expect("build_offline accepts network-isolating sandbox");
 
-    let build_networked = crate::ExecutionConfig {
-        profile: ExecutionSandboxProfile::BuildNetworked,
-        ..crate::ExecutionConfig::default()
-    };
+    let build_networked = execution_sandbox_config(ExecutionSandboxProfile::BuildNetworked);
     assert!(build_networked.profile_spec().network_allowed);
     assert!(build_networked.profile_spec().dependency_caches_read_only);
     build_networked
@@ -1365,10 +1502,7 @@ fn execution_config_profiles_validate_backend_capabilities() {
 
 #[test]
 fn execution_capability_requirements_report_missing_capabilities() {
-    let build_offline = crate::ExecutionConfig {
-        profile: ExecutionSandboxProfile::BuildOffline,
-        ..crate::ExecutionConfig::default()
-    };
+    let build_offline = execution_sandbox_config(ExecutionSandboxProfile::BuildOffline);
     let requirements = build_offline.required_capabilities();
 
     assert!(requirements.filesystem_isolation);
@@ -1386,6 +1520,13 @@ fn execution_capability_requirements_report_missing_capabilities() {
     );
 }
 
+fn execution_sandbox_config(profile: ExecutionSandboxProfile) -> crate::ExecutionConfig {
+    let mut sandbox =
+        crate::ExecutionSandboxStrategyConfig::new(ExecutionBackendKind::MacosSeatbelt);
+    sandbox.profile = profile;
+    crate::ExecutionConfig::sandbox(sandbox)
+}
+
 #[test]
 fn preferred_config_path_falls_back_to_user_config_path() {
     let temp = tempfile::tempdir().expect("tempdir should build");
@@ -1393,56 +1534,6 @@ fn preferred_config_path_falls_back_to_user_config_path() {
     assert_eq!(
         preferred_config_path(None, temp.path()).expect("user config path should resolve"),
         default_user_config_path().expect("default user config path should resolve")
-    );
-}
-
-#[test]
-fn preferred_implicit_config_path_migrates_legacy_config_to_visible_home_dir() {
-    let temp = tempfile::tempdir().expect("tempdir should build");
-    let default_path = temp.path().join(".sigil").join("sigil.toml");
-    let legacy_path = temp
-        .path()
-        .join("Library")
-        .join("Application Support")
-        .join("sigil")
-        .join("sigil.toml");
-    std::fs::create_dir_all(legacy_path.parent().expect("legacy parent should exist"))
-        .expect("legacy parent should be created");
-    std::fs::write(&legacy_path, "legacy = true\n").expect("legacy config should write");
-
-    let resolved = preferred_implicit_config_path(&default_path, &legacy_path)
-        .expect("legacy config should migrate");
-
-    assert_eq!(resolved, default_path);
-    assert_eq!(
-        std::fs::read_to_string(&default_path).expect("migrated config should exist"),
-        "legacy = true\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&legacy_path).expect("legacy config should remain"),
-        "legacy = true\n"
-    );
-}
-
-#[test]
-fn preferred_implicit_config_path_keeps_existing_visible_config() {
-    let temp = tempfile::tempdir().expect("tempdir should build");
-    let default_path = temp.path().join(".sigil").join("sigil.toml");
-    let legacy_path = temp.path().join("legacy").join("sigil.toml");
-    std::fs::create_dir_all(default_path.parent().expect("default parent should exist"))
-        .expect("default parent should be created");
-    std::fs::create_dir_all(legacy_path.parent().expect("legacy parent should exist"))
-        .expect("legacy parent should be created");
-    std::fs::write(&default_path, "new = true\n").expect("default config should write");
-    std::fs::write(&legacy_path, "legacy = true\n").expect("legacy config should write");
-
-    let resolved = preferred_implicit_config_path(&default_path, &legacy_path)
-        .expect("existing visible config should win");
-
-    assert_eq!(resolved, default_path);
-    assert_eq!(
-        std::fs::read_to_string(&default_path).expect("default config should remain"),
-        "new = true\n"
     );
 }
 

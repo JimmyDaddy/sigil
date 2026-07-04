@@ -1559,50 +1559,14 @@ fn mouse_click_infotrack_focuses_activity() -> Result<()> {
 
 #[test]
 fn mouse_click_info_rail_agent_row_switches_visible_agent() -> Result<()> {
-    let task_id = sigil_kernel::TaskId::new("task_1")?;
-    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(140, 32);
     app.active_pane = PaneFocus::Composer;
-    app.sync_current_session_state(vec![
-        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-            objective: "review workspace".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Running,
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: sigil_kernel::TaskPlanStatus::Accepted,
-            steps: vec![sigil_kernel::TaskStepSpec {
-                step_id: step_id.clone(),
-                title: "让子 agent 检查仓库".to_owned(),
-                display_name: Some("仓库审查".to_owned()),
-                detail: None,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                mode: None,
-                isolation: None,
-            }],
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskChildSession(
-            sigil_kernel::TaskChildSessionEntry {
-                task_id,
-                plan_version: 1,
-                step_id,
-                child_task_id: sigil_kernel::TaskId::new("child_1")?,
-                child_session_ref: sigil_kernel::SessionRef::new_relative(
-                    "children/task_1/step_1-child_1.jsonl",
-                )?,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                status: sigil_kernel::TaskChildSessionStatus::Completed,
-                summary_hash: None,
-            },
-        )),
-    ]);
+    app.sync_current_session_state(child_agent_entries(
+        Some("仓库审查"),
+        sigil_kernel::AgentThreadStatus::Completed,
+        sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
+    )?);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 32), &app);
     let child_row = layout.info_rail_agent_rows[1];
     assert_eq!(
@@ -1622,7 +1586,7 @@ fn mouse_click_info_rail_agent_row_switches_visible_agent() -> Result<()> {
     assert_eq!(
         app.last_notice(),
         Some(
-            "agent focus: agent 仓库审查 · completed · subagent_read · v1:step_1 · result missing"
+            "agent focus: 仓库审查 · completed · subagent_read · background task · deepseek-v4-pro · tools scoped · workspace inherited · result missing"
         )
     );
 

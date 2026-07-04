@@ -672,7 +672,6 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
         "deepseek".to_owned(),
         json!({
             "base_url": "https://example.com",
-            "model": "deepseek-v4-flash",
             "api_key": "test-key"
         }),
     );
@@ -707,7 +706,6 @@ fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result
         "deepseek".to_owned(),
         json!({
             "base_url": "https://example.com",
-            "model": "deepseek-v4-flash",
             "api_key": "test-key"
         }),
     );

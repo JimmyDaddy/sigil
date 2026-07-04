@@ -103,23 +103,28 @@ fn tool_card_classifies_shell_search_variants_and_rejects_complex_commands() {
 }
 
 #[test]
-fn tool_card_parses_legacy_previews_and_mcp_metadata() {
-    let markdown = parsed_summary(json!({
-        "tool_name": "read_file",
-        "status": "ok",
-        "content": (1..=20)
-            .map(|index| if index == 1 {
+fn tool_card_parses_previews_and_mcp_metadata() {
+    let markdown_lines = (1..=20)
+        .map(|index| {
+            if index == 1 {
                 "# Title".to_owned()
             } else {
                 format!("- item {index}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            }
+        })
+        .collect::<Vec<_>>();
+    let markdown = parsed_summary(json!({
+        "tool_name": "read_file",
+        "status": "ok",
+        "preview_kind": "markdown",
+        "preview_lines": markdown_lines
     }));
     let json_summary = parsed_summary(json!({
         "tool_name": "custom_tool",
         "status": "ok",
-        "content": {"root": {"leaf": "value"}}
+        "preview_kind": "json",
+        "preview_value": {"root": {"leaf": "value"}},
+        "preview_lines": ["{\"root\":{\"leaf\":\"value\"}}"]
     }));
     let mcp = parsed_summary(json!({
         "tool_name": "mcp__filesystem__stat",
@@ -1475,11 +1480,6 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
     assert_eq!(diff.rendered_line_count, 1);
     assert_eq!(diff_file.path, "unknown");
     assert!(!diff_file.truncated);
-    assert!(legacy_tool_preview_kind(&json!("plain text")) == ToolPreviewKind::Text);
-    assert_eq!(
-        legacy_tool_preview(None, ToolPreviewKind::Text),
-        (Vec::new(), 0)
-    );
     assert_eq!(metadata.mcp_server.as_deref(), Some("filesystem"));
     assert_eq!(metadata.mcp_tool.as_deref(), Some("stat"));
     assert_eq!(metadata.mcp_trust_class.as_deref(), Some("workspace"));

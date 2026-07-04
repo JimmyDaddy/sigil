@@ -12,7 +12,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus, ExecutionConfig,
-    ExecutionIsolationPolicy, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
     TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
 };
@@ -29,6 +29,19 @@ use super::{
     TerminalStartRequest,
 };
 use serial_test::serial;
+
+fn sandbox_execution_config(
+    backend: ExecutionBackendKind,
+    profile: ExecutionSandboxProfile,
+    fallback: ExecutionSandboxFallback,
+    container_image: Option<String>,
+) -> ExecutionConfig {
+    let mut sandbox = ExecutionSandboxStrategyConfig::new(backend);
+    sandbox.profile = profile;
+    sandbox.fallback = fallback;
+    sandbox.container_image = container_image;
+    ExecutionConfig::sandbox(sandbox)
+}
 
 #[test]
 fn terminal_process_manager_permission_context_reports_missing_task() -> Result<()> {
@@ -466,13 +479,12 @@ async fn terminal_process_manager_macos_seatbelt_pty_records_sandbox_and_denies_
     let outside = tempfile::tempdir()?;
     let outside_path = outside.path().join("denied.txt");
     let shell = "/bin/sh".to_owned();
-    let execution_config = ExecutionConfig {
-        backend: ExecutionBackendKind::MacosSeatbelt,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        profile: ExecutionSandboxProfile::WorkspaceWrite,
-        fallback: ExecutionSandboxFallback::Deny,
-        ..ExecutionConfig::default()
-    };
+    let execution_config = sandbox_execution_config(
+        ExecutionBackendKind::MacosSeatbelt,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    );
     let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
         temp.path(),
         temp.path().join("terminal-artifacts"),
@@ -549,13 +561,12 @@ async fn terminal_process_manager_linux_bubblewrap_pty_records_sandbox_and_denie
     let temp = tempfile::tempdir()?;
     let outside = tempfile::tempdir_in("/var/tmp")?;
     let outside_path = outside.path().join("denied.txt");
-    let execution_config = ExecutionConfig {
-        backend: ExecutionBackendKind::LinuxBubblewrap,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        profile: ExecutionSandboxProfile::WorkspaceWrite,
-        fallback: ExecutionSandboxFallback::Deny,
-        ..ExecutionConfig::default()
-    };
+    let execution_config = sandbox_execution_config(
+        ExecutionBackendKind::LinuxBubblewrap,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    );
     let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
         temp.path(),
         temp.path().join("terminal-artifacts"),
@@ -629,13 +640,12 @@ async fn terminal_process_manager_linux_bubblewrap_pty_records_sandbox_and_denie
 #[tokio::test]
 async fn terminal_process_manager_docker_pty_fails_closed_without_local_fallback() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let execution_config = ExecutionConfig {
-        backend: ExecutionBackendKind::Docker,
-        isolation: ExecutionIsolationPolicy::RequireSandbox,
-        profile: ExecutionSandboxProfile::WorkspaceWrite,
-        fallback: ExecutionSandboxFallback::Unconfined,
-        container_image: Some("sigil-test:latest".to_owned()),
-    };
+    let execution_config = sandbox_execution_config(
+        ExecutionBackendKind::Docker,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Unconfined,
+        Some("sigil-test:latest".to_owned()),
+    );
     let manager = TerminalProcessManager::new_with_artifact_root_and_terminal_execution(
         temp.path(),
         temp.path().join("terminal-artifacts"),

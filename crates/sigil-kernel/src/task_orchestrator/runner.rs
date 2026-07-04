@@ -1,27 +1,11 @@
 use super::*;
 
 /// Sequential planner/executor task orchestrator.
-pub struct SequentialTaskOrchestrator<R = LegacyTaskChildSessionRunner> {
+pub struct SequentialTaskOrchestrator<R> {
     planner: BoxedAgent,
     executor: BoxedAgent,
     child_runner: R,
     execution_backend: Option<Arc<dyn ExecutionBackend>>,
-}
-
-impl SequentialTaskOrchestrator<LegacyTaskChildSessionRunner> {
-    pub fn new(
-        planner: BoxedAgent,
-        executor: BoxedAgent,
-        subagent_read: BoxedAgent,
-        subagent_write: BoxedAgent,
-    ) -> Self {
-        Self {
-            planner,
-            executor,
-            child_runner: LegacyTaskChildSessionRunner::new(subagent_read, subagent_write),
-            execution_backend: None,
-        }
-    }
 }
 
 impl<R> SequentialTaskOrchestrator<R>

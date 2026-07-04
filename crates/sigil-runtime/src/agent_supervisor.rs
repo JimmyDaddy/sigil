@@ -35,48 +35,24 @@ const AGENT_RESULT_SUMMARY_LIMIT: usize = 4_000;
 /// Runtime-enforced limits for agent/thread fan-out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentBudgetPolicy {
-    pub max_threads: usize,
+    pub max_subagents: usize,
     pub max_depth: usize,
-    pub max_parallel_readonly: usize,
-    pub max_parallel_write: usize,
-    pub max_background_threads: usize,
-    pub max_spawn_fanout_per_turn: usize,
-    pub max_agent_tokens_per_task: u64,
 }
 
 impl AgentBudgetPolicy {
     #[must_use]
     pub fn from_root_config(root_config: &sigil_kernel::RootConfig) -> Self {
         let task = &root_config.task;
-        let max_threads = task.max_child_sessions.max(1);
-        let default_ro = max_threads.clamp(1, 3);
-        let max_parallel_readonly = task.max_parallel_readonly.unwrap_or(default_ro);
-        let max_spawn_fanout_per_turn = task
-            .max_spawn_fanout_per_turn
-            .unwrap_or(max_threads.clamp(1, 4));
-        let max_agent_tokens_per_task = task.max_agent_tokens_per_task.unwrap_or(200_000);
         Self {
-            max_threads,
+            max_subagents: task.max_subagents,
             max_depth: 1,
-            max_parallel_readonly,
-            max_parallel_write: task.max_parallel_write.unwrap_or(1),
-            max_background_threads: task
-                .max_background_threads
-                .unwrap_or(max_threads.clamp(1, 2)),
-            max_spawn_fanout_per_turn,
-            max_agent_tokens_per_task,
         }
     }
 
     fn hash(&self) -> Result<String> {
         hash_json(&json!({
-            "max_threads": self.max_threads,
+            "max_subagents": self.max_subagents,
             "max_depth": self.max_depth,
-            "max_parallel_readonly": self.max_parallel_readonly,
-            "max_parallel_write": self.max_parallel_write,
-            "max_background_threads": self.max_background_threads,
-            "max_spawn_fanout_per_turn": self.max_spawn_fanout_per_turn,
-            "max_agent_tokens_per_task": self.max_agent_tokens_per_task,
         }))
     }
 }
@@ -106,7 +82,6 @@ pub struct AgentSupervisor {
 #[derive(Debug, Default)]
 struct AgentSupervisorState {
     active_threads: BTreeMap<AgentThreadId, ActiveAgentThread>,
-    spawn_fanout_this_turn: usize,
     task_token_usage: BTreeMap<TaskId, u64>,
 }
 
@@ -114,7 +89,6 @@ struct AgentSupervisorState {
 struct ActiveAgentThread {
     profile_id: AgentProfileId,
     attempt_id: AgentRunAttemptId,
-    role: AgentRole,
     background: bool,
     mailbox_tx: Option<mpsc::Sender<AgentMailboxMessage>>,
 }
@@ -232,17 +206,6 @@ impl AgentSupervisor {
             .state
             .lock()
             .map_err(|_| "agent supervisor state lock poisoned".to_owned())?;
-        let background_count = state
-            .active_threads
-            .values()
-            .filter(|thread| thread.background)
-            .count();
-        if background_count >= self.budget.max_background_threads {
-            return Err(format!(
-                "background agent budget exceeded: [task].max_background_threads={}",
-                self.budget.max_background_threads
-            ));
-        }
         let Some(thread_id) = state
             .active_threads
             .iter()
@@ -257,11 +220,7 @@ impl AgentSupervisor {
         Ok(thread_id)
     }
 
-    pub fn reset_turn_budget(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.spawn_fanout_this_turn = 0;
-        }
-    }
+    pub fn reset_turn_budget(&self) {}
 
     #[must_use]
     pub fn active_profile_ids(&self) -> Vec<AgentProfileId> {
@@ -624,14 +583,6 @@ impl AgentSupervisor {
         let current_tokens = *state.task_token_usage.get(task_id).unwrap_or(&0);
         let total_tokens = current_tokens.saturating_add(usage.total_tokens);
         state.task_token_usage.insert(task_id.clone(), total_tokens);
-        if total_tokens > self.budget.max_agent_tokens_per_task {
-            bail!(
-                "agent token budget exceeded: task_id={} total_tokens={} max_agent_tokens_per_task={}",
-                task_id.as_str(),
-                total_tokens,
-                self.budget.max_agent_tokens_per_task
-            );
-        }
         Ok(())
     }
 
@@ -802,8 +753,8 @@ impl AgentSupervisor {
         thread_id: &AgentThreadId,
         attempt_id: &AgentRunAttemptId,
         profile_id: &AgentProfileId,
-        task_id: &TaskId,
-        role: AgentRole,
+        _task_id: &TaskId,
+        _role: AgentRole,
         invocation_mode: AgentInvocationMode,
         parent_depth: usize,
         mailbox_tx: Option<mpsc::Sender<AgentMailboxMessage>>,
@@ -812,10 +763,10 @@ impl AgentSupervisor {
             .state
             .lock()
             .map_err(|_| "agent supervisor state lock poisoned".to_owned())?;
-        if state.active_threads.len() >= self.budget.max_threads {
+        if state.active_threads.len() >= self.budget.max_subagents {
             return Err(format!(
-                "agent thread budget exceeded: max_threads={}",
-                self.budget.max_threads
+                "agent thread budget exceeded: [task].max_subagents={}",
+                self.budget.max_subagents
             ));
         }
         if parent_depth >= self.budget.max_depth {
@@ -824,63 +775,11 @@ impl AgentSupervisor {
                 self.budget.max_depth
             ));
         }
-        let current_task_tokens = *state.task_token_usage.get(task_id).unwrap_or(&0);
-        if current_task_tokens >= self.budget.max_agent_tokens_per_task {
-            return Err(format!(
-                "agent token budget exceeded before spawn: task_id={} total_tokens={} max_agent_tokens_per_task={}",
-                task_id.as_str(),
-                current_task_tokens,
-                self.budget.max_agent_tokens_per_task
-            ));
-        }
-        if state.spawn_fanout_this_turn >= self.budget.max_spawn_fanout_per_turn {
-            return Err(format!(
-                "agent fan-out budget exceeded: max_spawn_fanout_per_turn={}",
-                self.budget.max_spawn_fanout_per_turn
-            ));
-        }
-        let background_count = state
-            .active_threads
-            .values()
-            .filter(|thread| thread.background)
-            .count();
-        if matches!(invocation_mode, AgentInvocationMode::Background)
-            && background_count >= self.budget.max_background_threads
-        {
-            return Err(format!(
-                "background agent budget exceeded: [task].max_background_threads={}",
-                self.budget.max_background_threads
-            ));
-        }
-        let readonly_count = state
-            .active_threads
-            .values()
-            .filter(|thread| thread.role == AgentRole::SubagentRead)
-            .count();
-        if role == AgentRole::SubagentRead && readonly_count >= self.budget.max_parallel_readonly {
-            let max = self.budget.max_parallel_readonly;
-            return Err(format!(
-                "readonly agent budget exceeded: [task].max_parallel_readonly={max}"
-            ));
-        }
-        let write_count = state
-            .active_threads
-            .values()
-            .filter(|thread| thread.role == AgentRole::SubagentWrite)
-            .count();
-        if role == AgentRole::SubagentWrite && write_count >= self.budget.max_parallel_write {
-            let max = self.budget.max_parallel_write;
-            return Err(format!(
-                "write agent budget exceeded: [task].max_parallel_write={max}"
-            ));
-        }
-        state.spawn_fanout_this_turn += 1;
         state.active_threads.insert(
             thread_id.clone(),
             ActiveAgentThread {
                 profile_id: profile_id.clone(),
                 attempt_id: attempt_id.clone(),
-                role,
                 background: matches!(invocation_mode, AgentInvocationMode::Background),
                 mailbox_tx,
             },

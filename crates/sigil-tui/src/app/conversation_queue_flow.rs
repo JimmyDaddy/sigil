@@ -1,6 +1,8 @@
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ConversationInputQueueId, ConversationInputStatus, ConversationQueueItemProjection,
-    ConversationQueueProjection,
+    ControlEntry, ConversationInputKind, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputStatus, ConversationInputTarget, ConversationQueueItemProjection,
+    ConversationQueueProjection, SessionLogEntry,
 };
 
 use crate::{
@@ -10,13 +12,110 @@ use crate::{
     ui::StatusKind,
 };
 
-use super::{AppAction, AppState, ComposerQueueAction, PaneFocus};
+use super::{AgentView, AppAction, AppState, ComposerQueueAction, PaneFocus};
 
 const COMPOSER_QUEUE_VISIBLE_ROWS: usize = 4;
+const OPTIMISTIC_QUEUE_ID_PREFIX: &str = "ui_pending_";
 
 impl AppState {
     pub(crate) fn conversation_queue_projection(&self) -> ConversationQueueProjection {
-        ConversationQueueProjection::from_entries(&self.session_browser.current_entries)
+        let Some(visible_target) = self.active_conversation_queue_target() else {
+            return ConversationQueueProjection::default();
+        };
+
+        let mut entries = self.session_browser.current_entries.clone();
+        for (index, queued) in self.composer.optimistic_queue_items.iter().enumerate() {
+            if optimistic_queue_item_confirmed_by_durable_projection(
+                queued,
+                index,
+                &self.composer.optimistic_queue_items,
+                &self.session_browser.current_entries,
+            ) {
+                continue;
+            }
+            entries.push(SessionLogEntry::Control(
+                ControlEntry::ConversationInputQueued(queued.clone()),
+            ));
+        }
+        let mut projection = ConversationQueueProjection::from_entries(&entries);
+        projection
+            .items
+            .retain(|item| item.queued.target == visible_target);
+        if !projection.items.iter().any(|item| {
+            projection
+                .next_dispatchable
+                .as_ref()
+                .is_some_and(|queue_id| item.queued.queue_id == *queue_id)
+        }) {
+            projection.next_dispatchable = None;
+        }
+        projection
+    }
+
+    pub(super) fn active_conversation_queue_target(&self) -> Option<ConversationInputTarget> {
+        match &self.active_agent_view {
+            AgentView::Main => Some(ConversationInputTarget::MainThread),
+            AgentView::Child { .. } => self.active_agent_thread_projection().map(|thread| {
+                ConversationInputTarget::AgentThread {
+                    thread_id: thread.thread_id,
+                }
+            }),
+        }
+    }
+
+    pub(super) fn active_conversation_queue_submission(
+        &self,
+    ) -> (ConversationInputKind, ConversationInputTarget) {
+        let target = self
+            .active_conversation_queue_target()
+            .unwrap_or(ConversationInputTarget::MainThread);
+        let kind = match &target {
+            ConversationInputTarget::MainThread => ConversationInputKind::Chat,
+            ConversationInputTarget::AgentThread { .. } => ConversationInputKind::AgentMessage,
+        };
+        (kind, target)
+    }
+
+    pub(super) fn push_optimistic_conversation_queue_item(
+        &mut self,
+        prompt: String,
+        kind: ConversationInputKind,
+        target: ConversationInputTarget,
+    ) {
+        let queue_id = self.next_optimistic_queue_id();
+        self.composer
+            .optimistic_queue_items
+            .push(ConversationInputQueuedEntry {
+                queue_id,
+                target,
+                kind,
+                prompt_hash: conversation_prompt_hash(&prompt),
+                prompt,
+                reasoning_effort: Some(self.runtime.reasoning_effort.clone()),
+                created_at_ms: None,
+            });
+        self.refresh_conversation_queue_selection();
+    }
+
+    pub(super) fn reconcile_optimistic_conversation_queue_items(&mut self) {
+        if self.composer.optimistic_queue_items.is_empty() {
+            return;
+        }
+
+        let optimistic_items = std::mem::take(&mut self.composer.optimistic_queue_items);
+        let mut retained = Vec::new();
+        for queued in optimistic_items {
+            let confirmed_count =
+                active_durable_queue_match_count(&queued, &self.session_browser.current_entries);
+            let retained_match_count = retained
+                .iter()
+                .filter(|retained| queued_inputs_match(retained, &queued))
+                .count();
+            if retained_match_count >= confirmed_count {
+                retained.push(queued);
+            }
+        }
+        self.composer.optimistic_queue_items = retained;
     }
 
     pub(crate) fn composer_queue_rows(&self) -> Vec<ComposerQueueRow> {
@@ -126,19 +225,19 @@ impl AppState {
     }
 
     pub(super) fn promote_selected_queue_item(&mut self) -> Option<AppAction> {
-        let queue_id = self.selected_queue_id()?;
+        let queue_id = self.selected_confirmed_queue_id()?;
         self.last_notice = Some("follow-up will run next".to_owned());
         Some(AppAction::PromoteQueuedConversationInput { queue_id })
     }
 
     pub(super) fn send_selected_queue_item_now(&mut self) -> Option<AppAction> {
-        let queue_id = self.selected_queue_id()?;
+        let queue_id = self.selected_confirmed_queue_id()?;
         self.last_notice = Some("interrupting current turn for follow-up".to_owned());
         Some(AppAction::SendQueuedConversationInputNow { queue_id })
     }
 
     pub(super) fn cancel_selected_queue_item(&mut self) -> Option<AppAction> {
-        let queue_id = self.selected_queue_id()?;
+        let queue_id = self.selected_confirmed_queue_id()?;
         self.last_notice = Some("follow-up removed".to_owned());
         Some(AppAction::CancelQueuedConversationInput { queue_id })
     }
@@ -147,7 +246,7 @@ impl AppState {
         &mut self,
         direction: QueueMoveDirection,
     ) -> Option<AppAction> {
-        let queue_id = self.selected_queue_id()?;
+        let queue_id = self.selected_confirmed_queue_id()?;
         Some(AppAction::MoveQueuedConversationInput {
             queue_id,
             direction,
@@ -158,6 +257,10 @@ impl AppState {
         let Some(item) = self.selected_queue_item() else {
             return false;
         };
+        if is_optimistic_queue_id(&item.queued.queue_id) {
+            self.last_notice = Some("follow-up is being saved".to_owned());
+            return false;
+        }
         self.composer.queue_edit_target = Some(item.queued.queue_id.clone());
         self.set_input_and_cursor(item.queued.prompt.clone());
         self.active_pane = PaneFocus::Composer;
@@ -307,6 +410,15 @@ impl AppState {
             .map(|item| item.queued.queue_id.clone())
     }
 
+    fn selected_confirmed_queue_id(&mut self) -> Option<ConversationInputQueueId> {
+        let queue_id = self.selected_queue_id()?;
+        if is_optimistic_queue_id(&queue_id) {
+            self.last_notice = Some("follow-up is being saved".to_owned());
+            return None;
+        }
+        Some(queue_id)
+    }
+
     fn selected_queue_item(&self) -> Option<ConversationQueueItemProjection> {
         self.conversation_queue_projection()
             .items
@@ -334,10 +446,17 @@ impl AppState {
         } else {
             self.queue_id_for_target(target)
         };
-        queue_id.map(build).or_else(|| {
-            self.last_notice = Some("queue item not found".to_owned());
-            None
-        })
+        match queue_id {
+            Some(queue_id) if is_optimistic_queue_id(&queue_id) => {
+                self.last_notice = Some("follow-up is being saved".to_owned());
+                None
+            }
+            Some(queue_id) => Some(build(queue_id)),
+            None => {
+                self.last_notice = Some("queue item not found".to_owned());
+                None
+            }
+        }
     }
 
     fn queue_id_for_target(&self, target: &str) -> Option<ConversationInputQueueId> {
@@ -371,6 +490,64 @@ impl AppState {
                     .contains(&normalized)
         })
     }
+
+    fn next_optimistic_queue_id(&mut self) -> ConversationInputQueueId {
+        loop {
+            let next = self.composer.next_optimistic_queue_id;
+            self.composer.next_optimistic_queue_id =
+                self.composer.next_optimistic_queue_id.saturating_add(1);
+            let candidate = format!("{OPTIMISTIC_QUEUE_ID_PREFIX}{next}");
+            if let Ok(queue_id) = ConversationInputQueueId::new(&candidate) {
+                return queue_id;
+            }
+        }
+    }
+}
+
+fn optimistic_queue_item_confirmed_by_durable_projection(
+    queued: &ConversationInputQueuedEntry,
+    index: usize,
+    optimistic_items: &[ConversationInputQueuedEntry],
+    durable_entries: &[SessionLogEntry],
+) -> bool {
+    let confirmed_count = active_durable_queue_match_count(queued, durable_entries);
+    let previous_optimistic_match_count = optimistic_items
+        .iter()
+        .take(index)
+        .filter(|candidate| queued_inputs_match(candidate, queued))
+        .count();
+    previous_optimistic_match_count < confirmed_count
+}
+
+fn active_durable_queue_match_count(
+    queued: &ConversationInputQueuedEntry,
+    entries: &[SessionLogEntry],
+) -> usize {
+    ConversationQueueProjection::from_entries(entries)
+        .items
+        .iter()
+        .filter(|item| queued_inputs_match(&item.queued, queued))
+        .count()
+}
+
+fn queued_inputs_match(
+    left: &ConversationInputQueuedEntry,
+    right: &ConversationInputQueuedEntry,
+) -> bool {
+    left.target == right.target
+        && left.kind == right.kind
+        && left.prompt == right.prompt
+        && left.reasoning_effort == right.reasoning_effort
+}
+
+fn is_optimistic_queue_id(queue_id: &ConversationInputQueueId) -> bool {
+    queue_id.as_str().starts_with(OPTIMISTIC_QUEUE_ID_PREFIX)
+}
+
+fn conversation_prompt_hash(prompt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prompt.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn queue_slash_options() -> [(&'static str, &'static str, &'static str); 5] {

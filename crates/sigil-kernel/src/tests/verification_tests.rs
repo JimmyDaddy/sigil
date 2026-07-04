@@ -15,16 +15,16 @@ use crate::{
     FileMetadataPlatform, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
     PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
     PluginHookKind, PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream,
-    PluginVerificationHookReceiptRequest, ReadinessInput, ReadinessProjectionMode, ReadinessReason,
-    ReceiptStatus, RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session,
-    SessionLogEntry, SessionStreamRecord, SnapshotEntryState, ToolEffect,
-    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckConfig,
-    VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
-    VerificationConfig, VerificationPolicy, VerificationReceipt, VerificationScope,
-    VerificationSkipDecision, VerificationStaleCause, VerificationStaleReason,
-    VerificationStateProjection, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceMutationEvidence,
-    WorkspaceSnapshotEntry, WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
+    PluginVerificationHookReceiptRequest, ReadinessInput, ReadinessReason, ReceiptStatus,
+    RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session, SessionLogEntry,
+    SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationAutoRunPolicy,
+    VerificationBinding, VerificationCheckConfig, VerificationCheckRunEntry,
+    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationConfig,
+    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationSkipDecision,
+    VerificationStaleCause, VerificationStaleReason, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceMutationEvidence, WorkspaceSnapshotEntry,
+    WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
     build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
     record_plugin_verification_hook_receipt, run_verification_check, session::ControlEntry,
@@ -408,17 +408,13 @@ fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
         },
     )?;
     assert_eq!(global_policy.source, CheckDiscoverySource::CiConfig);
-    let legacy_default_source: super::TrustedCheckSpec =
-        serde_json::from_value(serde_json::json!({
-            "check_spec": global_policy.check_spec,
-            "promoted_by": { "kind": "global_policy", "policy_event_id": "event-global-policy" },
-            "approval_event_id": null,
-            "sandbox_decision_id": null
-        }))?;
-    assert_eq!(
-        legacy_default_source.source,
-        CheckDiscoverySource::UserConfirmed
-    );
+    let default_source: super::TrustedCheckSpec = serde_json::from_value(serde_json::json!({
+        "check_spec": global_policy.check_spec,
+        "promoted_by": { "kind": "global_policy", "policy_event_id": "event-global-policy" },
+        "approval_event_id": null,
+        "sandbox_decision_id": null
+    }))?;
+    assert_eq!(default_source.source, CheckDiscoverySource::UserConfirmed);
 
     let check = check_spec("cargo-test");
     let receipt = verification_receipt(
@@ -605,22 +601,6 @@ fn readiness_reducer_terminal_and_trust_edges_are_explicit() {
         reason,
         ReadinessReason::PendingCheckReducedForTerminalRun { .. }
     )));
-
-    let mut legacy = ReadinessInput::new_run(
-        RunStatus::Completed,
-        policy_with_checks(vec![check_spec("cargo-test")]),
-    );
-    legacy.projection_mode = ReadinessProjectionMode::LegacyProjection;
-    let legacy_eval = evaluate_readiness(&legacy);
-    assert_eq!(
-        legacy_eval.verification_verdict,
-        VerificationVerdict::NotEvaluated
-    );
-    assert!(
-        legacy_eval
-            .reasons
-            .contains(&ReadinessReason::LegacyEvidenceUnavailable)
-    );
 }
 
 #[test]
@@ -752,9 +732,8 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
 
     let stored_events = JsonlSessionStore::read_event_records(&store_path)?
         .into_iter()
-        .filter_map(|record| match record {
-            SessionStreamRecord::Stored(event) => Some(event),
-            SessionStreamRecord::Legacy { .. } => None,
+        .map(|record| match record {
+            SessionStreamRecord::Stored(event) => event,
         })
         .collect::<Vec<_>>();
     let event_types = stored_events
@@ -1110,7 +1089,7 @@ fn sandbox_required_policy_rejects_receipt_without_matching_backend_binding() {
     input.current_workspace_snapshot_id = Some(snapshot.clone());
     input.workspace_knowledge = WorkspaceKnowledge::Clean(1);
     input.verification_receipts.push(verification_receipt(
-        "receipt-legacy",
+        "receipt-unbound",
         &check,
         &snapshot,
         12,
@@ -1118,14 +1097,14 @@ fn sandbox_required_policy_rejects_receipt_without_matching_backend_binding() {
         false,
     ));
 
-    let legacy_evaluation = evaluate_readiness(&input);
+    let unbound_evaluation = evaluate_readiness(&input);
 
     assert_eq!(
-        legacy_evaluation.verification_verdict,
+        unbound_evaluation.verification_verdict,
         VerificationVerdict::Missing
     );
     assert!(
-        legacy_evaluation
+        unbound_evaluation
             .required_actions
             .contains(&RequiredAction::RunCheck {
                 check_spec_id: "cargo-test".to_owned()
@@ -1137,7 +1116,7 @@ fn sandbox_required_policy_rejects_receipt_without_matching_backend_binding() {
         .binding
         .execution_backend_capabilities = Some(ExecutionBackendCapabilities::default());
     input.verification_receipts[0].binding.execution_network =
-        ExecutionNetworkReceipt::unknown("legacy local receipt");
+        ExecutionNetworkReceipt::unknown("local receipt");
     input.verification_receipts[0].binding.sandbox_profile_hash =
         super::sandbox_profile_hash_for_execution(
             SandboxProfileRequirement::Sandboxed,
@@ -2032,17 +2011,6 @@ fn terminal_run_never_persists_pending_or_not_evaluated_for_new_runs() {
     assert_eq!(
         pending_eval.verification_verdict,
         VerificationVerdict::Inconclusive
-    );
-
-    let legacy = ReadinessInput {
-        projection_mode: ReadinessProjectionMode::LegacyProjection,
-        ..ReadinessInput::new_run(RunStatus::Completed, policy_with_checks(vec![check]))
-    };
-    let legacy_eval = evaluate_readiness(&legacy);
-
-    assert_eq!(
-        legacy_eval.verification_verdict,
-        VerificationVerdict::NotEvaluated
     );
 }
 

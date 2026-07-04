@@ -19,8 +19,8 @@ use crate::{
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
     ConversationInputTarget, DurableDomainEvent, DurableEventType, EventClass, EventSyncClass,
-    EvidenceReceipt, EvidenceScope, LegacyEvent, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
-    McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
+    EvidenceReceipt, EvidenceScope, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, McpElicitationDecision,
+    McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
     PlanApprovedEntry, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
     PluginTrustEntry, PrefixSnapshot, ProjectionApplyDecision, ProjectionCursor,
@@ -72,21 +72,6 @@ fn stored_event_checksum_is_canonical_and_roundtrips() {
     assert_eq!(parsed.record_checksum, event.record_checksum);
     assert!(parsed.record_checksum.starts_with("sha256:jcs-v1:"));
     assert_eq!(parsed, event);
-}
-
-#[test]
-fn stored_event_new_rejects_non_appendable_legacy_event_type() {
-    let error = StoredEvent::new(
-        DurableEventType::Legacy,
-        EventClass::NonCritical,
-        "event-legacy".to_owned(),
-        "session-1".to_owned(),
-        1,
-        json!({}),
-    )
-    .expect_err("legacy envelopes are replay-only and cannot be appended");
-
-    assert!(error.to_string().contains("cannot be appended"));
 }
 
 #[test]
@@ -232,7 +217,7 @@ fn stored_event_unknown_class_rules_fail_closed_when_required() {
 }
 
 #[test]
-fn typed_stored_event_decode_handles_unknown_and_legacy_boundaries() {
+fn typed_stored_event_decode_handles_unknown_boundaries() {
     let unknown = StoredEvent::new_raw(
         "new_noncritical_event",
         EventClass::NonCritical,
@@ -259,18 +244,6 @@ fn typed_stored_event_decode_handles_unknown_and_legacy_boundaries() {
     .expect("critical unknown event should serialize");
     let error = decode_typed_stored_event(critical).expect_err("critical unknown should fail");
     assert!(error.to_string().contains("unknown critical event"));
-
-    let legacy = StoredEvent::new_raw(
-        DurableEventType::Legacy.as_str(),
-        EventClass::Critical,
-        "event-legacy-typed".to_owned(),
-        "session-1".to_owned(),
-        3,
-        json!({}),
-    )
-    .expect("legacy event envelope can be constructed for decode validation");
-    let error = decode_typed_stored_event(legacy).expect_err("legacy should not decode from v2");
-    assert!(error.to_string().contains("upcast-only"));
 }
 
 #[test]
@@ -675,29 +648,8 @@ fn typed_event_decode_covers_other_event_fallbacks() {
 }
 
 #[test]
-fn stored_event_decode_rejects_legacy_stored_event() {
-    let event = StoredEvent::new_raw(
-        DurableEventType::Legacy.as_str(),
-        EventClass::Critical,
-        "event-legacy".to_owned(),
-        "session-1".to_owned(),
-        1,
-        json!({}),
-    )
-    .expect("legacy event envelope can be constructed for decode validation");
-
-    let error = decode_stored_event(event).expect_err("legacy event should not decode from v2");
-
-    assert!(error.to_string().contains("upcast-only"));
-}
-
-#[test]
 fn stored_event_decode_covers_every_known_domain_variant() {
-    for event_type in ALL_DURABLE_EVENT_TYPES
-        .iter()
-        .copied()
-        .filter(|event_type| *event_type != DurableEventType::Legacy)
-    {
+    for event_type in ALL_DURABLE_EVENT_TYPES.iter().copied() {
         let event_class = event_type
             .expected_event_class()
             .expect("known durable event type should have expected class");
@@ -725,17 +677,6 @@ fn stored_event_decode_covers_every_known_domain_variant() {
             Some(event_type.as_str())
         );
     }
-    assert!(
-        DurableDomainEvent::Legacy(LegacyEvent {
-            event_id: "event-legacy".to_owned(),
-            session_id: "session-legacy".to_owned(),
-            stream_sequence: 1,
-            raw_line_hash: "sha256:legacy".to_owned(),
-            payload: json!({ "legacy": true }),
-        })
-        .payload()
-        .is_none()
-    );
     assert_eq!(
         DurableDomainEvent::CheckFinished(crate::event::DomainPayload {
             event_version: 1,
@@ -759,7 +700,7 @@ fn stored_event_decode_covers_every_known_domain_variant() {
 }
 
 #[test]
-fn stored_event_sync_class_handles_unknown_and_non_appendable_events() {
+fn stored_event_sync_class_handles_unknown_events() {
     let unknown = StoredEvent::new_raw(
         "future_noncritical_event",
         EventClass::NonCritical,
@@ -791,23 +732,6 @@ fn stored_event_sync_class_handles_unknown_and_non_appendable_events() {
             .expect_err("critical unknown events fail closed")
             .to_string()
             .contains("unknown critical event")
-    );
-
-    let legacy = StoredEvent::new_raw(
-        DurableEventType::Legacy.as_str(),
-        EventClass::Critical,
-        "event-legacy".to_owned(),
-        "session-1".to_owned(),
-        3,
-        json!({}),
-    )
-    .expect("raw legacy envelope should build for compatibility tests");
-    assert!(
-        legacy
-            .sync_class()
-            .expect_err("legacy is upcast-only")
-            .to_string()
-            .contains("cannot be appended")
     );
 }
 
@@ -853,11 +777,6 @@ fn stored_event_rejects_oversized_payload() {
 #[test]
 fn durable_event_sync_mapping_covers_all_appendable_events() {
     for event_type in ALL_DURABLE_EVENT_TYPES {
-        if *event_type == DurableEventType::Legacy {
-            assert!(event_type.sync_class().is_none());
-            assert!(!event_type.appendable());
-            continue;
-        }
         assert!(
             event_type.sync_class().is_some(),
             "{} should have a sync class",

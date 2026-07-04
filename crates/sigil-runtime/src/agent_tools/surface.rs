@@ -358,10 +358,8 @@ impl AgentTool {
             format!("tool_scope: {}", tool_scope_summary(&profile.tool_scope)),
             format!("mcp_servers: {}", profile.mcp_servers.len()),
             format!(
-                "budget: max_threads={} max_fanout_per_turn={} max_tokens_per_agent={}",
-                self.surface.budget.max_threads,
-                self.surface.budget.max_spawn_fanout_per_turn,
-                self.surface.budget.max_agent_tokens_per_task
+                "budget: max_subagents={}",
+                self.surface.budget.max_subagents
             ),
         ]
         .join("\n");
@@ -402,7 +400,6 @@ impl AgentToolResolvedProfileExt for crate::ResolvedAgentProfile {
             sigil_kernel::AgentProfileSource::Plugin { .. } => "plugin",
             sigil_kernel::AgentProfileSource::Compatibility { .. } => "compatibility",
             sigil_kernel::AgentProfileSource::System => "system",
-            sigil_kernel::AgentProfileSource::LegacyTask => "legacy_task",
             sigil_kernel::AgentProfileSource::Unknown => "unknown",
         }
     }

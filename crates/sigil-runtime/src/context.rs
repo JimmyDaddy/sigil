@@ -1,15 +1,23 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
-use sigil_code_intel::context::{CodeContextBuilder, CodeContextHit};
+use anyhow::{Context, Result, bail};
+use sigil_code_intel::context::{
+    CodeContextBuilder, CodeContextHit, LspContextSnapshot, LspContextSnapshotStatus, RepoMapLite,
+    RepoMapLiteOptions, RepoSourceFileRef,
+};
+use sigil_code_intel::service::{CodeDiagnostic, CodeLocation, CodeSymbol};
 use sigil_kernel::{
-    ContextInclusionReason, ContextItem, ContextSensitivity, PluginHookContextItems,
-    PluginHookContextOptions, PluginHookOutputEnvelope, RuntimeContextCandidates, TaskMemoryV1,
-    plugin_hook_output_context_items, task_memory_context_items,
+    ContextBodyRef, ContextInclusionReason, ContextItem, ContextScoreComponent,
+    ContextScoreComponentKind, ContextSensitivity, ContextSource, ContextTrustLevel,
+    DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES, PluginHookContextItems, PluginHookContextOptions,
+    PluginHookOutputEnvelope, PluginTrustDecision, RuntimeContextCandidates, TaskMemoryV1,
+    estimate_context_token_cost, plugin_hook_output_context_items, task_memory_context_items,
+    validate_context_render_snippet,
 };
 
 const REPO_CONTEXT_MAX_FILES_SCANNED: usize = 160;
@@ -18,12 +26,357 @@ const REPO_CONTEXT_MAX_BYTES_PER_FILE: usize = 8 * 1024;
 const SOURCE_CONTEXT_MAX_FILES_SCANNED: usize = 640;
 const SOURCE_CONTEXT_MAX_INDEX_BYTES_PER_FILE: usize = 192 * 1024;
 const REPO_CONTEXT_SNIPPET_MAX_BYTES: usize = 2 * 1024;
+const LSP_CONTEXT_MAX_ITEMS: usize = 6;
+const LSP_CONTEXT_MAX_ITEM_TOKENS: usize = 64;
+const LSP_CONTEXT_MAX_TOTAL_TOKENS: usize = 192;
+const LSP_CONTEXT_TIMEOUT_MS: u64 = 150;
+const PLUGIN_CONTEXT_MAX_ITEMS: usize = 2;
+const PLUGIN_CONTEXT_MAX_ITEM_TOKENS: usize = 128;
+const PLUGIN_CONTEXT_MAX_TOTAL_TOKENS: usize = 192;
+const PLUGIN_CONTEXT_TIMEOUT_MS: u64 = 50;
+const MCP_RESOURCE_CONTEXT_MAX_ITEMS: usize = 4;
+const MCP_RESOURCE_CONTEXT_MAX_ITEM_TOKENS: usize = 128;
+const MCP_RESOURCE_CONTEXT_MAX_TOTAL_TOKENS: usize = 256;
+const MCP_RESOURCE_CONTEXT_TIMEOUT_MS: u64 = 50;
+const MCP_RESOURCE_CONTEXT_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone)]
 struct RepoContextCandidate {
     score: f32,
+    score_breakdown: Vec<ContextScoreComponent>,
     inclusion_reason: ContextInclusionReason,
     snippet_terms: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RepoCandidateScore {
+    score: f32,
+    score_breakdown: Vec<ContextScoreComponent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WarmLspContextProvider {
+    snapshot: Option<LspContextSnapshot>,
+}
+
+impl WarmLspContextProvider {
+    #[must_use]
+    pub fn new(snapshot: Option<LspContextSnapshot>) -> Self {
+        Self { snapshot }
+    }
+}
+
+/// Runtime adapter for bounded plugin hook output that may contribute Context V0 rows.
+///
+/// The provider only admits output for manifests whose current trust decision is `Trusted`.
+/// Untrusted output is retained as excluded provenance and never gets a model-visible snippet.
+#[derive(Debug, Clone)]
+pub struct PluginHookContextProvider {
+    output: PluginHookOutputEnvelope,
+    options: PluginHookContextOptions,
+    trust_decision: PluginTrustDecision,
+}
+
+impl PluginHookContextProvider {
+    #[must_use]
+    pub fn new(
+        output: PluginHookOutputEnvelope,
+        options: PluginHookContextOptions,
+        trust_decision: PluginTrustDecision,
+    ) -> Self {
+        Self {
+            output,
+            options,
+            trust_decision,
+        }
+    }
+}
+
+/// Bounded MCP resource text supplied by an already-approved MCP resource read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpResourceContextItem {
+    pub server_name: String,
+    pub uri: String,
+    pub media_type: Option<String>,
+    pub content: String,
+    pub egress_decision: Option<String>,
+    pub redacted: bool,
+}
+
+impl McpResourceContextItem {
+    #[must_use]
+    pub fn new(
+        server_name: impl Into<String>,
+        uri: impl Into<String>,
+        media_type: Option<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            server_name: server_name.into(),
+            uri: uri.into(),
+            media_type,
+            content: content.into(),
+            egress_decision: None,
+            redacted: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_egress_decision(mut self, egress_decision: impl Into<String>) -> Self {
+        self.egress_decision = Some(egress_decision.into());
+        self
+    }
+
+    #[must_use]
+    pub fn redacted(mut self, redacted: bool) -> Self {
+        self.redacted = redacted;
+        self
+    }
+}
+
+/// Runtime adapter for already-read MCP resources.
+///
+/// This provider does not call an MCP server. MCP resource discovery/read still flows through the
+/// normal MCP tool permission, trust and egress path; this adapter only turns bounded text results
+/// into Context V0 candidates and re-applies context hard caps.
+#[derive(Debug, Clone)]
+pub struct McpResourceContextProvider {
+    resources: Vec<McpResourceContextItem>,
+}
+
+impl McpResourceContextProvider {
+    #[must_use]
+    pub fn new(resources: Vec<McpResourceContextItem>) -> Self {
+        Self { resources }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LspContextScore {
+    score: f32,
+    score_breakdown: Vec<ContextScoreComponent>,
+}
+
+/// One request-local context collection pass.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextSourceRequest<'a> {
+    pub workspace_root: &'a Path,
+    pub query: &'a str,
+}
+
+impl<'a> ContextSourceRequest<'a> {
+    #[must_use]
+    pub fn new(workspace_root: &'a Path, query: &'a str) -> Self {
+        Self {
+            workspace_root,
+            query,
+        }
+    }
+}
+
+/// Hard-cap and trust declaration for one runtime context source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextSourcePolicy {
+    pub max_items: usize,
+    pub max_item_tokens: usize,
+    pub max_total_tokens: usize,
+    pub trust_level: ContextTrustLevel,
+    pub default_sensitivity: ContextSensitivity,
+    pub requires_egress_decision: bool,
+    pub timeout_ms: u64,
+    pub allow_blocking_io: bool,
+}
+
+impl ContextSourcePolicy {
+    /// Validates that the provider declared the hard caps required by the default scheduler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a provider omits an item, token, or timeout cap.
+    pub fn validate(&self, source_id: &str) -> Result<()> {
+        if source_id.trim().is_empty() {
+            bail!("context source provider id must not be empty");
+        }
+        if self.max_items == 0 {
+            bail!("context source provider {source_id} must declare max_items");
+        }
+        if self.max_item_tokens == 0 {
+            bail!("context source provider {source_id} must declare max_item_tokens");
+        }
+        if self.max_total_tokens == 0 {
+            bail!("context source provider {source_id} must declare max_total_tokens");
+        }
+        if self.timeout_ms == 0 {
+            bail!("context source provider {source_id} must declare timeout_ms");
+        }
+        Ok(())
+    }
+}
+
+/// Runtime-owned adapter contract for bounded Context V0 sources.
+pub trait ContextSourceProvider {
+    fn source_id(&self) -> &'static str;
+    fn source_kind(&self) -> ContextSource;
+    fn policy(&self) -> ContextSourcePolicy;
+    fn collect(&self, request: &ContextSourceRequest<'_>) -> Result<RuntimeContextCandidates>;
+}
+
+impl ContextSourceProvider for WarmLspContextProvider {
+    fn source_id(&self) -> &'static str {
+        "warm-lsp-context"
+    }
+
+    fn source_kind(&self) -> ContextSource {
+        ContextSource::LspSymbol
+    }
+
+    fn policy(&self) -> ContextSourcePolicy {
+        ContextSourcePolicy {
+            max_items: LSP_CONTEXT_MAX_ITEMS,
+            max_item_tokens: LSP_CONTEXT_MAX_ITEM_TOKENS,
+            max_total_tokens: LSP_CONTEXT_MAX_TOTAL_TOKENS,
+            trust_level: ContextTrustLevel::UntrustedRepositoryData,
+            default_sensitivity: ContextSensitivity::Repository,
+            requires_egress_decision: false,
+            timeout_ms: LSP_CONTEXT_TIMEOUT_MS,
+            allow_blocking_io: false,
+        }
+    }
+
+    fn collect(&self, request: &ContextSourceRequest<'_>) -> Result<RuntimeContextCandidates> {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Ok(lsp_context_unavailable_candidates(
+                "unavailable",
+                "no warm lsp context snapshot",
+            ));
+        };
+        match &snapshot.status {
+            LspContextSnapshotStatus::Ready => Ok(lsp_context_candidates_from_snapshot(
+                snapshot,
+                request.query,
+            )),
+            LspContextSnapshotStatus::Unavailable { reason } => {
+                Ok(lsp_context_unavailable_candidates("unavailable", reason))
+            }
+            LspContextSnapshotStatus::TimedOut { timeout_ms } => {
+                Ok(lsp_context_unavailable_candidates(
+                    "timeout",
+                    &format!("warm lsp context timed out after {timeout_ms}ms"),
+                ))
+            }
+        }
+    }
+}
+
+impl ContextSourceProvider for PluginHookContextProvider {
+    fn source_id(&self) -> &'static str {
+        "plugin-hook-context"
+    }
+
+    fn source_kind(&self) -> ContextSource {
+        ContextSource::ExtensionProvided
+    }
+
+    fn policy(&self) -> ContextSourcePolicy {
+        ContextSourcePolicy {
+            max_items: PLUGIN_CONTEXT_MAX_ITEMS,
+            max_item_tokens: PLUGIN_CONTEXT_MAX_ITEM_TOKENS,
+            max_total_tokens: PLUGIN_CONTEXT_MAX_TOTAL_TOKENS,
+            trust_level: ContextTrustLevel::ExtensionProvided,
+            default_sensitivity: ContextSensitivity::Repository,
+            requires_egress_decision: false,
+            timeout_ms: PLUGIN_CONTEXT_TIMEOUT_MS,
+            allow_blocking_io: false,
+        }
+    }
+
+    fn collect(&self, _request: &ContextSourceRequest<'_>) -> Result<RuntimeContextCandidates> {
+        let mut context = plugin_hook_context_candidates(&self.output, self.options.clone())?;
+        if self.trust_decision != PluginTrustDecision::Trusted {
+            for item in &mut context.items {
+                item.inclusion_reason = ContextInclusionReason::ExcludedUntrustedWorkspace;
+            }
+            context.snippets.clear();
+        }
+        Ok(context)
+    }
+}
+
+impl ContextSourceProvider for McpResourceContextProvider {
+    fn source_id(&self) -> &'static str {
+        "mcp-resource-context"
+    }
+
+    fn source_kind(&self) -> ContextSource {
+        ContextSource::McpResource
+    }
+
+    fn policy(&self) -> ContextSourcePolicy {
+        ContextSourcePolicy {
+            max_items: MCP_RESOURCE_CONTEXT_MAX_ITEMS,
+            max_item_tokens: MCP_RESOURCE_CONTEXT_MAX_ITEM_TOKENS,
+            max_total_tokens: MCP_RESOURCE_CONTEXT_MAX_TOTAL_TOKENS,
+            trust_level: ContextTrustLevel::ToolObservation,
+            default_sensitivity: ContextSensitivity::External,
+            requires_egress_decision: true,
+            timeout_ms: MCP_RESOURCE_CONTEXT_TIMEOUT_MS,
+            allow_blocking_io: false,
+        }
+    }
+
+    fn collect(&self, _request: &ContextSourceRequest<'_>) -> Result<RuntimeContextCandidates> {
+        Ok(mcp_resource_context_candidates(&self.resources))
+    }
+}
+
+/// Collects and hard-caps all configured context source providers for one request.
+///
+/// # Errors
+///
+/// Returns an error only when a provider violates the scheduler contract by omitting hard caps.
+/// Provider collection errors and panics are converted into excluded provenance rows so ordinary
+/// request assembly can continue.
+pub fn collect_context_from_source_providers(
+    providers: &[&dyn ContextSourceProvider],
+    request: &ContextSourceRequest<'_>,
+) -> Result<RuntimeContextCandidates> {
+    let mut collected = RuntimeContextCandidates::new();
+    for provider in providers {
+        collected.extend(collect_context_from_source_provider(*provider, request)?);
+    }
+    Ok(collected)
+}
+
+/// Collects and hard-caps one context source provider for the default scheduler.
+///
+/// # Errors
+///
+/// Returns an error when the provider policy does not declare required hard caps.
+pub fn collect_context_from_source_provider(
+    provider: &dyn ContextSourceProvider,
+    request: &ContextSourceRequest<'_>,
+) -> Result<RuntimeContextCandidates> {
+    let source_id = provider.source_id();
+    let source_kind = provider.source_kind();
+    let policy = provider.policy();
+    policy.validate(source_id)?;
+
+    let result = catch_unwind(AssertUnwindSafe(|| provider.collect(request)));
+    match result {
+        Ok(Ok(candidates)) => enforce_context_source_policy(source_kind, &policy, candidates),
+        Ok(Err(error)) => Ok(context_source_failure_candidates(
+            source_id,
+            source_kind,
+            &policy,
+            &format!("{error:#}"),
+        )),
+        Err(_) => Ok(context_source_failure_candidates(
+            source_id,
+            source_kind,
+            &policy,
+            "context source provider panicked",
+        )),
+    }
 }
 
 /// Converts typed task memory into runtime context candidates with provenance preserved.
@@ -44,6 +397,97 @@ pub fn context_items_from_plugin_hook_output(
     options: PluginHookContextOptions,
 ) -> Result<PluginHookContextItems> {
     plugin_hook_output_context_items(output, options)
+}
+
+fn plugin_hook_context_candidates(
+    output: &PluginHookOutputEnvelope,
+    options: PluginHookContextOptions,
+) -> Result<RuntimeContextCandidates> {
+    let context = plugin_hook_output_context_items(output, options)?;
+    Ok(RuntimeContextCandidates {
+        items: context.items,
+        snippets: context.snippets,
+    })
+}
+
+fn mcp_resource_context_candidates(
+    resources: &[McpResourceContextItem],
+) -> RuntimeContextCandidates {
+    let mut context = RuntimeContextCandidates::new();
+    for (index, resource) in resources.iter().enumerate() {
+        let media_type_allowed = mcp_resource_media_type_allowed(resource.media_type.as_deref());
+        let bounded_content =
+            truncate_to_char_boundary(&resource.content, MCP_RESOURCE_CONTEXT_MAX_BYTES).to_owned();
+        let body = if media_type_allowed {
+            bounded_content
+        } else {
+            format!(
+                "MCP resource {} omitted because media type {} is unsupported",
+                resource.uri,
+                resource.media_type.as_deref().unwrap_or("unknown")
+            )
+        };
+        let id = format!(
+            "mcp-resource:{}:{}:{}",
+            index,
+            context_source_item_id_segment(&resource.server_name),
+            context_source_item_id_segment(&resource.uri)
+        );
+        let mut sensitivity = ContextSensitivity::External;
+        if resource.redacted {
+            sensitivity = ContextSensitivity::PotentialSecret;
+        }
+        let inclusion_reason = if media_type_allowed {
+            ContextInclusionReason::RetrievalHit
+        } else {
+            ContextInclusionReason::ExcludedUnsupported
+        };
+        let item = ContextItem {
+            id: id.clone(),
+            source: ContextSource::McpResource,
+            source_event_id: Some(format!("mcp:{}:{}", resource.server_name, resource.uri)),
+            trust_level: ContextTrustLevel::ToolObservation,
+            sensitivity,
+            egress_decision: resource.egress_decision.clone(),
+            repo_revision: None,
+            token_cost: estimate_context_token_cost(&body),
+            score: Some(0.45),
+            score_breakdown: vec![score_component(
+                ContextScoreComponentKind::RetrievalScore,
+                45.0,
+            )],
+            inclusion_reason,
+            body_ref: ContextBodyRef::inline(&body),
+        };
+        if media_type_allowed {
+            context.snippets.insert(id, body);
+        }
+        context.items.push(item);
+    }
+    context
+}
+
+fn mcp_resource_media_type_allowed(media_type: Option<&str>) -> bool {
+    let Some(media_type) = media_type else {
+        return true;
+    };
+    let normalized = media_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized.starts_with("text/")
+        || matches!(
+            normalized.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/toml"
+                | "application/markdown"
+        )
 }
 
 /// Builds bounded repository-file Context V0 candidates from a user query.
@@ -75,6 +519,10 @@ pub fn context_candidates_from_repo_query(
                 &mut candidates,
                 relative,
                 100.0,
+                vec![score_component(
+                    ContextScoreComponentKind::ExplicitPath,
+                    100.0,
+                )],
                 ContextInclusionReason::RetrievalHit,
                 BTreeSet::new(),
             );
@@ -116,6 +564,471 @@ pub fn context_candidates_from_repo_query(
     Ok(runtime)
 }
 
+/// Builds bounded Context V0 candidates from safe request-local sources.
+///
+/// Repository context is collected synchronously with existing bounded scans. LSP context is only
+/// attached from a caller-supplied warm snapshot; this function never starts or queries a language
+/// server during prompt assembly.
+///
+/// # Errors
+///
+/// Returns an error when the repository context helper cannot canonicalize the workspace root or
+/// when a context source provider violates the hard-cap contract.
+pub fn context_candidates_from_safe_sources(
+    workspace_root: &Path,
+    query: &str,
+    lsp_snapshot: Option<&LspContextSnapshot>,
+) -> Result<RuntimeContextCandidates> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(RuntimeContextCandidates::default());
+    }
+
+    let mut context = context_candidates_from_repo_query(workspace_root, query)?;
+    let lsp_provider = WarmLspContextProvider::new(lsp_snapshot.cloned());
+    context.extend(collect_context_from_source_provider(
+        &lsp_provider,
+        &ContextSourceRequest::new(workspace_root, query),
+    )?);
+    Ok(context)
+}
+
+fn enforce_context_source_policy(
+    source_kind: ContextSource,
+    policy: &ContextSourcePolicy,
+    mut candidates: RuntimeContextCandidates,
+) -> Result<RuntimeContextCandidates> {
+    let mut capped = RuntimeContextCandidates::new();
+    let mut included_count = 0usize;
+    let mut used_tokens = 0usize;
+
+    for mut item in candidates.items {
+        let mut snippet = candidates.snippets.remove(&item.id);
+        normalize_context_source_item(source_kind.clone(), policy, &mut item);
+
+        if item.inclusion_reason.is_included()
+            && !context_source_provider_accepts_item(&source_kind, &item.source)
+        {
+            item.inclusion_reason = ContextInclusionReason::ExcludedUnsupported;
+            snippet = None;
+        }
+        if item.inclusion_reason.is_included() && item.token_cost > policy.max_item_tokens {
+            item.inclusion_reason = ContextInclusionReason::ExcludedTokenBudget;
+            snippet = None;
+        }
+        if item.inclusion_reason.is_included() && included_count >= policy.max_items {
+            item.inclusion_reason = ContextInclusionReason::ExcludedTokenBudget;
+            snippet = None;
+        }
+        if item.inclusion_reason.is_included()
+            && item.token_cost > policy.max_total_tokens.saturating_sub(used_tokens)
+        {
+            item.inclusion_reason = ContextInclusionReason::ExcludedTokenBudget;
+            snippet = None;
+        }
+        if item.inclusion_reason.is_included()
+            && let Some(candidate_snippet) = snippet.as_deref()
+            && validate_context_render_snippet(
+                &item,
+                candidate_snippet,
+                DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES
+                    .min(policy.max_item_tokens.saturating_mul(512)),
+            )
+            .is_err()
+        {
+            item.inclusion_reason = ContextInclusionReason::ExcludedUnsupported;
+            snippet = None;
+        }
+        if item.inclusion_reason.is_included() && item.validate().is_err() {
+            item.inclusion_reason = ContextInclusionReason::ExcludedUnsupported;
+            snippet = None;
+        }
+
+        if item.inclusion_reason.is_included() {
+            included_count = included_count.saturating_add(1);
+            used_tokens = used_tokens.saturating_add(item.token_cost);
+            if let Some(snippet) = snippet {
+                capped.snippets.insert(item.id.clone(), snippet);
+            }
+        }
+        capped.items.push(item);
+    }
+
+    capped.items.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(capped)
+}
+
+fn context_source_provider_accepts_item(
+    provider_source: &ContextSource,
+    item_source: &ContextSource,
+) -> bool {
+    provider_source == item_source
+        || matches!(
+            (provider_source, item_source),
+            (
+                ContextSource::LspSymbol,
+                ContextSource::LspDiagnostic | ContextSource::LspReference
+            )
+        )
+}
+
+fn normalize_context_source_item(
+    source_kind: ContextSource,
+    policy: &ContextSourcePolicy,
+    item: &mut ContextItem,
+) {
+    if item.source == source_kind {
+        item.trust_level = policy.trust_level;
+    }
+    if item.sensitivity < policy.default_sensitivity {
+        item.sensitivity = policy.default_sensitivity;
+    }
+    if item.inclusion_reason.is_included()
+        && policy.requires_egress_decision
+        && item.egress_decision.is_none()
+    {
+        item.inclusion_reason = ContextInclusionReason::ExcludedEgressDenied;
+    }
+}
+
+fn context_source_failure_candidates(
+    source_id: &str,
+    source_kind: ContextSource,
+    policy: &ContextSourcePolicy,
+    message: &str,
+) -> RuntimeContextCandidates {
+    let body = format!("context source {} unavailable: {message}", source_id.trim());
+    let item = ContextItem {
+        id: format!(
+            "context-source:{}:failure",
+            context_source_item_id_segment(source_id)
+        ),
+        source: source_kind,
+        source_event_id: None,
+        trust_level: policy.trust_level,
+        sensitivity: policy.default_sensitivity,
+        egress_decision: None,
+        repo_revision: None,
+        token_cost: estimate_context_token_cost(&body),
+        score: None,
+        score_breakdown: Vec::new(),
+        inclusion_reason: ContextInclusionReason::ExcludedUnsupported,
+        body_ref: ContextBodyRef::inline(&body),
+    };
+    RuntimeContextCandidates {
+        items: vec![item],
+        snippets: BTreeMap::new(),
+    }
+}
+
+fn context_source_item_id_segment(source_id: &str) -> String {
+    let mut segment = source_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    segment.truncate(96);
+    if segment.is_empty() {
+        "unknown".to_owned()
+    } else {
+        segment
+    }
+}
+
+fn lsp_context_candidates_from_snapshot(
+    snapshot: &LspContextSnapshot,
+    query: &str,
+) -> RuntimeContextCandidates {
+    let profile = LspContextQueryProfile::from_query(query);
+    let builder = CodeContextBuilder::new();
+    let mut runtime = RuntimeContextCandidates::new();
+
+    for symbol in &snapshot.symbols {
+        let Some(score) = lsp_symbol_score(symbol, &profile) else {
+            continue;
+        };
+        push_lsp_hit(&mut runtime, builder.symbol_hit(symbol), score);
+    }
+    for diagnostic in &snapshot.diagnostics {
+        let Some(score) = lsp_diagnostic_score(diagnostic, &profile) else {
+            continue;
+        };
+        push_lsp_hit(&mut runtime, builder.diagnostic_hit(diagnostic), score);
+    }
+    for reference in &snapshot.references {
+        let Some(score) = lsp_reference_score(reference, &profile) else {
+            continue;
+        };
+        push_lsp_hit(&mut runtime, builder.reference_hit(reference), score);
+    }
+
+    if runtime.items.is_empty() {
+        return lsp_context_unavailable_candidates(
+            "miss",
+            "warm lsp context cache had no query-relevant rows",
+        );
+    }
+
+    runtime.items.sort_by(|left, right| {
+        right
+            .score
+            .unwrap_or_default()
+            .partial_cmp(&left.score.unwrap_or_default())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    runtime
+}
+
+fn push_lsp_hit(
+    runtime: &mut RuntimeContextCandidates,
+    mut hit: CodeContextHit,
+    score: LspContextScore,
+) {
+    hit.item.score = Some(score.score);
+    hit.item.score_breakdown = score.score_breakdown;
+    hit.item.inclusion_reason = ContextInclusionReason::WarmLspMatch;
+    runtime
+        .snippets
+        .insert(hit.item.id.clone(), hit.snippet.clone());
+    runtime.items.push(hit.item);
+}
+
+fn lsp_context_unavailable_candidates(kind: &str, reason: &str) -> RuntimeContextCandidates {
+    let body = format!("warm lsp context {kind}: {}", reason.trim());
+    let item = ContextItem {
+        id: format!("lsp-context:{kind}"),
+        source: ContextSource::LspSymbol,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: None,
+        token_cost: estimate_context_token_cost(&body),
+        score: None,
+        score_breakdown: Vec::new(),
+        inclusion_reason: ContextInclusionReason::ExcludedUnsupported,
+        body_ref: ContextBodyRef::inline(&body),
+    };
+    RuntimeContextCandidates {
+        items: vec![item],
+        snippets: BTreeMap::new(),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LspContextQueryProfile {
+    source_intent: bool,
+    diagnostic_intent: bool,
+    reference_intent: bool,
+    lexical_terms: BTreeSet<String>,
+    symbol_terms: BTreeSet<String>,
+}
+
+impl LspContextQueryProfile {
+    fn from_query(query: &str) -> Self {
+        let lexical_terms = lexical_query_terms(query);
+        let source_profile = SourceQueryProfile::from_query(query, &lexical_terms);
+        let lower = query.to_ascii_lowercase();
+        Self {
+            source_intent: source_profile.source_intent,
+            diagnostic_intent: contains_any(
+                &lower,
+                &[
+                    "diagnostic",
+                    "diagnostics",
+                    "error",
+                    "warning",
+                    "报错",
+                    "诊断",
+                ],
+            ),
+            reference_intent: contains_any(
+                &lower,
+                &["reference", "references", "usage", "usages", "调用", "引用"],
+            ),
+            lexical_terms: source_profile.lexical_terms,
+            symbol_terms: source_profile.symbol_terms,
+        }
+    }
+}
+
+fn lsp_symbol_score(
+    symbol: &CodeSymbol,
+    profile: &LspContextQueryProfile,
+) -> Option<LspContextScore> {
+    let name = symbol.name.to_ascii_lowercase();
+    let path = symbol.path.to_ascii_lowercase();
+    let container = symbol
+        .container_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut score_breakdown = Vec::new();
+
+    for term in &profile.symbol_terms {
+        if source_term_variants(&name)
+            .iter()
+            .any(|variant| variant == term)
+            || name == *term
+        {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::ExactSymbol,
+                120.0,
+            );
+        } else if name.contains(term) || container.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::ExactSymbol,
+                70.0,
+            );
+        }
+        if path.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::SourcePath,
+                44.0,
+            );
+        }
+    }
+
+    for term in &profile.lexical_terms {
+        if path.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::SourcePath,
+                16.0,
+            );
+        }
+        if name.contains(term) || container.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::RetrievalScore,
+                10.0,
+            );
+        }
+    }
+
+    if profile.source_intent && !score_breakdown.is_empty() {
+        push_score_component(
+            &mut score_breakdown,
+            ContextScoreComponentKind::RetrievalScore,
+            8.0,
+        );
+    }
+
+    let score = score_from_breakdown(&score_breakdown);
+    (score >= 10.0).then_some(LspContextScore {
+        score,
+        score_breakdown,
+    })
+}
+
+fn lsp_diagnostic_score(
+    diagnostic: &CodeDiagnostic,
+    profile: &LspContextQueryProfile,
+) -> Option<LspContextScore> {
+    if !profile.diagnostic_intent && !profile.source_intent {
+        return None;
+    }
+
+    let path = diagnostic.path.to_ascii_lowercase();
+    let message = diagnostic.message.to_ascii_lowercase();
+    let severity = diagnostic.severity.to_ascii_lowercase();
+    let mut score_breakdown = Vec::new();
+
+    if profile.diagnostic_intent {
+        push_score_component(
+            &mut score_breakdown,
+            ContextScoreComponentKind::RetrievalScore,
+            18.0,
+        );
+    }
+    for term in profile
+        .lexical_terms
+        .iter()
+        .chain(profile.symbol_terms.iter())
+    {
+        if path.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::SourcePath,
+                22.0,
+            );
+        }
+        if message.contains(term) || severity.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::RetrievalScore,
+                10.0,
+            );
+        }
+    }
+
+    let score = score_from_breakdown(&score_breakdown);
+    (score >= 18.0).then_some(LspContextScore {
+        score,
+        score_breakdown,
+    })
+}
+
+fn lsp_reference_score(
+    location: &CodeLocation,
+    profile: &LspContextQueryProfile,
+) -> Option<LspContextScore> {
+    if !profile.reference_intent && !profile.source_intent && profile.symbol_terms.is_empty() {
+        return None;
+    }
+
+    let path = location.path.to_ascii_lowercase();
+    let preview = location
+        .preview
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut score_breakdown = Vec::new();
+
+    if profile.reference_intent {
+        push_score_component(
+            &mut score_breakdown,
+            ContextScoreComponentKind::RetrievalScore,
+            16.0,
+        );
+    }
+    for term in profile
+        .lexical_terms
+        .iter()
+        .chain(profile.symbol_terms.iter())
+    {
+        if path.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::SourcePath,
+                20.0,
+            );
+        }
+        if preview.contains(term) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::RetrievalScore,
+                14.0,
+            );
+        }
+    }
+
+    let score = score_from_breakdown(&score_breakdown);
+    (score >= 16.0).then_some(LspContextScore {
+        score,
+        score_breakdown,
+    })
+}
+
 fn collect_lexical_file_candidates(
     workspace_root: &Path,
     terms: &BTreeSet<String>,
@@ -148,12 +1061,12 @@ fn collect_lexical_file_candidates(
             if should_skip_repo_context_path(relative) {
                 continue;
             }
-            let score = lexical_file_score(&path, relative, terms);
-            if score > 0.0 {
+            if let Some(scored) = lexical_file_score(&path, relative, terms) {
                 upsert_context_candidate(
                     candidates,
                     relative.to_path_buf(),
-                    score,
+                    scored.score,
+                    scored.score_breakdown,
                     ContextInclusionReason::RetrievalHit,
                     BTreeSet::new(),
                 );
@@ -176,54 +1089,28 @@ fn collect_source_symbol_candidates(
         return;
     }
 
-    let mut stack = source_scan_roots(workspace_root);
-    let mut scanned = 0usize;
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&path) else {
+    let Ok(repo_map) = sigil_code_intel::build_repo_map_lite(
+        workspace_root,
+        RepoMapLiteOptions {
+            max_files_scanned: SOURCE_CONTEXT_MAX_FILES_SCANNED,
+            max_index_bytes_per_file: SOURCE_CONTEXT_MAX_INDEX_BYTES_PER_FILE,
+        },
+    ) else {
+        return;
+    };
+
+    for source_file in &repo_map.source_files {
+        let Some(scored) = source_symbol_file_score(source_file, &repo_map, &profile) else {
             continue;
         };
-        let mut entries = entries.flatten().collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.path());
-        for entry in entries {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                if !should_skip_repo_context_dir(&path) {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if !file_type.is_file() || scanned >= SOURCE_CONTEXT_MAX_FILES_SCANNED {
-                continue;
-            }
-            scanned = scanned.saturating_add(1);
-            let Ok(relative) = path.strip_prefix(workspace_root) else {
-                continue;
-            };
-            if should_skip_repo_context_path(relative)
-                || relative
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    != Some("rs")
-            {
-                continue;
-            }
-            let Some(scored) = source_symbol_file_score(&path, relative, &profile) else {
-                continue;
-            };
-            upsert_context_candidate(
-                candidates,
-                relative.to_path_buf(),
-                scored.score,
-                scored.inclusion_reason,
-                scored.snippet_terms,
-            );
-        }
-        if scanned >= SOURCE_CONTEXT_MAX_FILES_SCANNED {
-            break;
-        }
+        upsert_context_candidate(
+            candidates,
+            source_file.path.clone(),
+            scored.score,
+            scored.score_breakdown,
+            scored.inclusion_reason,
+            scored.snippet_terms,
+        );
     }
 }
 
@@ -231,6 +1118,7 @@ fn upsert_context_candidate(
     candidates: &mut BTreeMap<PathBuf, RepoContextCandidate>,
     path: PathBuf,
     score: f32,
+    score_breakdown: Vec<ContextScoreComponent>,
     inclusion_reason: ContextInclusionReason,
     snippet_terms: BTreeSet<String>,
 ) {
@@ -239,6 +1127,7 @@ fn upsert_context_candidate(
         .and_modify(|existing| {
             if score > existing.score {
                 existing.score = score;
+                existing.score_breakdown = score_breakdown.clone();
                 existing.inclusion_reason = inclusion_reason.clone();
                 existing.snippet_terms = snippet_terms.clone();
             } else if score == existing.score && existing.snippet_terms.is_empty() {
@@ -247,6 +1136,7 @@ fn upsert_context_candidate(
         })
         .or_insert(RepoContextCandidate {
             score,
+            score_breakdown,
             inclusion_reason,
             snippet_terms,
         });
@@ -267,6 +1157,7 @@ fn repo_context_hit(
                 "secret-like repository file omitted from automatic context",
             );
         hit.item.score = Some(candidate.score);
+        hit.item.score_breakdown = candidate.score_breakdown;
         return hit;
     }
 
@@ -280,6 +1171,7 @@ fn repo_context_hit(
         });
     let mut hit = builder.repo_file_hit(relative_path, body);
     hit.item.score = Some(candidate.score);
+    hit.item.score_breakdown = candidate.score_breakdown;
     hit.item.inclusion_reason = candidate.inclusion_reason;
     hit
 }
@@ -319,26 +1211,45 @@ fn read_repo_context_snippet_around_terms(path: &Path, terms: &BTreeSet<String>)
     Some(snippet_window_around_byte(&text, position, REPO_CONTEXT_SNIPPET_MAX_BYTES).to_owned())
 }
 
-fn lexical_file_score(path: &Path, relative: &Path, terms: &BTreeSet<String>) -> f32 {
+fn lexical_file_score(
+    path: &Path,
+    relative: &Path,
+    terms: &BTreeSet<String>,
+) -> Option<RepoCandidateScore> {
     let relative_text = relative.to_string_lossy().to_lowercase();
-    let mut score = terms
+    let mut score_breakdown = Vec::new();
+    let path_score = terms
         .iter()
         .filter(|term| relative_text.contains(term.as_str()))
         .count() as f32
         * 10.0;
+    push_score_component(
+        &mut score_breakdown,
+        ContextScoreComponentKind::RetrievalScore,
+        path_score,
+    );
 
-    if score == 0.0 && !looks_like_text_file(relative) {
-        return 0.0;
+    if path_score == 0.0 && !looks_like_text_file(relative) {
+        return None;
     }
 
     if let Some(snippet) = read_repo_context_snippet(path) {
         let text = snippet.to_lowercase();
-        score += terms
+        let content_score = terms
             .iter()
             .filter(|term| text.contains(term.as_str()))
             .count() as f32;
+        push_score_component(
+            &mut score_breakdown,
+            ContextScoreComponentKind::RetrievalScore,
+            content_score,
+        );
     }
-    score
+    let score = score_from_breakdown(&score_breakdown);
+    (score > 0.0).then_some(RepoCandidateScore {
+        score,
+        score_breakdown,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -451,44 +1362,87 @@ fn source_query_term_role(term: &str) -> SourceQueryTermRole {
 #[derive(Debug, Clone)]
 struct SourceSymbolScore {
     score: f32,
+    score_breakdown: Vec<ContextScoreComponent>,
     inclusion_reason: ContextInclusionReason,
     snippet_terms: BTreeSet<String>,
 }
 
 fn source_symbol_file_score(
-    path: &Path,
-    relative: &Path,
+    source_file: &RepoSourceFileRef,
+    repo_map: &RepoMapLite,
     profile: &SourceQueryProfile,
 ) -> Option<SourceSymbolScore> {
+    let relative = &source_file.path;
     let relative_text = relative.to_string_lossy().to_ascii_lowercase();
     let file_stem = relative
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    let index = read_repo_context_index(path)?;
-    let index_text = index.to_ascii_lowercase();
-    let mut score = if profile.source_intent { 28.0 } else { 0.0 };
+    let index_text = source_file.indexed_text.to_ascii_lowercase();
+    let mut score_breakdown = Vec::new();
+    if profile.source_intent {
+        push_score_component(
+            &mut score_breakdown,
+            ContextScoreComponentKind::SourcePath,
+            28.0,
+        );
+    }
     let mut matched_symbol = false;
     let mut snippet_terms = BTreeSet::new();
+    let symbols = repo_map
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.path == *relative)
+        .collect::<Vec<_>>();
 
     for term in &profile.symbol_terms {
         if file_stem == *term {
-            score += 130.0;
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::ExactSymbol,
+                130.0,
+            );
             matched_symbol = true;
             snippet_terms.insert(term.clone());
         } else if file_stem.contains(term) {
-            score += 85.0;
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::ExactSymbol,
+                85.0,
+            );
             matched_symbol = true;
             snippet_terms.insert(term.clone());
         }
         if relative_text.contains(term) {
-            score += 70.0;
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::SourcePath,
+                70.0,
+            );
             matched_symbol = true;
             snippet_terms.insert(term.clone());
         }
         if index_text.contains(term) {
-            score += 95.0;
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::ExactSymbol,
+                95.0,
+            );
+            matched_symbol = true;
+            snippet_terms.insert(term.clone());
+        }
+        if symbols.iter().any(|symbol| {
+            source_term_variants(&symbol.name)
+                .iter()
+                .any(|variant| variant == term)
+                || symbol.name.to_ascii_lowercase().contains(term)
+        }) {
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::ExactSymbol,
+                150.0,
+            );
             matched_symbol = true;
             snippet_terms.insert(term.clone());
         }
@@ -496,11 +1450,19 @@ fn source_symbol_file_score(
 
     for term in &profile.lexical_terms {
         if relative_text.contains(term) {
-            score += 18.0;
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::SourcePath,
+                18.0,
+            );
             snippet_terms.insert(term.clone());
         }
         if index_text.contains(term) {
-            score += 4.0;
+            push_score_component(
+                &mut score_breakdown,
+                ContextScoreComponentKind::RetrievalScore,
+                4.0,
+            );
             snippet_terms.insert(term.clone());
         }
     }
@@ -511,9 +1473,12 @@ fn source_symbol_file_score(
             .to_str()
             .is_some_and(|value| value == "tests")
     }) {
-        score *= 0.45;
+        for component in &mut score_breakdown {
+            component.value *= 0.45;
+        }
     }
 
+    let score = score_from_breakdown(&score_breakdown);
     if score < 36.0 {
         return None;
     }
@@ -525,18 +1490,36 @@ fn source_symbol_file_score(
     };
     Some(SourceSymbolScore {
         score,
+        score_breakdown,
         inclusion_reason,
         snippet_terms,
     })
 }
 
-fn source_scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
-    let crates_root = workspace_root.join("crates");
-    if crates_root.is_dir() {
-        vec![crates_root]
-    } else {
-        vec![workspace_root.to_path_buf()]
+fn score_component(kind: ContextScoreComponentKind, value: f32) -> ContextScoreComponent {
+    ContextScoreComponent { kind, value }
+}
+
+fn push_score_component(
+    breakdown: &mut Vec<ContextScoreComponent>,
+    kind: ContextScoreComponentKind,
+    value: f32,
+) {
+    if value == 0.0 {
+        return;
     }
+    if let Some(component) = breakdown
+        .iter_mut()
+        .find(|component| component.kind == kind)
+    {
+        component.value += value;
+    } else {
+        breakdown.push(score_component(kind, value));
+    }
+}
+
+fn score_from_breakdown(breakdown: &[ContextScoreComponent]) -> f32 {
+    breakdown.iter().map(|component| component.value).sum()
 }
 
 fn read_repo_context_index(path: &Path) -> Option<String> {

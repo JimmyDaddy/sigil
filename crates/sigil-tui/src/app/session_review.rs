@@ -209,7 +209,6 @@ fn apply_readiness(readiness: &ReadinessEvaluatedEntry, current: &mut ReviewTurn
 
 fn session_entry_from_stream_record(record: &SessionStreamRecord) -> Option<SessionLogEntry> {
     match record {
-        SessionStreamRecord::Legacy { entry, .. } => Some((**entry).clone()),
         SessionStreamRecord::Stored(event) => event
             .payload
             .get("session_log_entry")

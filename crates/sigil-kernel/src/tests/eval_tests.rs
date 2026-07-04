@@ -1624,15 +1624,14 @@ fn attach_session_evidence(
     result.session_log_path = Some(session_log_path.to_path_buf());
     let mut last_event = None;
     for record in JsonlSessionStore::read_event_records(session_log_path)? {
-        if let SessionStreamRecord::Stored(event) = record {
-            if include(&event) {
-                result.evidence.push(EvalEvidenceRef::durable_event(
-                    event.event_type.clone(),
-                    &event.event_id,
-                ));
-            }
-            last_event = Some(event);
+        let SessionStreamRecord::Stored(event) = record;
+        if include(&event) {
+            result.evidence.push(EvalEvidenceRef::durable_event(
+                event.event_type.clone(),
+                &event.event_id,
+            ));
         }
+        last_event = Some(event);
     }
     result.durable_stream_cursor = last_event.as_ref().map(cursor_for_event);
     Ok(())

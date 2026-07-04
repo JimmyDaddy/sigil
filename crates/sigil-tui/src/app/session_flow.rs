@@ -247,8 +247,9 @@ impl AppState {
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.session_browser.current_entries = entries;
         self.mark_current_session_entries_changed();
-        self.refresh_conversation_queue_selection();
+        self.reconcile_optimistic_conversation_queue_items();
         self.refresh_active_agent_view_after_parent_sync();
+        self.refresh_conversation_queue_selection();
         self.refresh_usage_sidebar_cache();
     }
 
@@ -262,8 +263,9 @@ impl AppState {
         self.tool_preview_snapshots =
             restored_tool_preview_snapshot_index(&self.session_browser.current_entries);
         self.mark_current_session_entries_changed();
-        self.refresh_conversation_queue_selection();
+        self.reconcile_optimistic_conversation_queue_items();
         self.refresh_active_agent_view_after_parent_sync();
+        self.refresh_conversation_queue_selection();
         self.refresh_usage_sidebar_cache();
     }
 
@@ -1306,7 +1308,7 @@ pub(super) fn render_control_entry_line(control: &ControlEntry) -> String {
             record.compacted_message_count, record.retained_tail_message_count
         ),
         ControlEntry::PlanApproved(entry) => format!(
-            "[ctl] legacy plan grant v{} permission={} expires={} hash={}",
+            "[ctl] plan grant v{} permission={} expires={} hash={}",
             entry.plan_version,
             plan_approval_permission_label(entry.permission),
             plan_approval_expiry_label(&entry.expires),
@@ -1912,7 +1914,6 @@ fn required_action_label(action: &sigil_kernel::RequiredAction) -> String {
 
 fn readiness_reason_label(reason: &sigil_kernel::ReadinessReason) -> String {
     match reason {
-        sigil_kernel::ReadinessReason::LegacyEvidenceUnavailable => "legacy_evidence".to_owned(),
         sigil_kernel::ReadinessReason::NoVerificationRequired => {
             "no_verification_required".to_owned()
         }

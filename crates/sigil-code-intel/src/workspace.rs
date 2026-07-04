@@ -32,11 +32,11 @@ pub fn effective_server_plan(
     config: &CodeIntelligenceConfig,
     workspace_root: &Path,
 ) -> EffectiveServerPlan {
-    if !config.discovery.enabled {
+    if !config.auto_discover {
         return configured_or_default_plan(config);
     }
 
-    match discover_language_servers(workspace_root, config.discovery.report_missing) {
+    match discover_language_servers(workspace_root, config.report_missing) {
         Ok(discovered) => effective_server_plan_from_discovered(config, discovered),
         Err(error) => {
             let mut plan = configured_or_default_plan(config);
@@ -81,7 +81,7 @@ fn fallback_rust_analyzer_server() -> LanguageServerConfig {
 }
 
 pub fn config_enabled(config: &CodeIntelligenceConfig) -> bool {
-    config.enabled && config.startup != CodeIntelStartup::Off
+    config.enabled && config.server_startup != CodeIntelStartup::Off
 }
 
 pub fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf> {

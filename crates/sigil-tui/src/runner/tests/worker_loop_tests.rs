@@ -40,6 +40,9 @@ fn chat_agent_run_input_with_repo_context_attaches_repository_candidates() {
     assert!(input.runtime_context.items.iter().any(|item| {
         item.id == "repo-file:README.md" && matches!(item.source, ContextSource::RepositoryFile)
     }));
+    assert!(input.runtime_context.items.iter().any(|item| {
+        item.id == "lsp-context:unavailable" && matches!(item.source, ContextSource::LspSymbol)
+    }));
 }
 
 #[test]
@@ -79,7 +82,7 @@ fn materialize_task_verification_config_records_specs_policy_and_events() {
             effect: ToolEffect::ReadOnly,
         }],
     );
-    root_config.verification.scope_profile = sigil_kernel::VerificationScopeProfile::Node;
+    root_config.verification.scope.profile = sigil_kernel::VerificationScopeProfile::Node;
     let (tx, rx) = mpsc::channel();
     let mut handler = ChannelEventHandler::new(tx);
     let task_id = TaskId::new("task-1").expect("task id");

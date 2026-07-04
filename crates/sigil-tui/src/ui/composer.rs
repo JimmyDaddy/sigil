@@ -277,7 +277,7 @@ fn render_agent_row(
     let agent_bg = palette.surface_agent_panel;
     let selected = panel_focused && row.selected;
     let focus = row.focus_symbol(panel_focused);
-    let label = row.label.strip_prefix("agent ").unwrap_or(&row.label);
+    let label = &row.label;
     let detail = row.compact_detail();
     let label_text = pad_display_width(
         &truncate_display_width(label, COMPOSER_AGENT_LABEL_WIDTH),

@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use sigil_kernel::ReasoningEffort;
 
 pub const SIGIL_API_KEY_ENV: &str = "SIGIL_API_KEY";
-pub const LEGACY_DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
-pub const SIGIL_MODEL_ENV: &str = "SIGIL_MODEL";
 pub const SIGIL_BASE_URL_ENV: &str = "SIGIL_BASE_URL";
 pub const SIGIL_BETA_BASE_URL_ENV: &str = "SIGIL_BETA_BASE_URL";
 pub const SIGIL_ANTHROPIC_BASE_URL_ENV: &str = "SIGIL_ANTHROPIC_BASE_URL";
@@ -24,7 +22,12 @@ pub struct DeepSeekProviderConfig {
     pub beta_base_url: String,
     #[serde(default = "default_anthropic_base_url")]
     pub anthropic_base_url: String,
-    #[serde(default = "default_model")]
+    #[serde(
+        rename = "__runtime_model",
+        skip_serializing,
+        skip_deserializing,
+        default = "default_model"
+    )]
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -47,9 +50,6 @@ impl DeepSeekProviderConfig {
     pub fn resolved(self) -> Result<Self> {
         let mut resolved = self;
 
-        if let Some(value) = read_env_string(SIGIL_MODEL_ENV) {
-            resolved.model = value;
-        }
         if let Some(value) = read_env_string(SIGIL_BASE_URL_ENV) {
             resolved.base_url = value;
         }
@@ -68,9 +68,7 @@ impl DeepSeekProviderConfig {
         if let Some(value) = read_env_strict_tools_mode(SIGIL_STRICT_TOOLS_MODE_ENV)? {
             resolved.strict_tools_mode = value;
         }
-        if let Some(value) = read_env_string(SIGIL_API_KEY_ENV)
-            .or_else(|| read_env_string(LEGACY_DEEPSEEK_API_KEY_ENV))
-        {
+        if let Some(value) = read_env_string(SIGIL_API_KEY_ENV) {
             resolved.api_key = Some(value);
         }
 

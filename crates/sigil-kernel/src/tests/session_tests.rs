@@ -17,9 +17,9 @@ use crate::{
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
     ConversationInputStatusEntry, ConversationInputTarget, DomainEvent, DomainPayload,
     DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, ExecutionMutationProfile,
-    LegacyEvent, MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
-    MemoryLoadReport, MemorySnapshot, MutationEventRecorder, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
+    MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig, MemoryLoadReport,
+    MemorySnapshot, MutationEventRecorder, PlanApprovalExpiry, PlanApprovalPermission,
+    PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanSourceRef, PluginCapability, PluginManifestSnapshot,
     PluginTrustDecision, PluginTrustEntry, ProjectionCursor, ProviderContinuationState,
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
@@ -53,7 +53,7 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
   "summary": "{summary}",
   "steps": [
     {{
-      "id": "step-1",
+      "step_id": "step-1",
       "title": "{title}",
       "target_paths": ["{path}"]
     }}
@@ -98,6 +98,20 @@ fn memory_snapshot_count(entries: &[SessionLogEntry]) -> usize {
             )
         })
         .count()
+}
+
+fn stored_session_entry_line(entry: &SessionLogEntry, sequence: u64) -> Result<String> {
+    let event_type = super::session_entry_event_type(entry);
+    let event_class = super::session_entry_event_class(event_type);
+    let event = StoredEvent::new(
+        event_type,
+        event_class,
+        format!("event-{sequence}"),
+        "session-test".to_owned(),
+        sequence,
+        serde_json::json!({ "session_log_entry": entry }),
+    )?;
+    event.to_json_line()
 }
 
 fn test_tool_execution(status: ToolExecutionStatus) -> SessionLogEntry {
@@ -368,24 +382,22 @@ fn test_agent_thread_started_entry() -> AgentThreadStartedEntry {
 }
 
 #[test]
-fn jsonl_session_store_reads_legacy_v2_and_mixed_records() -> Result<()> {
+fn jsonl_session_store_reads_v2_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
-    fs::write(
-        &path,
-        format!("\n{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
     let store = JsonlSessionStore::new(&path)?;
 
+    let user_entry = SessionLogEntry::User(ModelMessage::user("canonical"));
+    let first = store.append_session_entry_event(&user_entry)?;
     let v2_entry =
         SessionLogEntry::Assistant(ModelMessage::assistant(Some("v2".to_owned()), Vec::new()));
     let stored = store.append_session_entry_event(&v2_entry)?;
 
     let records = JsonlSessionStore::read_event_records(&path)?;
     assert_eq!(records.len(), 2);
-    assert!(matches!(records[0], SessionStreamRecord::Legacy { .. }));
+    assert!(matches!(records[0], SessionStreamRecord::Stored(_)));
     assert!(matches!(records[1], SessionStreamRecord::Stored(_)));
+    assert_eq!(first.stream_sequence, 1);
     assert_eq!(stored.stream_sequence, 2);
 
     let entries = JsonlSessionStore::read_entries(&path)?;
@@ -399,12 +411,8 @@ fn jsonl_session_store_reads_legacy_v2_and_mixed_records() -> Result<()> {
 fn session_stream_records_replay_to_domain_events_for_projection() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
     let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user("canonical")))?;
     store.append_session_entry_event(&SessionLogEntry::Assistant(ModelMessage::assistant(
         Some("v2".to_owned()),
         Vec::new(),
@@ -425,7 +433,10 @@ fn session_stream_records_replay_to_domain_events_for_projection() -> Result<()>
         .collect::<Vec<_>>();
 
     assert_eq!(domain_events.len(), 3);
-    assert!(matches!(domain_events[0].event, DomainEvent::Legacy(_)));
+    assert!(matches!(
+        domain_events[0].event,
+        DomainEvent::UserMessageRecorded(_)
+    ));
     assert!(matches!(
         domain_events[1].event,
         DomainEvent::AssistantMessageRecorded(_)
@@ -505,26 +516,7 @@ fn jsonl_session_store_append_writes_v2_session_entries() -> Result<()> {
 }
 
 #[test]
-fn session_domain_event_helpers_cover_legacy_and_durable_only_events() -> Result<()> {
-    let legacy_entry = SessionLogEntry::Assistant(ModelMessage::assistant(
-        Some("legacy answer".to_owned()),
-        Vec::new(),
-    ));
-    let legacy = DomainEvent::Legacy(LegacyEvent {
-        event_id: "legacy-event".to_owned(),
-        session_id: "session-1".to_owned(),
-        stream_sequence: 1,
-        raw_line_hash: "sha256:legacy".to_owned(),
-        payload: serde_json::to_value(&legacy_entry)?,
-    });
-    let restored = super::session_entry_from_domain_event(&legacy)?;
-    match restored {
-        Some(SessionLogEntry::Assistant(message)) => {
-            assert_eq!(message.content.as_deref(), Some("legacy answer"));
-        }
-        other => panic!("expected legacy assistant entry, got {other:?}"),
-    }
-
+fn session_domain_event_helpers_cover_durable_only_events() -> Result<()> {
     let durable_only = DomainEvent::ToolExecutionStarted(DomainPayload {
         event_version: 1,
         payload: serde_json::json!({ "call_id": "call-1" }),
@@ -730,20 +722,24 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
     assert_eq!(expected_session_id.as_deref(), Some("session-helper"));
 
     let mut expected_session_id = None;
-    super::validate_stream_record_identity(1, 1, "session-legacy", 1, &mut expected_session_id)?;
-    assert_eq!(expected_session_id.as_deref(), Some("session-legacy"));
+    super::validate_stream_record_identity(1, 1, "session-canonical", 1, &mut expected_session_id)?;
+    assert_eq!(expected_session_id.as_deref(), Some("session-canonical"));
     Ok(())
 }
 
 #[test]
-fn session_entry_from_json_line_decodes_legacy_v2_and_skips_unknown_noncritical() -> Result<()> {
+fn session_entry_from_json_line_decodes_v2_and_skips_unknown_noncritical() -> Result<()> {
     assert!(JsonlSessionStore::session_entry_from_json_line("  \n  ")?.is_none());
 
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
-    let legacy_line = serde_json::to_string(&legacy_entry)?;
-    let decoded = JsonlSessionStore::session_entry_from_json_line(&legacy_line)?
-        .expect("legacy line should decode to session entry");
-    assert!(matches!(decoded, SessionLogEntry::User(_)));
+    let non_v2_entry = SessionLogEntry::User(ModelMessage::user("non-v2"));
+    let non_v2_line = serde_json::to_string(&non_v2_entry)?;
+    let error = JsonlSessionStore::session_entry_from_json_line(&non_v2_line)
+        .expect_err("non-v2 session entry lines should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to decode stored event from session JSONL line")
+    );
 
     let v2_entry =
         SessionLogEntry::Assistant(ModelMessage::assistant(Some("v2".to_owned()), Vec::new()));
@@ -765,7 +761,7 @@ fn session_entry_from_json_line_decodes_legacy_v2_and_skips_unknown_noncritical(
         "event-future".to_owned(),
         "session-1".to_owned(),
         2,
-        serde_json::json!({ "session_log_entry": legacy_entry }),
+        serde_json::json!({ "session_log_entry": non_v2_entry }),
     )?;
     assert!(JsonlSessionStore::session_entry_from_json_line(&future.to_json_line()?)?.is_none());
 
@@ -1225,23 +1221,6 @@ fn append_session_entry_event_uses_noncritical_class_for_compatibility_records()
 }
 
 #[test]
-fn append_event_rejects_non_appendable_legacy_event_type() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-
-    let error = store
-        .append_event(
-            DurableEventType::Legacy,
-            EventClass::Critical,
-            serde_json::json!({}),
-        )
-        .expect_err("legacy event type should not be appendable");
-
-    assert!(error.to_string().contains("cannot be appended"));
-    Ok(())
-}
-
-#[test]
 fn append_event_rejects_mismatched_known_event_class() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
@@ -1319,58 +1298,7 @@ fn writer_mode_loader_fails_when_session_file_is_locked() -> Result<()> {
 }
 
 #[test]
-fn legacy_ids_and_session_id_are_stable_after_v2_append() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    fs::write(
-        &path,
-        format!(
-            "\n{}\n{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("one")))?,
-            serde_json::to_string(&SessionLogEntry::Assistant(ModelMessage::assistant(
-                Some("two".to_owned()),
-                Vec::new(),
-            )))?,
-        ),
-    )?;
-
-    let before = JsonlSessionStore::read_event_records(&path)?;
-    let legacy_ids_before = before
-        .iter()
-        .map(|record| match record {
-            SessionStreamRecord::Legacy { event, .. } => {
-                (event.session_id.clone(), event.event_id.clone())
-            }
-            SessionStreamRecord::Stored(_) => unreachable!("only legacy before append"),
-        })
-        .collect::<Vec<_>>();
-
-    let store = JsonlSessionStore::new(&path)?;
-    store.append_event(
-        DurableEventType::ToolExecutionStarted,
-        EventClass::Critical,
-        serde_json::json!({"call_id": "call-1"}),
-    )?;
-    let after = JsonlSessionStore::read_event_records(&path)?;
-    let legacy_ids_after = after
-        .iter()
-        .take(2)
-        .map(|record| match record {
-            SessionStreamRecord::Legacy { event, .. } => {
-                (event.session_id.clone(), event.event_id.clone())
-            }
-            SessionStreamRecord::Stored(_) => unreachable!("legacy prefix should remain legacy"),
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(legacy_ids_after, legacy_ids_before);
-    assert!(matches!(after[2], SessionStreamRecord::Stored(_)));
-    assert_eq!(after[2].stream_sequence(), 3);
-    Ok(())
-}
-
-#[test]
-fn legacy_after_v2_fails_closed() -> Result<()> {
+fn non_v2_line_after_v2_fails_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -1383,18 +1311,12 @@ fn legacy_after_v2_fails_closed() -> Result<()> {
     writeln!(
         file,
         "{}",
-        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(
-            "legacy after v2"
-        )))?
+        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("raw after v2")))?
     )?;
 
     let error = JsonlSessionStore::read_event_records(&path)
-        .expect_err("legacy after v2 should fail closed");
-    assert!(
-        error
-            .to_string()
-            .contains("legacy session entry appears after v2")
-    );
+        .expect_err("non-v2 entry after v2 should fail closed");
+    assert!(error.to_string().contains("failed to parse stored event"));
     Ok(())
 }
 
@@ -1431,8 +1353,8 @@ fn append_event_assigns_local_sequence_without_global_ordering() -> Result<()> {
 fn append_event_reconciles_pending_tail_recovery_intent_before_append() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("ok")))?;
-    fs::write(&path, format!("{valid}\n"))?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
+    fs::write(&path, valid)?;
     let records = JsonlSessionStore::read_event_records(&path)?;
     let session_id = records[0].session_id().to_owned();
     let recovered_size = fs::metadata(&path)?.len();
@@ -1473,33 +1395,6 @@ fn append_event_reconciles_pending_tail_recovery_intent_before_append() -> Resul
         Some(3)
     );
     assert!(!super::tail_recovery_intent_path(&path).exists());
-    Ok(())
-}
-
-#[test]
-fn append_event_fallback_rejects_non_appendable_event_type() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
-
-    let error = store
-        .append_event(
-            DurableEventType::Legacy,
-            EventClass::Critical,
-            serde_json::json!({}),
-        )
-        .expect_err("legacy event type is not appendable");
-
-    assert!(
-        error
-            .to_string()
-            .contains("cannot be appended as a v2 event")
-    );
     Ok(())
 }
 
@@ -1552,10 +1447,10 @@ fn append_event_recovers_invalid_v2_tail_before_append() -> Result<()> {
 fn append_event_recovers_oversized_tail_record() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("prefix")))?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("prefix")), 1)?;
     fs::write(
         &path,
-        format!("{valid}\n{}", "x".repeat(MAX_EVENT_BYTES + 64 * 1024)),
+        format!("{valid}{}", "x".repeat(MAX_EVENT_BYTES + 64 * 1024)),
     )?;
     let store = JsonlSessionStore::new(&path)?;
 
@@ -1585,15 +1480,15 @@ fn append_event_recovers_oversized_tail_record() -> Result<()> {
 fn read_only_loader_does_not_recover_tail_corruption() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("ok")))?;
-    fs::write(&path, format!("{valid}\n{{bad-tail"))?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
+    fs::write(&path, format!("{valid}{{bad-tail"))?;
     let before = fs::read_to_string(&path)?;
 
     let error =
         JsonlSessionStore::read_event_records(&path).expect_err("read-only load should fail");
     let after = fs::read_to_string(&path)?;
 
-    assert!(error.to_string().contains("failed to parse session entry"));
+    assert!(error.to_string().contains("failed to parse stored event"));
     assert_eq!(after, before);
     assert!(!temp.path().join(".sigil-recovery").exists());
     Ok(())
@@ -1603,8 +1498,8 @@ fn read_only_loader_does_not_recover_tail_corruption() -> Result<()> {
 fn load_from_store_recovers_tail_corruption_with_audit_event() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("ok")))?;
-    fs::write(&path, format!("{valid}\n{{bad-tail"))?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
+    fs::write(&path, format!("{valid}{{bad-tail"))?;
     let store = JsonlSessionStore::new(&path)?;
 
     let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
@@ -1632,8 +1527,8 @@ fn load_from_store_recovers_tail_corruption_with_audit_event() -> Result<()> {
 fn writer_mode_loader_recovers_tail_corruption_once() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("ok")))?;
-    fs::write(&path, format!("{valid}\n{{bad-tail"))?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
+    fs::write(&path, format!("{valid}{{bad-tail"))?;
     let store = JsonlSessionStore::new(&path)?;
 
     let records = store.read_event_records_writer()?;
@@ -1676,9 +1571,7 @@ fn writer_mode_loader_recovers_tail_corruption_without_prior_records() -> Result
     let records = store.read_event_records_writer()?;
 
     assert_eq!(records.len(), 1);
-    let SessionStreamRecord::Stored(event) = &records[0] else {
-        panic!("tail recovery should append a stored event");
-    };
+    let SessionStreamRecord::Stored(event) = &records[0];
     assert_eq!(
         event.event_type,
         DurableEventType::LogTailRecovered.as_str()
@@ -1699,11 +1592,8 @@ fn writer_mode_loader_recovers_tail_corruption_without_prior_records() -> Result
 fn writer_mode_loader_clears_completed_tail_recovery_intent() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("ok"));
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
+    let initial_store = JsonlSessionStore::new(&path)?;
+    initial_store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user("ok")))?;
     let records = JsonlSessionStore::read_event_records(&path)?;
     let session_id = records[0].session_id().to_owned();
     let recovered_size = fs::metadata(&path)?.len();
@@ -1891,9 +1781,9 @@ fn v2_stream_session_id_mismatch_fails_closed() -> Result<()> {
 fn writer_mode_loader_rejects_middle_corruption() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let first = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("one")))?;
-    let second = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("two")))?;
-    fs::write(&path, format!("{first}\nnot-json\n{second}\n"))?;
+    let first = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("one")), 1)?;
+    let second = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("two")), 2)?;
+    fs::write(&path, format!("{first}not-json\n{second}"))?;
     let store = JsonlSessionStore::new(&path)?;
 
     let error = store
@@ -1993,8 +1883,8 @@ fn append_event_rejects_sequence_gap_before_append() -> Result<()> {
 fn writer_mode_loader_finishes_tail_recovery_intent() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("ok")))?;
-    fs::write(&path, format!("{valid}\n"))?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
+    fs::write(&path, valid)?;
     let records = JsonlSessionStore::read_event_records(&path)?;
     let session_id = records[0].session_id().to_owned();
     let recovered_size = fs::metadata(&path)?.len();
@@ -2030,8 +1920,8 @@ fn writer_mode_loader_finishes_tail_recovery_intent() -> Result<()> {
 fn writer_mode_loader_replays_tail_recovery_intent_before_truncate() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("ok")))?;
-    fs::write(&path, format!("{valid}\n"))?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
+    fs::write(&path, valid)?;
     let records = JsonlSessionStore::read_event_records(&path)?;
     let session_id = records[0].session_id().to_owned();
     let recovered_size = fs::metadata(&path)?.len();
@@ -2543,18 +2433,18 @@ fn optional_durable_projections_return_none_for_in_memory_sessions() -> Result<(
 }
 
 #[test]
-fn task_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn task_state_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let legacy_run = SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+    let store = JsonlSessionStore::new(&path)?;
+    let run = SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: test_task_id(),
         parent_session_ref: test_session_ref(),
         objective: "ship durable projection".to_owned(),
         status: TaskRunStatus::Running,
         reason: None,
     }));
-    fs::write(&path, format!("{}\n", serde_json::to_string(&legacy_run)?))?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&run)?;
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskPlan(
         TaskPlanEntry {
             task_id: test_task_id(),
@@ -2702,19 +2592,7 @@ fn typed_domain_event_record_decodes_projection_cursor() -> Result<()> {
 }
 
 #[test]
-fn typed_domain_event_record_ignores_legacy_and_unknown_noncritical() -> Result<()> {
-    let legacy = SessionStreamRecord::Legacy {
-        event: LegacyEvent {
-            event_id: "event-legacy".to_owned(),
-            session_id: "session-typed".to_owned(),
-            stream_sequence: 1,
-            raw_line_hash: "sha256:legacy".to_owned(),
-            payload: serde_json::json!({"legacy": true}),
-        },
-        entry: Box::new(SessionLogEntry::User(ModelMessage::user("legacy"))),
-    };
-    assert!(legacy.typed_domain_event_record()?.is_none());
-
+fn typed_domain_event_record_ignores_unknown_noncritical() -> Result<()> {
     let future = StoredEvent::new_raw(
         "future_noncritical_event",
         EventClass::NonCritical,
@@ -2752,17 +2630,13 @@ fn session_exposes_optional_durable_agent_thread_state_projection() -> Result<()
 }
 
 #[test]
-fn agent_thread_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn agent_thread_state_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let started = test_agent_thread_started_entry();
-    let legacy_started =
-        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(started.clone()));
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_started)?),
-    )?;
     let store = JsonlSessionStore::new(&path)?;
+    let started = test_agent_thread_started_entry();
+    let started_entry = SessionLogEntry::Control(ControlEntry::AgentThreadStarted(started.clone()));
+    store.append_session_entry_event(&started_entry)?;
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
             thread_id: test_agent_thread_id(),
@@ -2799,12 +2673,12 @@ fn agent_thread_state_projection_replays_mixed_durable_stream_records() -> Resul
 fn session_list_projection_replays_from_session_durable_stream() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let identity = SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
     });
-    fs::write(&path, format!("{}\n", serde_json::to_string(&identity)?))?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&identity)?;
     store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user(
         "Inspect durable replay adoption",
     )))?;
@@ -2988,9 +2862,10 @@ fn agent_thread_projection_record_helper_fails_closed_on_unknown_critical_event(
 }
 
 #[test]
-fn agent_profile_projections_replay_mixed_durable_stream_records() -> Result<()> {
+fn agent_profile_projections_replay_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let snapshot = AgentProfileSnapshot {
         snapshot_id: test_agent_profile_snapshot_id(),
         profile_id: test_agent_profile_id(),
@@ -3003,7 +2878,7 @@ fn agent_profile_projections_replay_mixed_durable_stream_records() -> Result<()>
         resolved_skill_hashes: vec!["sha256:skill".to_owned()],
         trust_state: AgentTrustState::NeedsReview,
     };
-    let legacy_trust = AgentProfileTrustEntry {
+    let initial_trust = AgentProfileTrustEntry {
         profile_id: snapshot.profile_id.clone(),
         source: snapshot.source.clone(),
         source_hash: snapshot.source_hash.clone(),
@@ -3011,7 +2886,7 @@ fn agent_profile_projections_replay_mixed_durable_stream_records() -> Result<()>
         decision: AgentTrustState::Disabled,
         reviewed_at_ms: 10,
     };
-    let legacy_policy = AgentProfilePolicyEntry {
+    let initial_policy = AgentProfilePolicyEntry {
         profile_id: snapshot.profile_id.clone(),
         source: snapshot.source.clone(),
         source_hash: snapshot.source_hash.clone(),
@@ -3021,19 +2896,12 @@ fn agent_profile_projections_replay_mixed_durable_stream_records() -> Result<()>
         model_invocable: Some(false),
         reviewed_at_ms: 11,
     };
-    fs::write(
-        &path,
-        format!(
-            "{}\n{}\n",
-            serde_json::to_string(&SessionLogEntry::Control(
-                ControlEntry::AgentProfileTrustDecision(legacy_trust)
-            ))?,
-            serde_json::to_string(&SessionLogEntry::Control(
-                ControlEntry::AgentProfilePolicyDecision(legacy_policy)
-            ))?
-        ),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileTrustDecision(initial_trust),
+    ))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentProfilePolicyDecision(initial_policy),
+    ))?;
     let trusted = AgentProfileTrustEntry {
         profile_id: snapshot.profile_id.clone(),
         source: snapshot.source.clone(),
@@ -3087,25 +2955,19 @@ fn agent_profile_projections_replay_mixed_durable_stream_records() -> Result<()>
 }
 
 #[test]
-fn agent_result_continuation_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn agent_result_continuation_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let thread = test_agent_thread_id();
-    fs::write(
-        &path,
-        format!(
-            "{}\n",
-            serde_json::to_string(&SessionLogEntry::Control(
-                ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
-                    thread_id: thread.clone(),
-                    status: AgentResultContinuationStatus::Pending,
-                    reason: Some("waiting for child".to_owned()),
-                    updated_at_ms: Some(10),
-                })
-            ))?
-        ),
-    )?;
     let store = JsonlSessionStore::new(&path)?;
+    let thread = test_agent_thread_id();
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+            thread_id: thread.clone(),
+            status: AgentResultContinuationStatus::Pending,
+            reason: Some("waiting for child".to_owned()),
+            updated_at_ms: Some(10),
+        }),
+    ))?;
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
             thread_id: thread.clone(),
@@ -3129,28 +2991,22 @@ fn agent_result_continuation_projection_replays_mixed_durable_stream_records() -
 }
 
 #[test]
-fn conversation_queue_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn conversation_queue_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let queue_id = ConversationInputQueueId::new("queue-1")?;
-    fs::write(
-        &path,
-        format!(
-            "{}\n",
-            serde_json::to_string(&SessionLogEntry::Control(
-                ControlEntry::ConversationInputQueued(ConversationInputQueuedEntry {
-                    queue_id: queue_id.clone(),
-                    target: ConversationInputTarget::MainThread,
-                    kind: ConversationInputKind::Chat,
-                    prompt_hash: "sha256:prompt".to_owned(),
-                    prompt: "hello".to_owned(),
-                    reasoning_effort: None,
-                    created_at_ms: Some(10),
-                })
-            ))?
-        ),
-    )?;
     let store = JsonlSessionStore::new(&path)?;
+    let queue_id = ConversationInputQueueId::new("queue-1")?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueued(ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: "sha256:prompt".to_owned(),
+            prompt: "hello".to_owned(),
+            reasoning_effort: None,
+            created_at_ms: Some(10),
+        }),
+    ))?;
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::ConversationInputQueueControl(ConversationInputQueueControlEntry {
             action: ConversationInputQueueControlAction::Pause,
@@ -3309,11 +3165,12 @@ fn session_changeset_projection_replays_control_entries() -> Result<()> {
 }
 
 #[test]
-fn changeset_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn changeset_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let id = ChangeSetId::new("change-1")?;
-    let legacy_proposal = SessionLogEntry::Control(ControlEntry::ChangeSetProposed(ChangeSet {
+    let proposal = SessionLogEntry::Control(ControlEntry::ChangeSetProposed(ChangeSet {
         id: id.clone(),
         title: "Update README".to_owned(),
         summary: "Update project overview".to_owned(),
@@ -3321,11 +3178,7 @@ fn changeset_projection_replays_mixed_durable_stream_records() -> Result<()> {
         files: Vec::new(),
         validations: Vec::new(),
     }));
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_proposal)?),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&proposal)?;
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::ChangeSetApplied(
         ChangeSetResult {
             id: id.clone(),
@@ -3353,9 +3206,10 @@ fn changeset_projection_replays_mixed_durable_stream_records() -> Result<()> {
 }
 
 #[test]
-fn plan_approval_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn plan_approval_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let first = PlanApprovedEntry {
         plan_version: 1,
         plan_hash: "sha256:first".to_owned(),
@@ -3368,14 +3222,8 @@ fn plan_approval_projection_replays_mixed_durable_stream_records() -> Result<()>
         expires: PlanApprovalExpiry::NextUserPrompt,
         clear_planning_context: false,
     };
-    fs::write(
-        &path,
-        format!(
-            "{}\n",
-            serde_json::to_string(&SessionLogEntry::Control(ControlEntry::PlanApproved(first)))?
-        ),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store
+        .append_session_entry_event(&SessionLogEntry::Control(ControlEntry::PlanApproved(first)))?;
     let second = PlanApprovedEntry {
         plan_version: 2,
         plan_hash: "sha256:second".to_owned(),
@@ -3407,30 +3255,24 @@ fn plan_approval_projection_replays_mixed_durable_stream_records() -> Result<()>
 }
 
 #[test]
-fn plan_artifact_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn plan_artifact_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let first = plan_draft_created_entry(
         &structured_plan_text("Inspect README", "Inspect README.md", "README.md"),
         PlanSourceRef {
-            session_ref: Some("legacy.jsonl".to_owned()),
-            run_id: Some("run_legacy".to_owned()),
-            final_message_id: Some("msg_legacy".to_owned()),
+            session_ref: Some("first.jsonl".to_owned()),
+            run_id: Some("run_first".to_owned()),
+            final_message_id: Some("msg_first".to_owned()),
         },
         10,
-        Some("snapshot_legacy".to_owned()),
+        Some("snapshot_first".to_owned()),
     )?
-    .expect("legacy draft");
-    fs::write(
-        &path,
-        format!(
-            "{}\n",
-            serde_json::to_string(&SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
-                first
-            )))?
-        ),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    .expect("first draft");
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+        first,
+    )))?;
     let second = plan_draft_created_entry(
         &structured_plan_text(
             "Update quickstart docs",
@@ -3509,11 +3351,12 @@ fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
 }
 
 #[test]
-fn terminal_task_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let id = TerminalTaskId::new("terminal-1")?;
-    let legacy_running = SessionLogEntry::Control(ControlEntry::TerminalTask(TerminalTaskEntry {
+    let running = SessionLogEntry::Control(ControlEntry::TerminalTask(TerminalTaskEntry {
         handle: TerminalTaskHandle {
             task_id: id.clone(),
             command: "cargo test".to_owned(),
@@ -3534,11 +3377,7 @@ fn terminal_task_projection_replays_mixed_durable_stream_records() -> Result<()>
         cleanup: None,
         updated_at_ms: 120,
     }));
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_running)?),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&running)?;
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TerminalTask(
         TerminalTaskEntry {
             handle: TerminalTaskHandle {
@@ -3628,9 +3467,10 @@ fn session_skill_state_projection_replays_control_entries() -> Result<()> {
 }
 
 #[test]
-fn skill_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn skill_state_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let snapshot = SkillIndexSnapshot::new(vec![SkillDescriptor {
         id: "repo-review".to_owned(),
         name: "Repo Review".to_owned(),
@@ -3651,16 +3491,9 @@ fn skill_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
         disallowed_tools: Default::default(),
         path_patterns: Vec::new(),
     }])?;
-    fs::write(
-        &path,
-        format!(
-            "{}\n",
-            serde_json::to_string(&SessionLogEntry::Control(ControlEntry::SkillIndexCaptured(
-                snapshot.clone()
-            )))?
-        ),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::SkillIndexCaptured(snapshot.clone()),
+    ))?;
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::SkillLoaded(
         SkillLoadEntry {
             skill_id: "repo-review".to_owned(),
@@ -3723,9 +3556,10 @@ fn session_plugin_state_projection_replays_control_entries() -> Result<()> {
 }
 
 #[test]
-fn plugin_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn plugin_state_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let snapshot = PluginManifestSnapshot {
         plugin_id: "repo-review".to_owned(),
         name: "Repository Review".to_owned(),
@@ -3739,16 +3573,9 @@ fn plugin_state_projection_replays_mixed_durable_stream_records() -> Result<()> 
         }],
         trust: PluginTrustDecision::NeedsReview,
     };
-    fs::write(
-        &path,
-        format!(
-            "{}\n",
-            serde_json::to_string(&SessionLogEntry::Control(
-                ControlEntry::PluginManifestCaptured(snapshot.clone())
-            ))?
-        ),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::PluginManifestCaptured(snapshot.clone()),
+    ))?;
     let trust = PluginTrustEntry::for_snapshot(&snapshot, PluginTrustDecision::Trusted, 42)?;
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::PluginTrustDecision(trust.clone()),
@@ -3945,6 +3772,7 @@ fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
         repo_revision: Some("snapshot-readme".to_owned()),
         token_cost: 4,
         score: Some(100.0),
+        score_breakdown: Vec::new(),
         inclusion_reason: ContextInclusionReason::RetrievalHit,
         body_ref: ContextBodyRef::inline("Sigil readme context"),
     };
@@ -3980,6 +3808,83 @@ fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
 }
 
 #[test]
+fn build_request_context_v0_payload_distinguishes_memory_archive_and_evidence_sources() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("What prior context and evidence apply?"))?;
+    let mut runtime_context = RuntimeContextCandidates::new();
+    for (id, source, body) in [
+        (
+            "task-memory:mem-1:objective",
+            ContextSource::TaskDigest,
+            "memory objective context",
+        ),
+        (
+            "archive:session-1",
+            ContextSource::SessionArchive,
+            "session archive context",
+        ),
+        (
+            "receipt:command-1",
+            ContextSource::EvidenceReceipt,
+            "receipt context",
+        ),
+        (
+            "verification:receipt-1",
+            ContextSource::VerificationEvidence,
+            "verification evidence context",
+        ),
+    ] {
+        runtime_context
+            .snippets
+            .insert(id.to_owned(), body.to_owned());
+        runtime_context.items.push(ContextItem {
+            id: id.to_owned(),
+            source,
+            source_event_id: Some(format!("event-{id}")),
+            trust_level: ContextTrustLevel::ToolObservation,
+            sensitivity: ContextSensitivity::Repository,
+            egress_decision: None,
+            repo_revision: None,
+            token_cost: 8,
+            score: Some(10.0),
+            score_breakdown: Vec::new(),
+            inclusion_reason: ContextInclusionReason::RetrievalHit,
+            body_ref: ContextBodyRef::inline(body),
+        });
+    }
+
+    let request = session.build_request_with_transient_messages_and_context(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+        &[],
+        runtime_context,
+    )?;
+
+    let context_messages = request_context_v0_messages(&request);
+    assert_eq!(context_messages.len(), 1);
+    let context_text = context_messages[0]
+        .content
+        .as_deref()
+        .expect("context content");
+
+    for source in [
+        "\"source\": \"task_digest\"",
+        "\"source\": \"session_archive\"",
+        "\"source\": \"evidence_receipt\"",
+        "\"source\": \"verification_evidence\"",
+    ] {
+        assert!(context_text.contains(source), "missing {source}");
+    }
+    Ok(())
+}
+
+#[test]
 fn build_request_records_context_assembly_skip_for_invalid_runtime_snippet() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
@@ -3995,6 +3900,7 @@ fn build_request_records_context_assembly_skip_for_invalid_runtime_snippet() -> 
         repo_revision: Some("snapshot-readme".to_owned()),
         token_cost: 1,
         score: Some(100.0),
+        score_breakdown: Vec::new(),
         inclusion_reason: ContextInclusionReason::RetrievalHit,
         body_ref: ContextBodyRef::inline("short"),
     };
@@ -4533,23 +4439,6 @@ fn compaction_preview_reports_folded_messages_and_projected_after_state() -> Res
 }
 
 #[test]
-fn load_from_store_accepts_legacy_pascal_case_control_entries() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("legacy-session.jsonl");
-    fs::write(
-        &path,
-        "{\"Control\":{\"SessionIdentity\":{\"provider_name\":\"deepseek\",\"model_name\":\"deepseek-v4-flash\"}}}\n",
-    )?;
-
-    let store = JsonlSessionStore::new(&path)?;
-    let session = Session::load_from_store("fallback-provider", "fallback-model", store)?;
-
-    assert_eq!(session.provider_name(), "deepseek");
-    assert_eq!(session.model_name(), "deepseek-v4-flash");
-    Ok(())
-}
-
-#[test]
 fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
@@ -4591,10 +4480,11 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
 }
 
 #[test]
-fn usage_stats_projection_replays_mixed_durable_stream_records() -> Result<()> {
+fn usage_stats_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    let legacy_usage = SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
+    let store = JsonlSessionStore::new(&path)?;
+    let usage = SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
         prompt_tokens: 120,
         completion_tokens: 10,
         cache_hit_tokens: 90,
@@ -4604,11 +4494,7 @@ fn usage_stats_projection_replays_mixed_durable_stream_records() -> Result<()> {
         cache_savings: 7.0,
         system_fingerprint: None,
     }));
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string(&legacy_usage)?),
-    )?;
-    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&usage)?;
     store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
         UsageStats {
             prompt_tokens: 48,
@@ -5066,25 +4952,15 @@ fn load_from_store_does_not_duplicate_closed_tool_execution() -> Result<()> {
 fn jsonl_session_store_ignores_blank_lines_and_reports_parse_context() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
-    fs::write(
-        &path,
-        format!(
-            "\n{}\nnot-json\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("hello")))?,
-        ),
-    )?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("hello")), 1)?;
+    fs::write(&path, format!("\n{valid}not-json\n"))?;
 
     let error = JsonlSessionStore::read_entries(&path).expect_err("invalid json should fail");
     assert!(error.to_string().contains("line 3"));
     assert!(error.to_string().contains("session.jsonl"));
 
-    fs::write(
-        &path,
-        format!(
-            "\n{}\n",
-            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("hello")))?,
-        ),
-    )?;
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("hello")), 1)?;
+    fs::write(&path, format!("\n{valid}"))?;
     let entries = JsonlSessionStore::read_entries(&path)?;
     assert_eq!(entries.len(), 1);
     Ok(())

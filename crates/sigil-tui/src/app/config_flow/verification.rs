@@ -8,8 +8,8 @@ pub(super) fn render_scope_summary(config_state: &ConfigState) -> Vec<String> {
             "Profile",
             &format!(
                 "{} ({})",
-                verification.scope_profile.as_str(),
-                verification.scope_profile.summary()
+                verification.scope.profile.as_str(),
+                verification.scope.profile.summary()
             ),
         ),
         render_config_readonly_row("Key excludes", &summarize_scope_excludes(&scope.exclude)),
@@ -21,8 +21,8 @@ pub(super) fn render_scope_summary(config_state: &ConfigState) -> Vec<String> {
             "Advanced overrides",
             &format!(
                 "{} excludes, {} generated roots",
-                verification.extra_scope_excludes.len(),
-                verification.generated_roots.len()
+                verification.scope.extra_excludes.len(),
+                verification.scope.generated_roots.len()
             ),
         ),
     ]

@@ -15,6 +15,11 @@ use std::path::PathBuf;
 fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let child_session_ref =
+        sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("child_1")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore")?;
     app.sync_current_session_state(vec![
         SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
             task_id: task_id.clone(),
@@ -45,12 +50,56 @@ fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
                 plan_version: 1,
                 step_id,
                 child_task_id: sigil_kernel::TaskId::new("child_1")?,
-                child_session_ref: sigil_kernel::SessionRef::new_relative(
-                    "children/task_1/step_1-child_1.jsonl",
-                )?,
+                child_session_ref: child_session_ref.clone(),
                 role: sigil_kernel::AgentRole::SubagentRead,
                 status: sigil_kernel::TaskChildSessionStatus::Started,
                 summary_hash: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::System,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id,
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: child_session_ref,
+                profile_id,
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id,
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
+                    effective_tool_scope_hash: "sha256:tools".to_owned(),
+                    effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                    effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    provider_capability_hash: "sha256:provider".to_owned(),
+                    model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+                    budget_policy_hash: "sha256:budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: "inspect".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+                invocation_source: sigil_kernel::AgentInvocationSource::Task,
+                display_name: Some("repo read".to_owned()),
+                created_at_ms: None,
             },
         )),
     ]);
@@ -1208,22 +1257,20 @@ fn child_agent_transcript_reload_uses_tail_and_skips_unchanged_files() -> Result
     app.session_log_path = temp.path().join("parent.jsonl");
     sync_child_agent_for_transcript_tests(&mut app)?;
     let child_path = temp.path().join("children/task_1/step_1-child_1.jsonl");
-    std::fs::create_dir_all(child_path.parent().expect("child path has parent"))?;
-    let mut child_log = String::new();
-    for index in 0..1500 {
-        child_log.push_str(&serde_json::to_string(&SessionLogEntry::Assistant(
-            ModelMessage::assistant(Some(format!("child message {index}")), Vec::new()),
-        ))?);
-        child_log.push('\n');
+    let child_store = JsonlSessionStore::new(&child_path)?;
+    for index in 0..96 {
+        child_store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!("child message {index}")),
+            Vec::new(),
+        )))?;
     }
-    std::fs::write(&child_path, child_log)?;
 
     app.reload_active_agent_child_transcript();
     let rendered = transcript_plain(app.transcript_lines(16));
 
     assert!(rendered.contains("showing latest 80 child transcript entries"));
     assert!(!rendered.contains("child message 0"));
-    assert!(rendered.contains("child message 1499"));
+    assert!(rendered.contains("child message 95"));
 
     let transcript = app
         .active_agent_child_transcript
@@ -2404,7 +2451,7 @@ fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
 }
 
 #[test]
-fn terminal_legacy_child_view_does_not_render_working_progress() -> Result<()> {
+fn terminal_task_child_view_does_not_render_working_progress() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;
     let mut entries = app.session_browser.current_entries.clone();
@@ -2424,7 +2471,7 @@ fn terminal_legacy_child_view_does_not_render_working_progress() -> Result<()> {
     )));
     entries.push(SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
         sigil_kernel::AgentThreadClosedEntry {
-            thread_id: sigil_kernel::AgentThreadId::new("legacy_task_1_v1_step_1_child_1")?,
+            thread_id: sigil_kernel::AgentThreadId::new("child_1")?,
             reason: Some("hidden from sidebar".to_owned()),
         },
     )));
@@ -2441,13 +2488,13 @@ fn terminal_legacy_child_view_does_not_render_working_progress() -> Result<()> {
 }
 
 #[test]
-fn child_agent_view_live_activity_falls_back_to_legacy_child_entry() -> Result<()> {
+fn child_agent_view_live_activity_falls_back_to_task_child_entry() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;
     let mut entries = app.session_browser.current_entries.clone();
     entries.push(SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
         sigil_kernel::AgentThreadClosedEntry {
-            thread_id: sigil_kernel::AgentThreadId::new("legacy_task_1_v1_step_1_child_1")?,
+            thread_id: sigil_kernel::AgentThreadId::new("child_1")?,
             reason: Some("hidden from sidebar".to_owned()),
         },
     )));
@@ -2463,7 +2510,7 @@ fn child_agent_view_live_activity_falls_back_to_legacy_child_entry() -> Result<(
 
     let summary = app
         .live_activity_summary()
-        .expect("legacy child summary should survive closed thread filtering");
+        .expect("task child summary should survive closed thread filtering");
 
     assert!(matches!(app.live_panel_phase(), RunPhase::Agent(profile) if profile == "agent"));
     assert_eq!(summary.label, "agent");

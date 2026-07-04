@@ -326,6 +326,7 @@ pub(super) fn step_terminal_reason(step_id: &TaskStepId, status: TaskStepStatus)
     }
 }
 
+#[cfg(test)]
 pub(super) fn child_status_from_output(output: &StepRunOutput) -> TaskChildSessionStatus {
     if output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns
         || !output.outcome.interrupted_tool_calls.is_empty()

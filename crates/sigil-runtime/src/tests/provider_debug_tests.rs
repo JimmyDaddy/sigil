@@ -128,7 +128,6 @@ fn test_root_config(base_url: &str) -> RootConfig {
                 "base_url": base_url,
                 "beta_base_url": base_url,
                 "anthropic_base_url": base_url,
-                "model": "deepseek-v4-flash",
                 "fim_model": "deepseek-v4-pro",
                 "api_key": "test-key",
                 "strict_tools_mode": "auto"

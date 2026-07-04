@@ -217,17 +217,24 @@ pub(super) fn runtime_context_item_json(
     item: &ContextItem,
     snippets: &BTreeMap<String, String>,
 ) -> Result<serde_json::Value> {
+    let provenance = context_provenance_row_v1(item, None, None, None);
     Ok(serde_json::json!({
         "id": &item.id,
         "source": &item.source,
+        "source_ref": &provenance.source_ref,
         "source_event_id": &item.source_event_id,
         "trust_level": &item.trust_level,
         "sensitivity": &item.sensitivity,
         "egress_decision": &item.egress_decision,
-        "repo_revision": &item.repo_revision,
+        "repo_revision": &provenance.repo_revision,
         "token_cost": item.token_cost,
         "score": item.score,
+        "score_breakdown": &provenance.score_breakdown,
+        "score_missing_reason": &provenance.score_missing_reason,
         "inclusion_reason": &item.inclusion_reason,
+        "why_included": &provenance.why_included,
+        "why_excluded": &provenance.why_excluded,
+        "placement_missing_reason": &provenance.placement_missing_reason,
         "body_ref": &item.body_ref,
         "snippet": renderable_runtime_context_snippet(item, snippets)?,
     }))

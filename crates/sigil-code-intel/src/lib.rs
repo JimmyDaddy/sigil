@@ -9,7 +9,11 @@ pub mod service;
 pub mod tools;
 pub mod workspace;
 
-pub use context::{CodeContextBuilder, CodeContextHit};
+pub use context::{
+    CodeContextBuilder, CodeContextHit, LspContextSnapshot, LspContextSnapshotStatus, RepoMapEdge,
+    RepoMapEdgeKind, RepoMapLite, RepoMapLiteOptions, RepoSourceFileRef, RepoSymbolKind,
+    RepoSymbolRef, build_repo_map_lite,
+};
 pub use service::{
     CodeActionSummary, CodeDiagnostic, CodeEditPlan, CodeIntelResponse, CodeIntelServerStatus,
     CodeIntelStatus, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol, QueryMetadata,

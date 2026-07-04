@@ -107,7 +107,6 @@ pub enum DurableEventType {
     PluginHookExecutionFinished,
     SandboxDecisionRecorded,
     LogTailRecovered,
-    Legacy,
 }
 
 impl DurableEventType {
@@ -167,7 +166,6 @@ impl DurableEventType {
             Self::PluginHookExecutionFinished => "plugin_hook_execution_finished",
             Self::SandboxDecisionRecorded => "sandbox_decision_recorded",
             Self::LogTailRecovered => "log_tail_recovered",
-            Self::Legacy => "legacy",
         }
     }
 
@@ -227,15 +225,11 @@ impl DurableEventType {
             "plugin_hook_execution_finished" => Self::PluginHookExecutionFinished,
             "sandbox_decision_recorded" => Self::SandboxDecisionRecorded,
             "log_tail_recovered" => Self::LogTailRecovered,
-            "legacy" => Self::Legacy,
             _ => return None,
         })
     }
 
     pub fn sync_class(self) -> Option<EventSyncClass> {
-        if self == Self::Legacy {
-            return None;
-        }
         if self == Self::LogTailRecovered {
             return Some(EventSyncClass::TailRecovery);
         }
@@ -251,9 +245,6 @@ impl DurableEventType {
     }
 
     pub fn expected_event_class(self) -> Option<EventClass> {
-        if self == Self::Legacy {
-            return None;
-        }
         if matches!(
             self,
             Self::ContextSourceCaptured | Self::SessionEntryRecorded
@@ -264,7 +255,7 @@ impl DurableEventType {
     }
 
     pub fn appendable(self) -> bool {
-        !matches!(self, Self::Legacy)
+        true
     }
 }
 
@@ -324,7 +315,6 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::PluginHookExecutionFinished,
     DurableEventType::SandboxDecisionRecorded,
     DurableEventType::LogTailRecovered,
-    DurableEventType::Legacy,
 ];
 
 /// v2 durable event envelope persisted to JSONL.
@@ -576,7 +566,6 @@ pub enum DurableDomainEvent {
     PluginHookExecutionFinished(DomainPayload),
     SandboxDecisionRecorded(DomainPayload),
     LogTailRecovered(DomainPayload),
-    Legacy(LegacyEvent),
 }
 
 impl DurableDomainEvent {
@@ -644,7 +633,6 @@ impl DurableDomainEvent {
             Self::PluginHookExecutionFinished(_) => DurableEventType::PluginHookExecutionFinished,
             Self::SandboxDecisionRecorded(_) => DurableEventType::SandboxDecisionRecorded,
             Self::LogTailRecovered(_) => DurableEventType::LogTailRecovered,
-            Self::Legacy(_) => DurableEventType::Legacy,
         }
     }
 
@@ -704,22 +692,11 @@ impl DurableDomainEvent {
             | Self::PluginHookExecutionFinished(payload)
             | Self::SandboxDecisionRecorded(payload)
             | Self::LogTailRecovered(payload) => Some(payload),
-            Self::Legacy(_) => None,
         }
     }
 }
 
 pub type DomainEvent = DurableDomainEvent;
-
-/// Stable view of one legacy `SessionLogEntry` line.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LegacyEvent {
-    pub event_id: EventId,
-    pub session_id: SessionId,
-    pub stream_sequence: u64,
-    pub raw_line_hash: String,
-    pub payload: Value,
-}
 
 #[derive(Debug)]
 pub enum StoredEventDecode {
@@ -760,9 +737,6 @@ pub fn decode_stored_event(event: StoredEvent) -> Result<StoredEventDecode> {
             EventClass::Critical => bail!("unknown critical event {}", event.event_type),
         };
     };
-    if event_type == DurableEventType::Legacy {
-        bail!("legacy is an upcast-only event type and cannot be decoded from StoredEvent");
-    }
     let payload = DomainPayload {
         event_version: event.event_version,
         payload: event.payload,
@@ -782,9 +756,6 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
             EventClass::Critical => bail!("unknown critical event {}", event.event_type),
         };
     };
-    if event_type == DurableEventType::Legacy {
-        bail!("legacy is an upcast-only event type and cannot be decoded from StoredEvent");
-    }
     let typed = match event_type {
         DurableEventType::MutationPrepared => {
             TypedDomainEvent::MutationPrepared(decode_event_payload(&event)?)
@@ -1075,7 +1046,6 @@ fn domain_event_from_payload(
             DurableDomainEvent::SandboxDecisionRecorded(payload)
         }
         DurableEventType::LogTailRecovered => DurableDomainEvent::LogTailRecovered(payload),
-        DurableEventType::Legacy => unreachable!("legacy is handled before payload conversion"),
     }
 }
 
@@ -1090,10 +1060,6 @@ pub enum ReducerDisposition {
 
 pub fn reducer_disposition(event_type: DurableEventType) -> ReducerDisposition {
     match event_type {
-        DurableEventType::Legacy => ReducerDisposition::ExplicitlyIgnored {
-            reducer: "legacy_upcast",
-            reason: "legacy records are converted before domain reducers consume v2 events",
-        },
         DurableEventType::ContextSourceCaptured => ReducerDisposition::ExplicitlyIgnored {
             reducer: "context_projection",
             reason: "context source events are indexed by future context projections",

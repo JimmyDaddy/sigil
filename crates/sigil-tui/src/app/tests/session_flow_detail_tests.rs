@@ -69,7 +69,7 @@ fn local_ui_control_preservation_keeps_only_display_overrides() -> Result<()> {
                 plan_version: 1,
                 step_id: step_id.clone(),
                 child_task_id: sigil_kernel::TaskId::new("child_preserve")?,
-                display_name: "Legacy Reader".to_owned(),
+                display_name: "Plan Reader".to_owned(),
             },
         )),
         SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
@@ -119,7 +119,7 @@ fn local_ui_control_preservation_keeps_only_display_overrides() -> Result<()> {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
-                if rename.step_id == step_id && rename.display_name == "Legacy Reader"
+                if rename.step_id == step_id && rename.display_name == "Plan Reader"
         )
     }));
     assert!(!merged.iter().any(|entry| {
@@ -541,7 +541,6 @@ fn verification_audit_label_helpers_cover_all_variants() {
     );
 
     for reason in [
-        sigil_kernel::ReadinessReason::LegacyEvidenceUnavailable,
         sigil_kernel::ReadinessReason::NoVerificationRequired,
         sigil_kernel::ReadinessReason::FinalAssistantTextIgnored {
             event_id: "event-a".to_owned(),
@@ -885,10 +884,7 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     ]
     .join("\n");
 
-    assert!(
-        rendered
-            .contains("[ctl] legacy plan grant v1 permission=workspace_edits expires=next_user")
-    );
+    assert!(rendered.contains("[ctl] plan grant v1 permission=workspace_edits expires=next_user"));
     assert!(rendered.contains("[ctl] task task_1 status=running"));
     assert!(rendered.contains("[ctl] plan task_1 v1 status=accepted steps=1"));
     assert!(rendered.contains("[ctl] step task_1 v1:step_1 status=running"));
@@ -1753,13 +1749,13 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
     assert_eq!(session_history_title_from_log(title_file.path()), None);
 
     let large_title_file = tempfile::NamedTempFile::new()?;
-    let title_line = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(
-        "large history title",
-    )))?;
-    std::fs::write(
-        large_title_file.path(),
-        format!("{title_line}\n{}", "x".repeat(1024)),
-    )?;
+    JsonlSessionStore::new(large_title_file.path())?.append(&SessionLogEntry::User(
+        ModelMessage::user("large history title"),
+    ))?;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(large_title_file.path())?;
+    std::io::Write::write_all(&mut file, "x".repeat(1024).as_bytes())?;
     assert_eq!(
         session_history_title_from_log(large_title_file.path()).as_deref(),
         Some("large history title")

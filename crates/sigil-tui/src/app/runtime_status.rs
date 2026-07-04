@@ -91,10 +91,10 @@ impl ResolvedUsageCostCurrency {
 }
 
 pub(crate) fn code_intelligence_config_status(config: &CodeIntelligenceConfig) -> String {
-    if !config.enabled || config.startup == CodeIntelStartup::Off {
+    if !config.enabled || config.server_startup == CodeIntelStartup::Off {
         "off".to_owned()
     } else {
-        config.startup.as_str().to_owned()
+        config.server_startup.as_str().to_owned()
     }
 }
 

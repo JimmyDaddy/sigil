@@ -1098,53 +1098,6 @@ declared_effect = "read_only"
 }
 
 #[test]
-fn legacy_bare_sha256_trust_entry_matches_prefixed_manifest_digest() {
-    let workspace = tempfile::tempdir().expect("workspace should create");
-    write_plugin_skill(
-        workspace.path(),
-        "repo-review",
-        "skills/review/SKILL.md",
-        "# Review",
-    );
-    write_plugin_manifest(
-        workspace.path(),
-        "repo-review",
-        r#"id = "repo-review"
-name = "Repository Review"
-version = "0.1.0"
-
-[[skills]]
-path = "skills/review/SKILL.md"
-"#,
-    );
-    let pending = discover_workspace_plugins(workspace.path(), &[])
-        .expect("initial discovery should succeed");
-    let trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: pending.manifests[0].manifest_path.clone(),
-        manifest_hash: pending.manifests[0]
-            .manifest_hash
-            .strip_prefix("sha256:")
-            .expect("runtime digest should be prefixed")
-            .to_owned(),
-        manifest_version: Some(pending.manifests[0].version.clone()),
-        capability_digest: Some(
-            pending.manifests[0]
-                .capability_digest()
-                .expect("capability digest should compute"),
-        ),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
-
-    let report = discover_workspace_plugins(workspace.path(), &[trust])
-        .expect("trusted plugin discovery should succeed");
-
-    assert_eq!(report.manifests[0].trust, PluginTrustDecision::Trusted);
-    assert_eq!(report.registrations.skills.len(), 1);
-}
-
-#[test]
 fn invalid_plugin_paths_are_rejected_without_registering_plugin() {
     let workspace = tempfile::tempdir().expect("workspace should create");
     fs::create_dir_all(workspace.path().join(".sigil/plugins")).expect("plugins dir should create");
@@ -1790,9 +1743,7 @@ fn workspace_mutation_events(
 ) -> Result<Vec<(String, WorkspaceMutationDetected)>> {
     let mut events = Vec::new();
     for record in JsonlSessionStore::read_event_records(session_path)? {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let SessionStreamRecord::Stored(event) = record;
         if event.event_type != "workspace_mutation_detected" {
             continue;
         }

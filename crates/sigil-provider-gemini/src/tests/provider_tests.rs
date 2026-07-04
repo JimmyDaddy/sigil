@@ -10,10 +10,7 @@ use sigil_kernel::{
 };
 
 use super::*;
-use crate::{
-    GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, SIGIL_GEMINI_API_KEY_ENV, SIGIL_GEMINI_BASE_URL_ENV,
-    SIGIL_GEMINI_MODEL_ENV,
-};
+use crate::{SIGIL_GEMINI_API_KEY_ENV, SIGIL_GEMINI_BASE_URL_ENV};
 
 struct EnvScope {
     previous: Vec<(&'static str, Option<OsString>)>,
@@ -23,9 +20,8 @@ impl EnvScope {
     fn clear() -> Self {
         let names = [
             SIGIL_GEMINI_API_KEY_ENV,
-            GEMINI_API_KEY_ENV,
-            GOOGLE_API_KEY_ENV,
-            SIGIL_GEMINI_MODEL_ENV,
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
             SIGIL_GEMINI_BASE_URL_ENV,
         ];
         let previous = names

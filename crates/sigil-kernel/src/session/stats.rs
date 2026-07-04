@@ -183,15 +183,6 @@ pub(super) fn latest_task_memory_workspace_snapshot_id(
                     return Ok(Some(verification.receipt.binding.workspace_snapshot_id));
                 }
             }
-            SessionStreamRecord::Legacy { entry, .. } => {
-                if let SessionLogEntry::Control(ControlEntry::VerificationRecorded(verification)) =
-                    entry.as_ref()
-                {
-                    return Ok(Some(
-                        verification.receipt.binding.workspace_snapshot_id.clone(),
-                    ));
-                }
-            }
         }
     }
     Ok(None)

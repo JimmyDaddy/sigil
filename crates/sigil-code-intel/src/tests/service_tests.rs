@@ -1,10 +1,9 @@
-use std::{fs, sync::OnceLock};
+use std::{fs, sync::OnceLock, time::Duration};
 
-use sigil_kernel::{
-    CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig,
-};
+use sigil_kernel::{CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig};
 
 use super::*;
+use crate::context::LspContextSnapshotStatus;
 use crate::tests::common::{
     fake_lsp_server_config, fake_lsp_server_config_with_env, fake_server, python3_available,
     read_counter, write_fake_lsp_scenario, write_fake_lsp_server,
@@ -13,14 +12,12 @@ use crate::tests::common::{
 fn fake_config() -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         default_timeout_ms: 50,
         max_results: 20,
         max_payload_bytes: 64 * 1024,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         servers: vec![LanguageServerConfig {
             name: "missing-rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],
@@ -39,14 +36,12 @@ fn fake_config() -> CodeIntelligenceConfig {
 fn legacy_fake_lsp_server_config(script_path: &std::path::Path) -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         default_timeout_ms: 5_000,
         max_results: 20,
         max_payload_bytes: 64 * 1024,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         servers: vec![LanguageServerConfig {
             name: "rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],
@@ -64,6 +59,25 @@ fn legacy_fake_lsp_server_config(script_path: &std::path::Path) -> CodeIntellige
 
 fn missing_server_config() -> CodeIntelligenceConfig {
     fake_config()
+}
+
+#[tokio::test]
+async fn warm_lsp_context_snapshot_times_out_when_cache_read_blocks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), fake_config());
+    let _held_cache = service.inner.symbol_cache.lock().await;
+
+    let snapshot = service
+        .warm_lsp_context_snapshot("parse_config", 10, Duration::from_millis(1))
+        .await;
+
+    assert_eq!(
+        snapshot.status,
+        LspContextSnapshotStatus::TimedOut { timeout_ms: 1 }
+    );
+    assert!(snapshot.symbols.is_empty());
+    assert!(snapshot.diagnostics.is_empty());
+    assert!(snapshot.references.is_empty());
 }
 
 async fn fake_lsp_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
@@ -359,14 +373,12 @@ while True:
 fn full_feature_lsp_server_config(script_path: &std::path::Path) -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         default_timeout_ms: 5_000,
         max_results: 20,
         max_payload_bytes: 64 * 1024,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: false,
-            report_missing: true,
-        },
+        auto_discover: false,
+        report_missing: true,
         servers: vec![LanguageServerConfig {
             name: "rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],
@@ -407,11 +419,9 @@ fn lazy_discovery_is_deferred_until_first_code_query() {
         temp.path().to_path_buf(),
         CodeIntelligenceConfig {
             enabled: true,
-            startup: CodeIntelStartup::Lazy,
-            discovery: CodeIntelligenceDiscoveryConfig {
-                enabled: true,
-                report_missing: true,
-            },
+            server_startup: CodeIntelStartup::Lazy,
+            auto_discover: true,
+            report_missing: true,
             ..CodeIntelligenceConfig::default()
         },
     );
@@ -435,11 +445,9 @@ async fn lazy_discovery_loads_plan_on_first_query() {
         temp.path().to_path_buf(),
         CodeIntelligenceConfig {
             enabled: true,
-            startup: CodeIntelStartup::Lazy,
-            discovery: CodeIntelligenceDiscoveryConfig {
-                enabled: true,
-                report_missing: true,
-            },
+            server_startup: CodeIntelStartup::Lazy,
+            auto_discover: true,
+            report_missing: true,
             ..CodeIntelligenceConfig::default()
         },
     );
@@ -552,11 +560,12 @@ async fn document_symbols_uses_discovered_typescript_server_when_available() {
         temp.path().to_path_buf(),
         CodeIntelligenceConfig {
             enabled: true,
-            startup: CodeIntelStartup::Lazy,
+            server_startup: CodeIntelStartup::Lazy,
             default_timeout_ms: 10_000,
             max_results: 20,
             max_payload_bytes: 64 * 1024,
-            discovery: Default::default(),
+            auto_discover: true,
+            report_missing: true,
             servers: Vec::new(),
         },
     );
@@ -1132,10 +1141,8 @@ async fn ensure_client_by_name_reports_disabled_and_unknown_server() {
 fn initial_server_plan_marks_configured_servers_while_lazy_discovery_is_pending() {
     let config = CodeIntelligenceConfig {
         enabled: true,
-        discovery: CodeIntelligenceDiscoveryConfig {
-            enabled: true,
-            report_missing: true,
-        },
+        auto_discover: true,
+        report_missing: true,
         ..fake_config()
     };
 
@@ -1381,7 +1388,7 @@ async fn service_basic_accessors_status_and_shutdown_cover_idle_paths() {
     assert_eq!(
         CodeIntelligenceService::configured_status_line(&CodeIntelligenceConfig {
             enabled: true,
-            startup: CodeIntelStartup::Off,
+            server_startup: CodeIntelStartup::Off,
             ..CodeIntelligenceConfig::default()
         }),
         "off"

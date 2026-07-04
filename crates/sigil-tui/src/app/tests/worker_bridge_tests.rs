@@ -729,7 +729,6 @@ fn schedule_balance_refresh_skips_non_deepseek_provider() {
         "openai_compat".to_owned(),
         json!({
             "base_url": "https://openai.example.com/v1",
-            "model": "gpt-test",
             "api_key": "openai-key"
         }),
     );

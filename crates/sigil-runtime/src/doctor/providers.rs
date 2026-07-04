@@ -22,15 +22,14 @@ pub(super) fn check_execution_backend(report: &mut DoctorReport, root_config: &R
             let capabilities = backend.capabilities();
             let capability_summary = execution_capability_summary(capabilities);
             let image = config
-                .container_image
-                .as_deref()
+                .container_image()
                 .map(|image| format!(", image={image}"))
                 .unwrap_or_default();
             let message = format!(
                 "backend={}, profile={:?}, fallback={}, capabilities={}{}",
                 backend.kind().as_str(),
-                config.profile,
-                config.fallback.as_str(),
+                config.profile(),
+                config.fallback().as_str(),
                 capability_summary,
                 image
             );
@@ -54,7 +53,7 @@ pub(super) fn check_execution_backend(report: &mut DoctorReport, root_config: &R
                 DoctorStatus::Error,
                 "execution:sandbox",
                 error.to_string(),
-                Some("check [execution].backend, [execution].profile, container_image, and installed backend dependencies"),
+                Some("check [execution].strategy, [execution.sandbox], and installed backend dependencies"),
             );
         }
     }

@@ -14,11 +14,25 @@ fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry
 }
 
 fn queued_conversation_input_entry(id: &str, prompt: &str) -> Result<SessionLogEntry> {
+    queued_conversation_input_entry_with_target(
+        id,
+        prompt,
+        sigil_kernel::ConversationInputTarget::MainThread,
+        sigil_kernel::ConversationInputKind::Chat,
+    )
+}
+
+fn queued_conversation_input_entry_with_target(
+    id: &str,
+    prompt: &str,
+    target: sigil_kernel::ConversationInputTarget,
+    kind: sigil_kernel::ConversationInputKind,
+) -> Result<SessionLogEntry> {
     Ok(SessionLogEntry::Control(
         ControlEntry::ConversationInputQueued(sigil_kernel::ConversationInputQueuedEntry {
             queue_id: sigil_kernel::ConversationInputQueueId::new(id)?,
-            target: sigil_kernel::ConversationInputTarget::MainThread,
-            kind: sigil_kernel::ConversationInputKind::Chat,
+            target,
+            kind,
             prompt_hash: format!("sha256:{id}"),
             prompt: prompt.to_owned(),
             reasoning_effort: Some(ReasoningEffort::Max),
@@ -30,6 +44,11 @@ fn queued_conversation_input_entry(id: &str, prompt: &str) -> Result<SessionLogE
 fn sync_child_agent(app: &mut AppState) -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let child_session_ref =
+        sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("child_1")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore")?;
     app.sync_current_session_state(vec![
         SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
             task_id: task_id.clone(),
@@ -60,12 +79,64 @@ fn sync_child_agent(app: &mut AppState) -> Result<()> {
                 plan_version: 1,
                 step_id,
                 child_task_id: sigil_kernel::TaskId::new("child_1")?,
-                child_session_ref: sigil_kernel::SessionRef::new_relative(
-                    "children/task_1/step_1-child_1.jsonl",
-                )?,
+                child_session_ref: child_session_ref.clone(),
                 role: sigil_kernel::AgentRole::SubagentRead,
                 status: sigil_kernel::TaskChildSessionStatus::Completed,
                 summary_hash: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::System,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: child_session_ref,
+                profile_id,
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id,
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/tmp/workspace")?,
+                    effective_tool_scope_hash: "sha256:tools".to_owned(),
+                    effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                    effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    provider_capability_hash: "sha256:provider".to_owned(),
+                    model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+                    budget_policy_hash: "sha256:budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: "review workspace".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+                invocation_source: sigil_kernel::AgentInvocationSource::Task,
+                display_name: Some("仓库审查".to_owned()),
+                created_at_ms: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id,
+                status: sigil_kernel::AgentThreadStatus::Completed,
+                reason: None,
+                updated_at_ms: None,
             },
         )),
     ]);
@@ -616,6 +687,39 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     ));
     assert!(app.composer.input.is_empty());
     assert_eq!(app.last_notice(), Some("follow-up will run next"));
+    let rows = app.composer_queue_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "follow up after this finishes");
+    assert_eq!(rows[0].detail, "pending · main · follow-up");
+    assert_eq!(app.queue_strip_rows(), 3);
+    let live_view_model = crate::view_model::LivePanelViewModel::from_app(&app, 4);
+    assert_eq!(live_view_model.queue_rows.len(), 1);
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert!(
+        view_model
+            .footer
+            .hints
+            .contains("1 follow-up pending · next main: follow up after this finishes")
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    let pending_action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(pending_action.is_none());
+    assert_eq!(app.last_notice(), Some("follow-up is being saved"));
+
+    app.sync_current_session_state(vec![queued_conversation_input_entry(
+        "queue_1",
+        "follow up after this finishes",
+    )?]);
+    let rows = app.composer_queue_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "follow up after this finishes");
+    let confirmed_action =
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        confirmed_action,
+        Some(AppAction::PromoteQueuedConversationInput { ref queue_id })
+            if queue_id.as_str() == "queue_1"
+    ));
     assert!(
         app.timeline
             .iter()
@@ -632,6 +736,10 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
         queued_conversation_input_entry("queue_1", "first queued prompt")?,
         queued_conversation_input_entry("queue_2", "second queued prompt")?,
     ]);
+
+    let up_action = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert!(up_action.is_none());
+    assert!(!app.is_composer_queue_panel_focused());
 
     let down_action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert!(down_action.is_none());
@@ -671,6 +779,56 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
     assert!(tab.is_none());
     assert!(!app.is_composer_queue_panel_focused());
     assert_eq!(app.active_pane, PaneFocus::Composer);
+    Ok(())
+}
+
+#[test]
+fn composer_agent_up_at_first_item_does_not_focus_queue_panel() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    let mut entries = app.session_browser.current_entries.clone();
+    entries.push(queued_conversation_input_entry(
+        "queue_1",
+        "first queued prompt",
+    )?);
+    app.sync_current_session_state(entries);
+    app.active_pane = PaneFocus::Composer;
+
+    assert!(app.focus_composer_agent_panel());
+    assert_eq!(app.sidebar_agent_selected, 0);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.is_composer_agent_panel_focused());
+    assert!(!app.is_composer_queue_panel_focused());
+    assert_eq!(app.sidebar_agent_selected, 0);
+    Ok(())
+}
+
+#[test]
+fn main_queue_is_hidden_while_child_agent_transcript_is_active() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    let mut entries = app.session_browser.current_entries.clone();
+    entries.push(queued_conversation_input_entry(
+        "queue_1",
+        "first queued prompt",
+    )?);
+    app.sync_current_session_state(entries);
+
+    assert_eq!(app.composer_queue_rows().len(), 1);
+    assert_eq!(app.queue_strip_rows(), 3);
+
+    assert!(app.activate_agent_view_at_index(1));
+    assert!(app.active_agent_child_transcript.is_some());
+    assert!(app.composer_queue_rows().is_empty());
+    assert_eq!(app.queue_strip_rows(), 0);
+    assert!(!app.focus_composer_queue_panel());
+
+    assert!(app.activate_agent_view_at_index(0));
+    assert!(app.active_agent_child_transcript.is_none());
+    assert_eq!(app.composer_queue_rows().len(), 1);
     Ok(())
 }
 
@@ -1502,13 +1660,10 @@ fn composer_agent_panel_close_key_requests_selected_terminal_agent_close() -> Re
             ref thread_id,
             reason: Some(ref reason),
             ..
-        }) if thread_id.as_str() == "legacy_task_1_v1_step_1_child_1"
+        }) if thread_id.as_str() == "child_1"
             && reason == "closed from TUI /agent"
     ));
-    assert_eq!(
-        app.last_notice(),
-        Some("agent close requested: legacy_task_1_v1_step_1_child_1")
-    );
+    assert_eq!(app.last_notice(), Some("agent close requested: child_1"));
     assert!(app.is_composer_agent_panel_focused());
     Ok(())
 }
@@ -1547,19 +1702,119 @@ fn composer_down_moves_wrapped_input_before_agent_panel_focus() -> Result<()> {
 }
 
 #[test]
-fn composer_agent_panel_up_and_escape_return_to_input() -> Result<()> {
+fn composer_agent_panel_up_stays_in_agent_panel_and_escape_returns_to_input() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
+    let mut entries = app.session_browser.current_entries.clone();
+    entries.push(queued_conversation_input_entry(
+        "queue_1",
+        "main follow up",
+    )?);
+    app.sync_current_session_state(entries);
     assert!(app.focus_composer_agent_panel());
     assert!(app.is_composer_agent_panel_focused());
+    assert!(!app.is_composer_queue_panel_focused());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert!(!app.is_composer_agent_panel_focused());
+    assert!(app.is_composer_agent_panel_focused());
+    assert_eq!(app.sidebar_agent_selected, 0);
+    assert!(!app.is_composer_queue_panel_focused());
 
-    assert!(app.focus_composer_agent_panel());
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(!app.is_composer_agent_panel_focused());
+    assert!(!app.is_composer_queue_panel_focused());
     assert!(app.composer.input.is_empty());
+    Ok(())
+}
+
+#[test]
+fn queue_rows_are_scoped_to_active_agent_view() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    let mut entries = app.session_browser.current_entries.clone();
+    entries.push(queued_conversation_input_entry(
+        "queue_main",
+        "main follow up",
+    )?);
+    entries.push(queued_conversation_input_entry_with_target(
+        "queue_child",
+        "child follow up",
+        sigil_kernel::ConversationInputTarget::AgentThread {
+            thread_id: sigil_kernel::AgentThreadId::new("child_1")?,
+        },
+        sigil_kernel::ConversationInputKind::AgentMessage,
+    )?);
+    app.sync_current_session_state(entries);
+
+    let main_rows = app.composer_queue_rows();
+    assert_eq!(main_rows.len(), 1);
+    assert_eq!(main_rows[0].label, "main follow up");
+    assert_eq!(main_rows[0].detail, "pending · main · follow-up");
+
+    assert!(app.activate_agent_view_at_index(1));
+    let child_rows = app.composer_queue_rows();
+    assert_eq!(child_rows.len(), 1);
+    assert_eq!(child_rows[0].label, "child follow up");
+    assert_eq!(child_rows[0].detail, "pending · agent child_1 · message");
+
+    let _ = app.activate_agent_from_command("main")?;
+    let restored_main_rows = app.composer_queue_rows();
+    assert_eq!(restored_main_rows.len(), 1);
+    assert_eq!(restored_main_rows[0].label, "main follow up");
+    Ok(())
+}
+
+#[test]
+fn queue_focus_is_cleared_when_switching_to_agent_without_visible_queue() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    let mut entries = app.session_browser.current_entries.clone();
+    entries.push(queued_conversation_input_entry(
+        "queue_main",
+        "main follow up",
+    )?);
+    app.sync_current_session_state(entries);
+    assert!(app.focus_composer_queue_panel());
+    assert!(app.is_composer_queue_panel_focused());
+
+    assert!(app.activate_agent_view_at_index(1));
+
+    assert!(!app.is_composer_queue_panel_focused());
+    assert!(app.composer_queue_rows().is_empty());
+    assert_eq!(app.queue_strip_rows(), 0);
+    let typed = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert!(typed.is_none());
+    assert_eq!(app.composer.input, "x");
+    Ok(())
+}
+
+#[test]
+fn busy_plain_prompt_queues_against_active_agent_view() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    assert!(app.activate_agent_view_at_index(1));
+    app.runtime.is_busy = true;
+    app.composer.input = "check this thread next".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::QueueConversationInput {
+            prompt,
+            kind: sigil_kernel::ConversationInputKind::AgentMessage,
+            target: sigil_kernel::ConversationInputTarget::AgentThread { ref thread_id },
+        }) if prompt == "check this thread next" && thread_id.as_str() == "child_1"
+    ));
+    assert!(app.composer.input.is_empty());
+    let child_rows = app.composer_queue_rows();
+    assert_eq!(child_rows.len(), 1);
+    assert_eq!(child_rows[0].label, "check this thread next");
+    assert_eq!(child_rows[0].detail, "pending · agent child_1 · message");
+
+    let _ = app.activate_agent_from_command("main")?;
+    assert!(app.composer_queue_rows().is_empty());
     Ok(())
 }
 

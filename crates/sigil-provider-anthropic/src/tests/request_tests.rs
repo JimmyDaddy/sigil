@@ -154,6 +154,7 @@ fn build_messages_request_rejects_malformed_tool_args_and_missing_result_id() {
         content: Some("ok".to_owned()),
         tool_calls: Vec::new(),
         tool_call_id: None,
+        assistant_kind: None,
     }];
     let error = build_messages_request(&invalid, 1024).expect_err("missing id should fail");
     assert!(error.to_string().contains("missing tool_call_id"));

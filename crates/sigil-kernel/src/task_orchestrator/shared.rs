@@ -64,6 +64,7 @@ where
     )
 }
 
+#[cfg(test)]
 pub(super) fn route_id_for_call(
     task_id: &TaskId,
     step_id: &TaskStepId,
@@ -82,6 +83,7 @@ pub(super) fn route_id_for_call(
     ))
 }
 
+#[cfg(test)]
 pub(super) fn hash_text(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());

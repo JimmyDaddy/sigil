@@ -46,7 +46,6 @@ pub struct WorkspaceTrustDecisionEntry {
 #[serde(rename_all = "snake_case")]
 pub struct ReadinessInput {
     pub run_status: RunStatus,
-    pub projection_mode: ReadinessProjectionMode,
     pub policy: VerificationPolicy,
     pub workspace_trust: WorkspaceTrust,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,7 +75,6 @@ impl ReadinessInput {
     pub fn new_run(run_status: RunStatus, policy: VerificationPolicy) -> Self {
         Self {
             run_status,
-            projection_mode: ReadinessProjectionMode::NewRun,
             policy,
             workspace_trust: WorkspaceTrust::Unknown,
             workspace_trust_approval_event_id: None,
@@ -92,13 +90,6 @@ impl ReadinessInput {
             recovered_tool_error_event_ids: Vec::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReadinessProjectionMode {
-    NewRun,
-    LegacyProjection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -299,7 +290,6 @@ impl From<VerificationStateProjectionSnapshot> for VerificationStateProjection {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "reason", content = "details")]
 pub enum ReadinessReason {
-    LegacyEvidenceUnavailable,
     NoVerificationRequired,
     FinalAssistantTextIgnored {
         event_id: EventId,
@@ -370,16 +360,6 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
         reasons.push(ReadinessReason::RecoveredToolError {
             event_id: event_id.clone(),
         });
-    }
-
-    if input.projection_mode == ReadinessProjectionMode::LegacyProjection {
-        reasons.push(ReadinessReason::LegacyEvidenceUnavailable);
-        return evaluation(
-            input.run_status,
-            VerificationVerdict::NotEvaluated,
-            reasons,
-            required_actions,
-        );
     }
 
     if !input.policy.workspace_trust_requirement.is_satisfied(

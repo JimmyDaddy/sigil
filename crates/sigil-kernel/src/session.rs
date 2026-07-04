@@ -30,8 +30,8 @@ use crate::{
     context_engine::{
         ContextItem, ContextItemId, ContextPackOptions, ContextSensitivity, ContextSource,
         ContextTrustLevel, DEFAULT_CONTEXT_RENDER_SNIPPET_MAX_BYTES, PackedContext,
-        RuntimeContextCandidates, SessionArchive, SessionArchiveEntry, pack_context_items,
-        validate_context_render_snippet,
+        RuntimeContextCandidates, SessionArchive, SessionArchiveEntry, context_provenance_row_v1,
+        pack_context_items, validate_context_render_snippet,
     },
     conversation_queue::{
         ConversationInputEditedEntry, ConversationInputQueueControlEntry,
@@ -39,11 +39,10 @@ use crate::{
         ConversationInputStatusEntry, ConversationQueueProjection,
     },
     event::{
-        DomainEvent, DurableEventType, EventClass, EventSyncClass, LegacyEvent,
-        ProjectionApplyDecision, ProjectionCursor, StoredEvent, StoredEventDecode,
-        TypedDomainEvent, TypedStoredEventDecode, decode_stored_event, decode_typed_stored_event,
-        is_v2_stored_event_value, projection_apply_decision_for_record, stable_event_hash,
-        stable_event_uuid,
+        DomainEvent, DurableEventType, EventClass, EventSyncClass, ProjectionApplyDecision,
+        ProjectionCursor, StoredEvent, StoredEventDecode, TypedDomainEvent, TypedStoredEventDecode,
+        decode_stored_event, decode_typed_stored_event, is_v2_stored_event_value,
+        projection_apply_decision_for_record, stable_event_hash, stable_event_uuid,
     },
     memory::{apply_memory_report, materialize_memory},
     mutation::{ExecutionMutationProfile, MutationEventRecorder},

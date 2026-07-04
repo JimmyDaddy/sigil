@@ -15,7 +15,7 @@ impl AppState {
         }
         if self.config_snapshot.as_ref().is_some_and(|config| {
             !config.code_intelligence.enabled
-                || config.code_intelligence.startup == CodeIntelStartup::Off
+                || config.code_intelligence.server_startup == CodeIntelStartup::Off
         }) {
             self.last_notice = Some("code intelligence is off".to_owned());
             return None;

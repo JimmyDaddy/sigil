@@ -49,7 +49,7 @@ fn simple_structured_plan(summary: &str, title: &str, path: &str) -> String {
   "summary": "{summary}",
   "steps": [
     {{
-      "id": "step-1",
+      "step_id": "step-1",
       "title": "{title}",
       "target_paths": ["{path}"]
     }}
@@ -173,7 +173,7 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
   "summary": "Fix README typo",
   "steps": [
     {
-      "id": "fix-readme-typo",
+      "step_id": "fix-readme-typo",
       "title": "Fix README.md line 3 typo",
       "detail": "第 3 行 \"This docs has typoo.\" 中 \"typoo\" 拼写错误，修复为 typo。",
       "target_paths": ["README.md"],
@@ -212,14 +212,14 @@ fn sigil_plan_v1_block_creates_structured_executable_plan() -> Result<()> {
   "summary": "Fix README typo",
   "steps": [
     {
-      "id": "fix-readme-typo",
+      "step_id": "fix-readme-typo",
       "title": "Fix README.md line 3 typo",
       "mode": "write",
       "target_paths": ["README.md"],
       "acceptance": ["README.md line 3 no longer contains typoo"]
     },
     {
-      "id": "verify-readme",
+      "step_id": "verify-readme",
       "title": "Verify README.md wording",
       "mode": "verify",
       "target_paths": ["README.md"]
@@ -300,19 +300,19 @@ Plan:
   "summary": "Update quickstart docs",
   "steps": [
     {
-      "id": "inspect-readme",
+      "step_id": "inspect-readme",
       "title": "Inspect README.md",
       "mode": "read_only",
       "target_paths": ["README.md"]
     },
     {
-      "id": "update-quickstart",
+      "step_id": "update-quickstart",
       "title": "Update docs/en/quickstart.md copy",
       "mode": "write",
       "target_paths": ["docs/en/quickstart.md"]
     },
     {
-      "id": "verify-plan-tests",
+      "step_id": "verify-plan-tests",
       "title": "Verify with cargo test -p sigil-kernel plan",
       "mode": "verify"
     }

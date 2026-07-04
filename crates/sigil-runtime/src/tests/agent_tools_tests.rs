@@ -3485,15 +3485,13 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
 }
 
 #[tokio::test]
-async fn spawn_agent_records_budget_warning_without_failing_completed_child() -> Result<()> {
+async fn spawn_agent_records_usage_without_budget_warning() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
-    let mut budget = AgentBudgetPolicy::from_root_config(&config);
-    budget.max_agent_tokens_per_task = 10;
     let supervisor = AgentSupervisor::new(
         AgentProfileRegistry::from_root_config(&config)?,
-        budget,
+        AgentBudgetPolicy::from_root_config(&config),
         provider_capabilities(),
     );
     let mut runtime = AgentToolRuntime::with_provider_factory(
@@ -3571,19 +3569,19 @@ async fn spawn_agent_records_budget_warning_without_failing_completed_child() ->
         thread.result.as_ref().map(|result| result.summary.as_str()),
         Some("expensive child done")
     );
-    assert!(handler.events.iter().any(|event| {
-        matches!(event, RunEvent::Notice(message) if message.contains("agent budget warning after child completion"))
+    assert!(!handler.events.iter().any(|event| {
+        matches!(event, RunEvent::Notice(message) if message.contains("agent budget warning"))
     }));
     Ok(())
 }
 
 #[tokio::test]
-async fn spawn_agent_enforces_max_fanout() -> Result<()> {
+async fn spawn_agent_enforces_max_subagents() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let mut budget = AgentBudgetPolicy::from_root_config(&config);
-    budget.max_spawn_fanout_per_turn = 0;
+    budget.max_subagents = 0;
     let supervisor = AgentSupervisor::new(
         AgentProfileRegistry::from_root_config(&config)?,
         budget,
@@ -3602,7 +3600,7 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
         .handle_agent_tool_call(
             &mut session,
             &ToolCall {
-                id: "call-fanout".to_owned(),
+                id: "call-max-subagents".to_owned(),
                 name: SPAWN_AGENT_TOOL_NAME.to_owned(),
                 args_json: json!({
                     "profile_id": "explore",
@@ -3632,7 +3630,7 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
     );
     assert_eq!(
         model_content["error"]["details"]["config_paths"][0],
-        "[task].max_spawn_fanout_per_turn"
+        "[task].max_subagents"
     );
     assert!(
         result
@@ -3642,7 +3640,7 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
             .is_none()
     );
     let thread_id = chat_agent_thread_id_for_call(
-        "call-fanout",
+        "call-max-subagents",
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
     let projection = session.agent_thread_state_projection();
@@ -3655,7 +3653,7 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("fan-out budget"))
+            .is_some_and(|reason| reason.contains("[task].max_subagents=0"))
     );
     Ok(())
 }
@@ -3810,7 +3808,6 @@ fn root_config() -> RootConfig {
             "deepseek".to_owned(),
             json!({
                 "base_url": "https://example.com",
-                "model": "deepseek-v4-flash",
             }),
         )]),
         mcp_servers: Vec::new(),

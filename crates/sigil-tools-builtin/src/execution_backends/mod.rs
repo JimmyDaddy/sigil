@@ -72,7 +72,7 @@ pub fn long_lived_stdio_process_plan(
     }
     let canonical_cwd = fs::canonicalize(cwd)
         .with_context(|| format!("failed to canonicalize cwd {}", cwd.display()))?;
-    match config.backend {
+    match config.backend() {
         ExecutionBackendKind::Local => {
             if config.requires_sandbox() {
                 bail!(
@@ -112,7 +112,7 @@ pub fn long_lived_stdio_process_plan(
                 env: env.clone(),
                 backend: ExecutionBackendKind::MacosSeatbelt,
                 backend_capabilities: capabilities,
-                sandbox_profile: config.profile,
+                sandbox_profile: config.profile(),
                 sandboxed: true,
             })
         }
@@ -156,7 +156,7 @@ pub fn long_lived_stdio_process_plan(
                 env: env.clone(),
                 backend: ExecutionBackendKind::LinuxBubblewrap,
                 backend_capabilities: capabilities,
-                sandbox_profile: config.profile,
+                sandbox_profile: config.profile(),
                 sandboxed: true,
             })
         }
@@ -177,7 +177,7 @@ fn validate_long_lived_stdio_capabilities(
     if !missing.is_empty() {
         bail!(
             "MCP stdio sandbox unavailable: execution backend {} missing capabilities: {}",
-            config.backend.as_str(),
+            config.backend().as_str(),
             missing
                 .iter()
                 .map(|capability| capability.as_str())
@@ -198,7 +198,7 @@ fn validate_long_lived_stdio_capabilities(
 /// Returns an error when configuration requires sandbox enforcement that the selected backend
 /// cannot provide.
 pub fn build_execution_backend(config: &ExecutionConfig) -> Result<Arc<dyn ExecutionBackend>> {
-    let backend: Arc<dyn ExecutionBackend> = match config.backend {
+    let backend: Arc<dyn ExecutionBackend> = match config.backend() {
         ExecutionBackendKind::Local => Arc::new(LocalExecutionBackend),
         ExecutionBackendKind::MacosSeatbelt => {
             let backend = MacosSeatbeltExecutionBackend::default()
@@ -232,17 +232,12 @@ pub fn build_execution_backend(config: &ExecutionConfig) -> Result<Arc<dyn Execu
             Arc::new(backend)
         }
         ExecutionBackendKind::Docker => {
-            let Some(image) = config
-                .container_image
-                .as_ref()
-                .map(|image| image.trim())
-                .filter(|image| !image.is_empty())
-            else {
+            let Some(image) = config.container_image() else {
                 return fallback_or_error(
                     config,
                     ExecutionBackendSelectionDiagnostic::unavailable(
                         config,
-                        "docker execution backend requires [execution].container_image",
+                        "docker execution backend requires execution.sandbox.container_image",
                     ),
                 );
             };
@@ -290,7 +285,7 @@ pub(crate) fn fallback_or_error(
     config: &ExecutionConfig,
     diagnostic: ExecutionBackendSelectionDiagnostic,
 ) -> Result<Arc<dyn ExecutionBackend>> {
-    match config.fallback {
+    match config.fallback() {
         ExecutionSandboxFallback::Unconfined => Ok(Arc::new(LocalExecutionBackend)),
         ExecutionSandboxFallback::Deny | ExecutionSandboxFallback::Prompt => {
             bail!("{}", execution_backend_selection_error(config, &diagnostic))

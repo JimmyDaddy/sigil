@@ -12,18 +12,18 @@ use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ControlEntry,
-    ExecutionBackendKind, ExecutionIsolationPolicy, ExecutionSandboxProfile, InteractionMode,
-    JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
-    PermissionConfig, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport,
-    RoleModelConfig, RootConfig, Session, SessionConfig, SessionLogEntry, SkillDescriptor,
-    SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig,
-    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
-    ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ExecutionBackendKind, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    ExecutionSandboxStrategyConfig, InteractionMode, JsonlSessionStore, LanguageServerConfig,
+    McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ProviderCapabilities,
+    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionConfig,
+    SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool,
+    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
-use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
-use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
-use sigil_provider_gemini::{GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, SIGIL_GEMINI_API_KEY_ENV};
-use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV};
+use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
+use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
+use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 
 use super::{
     McpProcessLaunchRequest, McpProcessLauncher, SecretSource, activate_lazy_mcp_tools,
@@ -39,9 +39,28 @@ use super::{
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
 };
 
+fn sandbox_execution_config(
+    backend: ExecutionBackendKind,
+    profile: ExecutionSandboxProfile,
+    fallback: ExecutionSandboxFallback,
+    container_image: Option<String>,
+) -> sigil_kernel::ExecutionConfig {
+    let mut sandbox = ExecutionSandboxStrategyConfig::new(backend);
+    sandbox.profile = profile;
+    sandbox.fallback = fallback;
+    sandbox.container_image = container_image;
+    sigil_kernel::ExecutionConfig::sandbox(sandbox)
+}
+
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn test_root_config(provider: &str) -> RootConfig {
+    let model = match provider {
+        "openai_compat" => "gpt-test",
+        "anthropic" => "claude-test",
+        "gemini" => "gemini-test",
+        _ => "deepseek-v4-flash",
+    };
     RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
@@ -52,7 +71,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         },
         agent: AgentConfig {
             provider: provider.to_owned(),
-            model: "deepseek-v4-flash".to_owned(),
+            model: model.to_owned(),
             max_turns: Some(12),
             tool_timeout_secs: 45,
         },
@@ -74,7 +93,6 @@ fn test_root_config(provider: &str) -> RootConfig {
                     "base_url": "https://example.com",
                     "beta_base_url": "https://example.com/beta",
                     "anthropic_base_url": "https://example.com/anthropic",
-                    "model": "deepseek-v4-flash",
                     "fim_model": "deepseek-v4-pro",
                     "api_key": "test-key",
                     "strict_tools_mode": "auto"
@@ -84,7 +102,6 @@ fn test_root_config(provider: &str) -> RootConfig {
                 "openai_compat".to_owned(),
                 json!({
                     "base_url": "https://openai.example.com/v1",
-                    "model": "gpt-test",
                     "api_key": "openai-config-key",
                     "organization": "org-test",
                     "project": "project-test"
@@ -94,7 +111,6 @@ fn test_root_config(provider: &str) -> RootConfig {
                 "anthropic".to_owned(),
                 json!({
                     "base_url": "https://anthropic.example.com",
-                    "model": "claude-test",
                     "api_key": "anthropic-config-key",
                     "anthropic_version": "2023-06-01",
                     "max_tokens": 1024
@@ -104,7 +120,6 @@ fn test_root_config(provider: &str) -> RootConfig {
                 "gemini".to_owned(),
                 json!({
                     "base_url": "https://gemini.example.com/v1beta",
-                    "model": "gemini-test",
                     "api_key": "gemini-config-key"
                 }),
             ),
@@ -261,7 +276,7 @@ fn resolve_deepseek_api_key_uses_env_before_plaintext_config() -> Result<()> {
 }
 
 #[test]
-fn resolve_deepseek_api_key_supports_deepseek_env_and_config_fallback() -> Result<()> {
+fn resolve_deepseek_api_key_ignores_deepseek_env_and_uses_config_fallback() -> Result<()> {
     let _guard = ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -269,13 +284,10 @@ fn resolve_deepseek_api_key_supports_deepseek_env_and_config_fallback() -> Resul
     let config = load_deepseek_config(&test_root_config("deepseek"))?;
 
     {
-        let _scope = EnvScope::set_many(&[(LEGACY_DEEPSEEK_API_KEY_ENV, "deepseek-env-key")]);
+        let _scope = EnvScope::set_many(&[("DEEPSEEK_API_KEY", "deepseek-env-key")]);
         let resolved = resolve_deepseek_api_key(&config).expect("expected deepseek api key");
-        assert_eq!(resolved.value, "deepseek-env-key");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(LEGACY_DEEPSEEK_API_KEY_ENV)
-        );
+        assert_eq!(resolved.value, "test-key");
+        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
     }
 
     let resolved = resolve_deepseek_api_key(&config).expect("expected config api key");
@@ -306,15 +318,12 @@ fn resolve_openai_compat_api_key_prefers_env_session_then_config() -> Result<()>
     {
         let _scope = EnvScope::set_many(&[
             (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
-            (OPENAI_API_KEY_ENV, "openai-env-key"),
+            ("OPENAI_API_KEY", "openai-env-key"),
         ]);
         let resolved =
             resolve_openai_compat_api_key(&config).expect("expected OpenAI-compatible api key");
-        assert_eq!(resolved.value, "openai-env-key");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(OPENAI_API_KEY_ENV)
-        );
+        assert_eq!(resolved.value, "openai-config-key");
+        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
     }
 
     let resolved = resolve_openai_compat_api_key_with_session(&config, Some(" session-key "))
@@ -351,14 +360,11 @@ fn resolve_anthropic_and_gemini_api_keys_prefer_env_session_then_config() -> Res
     {
         let _scope = EnvScope::set_many(&[
             (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
-            (ANTHROPIC_API_KEY_ENV, "anthropic-provider-env"),
+            ("ANTHROPIC_API_KEY", "anthropic-provider-env"),
         ]);
         let resolved = resolve_anthropic_api_key(&anthropic).expect("expected Anthropic api key");
-        assert_eq!(resolved.value, "anthropic-provider-env");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(ANTHROPIC_API_KEY_ENV)
-        );
+        assert_eq!(resolved.value, "anthropic-config-key");
+        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
     }
 
     let resolved = super::resolve_anthropic_api_key_with_session(&anthropic, Some(" session-key "))
@@ -379,15 +385,12 @@ fn resolve_anthropic_and_gemini_api_keys_prefer_env_session_then_config() -> Res
     {
         let _scope = EnvScope::set_many(&[
             (SIGIL_GEMINI_API_KEY_ENV, "   "),
-            (GEMINI_API_KEY_ENV, "gemini-provider-env"),
-            (GOOGLE_API_KEY_ENV, "google-env"),
+            ("GEMINI_API_KEY", "gemini-provider-env"),
+            ("GOOGLE_API_KEY", "google-env"),
         ]);
         let resolved = resolve_gemini_api_key(&gemini).expect("expected Gemini api key");
-        assert_eq!(resolved.value, "gemini-provider-env");
-        assert_eq!(
-            resolved.source,
-            SecretSource::Environment(GEMINI_API_KEY_ENV)
-        );
+        assert_eq!(resolved.value, "gemini-config-key");
+        assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
     }
 
     let resolved = resolve_gemini_api_key_with_session(&gemini, Some(" gemini-session "))
@@ -437,10 +440,10 @@ fn secret_redactor_for_root_config_redacts_anthropic_and_gemini_api_keys() {
         .expect("env lock poisoned");
     let _scope = EnvScope::set_many(&[
         (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
-        (ANTHROPIC_API_KEY_ENV, "   "),
+        ("ANTHROPIC_API_KEY", "   "),
         (SIGIL_GEMINI_API_KEY_ENV, "   "),
-        (GEMINI_API_KEY_ENV, "   "),
-        (GOOGLE_API_KEY_ENV, "   "),
+        ("GEMINI_API_KEY", "   "),
+        ("GOOGLE_API_KEY", "   "),
     ]);
 
     let redactor = secret_redactor_for_root_config(&test_root_config("anthropic"));
@@ -474,11 +477,9 @@ fn build_provider_supports_deepseek_and_missing_provider_config_errors() -> Resu
 }
 
 #[test]
-fn build_provider_supports_openai_compat_aliases_and_missing_config_errors() -> Result<()> {
-    for provider_name in ["openai_compat", "openai-compatible", "openai_compatible"] {
-        let provider = build_provider(&test_root_config(provider_name))?;
-        assert_eq!(provider.name(), "openai_compat");
-    }
+fn build_provider_supports_openai_compat_and_missing_config_errors() -> Result<()> {
+    let provider = build_provider(&test_root_config("openai_compat"))?;
+    assert_eq!(provider.name(), "openai_compat");
 
     let mut missing = test_root_config("openai_compat");
     missing.providers.remove("openai_compat");
@@ -493,20 +494,13 @@ fn build_provider_supports_openai_compat_aliases_and_missing_config_errors() -> 
 }
 
 #[test]
-fn build_provider_supports_anthropic_and_gemini_and_missing_config_errors() -> Result<()> {
+fn build_provider_supports_canonical_anthropic_and_gemini_and_missing_config_errors() -> Result<()>
+{
     let anthropic = build_provider(&test_root_config("anthropic"))?;
     assert_eq!(anthropic.name(), "anthropic");
 
-    let claude_alias = build_provider(&test_root_config("claude"))?;
-    assert_eq!(claude_alias.name(), "anthropic");
-
     let gemini = build_provider(&test_root_config("gemini"))?;
     assert_eq!(gemini.name(), "gemini");
-
-    for provider_name in ["google", "google_gemini", "google-gemini"] {
-        let provider = build_provider(&test_root_config(provider_name))?;
-        assert_eq!(provider.name(), "gemini");
-    }
 
     let mut missing_anthropic = test_root_config("anthropic");
     missing_anthropic.providers.remove("anthropic");
@@ -523,16 +517,34 @@ fn build_provider_supports_anthropic_and_gemini_and_missing_config_errors() -> R
 }
 
 #[test]
+fn build_provider_rejects_provider_aliases() {
+    for provider_name in [
+        "openai-compatible",
+        "openai_compatible",
+        "claude",
+        "google",
+        "google_gemini",
+        "google-gemini",
+    ] {
+        let error = match build_provider(&test_root_config(provider_name)) {
+            Ok(_) => panic!("provider aliases should not be accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unsupported provider {provider_name}"))
+        );
+    }
+}
+
+#[test]
 fn provider_capability_view_uses_provider_neutral_rows() {
     let capabilities =
         provider_capabilities_for_name("anthropic").expect("Anthropic capabilities should exist");
     let view = provider_capability_view("anthropic", &capabilities);
-    let alias_capabilities =
-        provider_capabilities_for_name("claude").expect("Claude alias should resolve");
-    let alias_view = provider_capability_view("claude", &alias_capabilities);
 
     assert_eq!(view.provider_name, "anthropic");
-    assert_eq!(alias_view.provider_name, "anthropic");
     assert_eq!(
         view.rows.iter().map(|row| row.key).collect::<Vec<_>>(),
         vec![
@@ -568,6 +580,7 @@ fn provider_capability_view_uses_provider_neutral_rows() {
     assert!(view.rows.iter().any(|row| {
         row.key == "agent_background_resume" && row.status.as_str() == "unsupported"
     }));
+    assert!(provider_capabilities_for_name("claude").is_none());
     assert!(provider_capabilities_for_name("unknown").is_none());
 }
 
@@ -847,10 +860,7 @@ fn resolve_deepseek_api_key_prefers_session_over_plaintext_and_skips_blank_value
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("env lock poisoned");
-    let _scope = EnvScope::set_many(&[
-        (SIGIL_API_KEY_ENV, "   "),
-        (LEGACY_DEEPSEEK_API_KEY_ENV, "   "),
-    ]);
+    let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "   "), ("DEEPSEEK_API_KEY", "   ")]);
     let config = load_deepseek_config(&test_root_config("deepseek"))?;
 
     let resolved = resolve_deepseek_api_key_with_session(&config, Some("  session-secret  "))
@@ -885,8 +895,12 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
 async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.execution.backend = ExecutionBackendKind::Local;
-    config.execution.isolation = ExecutionIsolationPolicy::RequireSandbox;
+    config.execution = sandbox_execution_config(
+        ExecutionBackendKind::Local,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    );
 
     let result =
         build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await;
@@ -895,9 +909,9 @@ async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<(
     };
 
     assert!(
-        error.to_string().contains(
-            "execution isolation require_sandbox requires filesystem and process isolation"
-        )
+        error
+            .to_string()
+            .contains("execution profile WorkspaceWrite requires filesystem and process isolation")
     );
     Ok(())
 }
@@ -906,8 +920,12 @@ async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<(
 async fn build_tool_registry_fails_closed_when_profile_requires_sandbox() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.execution.backend = ExecutionBackendKind::Local;
-    config.execution.profile = ExecutionSandboxProfile::WorkspaceWrite;
+    config.execution = sandbox_execution_config(
+        ExecutionBackendKind::Local,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    );
 
     let result =
         build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await;
@@ -967,11 +985,12 @@ async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Resu
 #[test]
 fn configured_mcp_process_launcher_local_required_sandbox_fails_closed() {
     let launcher = super::ConfiguredMcpProcessLauncher {
-        execution: sigil_kernel::ExecutionConfig {
-            backend: ExecutionBackendKind::Local,
-            isolation: ExecutionIsolationPolicy::RequireSandbox,
-            ..sigil_kernel::ExecutionConfig::default()
-        },
+        execution: sandbox_execution_config(
+            ExecutionBackendKind::Local,
+            ExecutionSandboxProfile::WorkspaceWrite,
+            ExecutionSandboxFallback::Deny,
+            None,
+        ),
     };
     let result = launcher.launch(McpProcessLaunchRequest {
         server_name: "local".to_owned(),
@@ -1011,12 +1030,12 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
         outside.to_string_lossy().into_owned(),
     );
     let launcher = super::ConfiguredMcpProcessLauncher {
-        execution: sigil_kernel::ExecutionConfig {
-            backend: ExecutionBackendKind::MacosSeatbelt,
-            isolation: ExecutionIsolationPolicy::RequireSandbox,
-            profile: ExecutionSandboxProfile::WorkspaceWrite,
-            ..sigil_kernel::ExecutionConfig::default()
-        },
+        execution: sandbox_execution_config(
+            ExecutionBackendKind::MacosSeatbelt,
+            ExecutionSandboxProfile::WorkspaceWrite,
+            ExecutionSandboxFallback::Deny,
+            None,
+        ),
     };
     let launch = launcher.launch(McpProcessLaunchRequest {
         server_name: "seatbelt".to_owned(),
@@ -1068,8 +1087,12 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
 async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.execution.backend = ExecutionBackendKind::MacosSeatbelt;
-    config.execution.isolation = ExecutionIsolationPolicy::RequireSandbox;
+    config.execution = sandbox_execution_config(
+        ExecutionBackendKind::MacosSeatbelt,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    );
 
     let registry =
         build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await?;
@@ -1085,10 +1108,12 @@ async fn build_tool_registry_routes_terminal_pty_through_configured_sandbox_back
     let temp = tempfile::tempdir()?;
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.execution.backend = ExecutionBackendKind::MacosSeatbelt;
-    config.execution.isolation = ExecutionIsolationPolicy::RequireSandbox;
-    config.execution.profile = ExecutionSandboxProfile::WorkspaceWrite;
-    config.execution.fallback = sigil_kernel::ExecutionSandboxFallback::Deny;
+    config.execution = sandbox_execution_config(
+        ExecutionBackendKind::MacosSeatbelt,
+        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxFallback::Deny,
+        None,
+    );
     let registry =
         build_tool_registry(&config, &provider.capabilities(), temp.path().to_path_buf()).await?;
 
@@ -1135,7 +1160,7 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
     let mut config = test_root_config("deepseek");
     config.code_intelligence = CodeIntelligenceConfig {
         enabled: true,
-        startup: CodeIntelStartup::Lazy,
+        server_startup: CodeIntelStartup::Lazy,
         servers: vec![LanguageServerConfig {
             name: "rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],

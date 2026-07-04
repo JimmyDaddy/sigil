@@ -47,7 +47,6 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
                 "base_url": "https://example.com",
                 "beta_base_url": "https://example.com/beta",
                 "anthropic_base_url": "https://example.com/anthropic",
-                "model": "deepseek-v4-flash",
                 "fim_model": "deepseek-v4-pro",
                 "api_key": "test-key",
                 "strict_tools_mode": "auto"

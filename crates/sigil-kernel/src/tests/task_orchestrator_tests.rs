@@ -132,6 +132,19 @@ impl crate::EventHandler for RecordingEventHandler {
     }
 }
 
+fn test_orchestrator(
+    planner: Agent<Box<dyn Provider>>,
+    executor: Agent<Box<dyn Provider>>,
+    subagent_read: Agent<Box<dyn Provider>>,
+    subagent_write: Agent<Box<dyn Provider>>,
+) -> SequentialTaskOrchestrator<super::child_session::TestAgentTaskChildSessionRunner> {
+    SequentialTaskOrchestrator::new_with_child_runner(
+        planner,
+        executor,
+        super::child_session::TestAgentTaskChildSessionRunner::new(subagent_read, subagent_write),
+    )
+}
+
 #[async_trait]
 impl TaskChildSessionRunner for StaticChangesetChildRunner {
     async fn run_child_session<H, A>(
@@ -199,7 +212,7 @@ fn new_with_child_runner_constructs_orchestrator() {
             },
             ToolRegistry::new(),
         ),
-        crate::LegacyTaskChildSessionRunner::new(
+        super::child_session::TestAgentTaskChildSessionRunner::new(
             boxed_agent(
                 CapturingExecutorProvider {
                     requests: Arc::new(Mutex::new(Vec::new())),
@@ -605,7 +618,7 @@ impl crate::ApprovalHandler for DenyApprovalHandler {
 #[tokio::test]
 async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()> {
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -733,7 +746,7 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
 #[tokio::test]
 async fn sequential_task_orchestrator_continues_dependent_steps_until_completed() -> Result<()> {
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -853,7 +866,7 @@ async fn sequential_task_orchestrator_runs_configured_check_after_mutating_step(
     append_trusted_only_policy_for_task(&mut session, "task_1")?;
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(MutatingTool));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(MutatingToolProvider, registry),
         boxed_agent(
@@ -923,7 +936,7 @@ async fn sequential_task_orchestrator_completes_mutating_step_without_verificati
     let mut session = Session::new("planner", "model").with_store(store);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(MutatingTool));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(MutatingToolProvider, registry),
         boxed_agent(
@@ -985,7 +998,7 @@ async fn sequential_task_orchestrator_completes_mutating_step_without_verificati
 #[tokio::test]
 async fn continue_run_skips_completed_steps_and_executes_remaining() -> Result<()> {
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -1070,7 +1083,7 @@ async fn continue_run_skips_completed_steps_and_executes_remaining() -> Result<(
 
 #[tokio::test]
 async fn continue_run_pauses_when_active_workspace_write_lease_defers_ready_step() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -1141,7 +1154,7 @@ async fn task_write_isolation_ready_queue_defers_write_until_read_dependencies_c
 -> Result<()> {
     let read_requests = Arc::new(Mutex::new(Vec::new()));
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -1275,7 +1288,7 @@ async fn task_write_isolation_active_lease_pauses_ready_queue_without_running_st
 {
     let read_requests = Arc::new(Mutex::new(Vec::new()));
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -1382,7 +1395,7 @@ async fn task_write_isolation_active_lease_pauses_ready_queue_without_running_st
 
 #[tokio::test]
 async fn task_write_isolation_cancels_dependents_after_failed_write() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(FailingProvider, ToolRegistry::new()),
         boxed_agent(
@@ -1662,7 +1675,7 @@ async fn changeset_only_child_fails_when_parent_snapshot_changes() -> Result<()>
 async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
     let mut executor_registry = ToolRegistry::new();
     executor_registry.register(Arc::new(RecoverableErrorTool));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(RecoveringToolErrorProvider, executor_registry),
         boxed_agent(
@@ -1761,7 +1774,7 @@ async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
 
 #[tokio::test]
 async fn continue_run_errors_when_task_is_missing() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -1810,7 +1823,7 @@ async fn continue_run_errors_when_task_is_missing() -> Result<()> {
 
 #[tokio::test]
 async fn planner_provider_error_marks_task_failed() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(FailingProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -1871,7 +1884,7 @@ async fn planner_provider_error_marks_task_failed() -> Result<()> {
 #[tokio::test]
 async fn planner_role_step_runs_on_parent_executor_path() -> Result<()> {
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -1930,7 +1943,7 @@ async fn planner_role_step_runs_on_parent_executor_path() -> Result<()> {
 #[tokio::test]
 async fn subagent_step_runs_in_child_session_and_links_parent() -> Result<()> {
     let subagent_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2028,7 +2041,7 @@ async fn subagent_step_runs_in_child_session_and_links_parent() -> Result<()> {
 #[tokio::test]
 async fn direct_child_session_keeps_skill_context_out_of_parent_history() -> Result<()> {
     let subagent_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2145,7 +2158,7 @@ async fn direct_child_session_runs_configured_check_after_mutating_write() -> Re
     append_trusted_only_policy_for_task(&mut session, "task_skill")?;
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(MutatingTool));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2222,7 +2235,7 @@ async fn direct_child_session_completes_mutating_write_without_verification_conf
     let mut session = Session::new("planner", "model").with_store(store);
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(MutatingTool));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2291,7 +2304,7 @@ async fn direct_child_session_completes_mutating_write_without_verification_conf
 
 #[tokio::test]
 async fn direct_child_session_rejects_non_subagent_roles() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2351,7 +2364,7 @@ async fn direct_child_session_rejects_non_subagent_roles() -> Result<()> {
 #[tokio::test]
 async fn direct_child_session_supports_subagent_read_role() -> Result<()> {
     let subagent_read_requests = Arc::new(Mutex::new(Vec::new()));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2423,7 +2436,7 @@ async fn direct_child_session_supports_subagent_read_role() -> Result<()> {
 
 #[tokio::test]
 async fn direct_child_session_records_failed_child_provider() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2488,7 +2501,7 @@ async fn subagent_write_step_rejects_non_changeset_isolation_before_denied_route
     let store = JsonlSessionStore::new(temp.path().join("session-parent.jsonl"))?;
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ApprovalRequiredTool));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2525,7 +2538,7 @@ async fn subagent_write_step_rejects_non_changeset_isolation_before_denied_route
             &mut approval_handler,
         )
         .await
-        .expect_err("legacy subagent write plans must be rejected before routing approvals");
+        .expect_err("non-changeset subagent write plans must be rejected before routing approvals");
 
     assert!(error.to_string().contains("requires changeset_only"));
     assert!(session.entries().iter().all(|entry| {
@@ -2542,7 +2555,7 @@ async fn subagent_write_step_rejects_non_changeset_isolation_before_denied_route
 async fn subagent_write_step_rejects_non_changeset_isolation_before_approved_route() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ApprovalRequiredTool));
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2579,7 +2592,7 @@ async fn subagent_write_step_rejects_non_changeset_isolation_before_approved_rou
             &mut approval_handler,
         )
         .await
-        .expect_err("legacy subagent write plans must be rejected before routing approvals");
+        .expect_err("non-changeset subagent write plans must be rejected before routing approvals");
 
     assert!(error.to_string().contains("requires changeset_only"));
     assert!(session.entries().iter().all(|entry| {
@@ -2593,7 +2606,7 @@ async fn subagent_write_step_rejects_non_changeset_isolation_before_approved_rou
 
 #[tokio::test]
 async fn child_step_rejects_parent_role_in_child_runner() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2658,7 +2671,7 @@ async fn child_step_rejects_parent_role_in_child_runner() -> Result<()> {
 
 #[tokio::test]
 async fn subagent_step_error_marks_child_session_failed() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2738,7 +2751,7 @@ async fn subagent_step_error_marks_child_session_failed() -> Result<()> {
 
 #[tokio::test]
 async fn max_turns_marks_step_and_task_interrupted() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2804,7 +2817,7 @@ async fn max_turns_marks_step_and_task_interrupted() -> Result<()> {
 
 #[tokio::test]
 async fn planner_without_plan_marks_task_failed() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(NoPlanProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -2864,7 +2877,7 @@ async fn planner_without_plan_marks_task_failed() -> Result<()> {
 
 #[tokio::test]
 async fn proposed_plan_is_not_executable() -> Result<()> {
-    let orchestrator = SequentialTaskOrchestrator::new(
+    let orchestrator = test_orchestrator(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
@@ -4346,14 +4359,9 @@ fn task_step_readiness_carries_unknown_dirty_snapshot_evidence() -> Result<()> {
 }
 
 #[test]
-fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() -> Result<()> {
+fn durable_workspace_mutation_evidence_replays_stored_events() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let log_path = temp.path().join("session.jsonl");
-    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
-    std::fs::write(
-        &log_path,
-        format!("{}\n", serde_json::to_string(&legacy_entry)?),
-    )?;
     let store = JsonlSessionStore::new(&log_path)?;
     store.append_event(
         DurableEventType::MutationPrepared,
