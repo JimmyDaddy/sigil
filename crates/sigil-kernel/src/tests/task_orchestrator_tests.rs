@@ -137,11 +137,11 @@ fn test_orchestrator(
     executor: Agent<Box<dyn Provider>>,
     subagent_read: Agent<Box<dyn Provider>>,
     subagent_write: Agent<Box<dyn Provider>>,
-) -> SequentialTaskOrchestrator<super::child_session::TestAgentTaskChildSessionRunner> {
+) -> SequentialTaskOrchestrator<super::TestAgentTaskChildSessionRunner> {
     SequentialTaskOrchestrator::new_with_child_runner(
         planner,
         executor,
-        super::child_session::TestAgentTaskChildSessionRunner::new(subagent_read, subagent_write),
+        super::TestAgentTaskChildSessionRunner::new(subagent_read, subagent_write),
     )
 }
 
@@ -212,7 +212,7 @@ fn new_with_child_runner_constructs_orchestrator() {
             },
             ToolRegistry::new(),
         ),
-        super::child_session::TestAgentTaskChildSessionRunner::new(
+        super::TestAgentTaskChildSessionRunner::new(
             boxed_agent(
                 CapturingExecutorProvider {
                     requests: Arc::new(Mutex::new(Vec::new())),

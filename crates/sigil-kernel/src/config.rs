@@ -130,9 +130,13 @@ pub struct ModelRequestTimeouts {
 
 impl Default for ModelRequestTimeouts {
     fn default() -> Self {
-        ModelRequestConfig::default()
-            .to_timeouts()
-            .expect("default model request timeout config is valid")
+        Self {
+            request_timeout: Duration::from_secs(default_model_request_timeout_secs()),
+            stream_idle_timeout: Duration::from_secs(
+                default_model_request_stream_idle_timeout_secs(),
+            ),
+            stream_total_timeout: None,
+        }
     }
 }
 
@@ -427,11 +431,11 @@ impl UsageCostCurrency {
     }
 
     pub fn next(self) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|currency| *currency == self)
-            .expect("usage cost currency variants must be listed in ALL");
-        Self::ALL[(index + 1) % Self::ALL.len()]
+        match self {
+            Self::Auto => Self::Usd,
+            Self::Usd => Self::Cny,
+            Self::Cny => Self::Auto,
+        }
     }
 }
 

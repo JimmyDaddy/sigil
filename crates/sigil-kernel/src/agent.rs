@@ -1,56 +1,73 @@
 use std::{
-    collections::BTreeMap,
-    path::Path,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use futures::StreamExt;
-use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    CheckpointRestored, ExecutionMutationProfile, MutationCommitted, MutationReconciled,
-    MutationResolution, PlanApprovalExpiry, RuntimeContextCandidates, WorkspaceMutationDetected,
+    RuntimeContextCandidates,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
     config::{CompactionConfig, MemoryConfig},
-    event::{DurableEventType, EventClass, EventHandler, RunEvent},
+    event::{EventHandler, RunEvent},
     permission::{
-        ApprovalMode, InteractionMode, PermissionConfig, PermissionDecision,
-        PermissionEvaluationContext, PermissionPolicy, PermissionRisk,
-        tool_approval_session_grant_available,
+        ApprovalMode, InteractionMode, PermissionConfig, PermissionEvaluationContext,
+        PermissionPolicy, tool_approval_session_grant_available,
     },
-    provider::{
-        AssistantMessageKind, ModelMessage, Provider, ProviderChunk, ProviderContinuationState,
-        ToolCall,
-    },
+    provider::{ModelMessage, Provider, ToolCall},
     session::{
-        ControlEntry, JsonlSessionStore, Session, SessionLogEntry, SessionStreamRecord,
-        ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalEntry,
-        ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
-        ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
+        ControlEntry, Session, SessionLogEntry, ToolApprovalAuditAction, ToolApprovalUserDecision,
+        ToolExecutionStatus,
     },
-    task::{
-        TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanStatus, TaskPlanUpdateContext, task_plan_update_entry,
-        task_plan_update_result_content, task_plan_update_tool_spec,
-    },
-    terminal_task::TerminalTaskEntry,
-    time::saturating_elapsed,
+    task::{TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanUpdateContext, task_plan_update_tool_spec},
     tool::{
-        ToolCategory, ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
-        ToolPreviewCapability, ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink,
-        ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec, ToolSubject,
-        ToolSubjectScope, execution_mutation_profile_for_tool,
+        ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent, ToolProgressSink,
+        ToolRegistry, ToolResult, execution_mutation_profile_for_tool,
     },
-    verification::{
-        DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope, ReadinessEvaluatedEntry,
-        ReadinessInput, RunStatus, VerificationPolicy, VerificationScope,
-        WorkspaceMutationEvidence, WorkspaceTrust, build_workspace_snapshot_for_event,
-        evaluate_readiness, stable_workspace_id,
-    },
+};
+
+mod approval_policy;
+mod assistant_messages;
+mod preview;
+mod provider_stream;
+mod readiness;
+mod run_lifecycle;
+mod task_plan;
+mod tool_audit;
+mod tool_results;
+#[cfg(test)]
+use approval_policy::active_plan_approval;
+use approval_policy::{
+    interactive_external_directory_approval_override, plan_approval_decision_override,
+    tool_session_grant_decision_override,
+};
+use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
+use preview::capture_tool_preview_for_decision;
+use provider_stream::collect_provider_turn;
+use readiness::append_agent_run_readiness;
+pub use readiness::projected_agent_run_readiness;
+use run_lifecycle::append_run_lifecycle_events;
+use task_plan::{
+    append_tool_ignored_after_task_plan_acceptance, handle_task_plan_update_call,
+    task_plan_update_call_is_accepted,
+};
+use tool_audit::{
+    append_terminal_task_control_from_result, append_tool_approval_audit,
+    append_tool_approval_policy_audit, append_tool_approval_session_grant,
+    append_tool_control_entries_from_result, append_tool_execution_audit,
+    append_tool_execution_started_audit, attach_tool_call_context, duration_ms,
+    reconcile_terminal_task_mutation_from_start, tool_egress_control_entry,
+};
+#[cfg(test)]
+use tool_audit::{
+    external_directory_preview, stable_json_hash, stable_text_hash, tool_call_context,
+};
+use tool_results::{
+    agent_tool_result_satisfies_delegation, append_invalid_tool_input_result, emit_tool_result,
+    record_and_emit_tool_result, record_tool_run_outcome,
 };
 
 /// Runtime knobs for one agent run.
@@ -602,133 +619,31 @@ where
                 runtime_context.clone(),
             )?;
 
-            let mut stream = match self.provider.stream(request).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let error_message = format!("{error:#}");
-                    append_failed_run_lifecycle_events(
-                        session,
-                        "provider_request_error",
-                        total_tool_calls,
-                        &error_message,
-                    )?;
-                    return Err(error);
-                }
-            };
-            let mut assistant_text = String::new();
-            let mut reasoning_buffer = String::new();
-            let mut reasoning_trace_buffer = String::new();
-            let mut tool_parts: BTreeMap<String, (String, String)> = BTreeMap::new();
-            let mut completed_calls: Vec<ToolCall> = Vec::new();
-            let mut pending_states: Vec<ProviderContinuationState> = Vec::new();
+            let provider_turn = collect_provider_turn(
+                &self.provider,
+                session,
+                request,
+                &mut previous_response_handle,
+                total_tool_calls,
+                handler,
+            )
+            .await?;
+            let assistant_text = provider_turn.assistant_text;
+            let completed_calls = provider_turn.completed_calls;
+            let pending_states = provider_turn.pending_states;
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = match chunk.context("provider stream failed") {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        let error_message = format!("{error:#}");
-                        append_failed_run_lifecycle_events(
-                            session,
-                            "provider_stream_error",
-                            total_tool_calls,
-                            &error_message,
-                        )?;
-                        return Err(error);
-                    }
-                };
-                match chunk {
-                    ProviderChunk::TextDelta(delta) => {
-                        assistant_text.push_str(&delta);
-                        handler.handle(RunEvent::TextDelta(delta))?;
-                    }
-                    ProviderChunk::ReasoningDelta(delta) => {
-                        reasoning_buffer.push_str(&delta);
-                        reasoning_trace_buffer.push_str(&delta);
-                        handler.handle(RunEvent::ReasoningDelta(delta))?;
-                    }
-                    ProviderChunk::ReasoningSummaryDelta(delta) => {
-                        reasoning_trace_buffer.push_str(&delta);
-                        handler.handle(RunEvent::ReasoningDelta(delta))?;
-                    }
-                    ProviderChunk::ToolCallStart { id, name } => {
-                        tool_parts.insert(id.clone(), (name.clone(), String::new()));
-                        handler.handle(RunEvent::ToolCallStarted(ToolCall {
-                            id,
-                            name,
-                            args_json: String::new(),
-                        }))?;
-                    }
-                    ProviderChunk::ToolCallArgsDelta { id, delta } => {
-                        if let Some((_, args_json)) = tool_parts.get_mut(&id) {
-                            args_json.push_str(&delta);
-                        }
-                        handler.handle(RunEvent::ToolCallArgsDelta { id, delta })?;
-                    }
-                    ProviderChunk::ToolCallComplete(call) => {
-                        completed_calls.push(call.clone());
-                        handler.handle(RunEvent::ToolCallCompleted(call))?;
-                    }
-                    ProviderChunk::Usage(usage) => {
-                        session.stats_mut().apply_usage(&usage);
-                        session.append_control(ControlEntry::UsageSnapshot(usage.clone()))?;
-                        handler.handle(RunEvent::Usage(usage))?;
-                    }
-                    ProviderChunk::ResponseHandle(handle) => {
-                        previous_response_handle = Some(handle.clone());
-                        let control = ControlEntry::ResponseHandleTracked(handle);
-                        session.append_control(control.clone())?;
-                        handler.handle(RunEvent::Control(control))?;
-                    }
-                    ProviderChunk::BackgroundTaskAccepted(handle) => {
-                        let control = ControlEntry::BackgroundTaskTracked(handle);
-                        session.append_control(control.clone())?;
-                        handler.handle(RunEvent::Control(control))?;
-                    }
-                    ProviderChunk::BackgroundTaskStatus(status) => {
-                        handler.handle(RunEvent::Notice(format!(
-                            "background task {} status {}",
-                            status.task_id, status.status
-                        )))?;
-                    }
-                    ProviderChunk::ReasoningArtifact(_) => {}
-                    ProviderChunk::ContinuationState(state) => {
-                        pending_states.push(state.clone());
-                        handler.handle(RunEvent::ContinuationState(state))?;
-                    }
-                    ProviderChunk::Done => break,
-                }
-            }
-
-            append_reasoning_trace(session, &reasoning_trace_buffer)?;
+            append_reasoning_trace(session, &provider_turn.reasoning_trace)?;
 
             if !completed_calls.is_empty() {
                 total_tool_calls += completed_calls.len();
-                let completed_agent_tool_calls = count_agent_tool_calls(tools, &completed_calls);
-                let assistant_content = if completed_agent_tool_calls > 0 {
-                    None
-                } else {
-                    (!assistant_text.trim().is_empty()).then(|| assistant_text.clone())
-                };
-                let assistant_message = ModelMessage::assistant_with_kind(
-                    assistant_content,
-                    completed_calls.clone(),
-                    AssistantMessageKind::ToolPreamble,
-                );
-                let assistant_message_id = assistant_message.id.clone();
-                session.append_assistant_message(assistant_message.clone())?;
-                handler.handle(RunEvent::AssistantMessage(assistant_message))?;
-
-                for state in &mut pending_states {
-                    if state.message_id.is_none() {
-                        state.message_id = Some(assistant_message_id.clone());
-                    }
-                }
-
-                for state in pending_states {
-                    let control = ControlEntry::ContinuationStateSaved(state);
-                    session.append_control(control.clone())?;
-                    handler.handle(RunEvent::Control(control))?;
-                }
+                append_tool_preamble_message(
+                    session,
+                    handler,
+                    tools,
+                    &assistant_text,
+                    &completed_calls,
+                    pending_states,
+                )?;
 
                 let mut tool_ctx =
                     ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs);
@@ -768,9 +683,7 @@ where
                                 None,
                                 Some(&result),
                             )?;
-                            record_tool_run_outcome(&mut outcome, &result);
-                            session.append_tool_message(result.to_model_message())?;
-                            handler.handle(RunEvent::ToolResult(result))?;
+                            record_and_emit_tool_result(session, handler, &mut outcome, result)?;
                             continue;
                         };
                         let accepted = handle_task_plan_update_call(
@@ -793,101 +706,60 @@ where
                         let subjects = match tools.permission_subjects(&tool_ctx, &call) {
                             Ok(subjects) => subjects,
                             Err(error) => {
-                                let mut result = ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::InvalidInput,
-                                    format!("invalid tool arguments for {}: {error}", call.name),
-                                );
-                                attach_tool_call_context(&mut result, &call, &[]);
-                                append_tool_execution_audit(
+                                append_invalid_tool_input_result(
                                     session,
+                                    handler,
+                                    &mut outcome,
                                     &call,
                                     &[],
-                                    ToolExecutionStatus::Failed,
-                                    None,
-                                    Some(&result),
+                                    error,
                                 )?;
-                                record_tool_run_outcome(&mut outcome, &result);
-                                session.append_tool_message(result.to_model_message())?;
-                                handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
                             }
                         };
                         let access = match tools.permission_access(&tool_ctx, &call) {
                             Ok(access) => access,
                             Err(error) => {
-                                let mut result = ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::InvalidInput,
-                                    format!("invalid tool arguments for {}: {error}", call.name),
-                                );
-                                attach_tool_call_context(&mut result, &call, &subjects);
-                                append_tool_execution_audit(
+                                append_invalid_tool_input_result(
                                     session,
+                                    handler,
+                                    &mut outcome,
                                     &call,
                                     &subjects,
-                                    ToolExecutionStatus::Failed,
-                                    None,
-                                    Some(&result),
+                                    error,
                                 )?;
-                                record_tool_run_outcome(&mut outcome, &result);
-                                session.append_tool_message(result.to_model_message())?;
-                                handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
                             }
                         };
                         let operation = match tools.permission_operation(&tool_ctx, &call) {
                             Ok(operation) => operation,
                             Err(error) => {
-                                let mut result = ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::InvalidInput,
-                                    format!("invalid tool arguments for {}: {error}", call.name),
-                                );
-                                attach_tool_call_context(&mut result, &call, &subjects);
-                                append_tool_execution_audit(
+                                append_invalid_tool_input_result(
                                     session,
+                                    handler,
+                                    &mut outcome,
                                     &call,
                                     &subjects,
-                                    ToolExecutionStatus::Failed,
-                                    None,
-                                    Some(&result),
+                                    error,
                                 )?;
-                                record_tool_run_outcome(&mut outcome, &result);
-                                session.append_tool_message(result.to_model_message())?;
-                                handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
                             }
                         };
-                        let tool_default_mode = match tools
-                            .permission_default_mode(&tool_ctx, &call)
-                        {
-                            Ok(mode) => mode,
-                            Err(error) => {
-                                let mut result = ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::InvalidInput,
-                                    format!("invalid tool arguments for {}: {error}", call.name),
-                                );
-                                attach_tool_call_context(&mut result, &call, &subjects);
-                                append_tool_execution_audit(
-                                    session,
-                                    &call,
-                                    &subjects,
-                                    ToolExecutionStatus::Failed,
-                                    None,
-                                    Some(&result),
-                                )?;
-                                record_tool_run_outcome(&mut outcome, &result);
-                                session.append_tool_message(result.to_model_message())?;
-                                handler.handle(RunEvent::ToolResult(result))?;
-                                continue;
-                            }
-                        };
+                        let tool_default_mode =
+                            match tools.permission_default_mode(&tool_ctx, &call) {
+                                Ok(mode) => mode,
+                                Err(error) => {
+                                    append_invalid_tool_input_result(
+                                        session,
+                                        handler,
+                                        &mut outcome,
+                                        &call,
+                                        &subjects,
+                                        error,
+                                    )?;
+                                    continue;
+                                }
+                            };
                         let decision = permission_policy.decide_with_operation_and_default(
                             spec,
                             &call.name,
@@ -960,9 +832,12 @@ where
                                     reason,
                                 );
                                 attach_tool_call_context(&mut result, &call, &decision.subjects);
-                                record_tool_run_outcome(&mut outcome, &result);
-                                session.append_tool_message(result.to_model_message())?;
-                                handler.handle(RunEvent::ToolResult(result))?;
+                                record_and_emit_tool_result(
+                                    session,
+                                    handler,
+                                    &mut outcome,
+                                    result,
+                                )?;
                                 continue;
                             }
                             ApprovalMode::Ask => {
@@ -1036,10 +911,12 @@ where
                                                 &call,
                                                 &decision.subjects,
                                             );
-                                            record_tool_run_outcome(&mut outcome, &result);
-                                            session
-                                                .append_tool_message(result.to_model_message())?;
-                                            handler.handle(RunEvent::ToolResult(result))?;
+                                            record_and_emit_tool_result(
+                                                session,
+                                                handler,
+                                                &mut outcome,
+                                                result,
+                                            )?;
                                             continue;
                                         }
                                         append_tool_approval_audit(
@@ -1103,9 +980,12 @@ where
                                             &call,
                                             &decision.subjects,
                                         );
-                                        record_tool_run_outcome(&mut outcome, &result);
-                                        session.append_tool_message(result.to_model_message())?;
-                                        handler.handle(RunEvent::ToolResult(result))?;
+                                        record_and_emit_tool_result(
+                                            session,
+                                            handler,
+                                            &mut outcome,
+                                            result,
+                                        )?;
                                         continue;
                                     }
                                 }
@@ -1157,33 +1037,26 @@ where
                                     reason,
                                 );
                                 attach_tool_call_context(&mut result, &call, &decision.subjects);
-                                record_tool_run_outcome(&mut outcome, &result);
-                                session.append_tool_message(result.to_model_message())?;
-                                handler.handle(RunEvent::ToolResult(result))?;
+                                record_and_emit_tool_result(
+                                    session,
+                                    handler,
+                                    &mut outcome,
+                                    result,
+                                )?;
                                 continue;
                             }
                         }
                         let egress_audit = match tools.egress_audit(&tool_ctx, &call) {
                             Ok(audit) => audit,
                             Err(error) => {
-                                let mut result = ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::InvalidInput,
-                                    format!("invalid tool arguments for {}: {error}", call.name),
-                                );
-                                attach_tool_call_context(&mut result, &call, &decision.subjects);
-                                append_tool_execution_audit(
+                                append_invalid_tool_input_result(
                                     session,
+                                    handler,
+                                    &mut outcome,
                                     &call,
                                     &decision.subjects,
-                                    ToolExecutionStatus::Failed,
-                                    None,
-                                    Some(&result),
+                                    error,
                                 )?;
-                                record_tool_run_outcome(&mut outcome, &result);
-                                session.append_tool_message(result.to_model_message())?;
-                                handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
                             }
                         };
@@ -1292,8 +1165,7 @@ where
                         satisfied_agent_tool_calls = satisfied_agent_tool_calls.saturating_add(1);
                     }
                     let tool_transient_context = std::mem::take(&mut result.transient_context);
-                    session.append_tool_message(result.to_model_message())?;
-                    handler.handle(RunEvent::ToolResult(result))?;
+                    emit_tool_result(session, handler, result)?;
                     transient_context.extend(tool_transient_context);
                 }
                 if accepted_task_plan {
@@ -1380,29 +1252,8 @@ where
                 continue;
             }
 
-            let assistant_message = ModelMessage::assistant_with_kind(
-                Some(assistant_text.clone()),
-                Vec::new(),
-                AssistantMessageKind::FinalAnswer,
-            );
-            let final_message_id = assistant_message.id.clone();
-            session.append_assistant_message(assistant_message.clone())?;
-            handler.handle(RunEvent::AssistantMessage(assistant_message))?;
-
-            if !pending_states.is_empty() {
-                for mut state in pending_states {
-                    state.message_id = Some(
-                        session
-                            .messages()
-                            .last()
-                            .map(|m| m.id.clone())
-                            .unwrap_or_default(),
-                    );
-                    let control = ControlEntry::ContinuationStateSaved(state);
-                    session.append_control(control.clone())?;
-                    handler.handle(RunEvent::Control(control))?;
-                }
-            }
+            let final_message_id =
+                append_final_answer_message(session, handler, &assistant_text, pending_states)?;
 
             outcome.tool_calls = total_tool_calls;
             append_run_lifecycle_events(
@@ -1425,17 +1276,6 @@ where
     }
 }
 
-fn count_agent_tool_calls(tools: &ToolRegistry, calls: &[ToolCall]) -> usize {
-    calls
-        .iter()
-        .filter(|call| {
-            tools
-                .spec_for(&call.name)
-                .is_some_and(|spec| spec.category == ToolCategory::Agent)
-        })
-        .count()
-}
-
 fn tool_registry_has_agent_tools(tools: &ToolRegistry) -> bool {
     tools
         .specs()
@@ -1443,418 +1283,11 @@ fn tool_registry_has_agent_tools(tools: &ToolRegistry) -> bool {
         .any(|spec| spec.category == ToolCategory::Agent)
 }
 
-fn agent_tool_result_satisfies_delegation(result: &ToolResult) -> bool {
-    if result.is_error() {
-        return false;
-    }
-    let details = &result.metadata.details;
-    if details.get("thread_id").and_then(Value::as_str).is_some()
-        && details.get("status").and_then(Value::as_str).is_some()
-    {
-        return true;
-    }
-    if details
-        .get("result_available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    details
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(is_terminal_agent_status)
-}
-
-fn is_terminal_agent_status(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "interrupted" | "closed"
-    )
-}
-
-fn plan_approval_decision_override(
-    session: &Session,
-    spec: &ToolSpec,
-    mut decision: PermissionDecision,
-) -> PermissionDecision {
-    if decision.mode != ApprovalMode::Ask
-        || decision.external_directory_required
-        || !plan_approval_can_auto_allow_decision(&decision)
-    {
-        return decision;
-    }
-    let Some((permission, workspace_paths)) = active_plan_permission_scope(session) else {
-        return decision;
-    };
-    if permission.covers_tool(spec)
-        && plan_approval_covers_subjects(&workspace_paths, &decision.subjects)
-    {
-        decision.mode = ApprovalMode::Allow;
-    }
-    decision
-}
-
-fn interactive_external_directory_approval_override(
-    options: &AgentRunOptions,
-    mut decision: PermissionDecision,
-) -> PermissionDecision {
-    if decision.external_directory_required
-        && decision.mode == ApprovalMode::Deny
-        && options.interaction_mode == InteractionMode::Interactive
-    {
-        decision.mode = ApprovalMode::Ask;
-    }
-    decision
-}
-
-fn tool_session_grant_decision_override(
-    session: &Session,
-    tool_name: &str,
-    mut decision: PermissionDecision,
-) -> (PermissionDecision, Option<ToolApprovalSessionGrantEntry>) {
-    if decision.mode != ApprovalMode::Ask || !tool_approval_session_grant_available(&decision) {
-        return (decision, None);
-    }
-    let matching_grant = session.entries().iter().rev().find_map(|entry| {
-        let SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant)) = entry else {
-            return None;
-        };
-        session_grant_covers_decision(grant, tool_name, &decision).then(|| grant.clone())
-    });
-    if matching_grant.is_some() {
-        decision.mode = ApprovalMode::Allow;
-    }
-    (decision, matching_grant)
-}
-
-fn session_grant_covers_decision(
-    grant: &ToolApprovalSessionGrantEntry,
-    tool_name: &str,
-    decision: &PermissionDecision,
-) -> bool {
-    grant.expires == ToolApprovalSessionGrantExpiry::Session
-        && grant.tool_name == tool_name
-        && grant.access == decision.access
-        && grant.operation == decision.operation
-        && grant_subjects_match_decision(&grant.subjects, &decision.subjects)
-}
-
-fn grant_subjects_match_decision(
-    grant_subjects: &[ToolSubjectAudit],
-    subjects: &[ToolSubject],
-) -> bool {
-    let mut left = grant_subjects
-        .iter()
-        .filter_map(grant_subject_key)
-        .collect::<Vec<_>>();
-    let mut right = subjects
-        .iter()
-        .filter_map(decision_subject_key)
-        .collect::<Vec<_>>();
-    if left.len() != grant_subjects.len() || right.len() != subjects.len() {
-        return false;
-    }
-    left.sort();
-    right.sort();
-    left == right
-}
-
-fn grant_subject_key(subject: &ToolSubjectAudit) -> Option<(String, String, String)> {
-    let value = match subject.scope {
-        ToolSubjectScope::External => subject.canonical_path.as_deref().or_else(|| {
-            let normalized = subject.normalized.trim();
-            (!normalized.is_empty()).then_some(normalized)
-        })?,
-        ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
-            let normalized = subject.normalized.trim();
-            (!normalized.is_empty()).then_some(normalized)?
-        }
-    };
-    Some((
-        subject.kind.as_str().to_owned(),
-        subject.scope.as_str().to_owned(),
-        value.to_owned(),
-    ))
-}
-
-fn decision_subject_key(subject: &ToolSubject) -> Option<(String, String, String)> {
-    let value = match subject.scope {
-        ToolSubjectScope::External => subject
-            .canonical_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .or_else(|| {
-                let normalized = subject.normalized.trim();
-                (!normalized.is_empty()).then(|| normalized.to_owned())
-            })?,
-        ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
-            let normalized = subject.normalized.trim();
-            (!normalized.is_empty()).then(|| normalized.to_owned())?
-        }
-    };
-    Some((
-        subject.kind.as_str().to_owned(),
-        subject.scope.as_str().to_owned(),
-        value,
-    ))
-}
-
-fn plan_approval_can_auto_allow_decision(decision: &PermissionDecision) -> bool {
-    matches!(decision.risk, PermissionRisk::Low | PermissionRisk::Medium)
-}
-
-fn active_plan_permission_scope(
-    session: &Session,
-) -> Option<(crate::PlanApprovalPermission, Vec<String>)> {
-    active_plan_permission_grant(session)
-        .map(|grant| (grant.permission, grant.scope.workspace_paths))
-        .or_else(|| {
-            active_plan_approval(session)
-                .map(|approval| (approval.permission, approval.scope.workspace_paths))
-        })
-}
-
-fn active_plan_permission_grant(session: &Session) -> Option<crate::PlanPermissionGrantedEntry> {
-    let entries = session.entries();
-    let (grant_index, grant) = entries
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, entry)| match entry {
-            crate::SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => {
-                Some((index, grant.clone()))
-            }
-            _ => None,
-        })?;
-    if task_has_terminal_status_after(entries, &grant.task_id, grant_index) {
-        return None;
-    }
-    match grant.expires {
-        PlanApprovalExpiry::NextUserPrompt => {
-            let user_messages_after_grant = entries
-                .iter()
-                .skip(grant_index.saturating_add(1))
-                .filter(|entry| matches!(entry, crate::SessionLogEntry::User(_)))
-                .count();
-            (user_messages_after_grant == 0).then_some(grant)
-        }
-        PlanApprovalExpiry::Session => Some(grant),
-        PlanApprovalExpiry::AtUnixMs(expires_at_ms) => {
-            (unix_time_ms() <= expires_at_ms).then_some(grant)
-        }
-    }
-}
-
-fn task_has_terminal_status_after(
-    entries: &[SessionLogEntry],
-    task_id: &crate::TaskId,
-    start_index: usize,
-) -> bool {
-    entries
-        .iter()
-        .skip(start_index.saturating_add(1))
-        .any(|entry| {
-            matches!(
-                entry,
-                crate::SessionLogEntry::Control(ControlEntry::TaskRun(run))
-                    if &run.task_id == task_id && run.status.is_terminal()
-            )
-        })
-}
-
-fn active_plan_approval(session: &Session) -> Option<crate::PlanApprovedEntry> {
-    let entries = session.entries();
-    let (approval_index, approval) =
-        entries
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, entry)| match entry {
-                crate::SessionLogEntry::Control(ControlEntry::PlanApproved(approval)) => {
-                    Some((index, approval.clone()))
-                }
-                _ => None,
-            })?;
-    match approval.expires {
-        PlanApprovalExpiry::NextUserPrompt => {
-            let user_messages_after_approval = entries
-                .iter()
-                .skip(approval_index.saturating_add(1))
-                .filter(|entry| matches!(entry, crate::SessionLogEntry::User(_)))
-                .count();
-            (user_messages_after_approval == 1).then_some(approval)
-        }
-        PlanApprovalExpiry::Session => Some(approval),
-        PlanApprovalExpiry::AtUnixMs(expires_at_ms) => {
-            (unix_time_ms() <= expires_at_ms).then_some(approval)
-        }
-    }
-}
-
-fn plan_approval_covers_subjects(workspace_paths: &[String], subjects: &[ToolSubject]) -> bool {
-    if subjects.is_empty() {
-        return false;
-    }
-    subjects.iter().all(|subject| {
-        subject.scope == ToolSubjectScope::Workspace
-            && plan_approval_covers_subject(workspace_paths, subject)
-    })
-}
-
-fn plan_approval_covers_subject(workspace_paths: &[String], subject: &ToolSubject) -> bool {
-    // Empty scope means the accepted plan did not name a concrete workspace target. Keep the
-    // write behind normal approval instead of widening an ambiguous plan to the full workspace.
-    if workspace_paths.is_empty() {
-        return false;
-    }
-    workspace_paths
-        .iter()
-        .any(|scope_path| path_is_within_scope(&subject.normalized, scope_path))
-}
-
-fn path_is_within_scope(path: &str, scope_path: &str) -> bool {
-    let path_components = Path::new(path).components().collect::<Vec<_>>();
-    let scope_components = Path::new(scope_path).components().collect::<Vec<_>>();
-    !scope_components.is_empty()
-        && path_components.len() >= scope_components.len()
-        && path_components
-            .iter()
-            .zip(scope_components.iter())
-            .all(|(left, right)| left == right)
-}
-
 fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
         .unwrap_or(0)
-}
-
-fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &ToolResult) {
-    if !outcome.tool_call_ids.contains(&result.call_id) {
-        outcome.tool_call_ids.push(result.call_id.clone());
-    }
-    if !result.metadata.changed_files.is_empty() {
-        for file in &result.metadata.changed_files {
-            if !outcome.changed_files.contains(file) {
-                outcome.changed_files.push(file.clone());
-            }
-        }
-    }
-    let ToolResultStatus::Error(error) = &result.status else {
-        return;
-    };
-    if error.kind == ToolErrorKind::ApprovalDenied {
-        outcome.approval_denials += 1;
-    }
-    if error.kind == ToolErrorKind::Interrupted {
-        outcome.interrupted_tool_calls.push(result.call_id.clone());
-    }
-    outcome.tool_errors.push(error.clone());
-}
-
-fn task_plan_update_call_is_accepted(context: &TaskPlanUpdateContext, call: &ToolCall) -> bool {
-    if call.name != TASK_PLAN_UPDATE_TOOL_NAME {
-        return false;
-    }
-    task_plan_update_entry(context, call)
-        .map(|entry| entry.status == TaskPlanStatus::Accepted)
-        .unwrap_or(false)
-}
-
-fn handle_task_plan_update_call<H>(
-    session: &mut Session,
-    handler: &mut H,
-    outcome: &mut AgentRunOutcome,
-    call: &ToolCall,
-    context: &TaskPlanUpdateContext,
-) -> Result<bool>
-where
-    H: EventHandler + Send,
-{
-    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
-    let mut accepted = false;
-    let result = match task_plan_update_entry(context, call) {
-        Ok(entry) => {
-            accepted = entry.status == TaskPlanStatus::Accepted;
-            let control = ControlEntry::TaskPlan(entry.clone());
-            session.append_control(control.clone())?;
-            handler.handle(RunEvent::Control(control))?;
-            let result = ToolResult::ok(
-                call.id.clone(),
-                call.name.clone(),
-                task_plan_update_result_content(&entry),
-                ToolResultMeta::default(),
-            );
-            append_tool_execution_audit(
-                session,
-                call,
-                &[],
-                ToolExecutionStatus::Completed,
-                None,
-                Some(&result),
-            )?;
-            result
-        }
-        Err(error) => {
-            let result = ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::InvalidInput,
-                error.to_string(),
-            );
-            append_tool_execution_audit(
-                session,
-                call,
-                &[],
-                ToolExecutionStatus::Failed,
-                None,
-                Some(&result),
-            )?;
-            result
-        }
-    };
-    record_tool_run_outcome(outcome, &result);
-    session.append_tool_message(result.to_model_message())?;
-    handler.handle(RunEvent::ToolResult(result))?;
-    Ok(accepted)
-}
-
-fn append_tool_ignored_after_task_plan_acceptance<H>(
-    session: &mut Session,
-    handler: &mut H,
-    outcome: &mut AgentRunOutcome,
-    call: &ToolCall,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
-    let mut result = ToolResult::error(
-        call.id.clone(),
-        call.name.clone(),
-        ToolErrorKind::Unsupported,
-        "task plan was accepted; additional planner tool calls are ignored and orchestration will continue",
-    );
-    attach_tool_call_context(&mut result, call, &[]);
-    append_tool_execution_audit(
-        session,
-        call,
-        &[],
-        ToolExecutionStatus::Cancelled,
-        None,
-        Some(&result),
-    )?;
-    record_tool_run_outcome(outcome, &result);
-    session.append_tool_message(result.to_model_message())?;
-    handler.handle(RunEvent::ToolResult(result))?;
-    Ok(())
-}
-
-fn has_external_subject(subjects: &[ToolSubject]) -> bool {
-    subjects
-        .iter()
-        .any(|subject| subject.scope == ToolSubjectScope::External)
 }
 
 fn append_reasoning_trace(session: &mut Session, trace: &str) -> Result<()> {
@@ -1873,29 +1306,6 @@ fn reasoning_trace_note(trace: String) -> ControlEntry {
     }
 }
 
-fn attach_tool_call_context(result: &mut ToolResult, call: &ToolCall, subjects: &[ToolSubject]) {
-    let Some(context) = tool_call_context(call, subjects) else {
-        return;
-    };
-    match &mut result.metadata.details {
-        Value::Object(details) => {
-            details.insert("call".to_owned(), context);
-        }
-        Value::Null => {
-            let mut details = Map::new();
-            details.insert("call".to_owned(), context);
-            result.metadata.details = Value::Object(details);
-        }
-        existing => {
-            let previous = std::mem::replace(existing, Value::Null);
-            let mut details = Map::new();
-            details.insert("call".to_owned(), context);
-            details.insert("tool".to_owned(), previous);
-            *existing = Value::Object(details);
-        }
-    }
-}
-
 fn last_provider_visible_user_message_matches(session: &Session, message: &str) -> bool {
     session
         .entries()
@@ -1907,896 +1317,6 @@ fn last_provider_visible_user_message_matches(session: &Session, message: &str) 
             SessionLogEntry::Control(_) => None,
         })
         .unwrap_or(false)
-}
-
-fn tool_call_context(call: &ToolCall, subjects: &[ToolSubject]) -> Option<Value> {
-    let args = serde_json::from_str::<Value>(&call.args_json).ok();
-    let object = args.as_ref().and_then(Value::as_object);
-    let mut context = Map::new();
-    let mut summary_parts = Vec::new();
-
-    if let Some(command) = object
-        .and_then(|object| object.get("command"))
-        .and_then(Value::as_str)
-    {
-        let command = truncate_context_value(command);
-        context.insert("command".to_owned(), Value::String(command.clone()));
-        summary_parts.push(format!("command={command}"));
-    }
-    if let Some(path) = object
-        .and_then(|object| object.get("path"))
-        .and_then(Value::as_str)
-    {
-        let path = truncate_context_value(path);
-        context.insert("path".to_owned(), Value::String(path.clone()));
-        summary_parts.push(format!("path={path}"));
-    }
-    if let Some(pattern) = object
-        .and_then(|object| object.get("pattern"))
-        .and_then(Value::as_str)
-    {
-        let pattern = truncate_context_value(pattern);
-        context.insert("pattern".to_owned(), Value::String(pattern.clone()));
-        summary_parts.push(format!("pattern={pattern}"));
-    }
-
-    let subject_labels = subjects
-        .iter()
-        .take(6)
-        .map(tool_subject_context_label)
-        .collect::<Vec<_>>();
-    if !subject_labels.is_empty() {
-        context.insert(
-            "subjects".to_owned(),
-            Value::Array(subject_labels.iter().cloned().map(Value::String).collect()),
-        );
-        if summary_parts.is_empty() {
-            summary_parts.push(format!("subject={}", subject_labels.join(",")));
-        }
-    }
-
-    if !summary_parts.is_empty() {
-        context.insert(
-            "summary".to_owned(),
-            Value::String(truncate_context_value(&summary_parts.join(" "))),
-        );
-    }
-
-    (!context.is_empty()).then_some(Value::Object(context))
-}
-
-fn tool_subject_context_label(subject: &ToolSubject) -> String {
-    let target = subject
-        .canonical_path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| subject.normalized.clone());
-    truncate_context_value(&format!(
-        "{}:{}:{}",
-        subject.scope.as_str(),
-        subject.kind.as_str(),
-        target
-    ))
-}
-
-fn truncate_context_value(value: &str) -> String {
-    const MAX_CHARS: usize = 180;
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= MAX_CHARS {
-        return normalized;
-    }
-    let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
-    format!("{truncated}...")
-}
-
-fn external_directory_preview(tool_name: &str, subjects: &[ToolSubject]) -> ToolPreview {
-    let external_subjects = subjects
-        .iter()
-        .filter(|subject| subject.scope == ToolSubjectScope::External)
-        .map(|subject| {
-            subject
-                .canonical_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| subject.normalized.clone())
-        })
-        .collect::<Vec<_>>();
-    let body = if external_subjects.is_empty() {
-        "No external path subjects were reported.".to_owned()
-    } else {
-        external_subjects.join("\n")
-    };
-    ToolPreview {
-        title: format!("External directory access for {tool_name}"),
-        summary: "This tool call touches a path outside the workspace.".to_owned(),
-        body,
-        changed_files: Vec::new(),
-        file_diffs: Vec::new(),
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ToolPreviewCapture {
-    preview: Option<ToolPreview>,
-    preview_hash: Option<String>,
-}
-
-async fn capture_tool_preview_for_decision<H>(
-    session: &mut Session,
-    handler: &mut H,
-    tools: &ToolRegistry,
-    tool_ctx: ToolContext,
-    call: &ToolCall,
-    spec: &ToolSpec,
-    decision: &PermissionDecision,
-) -> Result<ToolPreviewCapture>
-where
-    H: EventHandler + Send,
-{
-    let should_capture = matches!(decision.mode, ApprovalMode::Ask)
-        || matches!(spec.preview, ToolPreviewCapability::Required);
-    if !should_capture {
-        return Ok(ToolPreviewCapture {
-            preview: None,
-            preview_hash: None,
-        });
-    }
-
-    let mut preview_error = None;
-    let preview = if has_external_subject(&decision.subjects) {
-        Some(external_directory_preview(&call.name, &decision.subjects))
-    } else {
-        match tools.preview(tool_ctx, call.clone()).await {
-            Ok(preview) => preview,
-            Err(error) => {
-                let error = error.to_string();
-                preview_error = Some(error.clone());
-                matches!(decision.mode, ApprovalMode::Ask).then(|| ToolPreview {
-                    title: format!("Preview unavailable for {}", call.name),
-                    summary: "The tool preview could not be generated automatically.".to_owned(),
-                    body: error,
-                    changed_files: Vec::new(),
-                    file_diffs: Vec::new(),
-                })
-            }
-        }
-    };
-
-    if let Some(error) = preview_error.as_ref() {
-        append_tool_approval_audit(
-            session,
-            call,
-            decision,
-            ToolApprovalAuditAction::PreviewFailed,
-            None,
-            Some(error.clone()),
-            None,
-        )?;
-    }
-
-    let preview_hash = preview.as_ref().map(stable_json_hash).transpose()?;
-    if preview_error.is_none()
-        && let Some(preview) = preview.as_ref()
-    {
-        let control = ControlEntry::ToolPreviewCaptured(ToolPreviewSnapshot::from_preview(
-            call.id.clone(),
-            call.name.clone(),
-            preview,
-            ToolDiffBudget::default(),
-            preview_hash.clone(),
-        ));
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
-    }
-
-    Ok(ToolPreviewCapture {
-        preview,
-        preview_hash,
-    })
-}
-
-fn append_tool_approval_audit(
-    session: &mut Session,
-    call: &ToolCall,
-    decision: &PermissionDecision,
-    action: ToolApprovalAuditAction,
-    user_decision: Option<ToolApprovalUserDecision>,
-    reason: Option<String>,
-    preview_hash: Option<String>,
-) -> Result<()> {
-    append_tool_approval_audit_with_source(
-        session,
-        call,
-        decision,
-        action,
-        None,
-        None,
-        user_decision,
-        reason,
-        preview_hash,
-    )
-}
-
-fn append_tool_approval_policy_audit(
-    session: &mut Session,
-    call: &ToolCall,
-    decision: &PermissionDecision,
-    session_grant_source: Option<&ToolApprovalSessionGrantEntry>,
-) -> Result<()> {
-    append_tool_approval_audit_with_source(
-        session,
-        call,
-        decision,
-        ToolApprovalAuditAction::PolicyEvaluated,
-        session_grant_source.map(|_| ToolApprovalAllowSource::SessionGrant),
-        session_grant_source.map(|grant| grant.call_id.clone()),
-        None,
-        None,
-        None,
-    )
-}
-
-fn append_tool_approval_audit_with_source(
-    session: &mut Session,
-    call: &ToolCall,
-    decision: &PermissionDecision,
-    action: ToolApprovalAuditAction,
-    allow_source: Option<ToolApprovalAllowSource>,
-    grant_call_id: Option<String>,
-    user_decision: Option<ToolApprovalUserDecision>,
-    reason: Option<String>,
-    preview_hash: Option<String>,
-) -> Result<()> {
-    session.append_control(ControlEntry::ToolApproval(ToolApprovalEntry {
-        action,
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        access: decision.access,
-        operation: Some(decision.operation),
-        risk: Some(decision.risk),
-        subjects: audit_subjects(&decision.subjects),
-        subject_zones: decision.subject_zones.clone(),
-        policy_decision: decision.mode,
-        external_directory_required: decision.external_directory_required,
-        confirmation: decision.confirmation.clone(),
-        snapshot_required: decision.snapshot_required,
-        allow_source,
-        grant_call_id,
-        user_decision,
-        reason,
-        preview_hash,
-    }))
-}
-
-fn append_tool_approval_session_grant<H: EventHandler>(
-    session: &mut Session,
-    handler: &mut H,
-    call: &ToolCall,
-    decision: &PermissionDecision,
-) -> Result<()> {
-    let control = ControlEntry::ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry {
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        access: decision.access,
-        operation: decision.operation,
-        risk: decision.risk,
-        subjects: audit_subjects(&decision.subjects),
-        subject_zones: decision.subject_zones.clone(),
-        expires: ToolApprovalSessionGrantExpiry::Session,
-        granted_at_ms: unix_time_ms(),
-    });
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
-}
-
-fn append_run_lifecycle_events(
-    session: &mut Session,
-    run_status: &'static str,
-    terminal_reason: AgentRunTerminalReason,
-    final_message_id: Option<&str>,
-    tool_calls: usize,
-) -> Result<()> {
-    append_run_lifecycle_event_payload(
-        session,
-        run_status,
-        terminal_reason.as_str(),
-        final_message_id,
-        tool_calls,
-        None,
-    )
-}
-
-fn append_failed_run_lifecycle_events(
-    session: &mut Session,
-    terminal_reason: &'static str,
-    tool_calls: usize,
-    error: &str,
-) -> Result<()> {
-    append_run_lifecycle_event_payload(
-        session,
-        "failed",
-        terminal_reason,
-        None,
-        tool_calls,
-        Some(error),
-    )
-}
-
-fn append_run_lifecycle_event_payload(
-    session: &mut Session,
-    run_status: &'static str,
-    terminal_reason: &'static str,
-    final_message_id: Option<&str>,
-    tool_calls: usize,
-    error: Option<&str>,
-) -> Result<()> {
-    session.append_durable_event(
-        DurableEventType::RunStatusChanged,
-        EventClass::Critical,
-        json!({
-            "run_status": run_status,
-            "terminal_reason": terminal_reason,
-            "final_message_id": final_message_id,
-            "tool_calls": tool_calls,
-            "error": error,
-        }),
-    )?;
-    session.append_durable_event(
-        DurableEventType::RunFinalized,
-        EventClass::Critical,
-        json!({
-            "run_status": run_status,
-            "terminal_reason": terminal_reason,
-            "final_message_id": final_message_id,
-            "tool_calls": tool_calls,
-            "error": error,
-        }),
-    )?;
-    Ok(())
-}
-
-fn append_tool_execution_audit(
-    session: &mut Session,
-    call: &ToolCall,
-    subjects: &[ToolSubject],
-    status: ToolExecutionStatus,
-    duration_ms: Option<u64>,
-    result: Option<&ToolResult>,
-) -> Result<()> {
-    let (changed_files, metadata, error, model_content_hash) = if let Some(result) = result {
-        let error = match &result.status {
-            ToolResultStatus::Ok => None,
-            ToolResultStatus::Error(error) => Some(error.clone()),
-        };
-        (
-            result.metadata.changed_files.clone(),
-            result.metadata.clone(),
-            error,
-            Some(stable_text_hash(&result.to_model_content())),
-        )
-    } else {
-        let mut metadata = ToolResultMeta::default();
-        if let Some(context) = tool_call_context(call, subjects) {
-            let mut details = Map::new();
-            details.insert("call".to_owned(), context);
-            metadata.details = Value::Object(details);
-        }
-        (Vec::new(), metadata, None, None)
-    };
-
-    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        status,
-        duration_ms,
-        subjects: audit_subjects(subjects),
-        changed_files,
-        metadata,
-        error,
-        model_content_hash,
-    })))
-}
-
-fn append_tool_execution_started_audit(
-    session: &mut Session,
-    call: &ToolCall,
-    subjects: &[ToolSubject],
-    execution_mutation_profile: Option<&ExecutionMutationProfile>,
-) -> Result<()> {
-    let mut metadata = ToolResultMeta::default();
-    let mut details = Map::new();
-    if let Some(context) = tool_call_context(call, subjects) {
-        details.insert("call".to_owned(), context);
-    }
-    if let Some(profile) = execution_mutation_profile {
-        details.insert(
-            "execution_mutation_profile".to_owned(),
-            serde_json::to_value(profile).context("failed to encode execution mutation profile")?,
-        );
-    }
-    if !details.is_empty() {
-        metadata.details = Value::Object(details);
-    }
-
-    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        status: ToolExecutionStatus::Started,
-        duration_ms: None,
-        subjects: audit_subjects(subjects),
-        changed_files: Vec::new(),
-        metadata,
-        error: None,
-        model_content_hash: None,
-    })))
-}
-
-fn append_terminal_task_control_from_result(
-    session: &mut Session,
-    handler: &mut impl EventHandler,
-    result: &ToolResult,
-) -> Result<Option<TerminalTaskEntry>> {
-    let Some(entry) = TerminalTaskEntry::from_tool_result_details(&result.metadata.details)? else {
-        return Ok(None);
-    };
-    let control = ControlEntry::TerminalTask(entry.clone());
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))?;
-    Ok(Some(entry))
-}
-
-fn reconcile_terminal_task_mutation_from_start(
-    session: &Session,
-    workspace_root: &Path,
-    entry: &TerminalTaskEntry,
-) -> Result<()> {
-    if !entry.status.is_terminal() {
-        return Ok(());
-    }
-    let Some(profile) =
-        terminal_start_execution_profile_for_task(session.entries(), &entry.handle.task_id)
-    else {
-        return Ok(());
-    };
-    let Some(recorder) = session.mutation_event_recorder() else {
-        return Ok(());
-    };
-    recorder.reconcile_execution_mutation_profile(workspace_root, &profile)?;
-    Ok(())
-}
-
-fn terminal_start_execution_profile_for_task(
-    entries: &[crate::SessionLogEntry],
-    task_id: &crate::TerminalTaskId,
-) -> Option<ExecutionMutationProfile> {
-    let mut profiles = BTreeMap::<String, ExecutionMutationProfile>::new();
-    for entry in entries {
-        let crate::SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry else {
-            continue;
-        };
-        if execution.tool_name != "terminal_start" {
-            continue;
-        }
-        if execution.status == ToolExecutionStatus::Started
-            && let Some(profile) = execution_mutation_profile_from_details(&execution.metadata)
-        {
-            profiles.insert(execution.call_id.clone(), profile);
-            continue;
-        }
-        if terminal_task_id_from_tool_metadata(&execution.metadata)
-            .as_deref()
-            .is_some_and(|recorded| recorded == task_id.as_str())
-            && let Some(profile) = profiles.get(&execution.call_id)
-        {
-            return Some(profile.clone());
-        }
-    }
-    None
-}
-
-fn execution_mutation_profile_from_details(
-    metadata: &ToolResultMeta,
-) -> Option<ExecutionMutationProfile> {
-    metadata
-        .details
-        .get("execution_mutation_profile")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-}
-
-fn terminal_task_id_from_tool_metadata(metadata: &ToolResultMeta) -> Option<String> {
-    metadata
-        .details
-        .get("task_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-}
-
-fn append_tool_control_entries_from_result(
-    session: &mut Session,
-    handler: &mut impl EventHandler,
-    result: &mut ToolResult,
-) -> Result<()> {
-    for control in std::mem::take(&mut result.control_entries) {
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
-    }
-    Ok(())
-}
-
-fn tool_egress_control_entry(
-    call: &ToolCall,
-    subjects: &[ToolSubject],
-    audit: ToolEgressAudit,
-) -> ControlEntry {
-    ControlEntry::ToolEgress(Box::new(ToolEgressEntry {
-        call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        destination: audit.destination,
-        operation: audit.operation,
-        subjects: audit_subjects(subjects),
-        payload: audit.payload,
-        redacted: audit.redacted,
-    }))
-}
-
-fn append_agent_run_readiness(
-    session: &mut Session,
-    handler: &mut impl EventHandler,
-    options: &AgentRunOptions,
-    final_message_id: &str,
-    outcome: &AgentRunOutcome,
-) -> Result<()> {
-    let entry = projected_agent_run_readiness(session, options, final_message_id, outcome)?;
-    let control = ControlEntry::ReadinessEvaluated(entry);
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
-}
-
-/// Computes the readiness verdict that would be recorded for a final run answer.
-///
-/// This is provider-neutral and intentionally shares the same reducer used by the durable
-/// post-final readiness entry so pre-final facts do not drift from the persisted verdict.
-pub fn projected_agent_run_readiness(
-    session: &Session,
-    options: &AgentRunOptions,
-    final_message_id: &str,
-    outcome: &AgentRunOutcome,
-) -> Result<ReadinessEvaluatedEntry> {
-    let scope = EvidenceScope::Run(final_message_id.to_owned());
-    let projection = session.verification_state_projection();
-    let mut policy = projection
-        .latest_policy(&scope)
-        .map(|entry| entry.policy.clone())
-        .unwrap_or_else(|| {
-            VerificationPolicy::no_checks_required(DEFAULT_TASK_VERIFICATION_SCOPE_HASH)
-        });
-    let workspace_id = stable_workspace_id(&options.workspace_root)?;
-    let mut mutations =
-        agent_run_workspace_mutation_evidence(session, &policy.verification_scope, outcome)?;
-    let policy_requires_snapshot = !policy.required_checks.is_empty()
-        || policy.completion_criteria != crate::CompletionCriteria::NoChecksRequired;
-    let has_recorded_workspace_mutation =
-        !outcome.changed_files.is_empty() || !mutations.is_empty();
-    let snapshot = if has_recorded_workspace_mutation || policy_requires_snapshot {
-        let source_stream_sequence = session.next_stream_sequence_hint()?;
-        Some(build_workspace_snapshot_for_event(
-            &options.workspace_root,
-            workspace_id.clone(),
-            &policy.verification_scope,
-            0,
-            final_message_id.to_owned(),
-            source_stream_sequence,
-        )?)
-    } else {
-        None
-    };
-    if let Some(snapshot) = snapshot.as_ref()
-        && let Some(unknown_dirty) = snapshot.unknown_dirty_evidence.clone()
-    {
-        mutations.push(unknown_dirty);
-    }
-    let has_workspace_mutation = has_recorded_workspace_mutation || !mutations.is_empty();
-    if !has_workspace_mutation {
-        policy.required_checks.clear();
-        policy.completion_criteria = crate::CompletionCriteria::NoChecksRequired;
-        policy.allow_unverified_completion = true;
-    }
-    let policy_hash = policy.stable_hash()?;
-    let mut input = ReadinessInput::new_run(RunStatus::Completed, policy);
-    input.workspace_trust = projection
-        .workspace_trust
-        .get(&workspace_id)
-        .map(|entry| entry.trust)
-        .unwrap_or(WorkspaceTrust::Unknown);
-    input.current_workspace_snapshot_id = snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.workspace_snapshot_id.clone());
-    input.workspace_knowledge = if let Some(snapshot) = snapshot.as_ref()
-        && snapshot.workspace_knowledge.is_unknown_dirty()
-    {
-        snapshot.workspace_knowledge.clone()
-    } else if mutations.iter().any(|mutation| mutation.unknown_dirty) {
-        crate::WorkspaceKnowledge::UnknownDirty
-    } else if has_workspace_mutation {
-        crate::WorkspaceKnowledge::Dirty(1)
-    } else if let Some(snapshot) = snapshot.as_ref() {
-        snapshot.workspace_knowledge.clone()
-    } else {
-        crate::WorkspaceKnowledge::Clean(0)
-    };
-    input.mutations = mutations;
-    input.verification_receipts = projection
-        .receipts
-        .values()
-        .filter(|entry| entry.receipt.receipt.scope == scope)
-        .map(|entry| entry.receipt.clone())
-        .collect();
-    input.final_assistant_event_id = Some(final_message_id.to_owned());
-
-    let workspace_snapshot_id = input.current_workspace_snapshot_id.clone();
-    Ok(ReadinessEvaluatedEntry {
-        scope,
-        evaluation: evaluate_readiness(&input),
-        policy_hash: Some(policy_hash),
-        workspace_snapshot_id,
-    })
-}
-
-fn agent_run_workspace_mutation_evidence(
-    session: &Session,
-    scope: &VerificationScope,
-    outcome: &AgentRunOutcome,
-) -> Result<Vec<WorkspaceMutationEvidence>> {
-    let Some(path) = session.store_path() else {
-        return Ok(Vec::new());
-    };
-    let records = JsonlSessionStore::read_event_records(path)?;
-    let mut prepared_tool_calls = BTreeMap::<String, Option<String>>::new();
-    for record in &records {
-        let SessionStreamRecord::Stored(event) = record;
-        if DurableEventType::from_event_type(&event.event_type)
-            == Some(DurableEventType::MutationPrepared)
-            && let Ok(payload) =
-                serde_json::from_value::<crate::MutationPrepared>(event.payload.clone())
-        {
-            prepared_tool_calls.insert(payload.operation_id, payload.tool_call_id);
-        }
-    }
-
-    let mut evidence = records
-        .iter()
-        .filter_map(|record| {
-            let SessionStreamRecord::Stored(event) = record;
-            match DurableEventType::from_event_type(&event.event_type) {
-                Some(DurableEventType::MutationCommitted) => {
-                    let payload =
-                        serde_json::from_value::<MutationCommitted>(event.payload.clone()).ok()?;
-                    let tool_call_id = prepared_tool_calls
-                        .get(&payload.operation_id)
-                        .and_then(Clone::clone)?;
-                    if !outcome.tool_call_ids.contains(&tool_call_id) {
-                        return None;
-                    }
-                    Some(WorkspaceMutationEvidence {
-                        event_id: event.event_id.clone(),
-                        source_event_type: DurableEventType::MutationCommitted.as_str().to_owned(),
-                        source_label: None,
-                        recovery_hint: None,
-                        scope_hash: scope.scope_hash.clone(),
-                        recorded_at_stream_sequence: event.stream_sequence,
-                        from_workspace_snapshot_id: None,
-                        to_workspace_snapshot_id: Some(payload.workspace_snapshot_id),
-                        tool_effect: crate::ToolEffect::WorkspaceWrite,
-                        unknown_dirty: false,
-                    })
-                }
-                Some(DurableEventType::MutationReconciled) => {
-                    let payload =
-                        serde_json::from_value::<MutationReconciled>(event.payload.clone()).ok()?;
-                    let tool_call_id = prepared_tool_calls
-                        .get(&payload.operation_id)
-                        .and_then(Clone::clone)?;
-                    if !outcome.tool_call_ids.contains(&tool_call_id) {
-                        return None;
-                    }
-                    let unknown_dirty = payload.resolution == MutationResolution::MarkUnknownDirty;
-                    Some(WorkspaceMutationEvidence {
-                        event_id: event.event_id.clone(),
-                        source_event_type: DurableEventType::MutationReconciled.as_str().to_owned(),
-                        source_label: None,
-                        recovery_hint: None,
-                        scope_hash: scope.scope_hash.clone(),
-                        recorded_at_stream_sequence: event.stream_sequence,
-                        from_workspace_snapshot_id: None,
-                        to_workspace_snapshot_id: payload.workspace_snapshot_id,
-                        tool_effect: if unknown_dirty {
-                            crate::ToolEffect::Unknown
-                        } else {
-                            crate::ToolEffect::WorkspaceWrite
-                        },
-                        unknown_dirty,
-                    })
-                }
-                Some(DurableEventType::CheckpointRestored) => {
-                    let payload =
-                        serde_json::from_value::<CheckpointRestored>(event.payload.clone()).ok()?;
-                    if !payload
-                        .tool_call_id
-                        .as_ref()
-                        .is_some_and(|call_id| outcome.tool_call_ids.contains(call_id))
-                    {
-                        return None;
-                    }
-                    Some(WorkspaceMutationEvidence {
-                        event_id: event.event_id.clone(),
-                        source_event_type: DurableEventType::CheckpointRestored.as_str().to_owned(),
-                        source_label: None,
-                        recovery_hint: None,
-                        scope_hash: scope.scope_hash.clone(),
-                        recorded_at_stream_sequence: event.stream_sequence,
-                        from_workspace_snapshot_id: None,
-                        to_workspace_snapshot_id: Some(payload.workspace_snapshot_id),
-                        tool_effect: crate::ToolEffect::WorkspaceWrite,
-                        unknown_dirty: false,
-                    })
-                }
-                Some(DurableEventType::WorkspaceMutationDetected) => {
-                    let payload =
-                        serde_json::from_value::<WorkspaceMutationDetected>(event.payload.clone())
-                            .ok()?;
-                    if let Some(call_id) = payload.tool_call_id.as_ref() {
-                        if !outcome.tool_call_ids.contains(call_id) {
-                            return None;
-                        }
-                    } else if !payload.unknown_dirty {
-                        return None;
-                    }
-                    Some(WorkspaceMutationEvidence::from_detected_event(
-                        event.event_id.clone(),
-                        event.stream_sequence,
-                        payload,
-                    ))
-                }
-                _ => None,
-            }
-        })
-        .collect::<Vec<_>>();
-    evidence.extend(active_terminal_mutation_evidence(&records, scope));
-    evidence.sort_by_key(|entry| entry.recorded_at_stream_sequence);
-    Ok(evidence)
-}
-
-fn active_terminal_mutation_evidence(
-    records: &[SessionStreamRecord],
-    scope: &VerificationScope,
-) -> Vec<WorkspaceMutationEvidence> {
-    let mut open_profiles = BTreeMap::<String, (ExecutionMutationProfile, String, u64)>::new();
-    let mut terminal_profiles = BTreeMap::<String, (ExecutionMutationProfile, String, u64)>::new();
-    let mut active_terminals = BTreeMap::<String, (String, u64)>::new();
-
-    for record in records {
-        let SessionStreamRecord::Stored(event) = record;
-        let Some(entry) = session_entry_from_stored_event(event) else {
-            continue;
-        };
-        match entry {
-            SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) => {
-                if execution.status == ToolExecutionStatus::Started {
-                    if let Some(profile) =
-                        execution_mutation_profile_from_details(&execution.metadata)
-                    {
-                        open_profiles.insert(
-                            execution.call_id.clone(),
-                            (profile, event.event_id.clone(), event.stream_sequence),
-                        );
-                    }
-                    continue;
-                }
-                if let Some(task_id) = terminal_task_id_from_tool_metadata(&execution.metadata)
-                    && let Some(profile) = open_profiles.get(&execution.call_id)
-                {
-                    terminal_profiles.insert(task_id, profile.clone());
-                }
-                open_profiles.remove(&execution.call_id);
-            }
-            SessionLogEntry::Control(ControlEntry::TerminalTask(entry)) => {
-                let task_id = entry.handle.task_id.as_str().to_owned();
-                if entry.status.is_active() {
-                    active_terminals
-                        .insert(task_id, (event.event_id.clone(), event.stream_sequence));
-                } else {
-                    active_terminals.remove(&task_id);
-                }
-            }
-            SessionLogEntry::User(_)
-            | SessionLogEntry::Assistant(_)
-            | SessionLogEntry::ToolResult(_)
-            | SessionLogEntry::Control(_) => {}
-        }
-    }
-
-    let mut evidence = open_profiles
-        .into_values()
-        .filter_map(|(profile, event_id, stream_sequence)| {
-            profile.effect.may_mutate_workspace().then(|| {
-                running_execution_evidence(
-                    profile,
-                    event_id,
-                    stream_sequence,
-                    scope,
-                    "running_tool_execution",
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    for (task_id, (event_id, stream_sequence)) in active_terminals {
-        let Some((profile, _, _)) = terminal_profiles.get(&task_id) else {
-            continue;
-        };
-        if profile.effect.may_mutate_workspace() {
-            evidence.push(running_execution_evidence(
-                profile.clone(),
-                event_id,
-                stream_sequence,
-                scope,
-                "running_terminal_task",
-            ));
-        }
-    }
-    evidence
-}
-
-fn running_execution_evidence(
-    profile: ExecutionMutationProfile,
-    event_id: String,
-    stream_sequence: u64,
-    scope: &VerificationScope,
-    source_event_type: &str,
-) -> WorkspaceMutationEvidence {
-    let scope_hash = if profile.scan_scope_hash.is_empty() {
-        scope.scope_hash.clone()
-    } else {
-        profile.scan_scope_hash
-    };
-    WorkspaceMutationEvidence {
-        event_id,
-        source_event_type: source_event_type.to_owned(),
-        source_label: None,
-        recovery_hint: None,
-        scope_hash,
-        recorded_at_stream_sequence: stream_sequence,
-        from_workspace_snapshot_id: profile.pre_execution_snapshot_id,
-        to_workspace_snapshot_id: None,
-        tool_effect: profile.effect,
-        unknown_dirty: true,
-    }
-}
-
-fn session_entry_from_stored_event(event: &crate::StoredEvent) -> Option<SessionLogEntry> {
-    let value = event.payload.get("session_log_entry")?.clone();
-    serde_json::from_value(value).ok()
-}
-
-fn audit_subjects(subjects: &[ToolSubject]) -> Vec<ToolSubjectAudit> {
-    subjects.iter().map(ToolSubjectAudit::from).collect()
-}
-
-fn stable_json_hash<T: serde::Serialize>(value: &T) -> Result<String> {
-    let serialized = serde_json::to_string(value).context("failed to serialize audit payload")?;
-    Ok(stable_text_hash(&serialized))
-}
-
-fn stable_text_hash(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    format!("{digest:x}")
-}
-
-fn duration_ms(started_at: Instant) -> u64 {
-    saturating_elapsed(started_at)
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

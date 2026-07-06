@@ -92,7 +92,8 @@ use readiness::{
     task_step_default_policy, task_step_readiness,
 };
 #[cfg(test)]
-use scheduler::child_status_from_output;
+#[path = "tests/task_orchestrator_child_session_test_support.rs"]
+mod task_orchestrator_child_session_test_support;
 use scheduler::{
     append_cancelled_dependent_steps, cancels_dependent_steps, latest_executable_plan,
     run_status_from_step_status, runnable_steps_for_continue, step_reason_from_output,
@@ -102,6 +103,10 @@ use scheduler::{
 use shared::{append_task_control, append_task_run, append_task_step};
 #[cfg(test)]
 use shared::{hash_text, route_id_for_call};
+#[cfg(test)]
+use task_orchestrator_child_session_test_support::{
+    TestAgentTaskChildSessionRunner, child_status_from_output,
+};
 use types::StepRunOutput;
 use write_lease::{
     acquire_task_write_lease, release_task_write_lease, write_lease_release_status_from_step_status,

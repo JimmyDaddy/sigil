@@ -20,6 +20,7 @@ pub mod resume;
 pub mod secret;
 pub mod session;
 pub mod skill;
+pub mod sse;
 pub mod task;
 pub mod task_memory;
 pub mod task_orchestrator;
@@ -104,9 +105,10 @@ pub use eval::{
     EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture, write_eval_report_artifacts,
 };
 pub use event::{
-    ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent, DurableEventType,
-    EventClass, EventHandler, EventId, EventSyncClass, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
-    NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision, ProjectionCursor,
+    ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent,
+    DurableEventPayloadMetadata, DurableEventPayloadStorage, DurableEventType, EventClass,
+    EventHandler, EventId, EventSyncClass, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, NoopEventHandler,
+    PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision, ProjectionCursor,
     PublicAssistantMessage, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
     RECORD_CHECKSUM_PREFIX, ReducerDisposition, RunEvent, STORED_EVENT_SCHEMA_VERSION, SessionId,
     StoredEvent, StoredEventDecode, TypedDomainEvent, TypedStoredEventDecode, decode_stored_event,
@@ -213,6 +215,7 @@ pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,
     SkillStateProjection, SkillTrustState,
 };
+pub use sse::SseFrameBuffer;
 pub use task::{
     AgentRole, DEFAULT_TASK_MAX_PLAN_VERSIONS, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
     TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,

@@ -50,272 +50,166 @@ pub enum EventSyncClass {
     TailRecovery,
 }
 
-/// Known durable event type names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DurableEventType {
-    UserMessageRecorded,
-    AssistantMessageRecorded,
-    ToolResultRecorded,
-    SessionEntryRecorded,
-    RunStatusChanged,
-    RunFinalized,
-    ToolExecutionStarted,
-    ToolExecutionFinished,
-    ApprovalResolved,
-    PlanDraftCreated,
-    PlanDecisionRecorded,
-    PlanPermissionGranted,
-    TaskCreatedFromPlan,
-    MutationPrepared,
-    MutationCommitted,
-    MutationReconciled,
-    MutationBatchStarted,
-    MutationBatchFinished,
-    WriteCommitted,
-    WorkspaceMutationDetected,
-    CheckpointRestored,
-    MutationArtifactCleanupRequested,
-    MutationArtifactLifecycleRecorded,
-    CommandFinished,
-    CheckFinished,
-    CheckSpecRecorded,
-    DiagnosticRecorded,
-    TodoChanged,
-    VerificationRecorded,
-    VerificationPolicyChanged,
-    VerificationCheckRun,
-    EnvironmentFingerprintRecorded,
-    ReadinessEvaluated,
-    TaskStatusChanged,
-    ChildVerificationReceiptLinked,
-    ChildChangesetMerged,
-    AgentMergeApplied,
-    WriteLeaseAcquired,
-    WriteLeaseReleased,
-    IsolatedWorkspaceCreated,
-    IsolatedChangeSetProduced,
-    MergeReviewRequested,
-    MergeReviewResolved,
-    JobIntentRecorded,
-    StepLeaseRecorded,
-    StepLeaseHeartbeatRecorded,
-    WorkspaceTrustDecision,
-    ContextSourceCaptured,
-    EgressDecisionRecorded,
-    ExtensionTrustDecision,
-    PluginHookExecutionStarted,
-    PluginHookExecutionFinished,
-    SandboxDecisionRecorded,
-    LogTailRecovered,
+/// Versioned payload carried by a reducer-facing domain event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainPayload {
+    pub event_version: u16,
+    pub payload: Value,
 }
 
-impl DurableEventType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UserMessageRecorded => "user_message_recorded",
-            Self::AssistantMessageRecorded => "assistant_message_recorded",
-            Self::ToolResultRecorded => "tool_result_recorded",
-            Self::SessionEntryRecorded => "session_entry_recorded",
-            Self::RunStatusChanged => "run_status_changed",
-            Self::RunFinalized => "run_finalized",
-            Self::ToolExecutionStarted => "tool_execution_started",
-            Self::ToolExecutionFinished => "tool_execution_finished",
-            Self::ApprovalResolved => "approval_resolved",
-            Self::PlanDraftCreated => "plan_draft_created",
-            Self::PlanDecisionRecorded => "plan_decision_recorded",
-            Self::PlanPermissionGranted => "plan_permission_granted",
-            Self::TaskCreatedFromPlan => "task_created_from_plan",
-            Self::MutationPrepared => "mutation_prepared",
-            Self::MutationCommitted => "mutation_committed",
-            Self::MutationReconciled => "mutation_reconciled",
-            Self::MutationBatchStarted => "mutation_batch_started",
-            Self::MutationBatchFinished => "mutation_batch_finished",
-            Self::WriteCommitted => "write_committed",
-            Self::WorkspaceMutationDetected => "workspace_mutation_detected",
-            Self::CheckpointRestored => "checkpoint_restored",
-            Self::MutationArtifactCleanupRequested => "mutation_artifact_cleanup_requested",
-            Self::MutationArtifactLifecycleRecorded => "mutation_artifact_lifecycle_recorded",
-            Self::CommandFinished => "command_finished",
-            Self::CheckFinished => "check_finished",
-            Self::CheckSpecRecorded => "check_spec_recorded",
-            Self::DiagnosticRecorded => "diagnostic_recorded",
-            Self::TodoChanged => "todo_changed",
-            Self::VerificationRecorded => "verification_recorded",
-            Self::VerificationPolicyChanged => "verification_policy_changed",
-            Self::VerificationCheckRun => "verification_check_run",
-            Self::EnvironmentFingerprintRecorded => "environment_fingerprint_recorded",
-            Self::ReadinessEvaluated => "readiness_evaluated",
-            Self::TaskStatusChanged => "task_status_changed",
-            Self::ChildVerificationReceiptLinked => "child_verification_receipt_linked",
-            Self::ChildChangesetMerged => "child_changeset_merged",
-            Self::AgentMergeApplied => "agent_merge_applied",
-            Self::WriteLeaseAcquired => "write_lease_acquired",
-            Self::WriteLeaseReleased => "write_lease_released",
-            Self::IsolatedWorkspaceCreated => "isolated_workspace_created",
-            Self::IsolatedChangeSetProduced => "isolated_changeset_produced",
-            Self::MergeReviewRequested => "merge_review_requested",
-            Self::MergeReviewResolved => "merge_review_resolved",
-            Self::JobIntentRecorded => "job_intent_recorded",
-            Self::StepLeaseRecorded => "step_lease_recorded",
-            Self::StepLeaseHeartbeatRecorded => "step_lease_heartbeat_recorded",
-            Self::WorkspaceTrustDecision => "workspace_trust_decision",
-            Self::ContextSourceCaptured => "context_source_captured",
-            Self::EgressDecisionRecorded => "egress_decision_recorded",
-            Self::ExtensionTrustDecision => "extension_trust_decision",
-            Self::PluginHookExecutionStarted => "plugin_hook_execution_started",
-            Self::PluginHookExecutionFinished => "plugin_hook_execution_finished",
-            Self::SandboxDecisionRecorded => "sandbox_decision_recorded",
-            Self::LogTailRecovered => "log_tail_recovered",
-        }
-    }
-
-    pub fn from_event_type(value: &str) -> Option<Self> {
-        Some(match value {
-            "user_message_recorded" => Self::UserMessageRecorded,
-            "assistant_message_recorded" => Self::AssistantMessageRecorded,
-            "tool_result_recorded" => Self::ToolResultRecorded,
-            "session_entry_recorded" => Self::SessionEntryRecorded,
-            "run_status_changed" => Self::RunStatusChanged,
-            "run_finalized" => Self::RunFinalized,
-            "tool_execution_started" => Self::ToolExecutionStarted,
-            "tool_execution_finished" => Self::ToolExecutionFinished,
-            "approval_resolved" => Self::ApprovalResolved,
-            "plan_draft_created" => Self::PlanDraftCreated,
-            "plan_decision_recorded" => Self::PlanDecisionRecorded,
-            "plan_permission_granted" => Self::PlanPermissionGranted,
-            "task_created_from_plan" => Self::TaskCreatedFromPlan,
-            "mutation_prepared" => Self::MutationPrepared,
-            "mutation_committed" => Self::MutationCommitted,
-            "mutation_reconciled" => Self::MutationReconciled,
-            "mutation_batch_started" => Self::MutationBatchStarted,
-            "mutation_batch_finished" => Self::MutationBatchFinished,
-            "write_committed" => Self::WriteCommitted,
-            "workspace_mutation_detected" => Self::WorkspaceMutationDetected,
-            "checkpoint_restored" => Self::CheckpointRestored,
-            "mutation_artifact_cleanup_requested" => Self::MutationArtifactCleanupRequested,
-            "mutation_artifact_lifecycle_recorded" => Self::MutationArtifactLifecycleRecorded,
-            "command_finished" => Self::CommandFinished,
-            "check_finished" => Self::CheckFinished,
-            "check_spec_recorded" => Self::CheckSpecRecorded,
-            "diagnostic_recorded" => Self::DiagnosticRecorded,
-            "todo_changed" => Self::TodoChanged,
-            "verification_recorded" => Self::VerificationRecorded,
-            "verification_policy_changed" => Self::VerificationPolicyChanged,
-            "verification_check_run" => Self::VerificationCheckRun,
-            "environment_fingerprint_recorded" => Self::EnvironmentFingerprintRecorded,
-            "readiness_evaluated" => Self::ReadinessEvaluated,
-            "task_status_changed" => Self::TaskStatusChanged,
-            "child_verification_receipt_linked" => Self::ChildVerificationReceiptLinked,
-            "child_changeset_merged" => Self::ChildChangesetMerged,
-            "agent_merge_applied" => Self::AgentMergeApplied,
-            "write_lease_acquired" => Self::WriteLeaseAcquired,
-            "write_lease_released" => Self::WriteLeaseReleased,
-            "isolated_workspace_created" => Self::IsolatedWorkspaceCreated,
-            "isolated_changeset_produced" => Self::IsolatedChangeSetProduced,
-            "merge_review_requested" => Self::MergeReviewRequested,
-            "merge_review_resolved" => Self::MergeReviewResolved,
-            "job_intent_recorded" => Self::JobIntentRecorded,
-            "step_lease_recorded" => Self::StepLeaseRecorded,
-            "step_lease_heartbeat_recorded" => Self::StepLeaseHeartbeatRecorded,
-            "workspace_trust_decision" => Self::WorkspaceTrustDecision,
-            "context_source_captured" => Self::ContextSourceCaptured,
-            "egress_decision_recorded" => Self::EgressDecisionRecorded,
-            "extension_trust_decision" => Self::ExtensionTrustDecision,
-            "plugin_hook_execution_started" => Self::PluginHookExecutionStarted,
-            "plugin_hook_execution_finished" => Self::PluginHookExecutionFinished,
-            "sandbox_decision_recorded" => Self::SandboxDecisionRecorded,
-            "log_tail_recovered" => Self::LogTailRecovered,
-            _ => return None,
-        })
-    }
-
-    pub fn sync_class(self) -> Option<EventSyncClass> {
-        if self == Self::LogTailRecovered {
-            return Some(EventSyncClass::TailRecovery);
-        }
-        if matches!(
-            self,
-            Self::UserMessageRecorded
-                | Self::AssistantMessageRecorded
-                | Self::ContextSourceCaptured
-        ) {
-            return Some(EventSyncClass::NormalEvent);
-        }
-        Some(EventSyncClass::RecoveryCritical)
-    }
-
-    pub fn expected_event_class(self) -> Option<EventClass> {
-        if matches!(
-            self,
-            Self::ContextSourceCaptured | Self::SessionEntryRecorded
-        ) {
-            return Some(EventClass::NonCritical);
-        }
-        Some(EventClass::Critical)
-    }
-
-    pub fn appendable(self) -> bool {
-        true
-    }
+/// Physical storage shape for one durable event payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableEventPayloadStorage {
+    /// Payload is a JSON object with a `session_log_entry` field.
+    SessionLogEntry,
+    /// Payload is a durable-event-specific JSON object.
+    DirectJson,
 }
 
-/// Ordered known durable event types.
-pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
-    DurableEventType::UserMessageRecorded,
-    DurableEventType::AssistantMessageRecorded,
-    DurableEventType::ToolResultRecorded,
-    DurableEventType::SessionEntryRecorded,
-    DurableEventType::RunStatusChanged,
-    DurableEventType::RunFinalized,
-    DurableEventType::ToolExecutionStarted,
-    DurableEventType::ToolExecutionFinished,
-    DurableEventType::ApprovalResolved,
-    DurableEventType::PlanDraftCreated,
-    DurableEventType::PlanDecisionRecorded,
-    DurableEventType::PlanPermissionGranted,
-    DurableEventType::TaskCreatedFromPlan,
-    DurableEventType::MutationPrepared,
-    DurableEventType::MutationCommitted,
-    DurableEventType::MutationReconciled,
-    DurableEventType::MutationBatchStarted,
-    DurableEventType::MutationBatchFinished,
-    DurableEventType::WriteCommitted,
-    DurableEventType::WorkspaceMutationDetected,
-    DurableEventType::CheckpointRestored,
-    DurableEventType::MutationArtifactCleanupRequested,
-    DurableEventType::MutationArtifactLifecycleRecorded,
-    DurableEventType::CommandFinished,
-    DurableEventType::CheckFinished,
-    DurableEventType::CheckSpecRecorded,
-    DurableEventType::DiagnosticRecorded,
-    DurableEventType::TodoChanged,
-    DurableEventType::VerificationRecorded,
-    DurableEventType::VerificationPolicyChanged,
-    DurableEventType::VerificationCheckRun,
-    DurableEventType::EnvironmentFingerprintRecorded,
-    DurableEventType::ReadinessEvaluated,
-    DurableEventType::TaskStatusChanged,
-    DurableEventType::ChildVerificationReceiptLinked,
-    DurableEventType::ChildChangesetMerged,
-    DurableEventType::AgentMergeApplied,
-    DurableEventType::WriteLeaseAcquired,
-    DurableEventType::WriteLeaseReleased,
-    DurableEventType::IsolatedWorkspaceCreated,
-    DurableEventType::IsolatedChangeSetProduced,
-    DurableEventType::MergeReviewRequested,
-    DurableEventType::MergeReviewResolved,
-    DurableEventType::JobIntentRecorded,
-    DurableEventType::StepLeaseRecorded,
-    DurableEventType::StepLeaseHeartbeatRecorded,
-    DurableEventType::WorkspaceTrustDecision,
-    DurableEventType::ContextSourceCaptured,
-    DurableEventType::EgressDecisionRecorded,
-    DurableEventType::ExtensionTrustDecision,
-    DurableEventType::PluginHookExecutionStarted,
-    DurableEventType::PluginHookExecutionFinished,
-    DurableEventType::SandboxDecisionRecorded,
-    DurableEventType::LogTailRecovered,
-];
+/// Static payload metadata for a durable event type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableEventPayloadMetadata {
+    pub storage: DurableEventPayloadStorage,
+    pub payload_name: &'static str,
+}
+
+macro_rules! durable_event_types {
+    ($($variant:ident => ($wire_name:literal, $sync_class:ident, $event_class:ident, $payload_storage:ident, $payload_name:literal),)+) => {
+        /// Known durable event type names.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum DurableEventType {
+            $($variant,)+
+        }
+
+        /// Strong reducer-facing event.
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum DurableDomainEvent {
+            $($variant(DomainPayload),)+
+        }
+
+        impl DurableEventType {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire_name,)+
+                }
+            }
+
+            pub fn from_event_type(value: &str) -> Option<Self> {
+                Some(match value {
+                    $($wire_name => Self::$variant,)+
+                    _ => return None,
+                })
+            }
+
+            pub fn sync_class(self) -> Option<EventSyncClass> {
+                Some(match self {
+                    $(Self::$variant => EventSyncClass::$sync_class,)+
+                })
+            }
+
+            pub fn expected_event_class(self) -> Option<EventClass> {
+                Some(match self {
+                    $(Self::$variant => EventClass::$event_class,)+
+                })
+            }
+
+            pub fn payload_metadata(self) -> DurableEventPayloadMetadata {
+                match self {
+                    $(Self::$variant => DurableEventPayloadMetadata {
+                        storage: DurableEventPayloadStorage::$payload_storage,
+                        payload_name: $payload_name,
+                    },)+
+                }
+            }
+
+            pub fn appendable(self) -> bool {
+                true
+            }
+
+            pub fn to_domain_event(self, payload: DomainPayload) -> DurableDomainEvent {
+                match self {
+                    $(Self::$variant => DurableDomainEvent::$variant(payload),)+
+                }
+            }
+        }
+
+        impl DurableDomainEvent {
+            pub fn event_type(&self) -> DurableEventType {
+                match self {
+                    $(Self::$variant(_) => DurableEventType::$variant,)+
+                }
+            }
+
+            pub fn payload(&self) -> Option<&DomainPayload> {
+                match self {
+                    $(Self::$variant(payload) => Some(payload),)+
+                }
+            }
+        }
+
+        /// Ordered known durable event types.
+        pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
+            $(DurableEventType::$variant,)+
+        ];
+    };
+}
+
+durable_event_types! {
+    UserMessageRecorded => ("user_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
+    AssistantMessageRecorded => ("assistant_message_recorded", NormalEvent, Critical, SessionLogEntry, "session_log_entry"),
+    ToolResultRecorded => ("tool_result_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
+    RunStatusChanged => ("run_status_changed", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
+    RunFinalized => ("run_finalized", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
+    ToolExecutionStarted => ("tool_execution_started", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ToolExecutionFinished => ("tool_execution_finished", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ApprovalResolved => ("approval_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanDraftCreated => ("plan_draft_created", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanDecisionRecorded => ("plan_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanPermissionGranted => ("plan_permission_granted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskCreatedFromPlan => ("task_created_from_plan", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    MutationPrepared => ("mutation_prepared", RecoveryCritical, Critical, DirectJson, "mutation_prepared"),
+    MutationCommitted => ("mutation_committed", RecoveryCritical, Critical, DirectJson, "mutation_committed"),
+    MutationReconciled => ("mutation_reconciled", RecoveryCritical, Critical, DirectJson, "mutation_reconciled"),
+    MutationBatchStarted => ("mutation_batch_started", RecoveryCritical, Critical, DirectJson, "mutation_batch_started"),
+    MutationBatchFinished => ("mutation_batch_finished", RecoveryCritical, Critical, DirectJson, "mutation_batch_finished"),
+    WriteCommitted => ("write_committed", RecoveryCritical, Critical, DirectJson, "write_committed"),
+    WorkspaceMutationDetected => ("workspace_mutation_detected", RecoveryCritical, Critical, DirectJson, "workspace_mutation_detected"),
+    CheckpointRestored => ("checkpoint_restored", RecoveryCritical, Critical, DirectJson, "checkpoint_restored"),
+    MutationArtifactCleanupRequested => ("mutation_artifact_cleanup_requested", RecoveryCritical, Critical, DirectJson, "mutation_artifact_cleanup_requested"),
+    MutationArtifactLifecycleRecorded => ("mutation_artifact_lifecycle_recorded", RecoveryCritical, Critical, DirectJson, "mutation_artifact_lifecycle_recorded"),
+    CommandFinished => ("command_finished", RecoveryCritical, Critical, DirectJson, "command_finished"),
+    CheckFinished => ("check_finished", RecoveryCritical, Critical, DirectJson, "check_finished"),
+    CheckSpecRecorded => ("check_spec_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    DiagnosticRecorded => ("diagnostic_recorded", RecoveryCritical, Critical, DirectJson, "diagnostic_recorded"),
+    TodoChanged => ("todo_changed", RecoveryCritical, Critical, DirectJson, "todo_changed"),
+    VerificationRecorded => ("verification_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    VerificationPolicyChanged => ("verification_policy_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    VerificationCheckRun => ("verification_check_run", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    EnvironmentFingerprintRecorded => ("environment_fingerprint_recorded", RecoveryCritical, Critical, DirectJson, "environment_fingerprint_recorded"),
+    ReadinessEvaluated => ("readiness_evaluated", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ChildVerificationReceiptLinked => ("child_verification_receipt_linked", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ChildChangesetMerged => ("child_changeset_merged", RecoveryCritical, Critical, DirectJson, "child_changeset_merged"),
+    AgentMergeApplied => ("agent_merge_applied", RecoveryCritical, Critical, DirectJson, "agent_merge_applied"),
+    WriteLeaseAcquired => ("write_lease_acquired", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    WriteLeaseReleased => ("write_lease_released", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IsolatedWorkspaceCreated => ("isolated_workspace_created", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    IsolatedChangeSetProduced => ("isolated_changeset_produced", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    MergeReviewRequested => ("merge_review_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    MergeReviewResolved => ("merge_review_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    JobIntentRecorded => ("job_intent_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    StepLeaseRecorded => ("step_lease_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    StepLeaseHeartbeatRecorded => ("step_lease_heartbeat_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    WorkspaceTrustDecision => ("workspace_trust_decision", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ContextSourceCaptured => ("context_source_captured", NormalEvent, NonCritical, SessionLogEntry, "session_log_entry"),
+    EgressDecisionRecorded => ("egress_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ExtensionTrustDecision => ("extension_trust_decision", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PluginHookExecutionStarted => ("plugin_hook_execution_started", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PluginHookExecutionFinished => ("plugin_hook_execution_finished", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    SandboxDecisionRecorded => ("sandbox_decision_recorded", RecoveryCritical, Critical, DirectJson, "sandbox_decision_recorded"),
+    LogTailRecovered => ("log_tail_recovered", TailRecovery, Critical, DirectJson, "log_tail_recovered"),
+}
 
 /// v2 durable event envelope persisted to JSONL.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -502,200 +396,6 @@ impl StoredEvent {
     }
 }
 
-/// Versioned payload carried by a reducer-facing domain event.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DomainPayload {
-    pub event_version: u16,
-    pub payload: Value,
-}
-
-/// Strong reducer-facing event.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DurableDomainEvent {
-    UserMessageRecorded(DomainPayload),
-    AssistantMessageRecorded(DomainPayload),
-    ToolResultRecorded(DomainPayload),
-    SessionEntryRecorded(DomainPayload),
-    RunStatusChanged(DomainPayload),
-    RunFinalized(DomainPayload),
-    ToolExecutionStarted(DomainPayload),
-    ToolExecutionFinished(DomainPayload),
-    ApprovalResolved(DomainPayload),
-    PlanDraftCreated(DomainPayload),
-    PlanDecisionRecorded(DomainPayload),
-    PlanPermissionGranted(DomainPayload),
-    TaskCreatedFromPlan(DomainPayload),
-    MutationPrepared(DomainPayload),
-    MutationCommitted(DomainPayload),
-    MutationReconciled(DomainPayload),
-    MutationBatchStarted(DomainPayload),
-    MutationBatchFinished(DomainPayload),
-    WriteCommitted(DomainPayload),
-    WorkspaceMutationDetected(DomainPayload),
-    CheckpointRestored(DomainPayload),
-    MutationArtifactCleanupRequested(DomainPayload),
-    MutationArtifactLifecycleRecorded(DomainPayload),
-    CommandFinished(DomainPayload),
-    CheckFinished(DomainPayload),
-    CheckSpecRecorded(DomainPayload),
-    DiagnosticRecorded(DomainPayload),
-    TodoChanged(DomainPayload),
-    VerificationRecorded(DomainPayload),
-    VerificationPolicyChanged(DomainPayload),
-    VerificationCheckRun(DomainPayload),
-    EnvironmentFingerprintRecorded(DomainPayload),
-    ReadinessEvaluated(DomainPayload),
-    TaskStatusChanged(DomainPayload),
-    ChildVerificationReceiptLinked(DomainPayload),
-    ChildChangesetMerged(DomainPayload),
-    AgentMergeApplied(DomainPayload),
-    WriteLeaseAcquired(DomainPayload),
-    WriteLeaseReleased(DomainPayload),
-    IsolatedWorkspaceCreated(DomainPayload),
-    IsolatedChangeSetProduced(DomainPayload),
-    MergeReviewRequested(DomainPayload),
-    MergeReviewResolved(DomainPayload),
-    JobIntentRecorded(DomainPayload),
-    StepLeaseRecorded(DomainPayload),
-    StepLeaseHeartbeatRecorded(DomainPayload),
-    WorkspaceTrustDecision(DomainPayload),
-    ContextSourceCaptured(DomainPayload),
-    EgressDecisionRecorded(DomainPayload),
-    ExtensionTrustDecision(DomainPayload),
-    PluginHookExecutionStarted(DomainPayload),
-    PluginHookExecutionFinished(DomainPayload),
-    SandboxDecisionRecorded(DomainPayload),
-    LogTailRecovered(DomainPayload),
-}
-
-impl DurableDomainEvent {
-    pub fn event_type(&self) -> DurableEventType {
-        match self {
-            Self::UserMessageRecorded(_) => DurableEventType::UserMessageRecorded,
-            Self::AssistantMessageRecorded(_) => DurableEventType::AssistantMessageRecorded,
-            Self::ToolResultRecorded(_) => DurableEventType::ToolResultRecorded,
-            Self::SessionEntryRecorded(_) => DurableEventType::SessionEntryRecorded,
-            Self::RunStatusChanged(_) => DurableEventType::RunStatusChanged,
-            Self::RunFinalized(_) => DurableEventType::RunFinalized,
-            Self::ToolExecutionStarted(_) => DurableEventType::ToolExecutionStarted,
-            Self::ToolExecutionFinished(_) => DurableEventType::ToolExecutionFinished,
-            Self::ApprovalResolved(_) => DurableEventType::ApprovalResolved,
-            Self::PlanDraftCreated(_) => DurableEventType::PlanDraftCreated,
-            Self::PlanDecisionRecorded(_) => DurableEventType::PlanDecisionRecorded,
-            Self::PlanPermissionGranted(_) => DurableEventType::PlanPermissionGranted,
-            Self::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
-            Self::MutationPrepared(_) => DurableEventType::MutationPrepared,
-            Self::MutationCommitted(_) => DurableEventType::MutationCommitted,
-            Self::MutationReconciled(_) => DurableEventType::MutationReconciled,
-            Self::MutationBatchStarted(_) => DurableEventType::MutationBatchStarted,
-            Self::MutationBatchFinished(_) => DurableEventType::MutationBatchFinished,
-            Self::WriteCommitted(_) => DurableEventType::WriteCommitted,
-            Self::WorkspaceMutationDetected(_) => DurableEventType::WorkspaceMutationDetected,
-            Self::CheckpointRestored(_) => DurableEventType::CheckpointRestored,
-            Self::MutationArtifactCleanupRequested(_) => {
-                DurableEventType::MutationArtifactCleanupRequested
-            }
-            Self::MutationArtifactLifecycleRecorded(_) => {
-                DurableEventType::MutationArtifactLifecycleRecorded
-            }
-            Self::CommandFinished(_) => DurableEventType::CommandFinished,
-            Self::CheckFinished(_) => DurableEventType::CheckFinished,
-            Self::CheckSpecRecorded(_) => DurableEventType::CheckSpecRecorded,
-            Self::DiagnosticRecorded(_) => DurableEventType::DiagnosticRecorded,
-            Self::TodoChanged(_) => DurableEventType::TodoChanged,
-            Self::VerificationRecorded(_) => DurableEventType::VerificationRecorded,
-            Self::VerificationPolicyChanged(_) => DurableEventType::VerificationPolicyChanged,
-            Self::VerificationCheckRun(_) => DurableEventType::VerificationCheckRun,
-            Self::EnvironmentFingerprintRecorded(_) => {
-                DurableEventType::EnvironmentFingerprintRecorded
-            }
-            Self::ReadinessEvaluated(_) => DurableEventType::ReadinessEvaluated,
-            Self::TaskStatusChanged(_) => DurableEventType::TaskStatusChanged,
-            Self::ChildVerificationReceiptLinked(_) => {
-                DurableEventType::ChildVerificationReceiptLinked
-            }
-            Self::ChildChangesetMerged(_) => DurableEventType::ChildChangesetMerged,
-            Self::AgentMergeApplied(_) => DurableEventType::AgentMergeApplied,
-            Self::WriteLeaseAcquired(_) => DurableEventType::WriteLeaseAcquired,
-            Self::WriteLeaseReleased(_) => DurableEventType::WriteLeaseReleased,
-            Self::IsolatedWorkspaceCreated(_) => DurableEventType::IsolatedWorkspaceCreated,
-            Self::IsolatedChangeSetProduced(_) => DurableEventType::IsolatedChangeSetProduced,
-            Self::MergeReviewRequested(_) => DurableEventType::MergeReviewRequested,
-            Self::MergeReviewResolved(_) => DurableEventType::MergeReviewResolved,
-            Self::JobIntentRecorded(_) => DurableEventType::JobIntentRecorded,
-            Self::StepLeaseRecorded(_) => DurableEventType::StepLeaseRecorded,
-            Self::StepLeaseHeartbeatRecorded(_) => DurableEventType::StepLeaseHeartbeatRecorded,
-            Self::WorkspaceTrustDecision(_) => DurableEventType::WorkspaceTrustDecision,
-            Self::ContextSourceCaptured(_) => DurableEventType::ContextSourceCaptured,
-            Self::EgressDecisionRecorded(_) => DurableEventType::EgressDecisionRecorded,
-            Self::ExtensionTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
-            Self::PluginHookExecutionStarted(_) => DurableEventType::PluginHookExecutionStarted,
-            Self::PluginHookExecutionFinished(_) => DurableEventType::PluginHookExecutionFinished,
-            Self::SandboxDecisionRecorded(_) => DurableEventType::SandboxDecisionRecorded,
-            Self::LogTailRecovered(_) => DurableEventType::LogTailRecovered,
-        }
-    }
-
-    pub fn payload(&self) -> Option<&DomainPayload> {
-        match self {
-            Self::UserMessageRecorded(payload)
-            | Self::AssistantMessageRecorded(payload)
-            | Self::ToolResultRecorded(payload)
-            | Self::SessionEntryRecorded(payload)
-            | Self::RunStatusChanged(payload)
-            | Self::RunFinalized(payload)
-            | Self::ToolExecutionStarted(payload)
-            | Self::ToolExecutionFinished(payload)
-            | Self::ApprovalResolved(payload)
-            | Self::PlanDraftCreated(payload)
-            | Self::PlanDecisionRecorded(payload)
-            | Self::PlanPermissionGranted(payload)
-            | Self::TaskCreatedFromPlan(payload)
-            | Self::MutationPrepared(payload)
-            | Self::MutationCommitted(payload)
-            | Self::MutationReconciled(payload)
-            | Self::MutationBatchStarted(payload)
-            | Self::MutationBatchFinished(payload)
-            | Self::WriteCommitted(payload)
-            | Self::WorkspaceMutationDetected(payload)
-            | Self::CheckpointRestored(payload)
-            | Self::MutationArtifactCleanupRequested(payload)
-            | Self::MutationArtifactLifecycleRecorded(payload)
-            | Self::CommandFinished(payload)
-            | Self::CheckFinished(payload)
-            | Self::CheckSpecRecorded(payload)
-            | Self::DiagnosticRecorded(payload)
-            | Self::TodoChanged(payload)
-            | Self::VerificationRecorded(payload)
-            | Self::VerificationPolicyChanged(payload)
-            | Self::VerificationCheckRun(payload)
-            | Self::EnvironmentFingerprintRecorded(payload)
-            | Self::ReadinessEvaluated(payload)
-            | Self::TaskStatusChanged(payload)
-            | Self::ChildVerificationReceiptLinked(payload)
-            | Self::ChildChangesetMerged(payload)
-            | Self::AgentMergeApplied(payload)
-            | Self::WriteLeaseAcquired(payload)
-            | Self::WriteLeaseReleased(payload)
-            | Self::IsolatedWorkspaceCreated(payload)
-            | Self::IsolatedChangeSetProduced(payload)
-            | Self::MergeReviewRequested(payload)
-            | Self::MergeReviewResolved(payload)
-            | Self::JobIntentRecorded(payload)
-            | Self::StepLeaseRecorded(payload)
-            | Self::StepLeaseHeartbeatRecorded(payload)
-            | Self::WorkspaceTrustDecision(payload)
-            | Self::ContextSourceCaptured(payload)
-            | Self::EgressDecisionRecorded(payload)
-            | Self::ExtensionTrustDecision(payload)
-            | Self::PluginHookExecutionStarted(payload)
-            | Self::PluginHookExecutionFinished(payload)
-            | Self::SandboxDecisionRecorded(payload)
-            | Self::LogTailRecovered(payload) => Some(payload),
-        }
-    }
-}
-
 pub type DomainEvent = DurableDomainEvent;
 
 #[derive(Debug)]
@@ -741,9 +441,9 @@ pub fn decode_stored_event(event: StoredEvent) -> Result<StoredEventDecode> {
         event_version: event.event_version,
         payload: event.payload,
     };
-    Ok(StoredEventDecode::Known(domain_event_from_payload(
-        event_type, payload,
-    )))
+    Ok(StoredEventDecode::Known(
+        event_type.to_domain_event(payload),
+    ))
 }
 
 pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventDecode> {
@@ -842,9 +542,7 @@ fn typed_other_event(event_type: DurableEventType, event: StoredEvent) -> Result
         event_version: event.event_version,
         payload: event.payload,
     };
-    Ok(TypedDomainEvent::Other(domain_event_from_payload(
-        event_type, payload,
-    )))
+    Ok(TypedDomainEvent::Other(event_type.to_domain_event(payload)))
 }
 
 fn decode_event_payload<T>(event: &StoredEvent) -> Result<T>
@@ -944,108 +642,6 @@ fn maybe_decode_control_entry(event: &StoredEvent) -> Result<Option<ControlEntry
         SessionLogEntry::User(_)
         | SessionLogEntry::Assistant(_)
         | SessionLogEntry::ToolResult(_) => Ok(None),
-    }
-}
-
-fn domain_event_from_payload(
-    event_type: DurableEventType,
-    payload: DomainPayload,
-) -> DurableDomainEvent {
-    match event_type {
-        DurableEventType::UserMessageRecorded => DurableDomainEvent::UserMessageRecorded(payload),
-        DurableEventType::AssistantMessageRecorded => {
-            DurableDomainEvent::AssistantMessageRecorded(payload)
-        }
-        DurableEventType::ToolResultRecorded => DurableDomainEvent::ToolResultRecorded(payload),
-        DurableEventType::SessionEntryRecorded => DurableDomainEvent::SessionEntryRecorded(payload),
-        DurableEventType::RunStatusChanged => DurableDomainEvent::RunStatusChanged(payload),
-        DurableEventType::RunFinalized => DurableDomainEvent::RunFinalized(payload),
-        DurableEventType::ToolExecutionStarted => DurableDomainEvent::ToolExecutionStarted(payload),
-        DurableEventType::ToolExecutionFinished => {
-            DurableDomainEvent::ToolExecutionFinished(payload)
-        }
-        DurableEventType::ApprovalResolved => DurableDomainEvent::ApprovalResolved(payload),
-        DurableEventType::PlanDraftCreated => DurableDomainEvent::PlanDraftCreated(payload),
-        DurableEventType::PlanDecisionRecorded => DurableDomainEvent::PlanDecisionRecorded(payload),
-        DurableEventType::PlanPermissionGranted => {
-            DurableDomainEvent::PlanPermissionGranted(payload)
-        }
-        DurableEventType::TaskCreatedFromPlan => DurableDomainEvent::TaskCreatedFromPlan(payload),
-        DurableEventType::MutationPrepared => DurableDomainEvent::MutationPrepared(payload),
-        DurableEventType::MutationCommitted => DurableDomainEvent::MutationCommitted(payload),
-        DurableEventType::MutationReconciled => DurableDomainEvent::MutationReconciled(payload),
-        DurableEventType::MutationBatchStarted => DurableDomainEvent::MutationBatchStarted(payload),
-        DurableEventType::MutationBatchFinished => {
-            DurableDomainEvent::MutationBatchFinished(payload)
-        }
-        DurableEventType::WriteCommitted => DurableDomainEvent::WriteCommitted(payload),
-        DurableEventType::WorkspaceMutationDetected => {
-            DurableDomainEvent::WorkspaceMutationDetected(payload)
-        }
-        DurableEventType::CheckpointRestored => DurableDomainEvent::CheckpointRestored(payload),
-        DurableEventType::MutationArtifactCleanupRequested => {
-            DurableDomainEvent::MutationArtifactCleanupRequested(payload)
-        }
-        DurableEventType::MutationArtifactLifecycleRecorded => {
-            DurableDomainEvent::MutationArtifactLifecycleRecorded(payload)
-        }
-        DurableEventType::CommandFinished => DurableDomainEvent::CommandFinished(payload),
-        DurableEventType::CheckFinished => DurableDomainEvent::CheckFinished(payload),
-        DurableEventType::CheckSpecRecorded => DurableDomainEvent::CheckSpecRecorded(payload),
-        DurableEventType::DiagnosticRecorded => DurableDomainEvent::DiagnosticRecorded(payload),
-        DurableEventType::TodoChanged => DurableDomainEvent::TodoChanged(payload),
-        DurableEventType::VerificationRecorded => DurableDomainEvent::VerificationRecorded(payload),
-        DurableEventType::VerificationPolicyChanged => {
-            DurableDomainEvent::VerificationPolicyChanged(payload)
-        }
-        DurableEventType::VerificationCheckRun => DurableDomainEvent::VerificationCheckRun(payload),
-        DurableEventType::EnvironmentFingerprintRecorded => {
-            DurableDomainEvent::EnvironmentFingerprintRecorded(payload)
-        }
-        DurableEventType::ReadinessEvaluated => DurableDomainEvent::ReadinessEvaluated(payload),
-        DurableEventType::TaskStatusChanged => DurableDomainEvent::TaskStatusChanged(payload),
-        DurableEventType::ChildVerificationReceiptLinked => {
-            DurableDomainEvent::ChildVerificationReceiptLinked(payload)
-        }
-        DurableEventType::ChildChangesetMerged => DurableDomainEvent::ChildChangesetMerged(payload),
-        DurableEventType::AgentMergeApplied => DurableDomainEvent::AgentMergeApplied(payload),
-        DurableEventType::WriteLeaseAcquired => DurableDomainEvent::WriteLeaseAcquired(payload),
-        DurableEventType::WriteLeaseReleased => DurableDomainEvent::WriteLeaseReleased(payload),
-        DurableEventType::IsolatedWorkspaceCreated => {
-            DurableDomainEvent::IsolatedWorkspaceCreated(payload)
-        }
-        DurableEventType::IsolatedChangeSetProduced => {
-            DurableDomainEvent::IsolatedChangeSetProduced(payload)
-        }
-        DurableEventType::MergeReviewRequested => DurableDomainEvent::MergeReviewRequested(payload),
-        DurableEventType::MergeReviewResolved => DurableDomainEvent::MergeReviewResolved(payload),
-        DurableEventType::JobIntentRecorded => DurableDomainEvent::JobIntentRecorded(payload),
-        DurableEventType::StepLeaseRecorded => DurableDomainEvent::StepLeaseRecorded(payload),
-        DurableEventType::StepLeaseHeartbeatRecorded => {
-            DurableDomainEvent::StepLeaseHeartbeatRecorded(payload)
-        }
-        DurableEventType::WorkspaceTrustDecision => {
-            DurableDomainEvent::WorkspaceTrustDecision(payload)
-        }
-        DurableEventType::ContextSourceCaptured => {
-            DurableDomainEvent::ContextSourceCaptured(payload)
-        }
-        DurableEventType::EgressDecisionRecorded => {
-            DurableDomainEvent::EgressDecisionRecorded(payload)
-        }
-        DurableEventType::ExtensionTrustDecision => {
-            DurableDomainEvent::ExtensionTrustDecision(payload)
-        }
-        DurableEventType::PluginHookExecutionStarted => {
-            DurableDomainEvent::PluginHookExecutionStarted(payload)
-        }
-        DurableEventType::PluginHookExecutionFinished => {
-            DurableDomainEvent::PluginHookExecutionFinished(payload)
-        }
-        DurableEventType::SandboxDecisionRecorded => {
-            DurableDomainEvent::SandboxDecisionRecorded(payload)
-        }
-        DurableEventType::LogTailRecovered => DurableDomainEvent::LogTailRecovered(payload),
     }
 }
 

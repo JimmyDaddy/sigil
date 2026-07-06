@@ -326,22 +326,6 @@ pub(super) fn step_terminal_reason(step_id: &TaskStepId, status: TaskStepStatus)
     }
 }
 
-#[cfg(test)]
-pub(super) fn child_status_from_output(output: &StepRunOutput) -> TaskChildSessionStatus {
-    if output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns
-        || !output.outcome.interrupted_tool_calls.is_empty()
-    {
-        TaskChildSessionStatus::Interrupted
-    } else if output.outcome.approval_denials > 0
-        || has_blocking_tool_error(&output.outcome)
-        || (!output.outcome.tool_errors.is_empty() && output.final_text.trim().is_empty())
-    {
-        TaskChildSessionStatus::Failed
-    } else {
-        TaskChildSessionStatus::Completed
-    }
-}
-
 pub(super) fn has_blocking_tool_error(outcome: &AgentRunOutcome) -> bool {
     outcome.tool_errors.iter().any(|error| {
         matches!(

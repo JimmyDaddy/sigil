@@ -18,9 +18,9 @@ use crate::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, DurableDomainEvent, DurableEventType, EventClass, EventSyncClass,
-    EvidenceReceipt, EvidenceScope, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, McpElicitationDecision,
-    McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
+    ConversationInputTarget, DurableDomainEvent, DurableEventPayloadStorage, DurableEventType,
+    EventClass, EventSyncClass, EvidenceReceipt, EvidenceScope, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
+    McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
     PlanApprovedEntry, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
     PluginTrustEntry, PrefixSnapshot, ProjectionApplyDecision, ProjectionCursor,
@@ -676,6 +676,19 @@ fn stored_event_decode_covers_every_known_domain_variant() {
                 .and_then(|value| value.as_str()),
             Some(event_type.as_str())
         );
+
+        let direct_domain_event = event_type.to_domain_event(crate::event::DomainPayload {
+            event_version: 1,
+            payload: json!({"event_type": event_type.as_str()}),
+        });
+        assert_eq!(direct_domain_event.event_type(), event_type);
+        assert_eq!(
+            direct_domain_event
+                .payload()
+                .and_then(|payload| payload.payload.get("event_type"))
+                .and_then(|value| value.as_str()),
+            Some(event_type.as_str())
+        );
     }
     assert_eq!(
         DurableDomainEvent::CheckFinished(crate::event::DomainPayload {
@@ -827,6 +840,49 @@ fn durable_event_type_expected_class_covers_all_appendable_types() {
     assert_eq!(
         DurableEventType::SessionEntryRecorded.expected_event_class(),
         Some(EventClass::NonCritical)
+    );
+}
+
+#[test]
+fn durable_event_payload_metadata_covers_all_known_types() {
+    for event_type in ALL_DURABLE_EVENT_TYPES {
+        let metadata = event_type.payload_metadata();
+        assert!(
+            !metadata.payload_name.is_empty(),
+            "{} should have a payload name",
+            event_type.as_str()
+        );
+    }
+
+    assert_eq!(
+        DurableEventType::UserMessageRecorded
+            .payload_metadata()
+            .storage,
+        DurableEventPayloadStorage::SessionLogEntry
+    );
+    assert_eq!(
+        DurableEventType::VerificationRecorded
+            .payload_metadata()
+            .storage,
+        DurableEventPayloadStorage::SessionLogEntry
+    );
+    assert_eq!(
+        DurableEventType::MutationPrepared
+            .payload_metadata()
+            .storage,
+        DurableEventPayloadStorage::DirectJson
+    );
+    assert_eq!(
+        DurableEventType::RunFinalized
+            .payload_metadata()
+            .payload_name,
+        "run_lifecycle"
+    );
+    assert_eq!(
+        DurableEventType::LogTailRecovered
+            .payload_metadata()
+            .storage,
+        DurableEventPayloadStorage::DirectJson
     );
 }
 
