@@ -69,6 +69,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
+| `/agent cancel <child-id|current>` | Cancel a running background child agent that still has a live runtime handle |
 | `/queue` | Advanced follow-up controls |
 | `/queue next|interrupt|edit|delete [item]` | Keep a follow-up for the next turn, interrupt and run it now, edit it, or cancel it |
 | `/plan` / `/plan <prompt>` | Enter plan mode or run one read-only planning prompt; structured plans can be accepted into a durable task |
@@ -79,7 +80,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/compact` | Manually compact the provider-visible context for the current session |
 | `/quit` | Quit the TUI |
 
-`/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
+`/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` and `/agent cancel` also show child-agent candidates before the argument is completed.
 
 When Sigil is already running, ordinary chat input becomes a visible Follow-ups item instead of being dropped or added immediately to the timeline or provider-visible history. Follow-up dispatch is FIFO after the active turn finishes; the normal user message is added when the item dispatches. `next` moves an item to the front for the next turn; `interrupt` stops the current run before dispatching the selected item. Agent mentions are not silently converted into main-thread follow-ups while the session is busy; wait for the current turn or use the dedicated agent messaging surface.
 

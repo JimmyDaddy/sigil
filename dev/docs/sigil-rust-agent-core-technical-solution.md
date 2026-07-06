@@ -704,27 +704,53 @@ cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源
 
 ### 7.1 TUI worker 命令面
 
-当前 TUI worker protocol 的命令包括：
+当前 TUI worker protocol 的主要命令面包括；完整枚举以
+`crates/sigil-tui/src/runner/protocol.rs` 为准：
 
 - `SubmitPrompt { prompt, reasoning_effort }`
+- `SubmitPlanPrompt { prompt, reasoning_effort }`
+- `InvokeInlineSkill { skill_id, arguments, reasoning_effort }`
+- `InvokeChildSessionSkill { skill_id, arguments }`
+- `InvokeAgentProfile { profile_id, prompt, parent_prompt }`
 - `SubmitTask { prompt }`
 - `ContinueTask { task_id: Option<String>, guidance: Option<String> }`
 - `ApprovalDecision { call_id, approved }`
 - `CancelRun`
+- `CancelTerminalTask { task_id }`
+- `CloseAgent { thread_id, reason }`
+- `CancelAgent { thread_id, reason }`
+- `MessageAgent { thread_id, prompt }`
 - `CompactNow`
+- `CheckChangedFilesDiagnostics`
+- `CleanMutationArtifacts { target }`
+- `DeleteMutationArtifact { artifact_id }`
 - `StartNewSession { session_log_path }`
 - `SwitchSession { session_log_path }`
 - `Shutdown`
 
-对应消息包括：
+对应主要消息包括；完整枚举以
+`crates/sigil-tui/src/runner/protocol.rs` 为准：
 
 - `Event(Box<RunEvent>)`
 - `Notice`
 - `RunStarted`
+- `SkillRunStarted`
+- `PlanRunStarted`
+- `AgentRunStarted`
+- `AgentResultContinuationStarted`
 - `RunFinished`
+- `PlanRunFinished`
+- `AgentRunFinished`
 - `TaskRunStarted`
 - `TaskRunFinished`
 - `RunCancelled`
+- `AgentThreadEvent`
+- `AgentThreadStatusLive`
+- `AgentThreadClosed`
+- `AgentThreadCancelled`
+- `TerminalTaskUpdated`
+- `ConversationQueueUpdated`
+- `ConversationQueueDispatchStarted`
 - `NewSessionStarted`
 - `SessionSwitched`
 - `SessionCompacted`
@@ -817,12 +843,12 @@ Planner / executor / subagent 协作已经作为 TUI-first task flow 落地。Du
 - 普通 chat 如果用户明确要求 subagent / 子 agent delegation，TUI 会把该意图映射为 `AgentDelegationRequirement`；agent loop 在可用 Agent 类工具面存在时会拒绝接受未产生 terminal 或 result-bearing Agent 类工具结果的 final answer，先用 transient retry prompt 要求模型调用 `spawn_agent` 等 agent-thread tool，重试后仍未满足时不写入该 final answer；无效输入、tool execution error 或仍处于 running 状态的 agent tool result 不会解除 hard gate。
 - 主会话 running-input queue 是内部 durable control plane，使用 `ConversationInputQueued`、`ConversationInputEdited`、`ConversationInputReordered`、`ConversationInputStatusChanged` 和 `ConversationInputQueueControl` append-only control entry 持久化；TUI 产品层把它呈现为 visible follow-up，而不是暴露为隐藏队列。普通 chat 在 active run busy 时会显示为 follow-up，不提前写入 provider-visible user history；busy 状态下的 agent mention 不会静默降级成 main-thread chat，而是保留输入并提示用户等待或使用专门的 agent message 入口。worker 在当前 turn 结束后 FIFO dispatch，成功写 `Delivered`，失败写 `Rejected` 并 pause queue。`/queue next` 只调整顺序等待下一 turn；`/queue interrupt`（兼容旧别名 `now`）先走 cancel/interrupted audit，再 dispatch 选中 item。
 - Background child result completion 与 follow-up / internal queue 有明确优先级：`join_before_final` / blocking child 完成后优先触发 parent continuation；普通 non-blocking background child 完成只写 `AgentResultContinuation(Pending)` ready 状态。当主会话已经有 pending follow-up 时，non-blocking result 不抢占 queued input，只以 bounded transient system notice 提醒模型可按需 `wait_agent` / `read_agent_result`。
-- `/agent close <child-id|current>` 不再由 TUI 直接追加 `AgentThreadClosed`；TUI 只解析目标并发送 worker `CloseAgent`，worker 通过 runtime `close_agent_thread` 复用 model-visible `close_agent` 的 terminal 校验和 control entry 生成，再把同步后的 session entries 返回给 TUI。running thread 仍通过后续 cancel path 处理。
-- `message_agent` 已作为 agent coordination tool 注册，用于给 active background child mailbox 投递 follow-up。它记录 `AgentThreadMessageRouted` requested -> resolved/rejected 审计，tool result 明确返回 `delivered_to_mailbox`、`will_apply_after_current_turn`、`interrupt_requested=false` 和 `interrupts_in_flight_provider_stream=false`；语义是 next safe point steering，不承诺 mid-token 或正在执行 tool 时实时中断。terminal child、无 mailbox 或无效目标会返回 rejected，且不改变 child lifecycle terminal status。
+- `/agent close <child-id|current>` 不再由 TUI 直接追加 `AgentThreadClosed`；TUI 只解析目标并发送 worker `CloseAgent`，worker 通过 runtime `close_agent_thread` 复用 model-visible `close_agent` 的 terminal 校验和 control entry 生成，再把同步后的 session entries 返回给 TUI。`/agent cancel <child-id|current>` 解析 running target 后发送 worker `CancelAgent`，worker 通过 runtime `cancel_agent` 取消仍持有 live handle 的 background child，并追加 `AgentThreadStatusChanged(Cancelled)` 与 `AgentRunInterrupted`；`close_agent` 负责 terminal 收口，`cancel_agent` 负责 running 收口。
+- `list_agents`、`message_agent`、`cancel_agent` 和 `close_agent` 已作为 agent coordination tools 注册。`list_agents` 返回所有 agent thread 的 status、objective、result ref、messageable/closable/cancelable 与 approval_pending；`message_agent` 用于给 active background child mailbox 投递 follow-up，记录 `AgentThreadMessageRouted` requested -> resolved/rejected 审计，tool result 明确返回 `delivered_to_mailbox`、`will_apply_after_current_turn`、`interrupt_requested=false` 和 `interrupts_in_flight_provider_stream=false`，语义是 next safe point steering，不承诺 mid-token 或正在执行 tool 时实时中断；`cancel_agent` 只取消仍有 live handle 的 running background child；terminal child、无 mailbox 或无效目标会返回 rejected/unsupported，且不改变 child lifecycle terminal status。
 - Subagent tool approval 与 MCP elicitation 会在 parent session 记录 route summary；真实工具审批、工具执行和 elicitation 决策仍按原有 control entry 机制审计。
 - 普通 tool error 是 agent loop 的可恢复输入；如果 step 最终产出回答，task orchestrator 继续后续步骤，并把恢复过的错误写入 step reason。审批拒绝、权限类错误、interrupted tool call 和 max turns 仍会阻断 task。
 - Role-specific provider、reasoning effort 和 tool scope 由 `sigil-runtime` 装配；planner 与 subagent-read 默认只读，executor 默认完整工具面，subagent-write 受 `[task].allow_write_subagents` 控制。
-- `sigil-runtime::AgentProfileRegistry` 已把内置 role 投影为 profile，并通过 `AgentInvocationPolicy`（`manual_only` / `model_allowed` / `system_only`）和 `AgentResultPolicy`（`summary_only` / `summary_with_page_ref` / `artifact_only` / `foreground_merge_required`）表达调用与结果返回语义。旧 session/profile JSON 中只有 `user_invocable` / `model_invocable` 时会反推 invocation policy；model-visible agent index 只暴露 trusted、enabled、scope-contained 且 `model_allowed` 的 profile，并把 `result_policy` 纳入 fingerprint 和 `spawn_agent` 描述。runtime worker 使用 workspace-aware registry，已支持从固定 workspace `.sigil/agents` 发现 Sigil-native workspace profiles：`.sigil/agents/<id>/agent.toml` 或 `.sigil/agents/<id>/AGENT.md`。Native profiles 默认 enabled、manual-only、needs-review、read-only，只有显式 trusted 且 model_allowed 后才进入 model-visible index；`AgentProfileTrustDecision` append-only control entry 会通过 `AgentProfileTrustProjection` 覆盖非 system profile 的 trust 状态，TUI worker 的 agent tools 注册面和 runtime supervisor 都使用 session-aware registry，因此 source/profile hash 变化后旧 trust decision 会失效并回到 `needs_review`，默认退出 model-visible index；duplicate built-in/profile id 会 warning 并跳过，alias/slash name 冲突会 deterministic warning 并禁用冲突别名，symlink escape 会 warning 并跳过。同一 registry 还会把 skill discovery 中 `run_as=child_session` 的 trusted compatibility entries 投影为 subagent profiles：`.sigil/agents/*.md`，以及显式配置 `[skills].compatibility_sources = ["claude", "reasonix"]` 后的 `.claude/agents/*.md` 和 `.reasonix/agents/*.md`；`disable-model-invocation` / `disableModelInvocation` 会映射为 manual-only，`allowed-tools` / `allowedTools` 只能收窄工具面，包含 `disallowed-tools` / `disallowedTools` 的条目因 subtractive scope 不能安全表达为 profile 会 warning 并跳过。受信任 plugin manifest 可通过 `[[agents]]` 贡献 agent profile；未 trust plugin 只在 config 中展示 capability，不注册 runtime profile，已 trust 且 hash 匹配时才生成 `AgentProfileSource::Plugin` profile，并用 namespaced id 避免与 workspace/native profile 裸 id 冲突。spawn 时 profile tool scope 会与 role registry scope 取交集，profile 不能扩大角色原本的工具面；profile description/instructions 会作为 transient child system prompt 注入子会话，不持久化进 parent history。
+- `sigil-runtime::AgentProfileRegistry` 已把内置 role 投影为 profile，并通过 `AgentInvocationPolicy`（`manual_only` / `model_allowed` / `system_only`）和 `AgentResultPolicy`（`summary_only` / `summary_with_page_ref` / `artifact_only` / `foreground_merge_required`）表达调用与结果返回语义。旧 session/profile JSON 中只有 `user_invocable` / `model_invocable` 时会反推 invocation policy；model-visible agent index 只暴露 trusted、enabled、scope-contained 且 `model_allowed` 的 profile，并把 `result_policy` 纳入 fingerprint 和 `spawn_agent` 描述。内置 `worker` 现在是 `ModelAllowed` 的 `SubagentWrite` profile，但只通过 changeset-only foreground 隔离运行：foreground / join-before-final worker 必须返回结构化 changeset proposal，parent workspace 被 child 直接修改会失败，成功时追加 `ChangeSetProposed`、`IsolatedChangeSetProduced` 和 `MergeReviewRequested`；background worker spawn 仍返回 `unsupported_write_background_without_isolation`。runtime worker 使用 workspace-aware registry，已支持从固定 workspace `.sigil/agents` 发现 Sigil-native workspace profiles：`.sigil/agents/<id>/agent.toml` 或 `.sigil/agents/<id>/AGENT.md`。Native profiles 默认 enabled、manual-only、needs-review、read-only，只有显式 trusted 且 model_allowed 后才进入 model-visible index；`AgentProfileTrustDecision` append-only control entry 会通过 `AgentProfileTrustProjection` 覆盖非 system profile 的 trust 状态，TUI worker 的 agent tools 注册面和 runtime supervisor 都使用 session-aware registry，因此 source/profile hash 变化后旧 trust decision 会失效并回到 `needs_review`，默认退出 model-visible index；duplicate built-in/profile id 会 warning 并跳过，alias/slash name 冲突会 deterministic warning 并禁用冲突别名，symlink escape 会 warning 并跳过。同一 registry 还会把 skill discovery 中 `run_as=child_session` 的 trusted compatibility entries 投影为 subagent profiles：`.sigil/agents/*.md`，以及显式配置 `[skills].compatibility_sources = ["claude", "reasonix"]` 后的 `.claude/agents/*.md` 和 `.reasonix/agents/*.md`；`disable-model-invocation` / `disableModelInvocation` 会映射为 manual-only，`allowed-tools` / `allowedTools` 只能收窄工具面，包含 `disallowed-tools` / `disallowedTools` 的条目因 subtractive scope 不能安全表达为 profile 会 warning 并跳过。受信任 plugin manifest 可通过 `[[agents]]` 贡献 agent profile；未 trust plugin 只在 config 中展示 capability，不注册 runtime profile，已 trust 且 hash 匹配时才生成 `AgentProfileSource::Plugin` profile，并用 namespaced id 避免与 workspace/native profile 裸 id 冲突。spawn 时 profile tool scope 会与 role registry scope 取交集，profile 不能扩大角色原本的工具面；profile description/instructions 会作为 transient child system prompt 注入子会话，不持久化进 parent history。
 - `AgentProfilePolicyDecision` append-only control entry 已用于非 system profile 的 effective policy overlay，覆盖 `enabled` / `user_invocable` / `model_invocable`。policy replay 需要 profile id、source、source hash、profile hash 全部匹配当前 snapshot；hash 变化后旧 policy 失效。runtime `model_visible_index`、`AgentToolRuntime::resolve_spawn_profile` 和 `AgentSupervisor::begin_chat_child_thread` 使用 effective policy 过滤，但 overlay 不修改源 `AgentProfile`，因此不会污染 snapshot hash。
 - TUI `/config` 的 `Agents` section 已改用 workspace-aware `AgentProfileRegistry`，展示 built-in、native、compatibility profiles 的 source/kind/trust/effective enabled/user/model、provider/model、tool scope 和 nickname candidates；footer trust/block/enable/user/model actions 会追加 `AgentProfileCaptured` 与对应 trust/policy decision 到当前 session JSONL。普通 inline/reusable skill 留在 `Skills` section，并继续通过 footer load/invoke 生成受 runtime `load_skill` policy 约束的请求；slash selector 的 skill fallback 同步限定为 trusted inline skills，`run_as=child_session` 兼容资源不再作为普通 skill slash row 展示或通过 `/skill-id` 解析启动。Composer 起始 `@` 会打开 agent mention selector，候选只来自 enabled、trusted、user-invocable 的 session-aware profiles；提交 `@profile <prompt>` 会走 TUI worker `InvokeAgentProfile` 和 runtime `AgentToolRuntime::invoke_agent_profile`，以 `AgentInvocationSource::Mention` 启动 foreground child thread，并按 user-invocable policy 校验，而不是把 mention 当普通 chat prompt 交给 delegation hard-gate。
 

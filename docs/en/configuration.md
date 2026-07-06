@@ -288,6 +288,7 @@ default_mode = "chat"
 max_plan_steps = 12
 max_replans = 2
 max_subagents = 8
+multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 
 [task.planner]
@@ -310,6 +311,8 @@ Planned tasks are started from the TUI with `/task <task>`. `/plan` remains read
 Role-specific provider/model settings inherit `[agent]` when omitted. Planner and subagent-read default to read-only file/search/code-intelligence tools. Executor can see the full runtime registry. Subagent-write can see the full runtime registry only when `allow_write_subagents = true`; otherwise it falls back to the read-only scope. Mutating tools still go through the normal approval policy.
 
 Agent concurrency is controlled by `[task].max_subagents`: the default permits up to 8 active child agents across foreground, background, read-only, and write-capable roles. Token usage is recorded in agent results for reporting, but it is not a hard spawn-denial budget.
+
+`multi_agent_mode` controls when model-visible agent tools should be used. The default, `explicit_request_only`, keeps `spawn_agent` available but instructs the model to use subagents only when the user or active repo/skill instructions explicitly request delegation, parallel agent work, or subagents. `none` disables ordinary model delegation guidance, while `proactive` lets the model spawn non-overlapping child agents when parallelism clearly improves speed or quality. Write-capable `worker` runs are still constrained by runtime policy: foreground and join-before-final use changeset-only merge review, and background worker writes are rejected until isolation is available.
 
 Each role can override visible tools:
 

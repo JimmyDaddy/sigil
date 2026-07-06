@@ -288,6 +288,7 @@ default_mode = "chat"
 max_plan_steps = 12
 max_replans = 2
 max_subagents = 8
+multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 
 [task.planner]
@@ -310,6 +311,8 @@ allow_write_subagents = true
 各 role 的 provider/model 未配置时继承 `[agent]`。Planner 和 subagent-read 默认只看到只读文件/搜索/code-intelligence 工具。Executor 可以看到完整 runtime registry。Subagent-write 只有在 `allow_write_subagents = true` 时才能看到完整 registry；否则回退到只读工具面。写工具仍然按正常审批策略执行。
 
 Agent 并发由 `[task].max_subagents` 控制：默认最多允许 8 个活跃子 agent，覆盖 foreground、background、只读和可写角色。Token 用量会记录到 agent result 里用于报告，但不作为拒绝 spawn 的硬预算。
+
+`multi_agent_mode` 控制模型可见 agent 工具的使用时机。默认 `explicit_request_only` 会保留 `spawn_agent`，但要求模型只有在用户或当前 repo/skill 指令明确要求 delegation、parallel agent work 或 subagent 时才使用子 agent。`none` 关闭普通模型委派指令，`proactive` 允许模型在并行、非重叠工作明显提升速度或质量时主动 spawn。可写 `worker` 仍受 runtime 策略约束：foreground 和 join-before-final 只能走 changeset-only merge review；后台 worker 写入会被拒绝，直到隔离能力可用。
 
 每个 role 都可以覆盖可见工具：
 

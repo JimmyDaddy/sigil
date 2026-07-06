@@ -41,6 +41,7 @@
 | `/resume` | 选择并恢复历史 session |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
+| `/agent cancel <child-id|current>` | 取消仍有 live runtime handle 的运行中后台 child agent |
 | `/queue` | 高级 follow-up 控制 |
 | `/queue next|interrupt|edit|delete [item]` | 保留 follow-up 到下一轮、interrupt 并立即运行、编辑或取消 |
 | `/plan` / `/plan <prompt>` | 运行一次只读 planning prompt；接受 plan card 后创建并运行 durable task |

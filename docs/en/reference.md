@@ -41,6 +41,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
+| `/agent cancel <child-id|current>` | Cancel a running background child agent that still has a live runtime handle |
 | `/queue` | Advanced follow-up controls |
 | `/queue next|interrupt|edit|delete [item]` | Keep a follow-up for the next turn, interrupt and run it now, edit it, or cancel it |
 | `/plan` / `/plan <prompt>` | Run a read-only planning prompt; accept the plan card to create and run a durable task |
