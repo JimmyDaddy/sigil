@@ -4,7 +4,7 @@ pub fn anthropic_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         exact_prefix_cache: false,
         reports_cache_tokens: true,
-        reasoning_stream: ReasoningStreamSupport::Unsupported,
+        reasoning_stream: ReasoningStreamSupport::Native,
         supports_reasoning_effort: false,
         supports_tool_stream: true,
         supports_background_tasks: false,

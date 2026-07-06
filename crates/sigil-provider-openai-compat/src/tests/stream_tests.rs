@@ -40,6 +40,21 @@ fn decoder_normalizes_crlf_and_finishes_partial_frame() -> Result<()> {
 }
 
 #[test]
+fn decoder_keeps_split_frame_buffered_until_separator() -> Result<()> {
+    let mut decoder = OpenAiSseDecoder::default();
+
+    assert!(decoder.push("data: {\"a\":")?.is_empty());
+    assert!(decoder.push("1}")?.is_empty());
+    let frames = decoder.push("\n\n")?;
+
+    assert!(matches!(
+        frames.as_slice(),
+        [OpenAiSseFrame::Data(data)] if data == "{\"a\":1}"
+    ));
+    Ok(())
+}
+
+#[test]
 fn decoder_finish_flushes_pending_carriage_return_and_partial_data() -> Result<()> {
     let mut decoder = OpenAiSseDecoder::default();
 

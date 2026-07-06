@@ -9,6 +9,7 @@ fn anthropic_capabilities_are_provider_neutral() {
     assert!(capabilities.reports_cache_tokens);
     assert!(!capabilities.exact_prefix_cache);
     assert!(!capabilities.supports_reasoning_effort);
-    assert_eq!(capabilities.reasoning_stream.as_str(), "unsupported");
+    assert_eq!(capabilities.reasoning_stream.as_str(), "native");
+    assert!(capabilities.can_surface_reasoning_stream());
     assert_eq!(capabilities.tool_name_max_chars, 64);
 }

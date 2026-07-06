@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use sigil_kernel::SseFrameBuffer;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenAiSseFrame {
@@ -10,56 +11,16 @@ pub enum OpenAiSseFrame {
 
 #[derive(Debug, Default)]
 pub struct OpenAiSseDecoder {
-    normalized_buffer: String,
-    pending_cr: bool,
+    buffer: SseFrameBuffer,
 }
 
 impl OpenAiSseDecoder {
     pub fn push(&mut self, raw: &str) -> Result<Vec<OpenAiSseFrame>> {
-        self.append_normalized(raw);
-        self.drain_complete_frames()
+        self.buffer.push(raw, parse_sse_chunk)
     }
 
     pub fn finish(&mut self) -> Result<Vec<OpenAiSseFrame>> {
-        if self.pending_cr {
-            self.normalized_buffer.push('\n');
-            self.pending_cr = false;
-        }
-        if self.normalized_buffer.is_empty() {
-            return Ok(Vec::new());
-        }
-        let chunk = std::mem::take(&mut self.normalized_buffer);
-        Ok(vec![parse_sse_chunk(&chunk)?])
-    }
-
-    fn append_normalized(&mut self, raw: &str) {
-        for character in raw.chars() {
-            if self.pending_cr {
-                if character == '\n' {
-                    self.normalized_buffer.push('\n');
-                    self.pending_cr = false;
-                    continue;
-                }
-                self.normalized_buffer.push('\n');
-                self.pending_cr = false;
-            }
-
-            if character == '\r' {
-                self.pending_cr = true;
-            } else {
-                self.normalized_buffer.push(character);
-            }
-        }
-    }
-
-    fn drain_complete_frames(&mut self) -> Result<Vec<OpenAiSseFrame>> {
-        let mut frames = Vec::new();
-        while let Some(separator_index) = self.normalized_buffer.find("\n\n") {
-            let chunk = self.normalized_buffer[..separator_index].to_owned();
-            self.normalized_buffer = self.normalized_buffer[separator_index + 2..].to_owned();
-            frames.push(parse_sse_chunk(&chunk)?);
-        }
-        Ok(frames)
+        self.buffer.finish(parse_sse_chunk)
     }
 }
 

@@ -32,6 +32,21 @@ fn sse_decoder_finishes_trailing_frame() -> anyhow::Result<()> {
 }
 
 #[test]
+fn sse_decoder_keeps_split_frame_buffered_until_separator() -> anyhow::Result<()> {
+    let mut decoder = GeminiSseDecoder::default();
+
+    assert!(decoder.push("data: {\"candidates\":")?.is_empty());
+    assert!(decoder.push("[]}")?.is_empty());
+    let frames = decoder.push("\n\n")?;
+
+    assert_eq!(
+        frames,
+        vec![GeminiSseFrame::Data(r#"{"candidates":[]}"#.to_owned())]
+    );
+    Ok(())
+}
+
+#[test]
 fn sse_decoder_handles_pending_carriage_return_and_invalid_chunks() -> anyhow::Result<()> {
     let mut decoder = GeminiSseDecoder::default();
     decoder.push("data: {\"candidates\":[]}\r")?;

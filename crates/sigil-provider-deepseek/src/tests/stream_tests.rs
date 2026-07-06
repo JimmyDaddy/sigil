@@ -32,6 +32,20 @@ fn decoder_merges_crlf_boundaries_split_across_chunks() -> Result<()> {
 }
 
 #[test]
+fn decoder_keeps_split_frame_buffered_until_separator() -> Result<()> {
+    let mut decoder = DeepSeekSseDecoder::default();
+
+    assert!(decoder.push("data: {\"choices\":")?.is_empty());
+    assert!(decoder.push("[]}")?.is_empty());
+    let frames = decoder.push("\n\n")?;
+
+    assert!(
+        matches!(frames.as_slice(), [DeepSeekSseFrame::Data(data)] if data == "{\"choices\":[]}")
+    );
+    Ok(())
+}
+
+#[test]
 fn decoder_normalizes_bare_carriage_return_before_non_newline_character() -> Result<()> {
     let mut decoder = DeepSeekSseDecoder::default();
 
