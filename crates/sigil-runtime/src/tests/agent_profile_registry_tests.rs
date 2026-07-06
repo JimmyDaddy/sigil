@@ -136,7 +136,64 @@ slash_names = ["review-agent"]
         .iter()
         .map(|entry| entry.profile_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec![EXPLORE_PROFILE_ID, "review"]);
+    assert_eq!(ids, vec![EXPLORE_PROFILE_ID, "review", WORKER_PROFILE_ID]);
+    Ok(())
+}
+
+#[test]
+fn registry_derives_execution_role_from_profile_policy_not_profile_id() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    for (id, body) in [
+        (
+            "patcher",
+            r#"
+description = "Custom patching agent."
+instructions = "Propose changes."
+trust = "trusted"
+invocation_policy = "model_allowed"
+result_policy = "foreground_merge_required"
+allowed_tools = ["grep"]
+"#,
+        ),
+        (
+            "writer-name-read-role",
+            r#"
+description = "Read role despite write-looking tools."
+instructions = "Inspect only."
+trust = "trusted"
+invocation_policy = "model_allowed"
+allowed_tools = ["write_file"]
+"#,
+        ),
+    ] {
+        let agent_dir = workspace.join(".sigil").join("agents").join(id);
+        fs::create_dir_all(&agent_dir)?;
+        fs::write(agent_dir.join("agent.toml"), body)?;
+    }
+
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let patcher = registry
+        .get(&AgentProfileId::new("patcher")?)
+        .expect("patcher profile exists");
+    let read_profile = registry
+        .get(&AgentProfileId::new("writer-name-read-role")?)
+        .expect("read profile exists");
+
+    assert_eq!(
+        patcher.execution_role,
+        sigil_kernel::AgentRole::SubagentWrite
+    );
+    assert_eq!(
+        patcher.profile.result_policy,
+        AgentResultPolicy::ForegroundMergeRequired
+    );
+    assert_eq!(
+        read_profile.execution_role,
+        sigil_kernel::AgentRole::SubagentRead
+    );
+    assert_ne!(patcher.profile.id.as_str(), WORKER_PROFILE_ID);
     Ok(())
 }
 
@@ -631,7 +688,7 @@ Review code through grep only.
         .iter()
         .map(|entry| entry.profile_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec![EXPLORE_PROFILE_ID, "reviewer"]);
+    assert_eq!(ids, vec![EXPLORE_PROFILE_ID, "reviewer", WORKER_PROFILE_ID]);
     Ok(())
 }
 
@@ -755,8 +812,12 @@ instructions = "Manual only."
     assert!(!local.profile.tool_scope.allows("write_file"));
 
     let visible = registry.model_visible_index(&AgentProfileIndexContext::default())?;
-    assert_eq!(visible.entries.len(), 1);
-    assert_eq!(visible.entries[0].profile_id.as_str(), EXPLORE_PROFILE_ID);
+    let visible_ids = visible
+        .entries
+        .iter()
+        .map(|entry| entry.profile_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(visible_ids, vec![EXPLORE_PROFILE_ID, WORKER_PROFILE_ID]);
     Ok(())
 }
 
@@ -1230,6 +1291,18 @@ fn registry_projects_existing_task_roles_to_builtin_profiles() -> Result<()> {
         worker.profile.result_policy,
         AgentResultPolicy::ForegroundMergeRequired
     );
+    assert_eq!(
+        worker.execution_role,
+        sigil_kernel::AgentRole::SubagentWrite
+    );
+    assert_eq!(
+        worker.profile.invocation_policy,
+        AgentInvocationPolicy::ModelAllowed
+    );
+    assert!(worker.profile.model_invocation_allowed());
+    assert!(!worker.profile.tool_scope.allows("write_file"));
+    assert!(!worker.profile.tool_scope.allows("apply_changeset"));
+    assert!(!worker.profile.tool_scope.allows("bash"));
     assert!(registry.warnings().is_empty());
     Ok(())
 }
@@ -1492,7 +1565,7 @@ fn registry_model_visible_index_is_deterministic_and_fingerprinted() -> Result<(
     let second = registry.model_visible_index(&context)?;
 
     assert_eq!(first, second);
-    assert_eq!(first.entries.len(), 1);
+    assert_eq!(first.entries.len(), 2);
     assert_eq!(first.entries[0].profile_id.as_str(), EXPLORE_PROFILE_ID);
     assert_eq!(
         first.entries[0].result_policy,
@@ -1504,7 +1577,7 @@ fn registry_model_visible_index_is_deterministic_and_fingerprinted() -> Result<(
     truncated_context.max_entries = Some(0);
     let truncated = registry.model_visible_index(&truncated_context)?;
     assert!(truncated.entries.is_empty());
-    assert_eq!(truncated.hidden_count, 1);
+    assert_eq!(truncated.hidden_count, 2);
     assert_ne!(first.fingerprint, truncated.fingerprint);
     Ok(())
 }
@@ -1512,8 +1585,11 @@ fn registry_model_visible_index_is_deterministic_and_fingerprinted() -> Result<(
 #[test]
 fn registry_filters_untrusted_or_disabled_model_invocable_profiles() -> Result<()> {
     let mut registry = AgentProfileRegistry::from_root_config(&root_config())?;
-    let context = AgentProfileIndexContext::default();
     let explore_id = AgentProfileId::new(EXPLORE_PROFILE_ID)?;
+    let context = AgentProfileIndexContext {
+        allowed_profile_ids: Some(BTreeSet::from([explore_id.clone()])),
+        ..AgentProfileIndexContext::default()
+    };
 
     registry
         .profiles

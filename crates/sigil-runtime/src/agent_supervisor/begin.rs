@@ -2,10 +2,10 @@ use std::sync::mpsc;
 
 use anyhow::{Context, Result, bail};
 use sigil_kernel::{
-    AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentRole,
-    AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentThreadId,
-    AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState,
-    ControlEntry, EventHandler, Session, WorkspaceRootSnapshot,
+    AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentResultPolicy,
+    AgentRole, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
+    AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    AgentTrustState, ControlEntry, EventHandler, Session, WorkspaceRootSnapshot,
 };
 
 use crate::AgentProfileIndexContext;
@@ -91,6 +91,16 @@ impl AgentSupervisor {
                 created_at_ms: None,
             }),
         )?;
+
+        if start.role == AgentRole::SubagentWrite
+            && start.invocation_mode == AgentInvocationMode::Background
+            && resolved_profile.profile.result_policy == AgentResultPolicy::ForegroundMergeRequired
+        {
+            let reason =
+                "background write-capable agents require isolated merge support".to_owned();
+            append_thread_failed(session, handler, thread_id.clone(), reason.clone())?;
+            bail!("background write-capable agent requires isolated merge support");
+        }
 
         if start.role == AgentRole::SubagentWrite
             && tool_scope_has_unguarded_write_capability(&resolved_profile.profile.tool_scope)
@@ -226,6 +236,16 @@ impl AgentSupervisor {
                 created_at_ms: None,
             }),
         )?;
+
+        if start.role == AgentRole::SubagentWrite
+            && start.invocation_mode == AgentInvocationMode::Background
+            && resolved_profile.profile.result_policy == AgentResultPolicy::ForegroundMergeRequired
+        {
+            let reason =
+                "background write-capable agents require isolated merge support".to_owned();
+            append_thread_failed(session, handler, thread_id.clone(), reason.clone())?;
+            bail!("background write-capable agent requires isolated merge support");
+        }
 
         if start.role == AgentRole::SubagentWrite
             && tool_scope_has_unguarded_write_capability(&resolved_profile.profile.tool_scope)

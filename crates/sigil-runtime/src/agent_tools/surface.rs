@@ -6,7 +6,12 @@ use super::*;
 pub fn register_agent_tools(registry: &mut ToolRegistry, root_config: &RootConfig) -> Result<()> {
     let profile_registry = AgentProfileRegistry::from_root_config(root_config)?;
     let budget = AgentBudgetPolicy::from_root_config(root_config);
-    register_agent_tools_with_registry(registry, profile_registry, budget)
+    register_agent_tools_with_registry_and_mode(
+        registry,
+        profile_registry,
+        budget,
+        root_config.task.multi_agent_mode,
+    )
 }
 
 pub fn register_agent_tools_with_workspace(
@@ -17,7 +22,12 @@ pub fn register_agent_tools_with_workspace(
     let profile_registry =
         AgentProfileRegistry::from_root_config_with_workspace(root_config, workspace_root)?;
     let budget = AgentBudgetPolicy::from_root_config(root_config);
-    register_agent_tools_with_registry(registry, profile_registry, budget)
+    register_agent_tools_with_registry_and_mode(
+        registry,
+        profile_registry,
+        budget,
+        root_config.task.multi_agent_mode,
+    )
 }
 
 pub fn register_agent_tools_with_workspace_and_entries(
@@ -32,7 +42,12 @@ pub fn register_agent_tools_with_workspace_and_entries(
         entries,
     )?;
     let budget = AgentBudgetPolicy::from_root_config(root_config);
-    register_agent_tools_with_registry(registry, profile_registry, budget)
+    register_agent_tools_with_registry_and_mode(
+        registry,
+        profile_registry,
+        budget,
+        root_config.task.multi_agent_mode,
+    )
 }
 
 pub fn register_agent_tools_with_registry(
@@ -40,10 +55,25 @@ pub fn register_agent_tools_with_registry(
     profile_registry: AgentProfileRegistry,
     budget: AgentBudgetPolicy,
 ) -> Result<()> {
+    register_agent_tools_with_registry_and_mode(
+        registry,
+        profile_registry,
+        budget,
+        MultiAgentMode::default(),
+    )
+}
+
+pub fn register_agent_tools_with_registry_and_mode(
+    registry: &mut ToolRegistry,
+    profile_registry: AgentProfileRegistry,
+    budget: AgentBudgetPolicy,
+    multi_agent_mode: MultiAgentMode,
+) -> Result<()> {
     let index = profile_registry.model_visible_index(&Default::default())?;
     let surface = Arc::new(AgentToolSurface {
         profile_registry,
         budget,
+        multi_agent_mode,
         profile_index_description: profile_index_description(&index),
     });
     for kind in AgentToolKind::ALL {
@@ -83,6 +113,7 @@ pub fn close_agent_thread(
 struct AgentToolSurface {
     profile_registry: AgentProfileRegistry,
     budget: AgentBudgetPolicy,
+    multi_agent_mode: MultiAgentMode,
     profile_index_description: String,
 }
 
@@ -91,15 +122,19 @@ pub(super) enum AgentToolKind {
     Spawn,
     Wait,
     ReadResult,
+    List,
+    Cancel,
     Message,
     Close,
 }
 
 impl AgentToolKind {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::Spawn,
         Self::Wait,
         Self::ReadResult,
+        Self::List,
+        Self::Cancel,
         Self::Message,
         Self::Close,
     ];
@@ -109,6 +144,8 @@ impl AgentToolKind {
             SPAWN_AGENT_TOOL_NAME => Some(Self::Spawn),
             WAIT_AGENT_TOOL_NAME => Some(Self::Wait),
             READ_AGENT_RESULT_TOOL_NAME => Some(Self::ReadResult),
+            LIST_AGENTS_TOOL_NAME => Some(Self::List),
+            CANCEL_AGENT_TOOL_NAME => Some(Self::Cancel),
             MESSAGE_AGENT_TOOL_NAME => Some(Self::Message),
             CLOSE_AGENT_TOOL_NAME => Some(Self::Close),
             _ => None,
@@ -120,6 +157,8 @@ impl AgentToolKind {
             Self::Spawn => SPAWN_AGENT_TOOL_NAME,
             Self::Wait => WAIT_AGENT_TOOL_NAME,
             Self::ReadResult => READ_AGENT_RESULT_TOOL_NAME,
+            Self::List => LIST_AGENTS_TOOL_NAME,
+            Self::Cancel => CANCEL_AGENT_TOOL_NAME,
             Self::Message => MESSAGE_AGENT_TOOL_NAME,
             Self::Close => CLOSE_AGENT_TOOL_NAME,
         }
@@ -140,15 +179,20 @@ impl Tool for AgentTool {
             input_schema: self.input_schema(),
             category: ToolCategory::Agent,
             access: match self.kind {
-                AgentToolKind::Wait | AgentToolKind::ReadResult => ToolAccess::Read,
-                AgentToolKind::Spawn | AgentToolKind::Message | AgentToolKind::Close => {
-                    ToolAccess::Execute
+                AgentToolKind::Wait | AgentToolKind::ReadResult | AgentToolKind::List => {
+                    ToolAccess::Read
                 }
+                AgentToolKind::Spawn
+                | AgentToolKind::Cancel
+                | AgentToolKind::Message
+                | AgentToolKind::Close => ToolAccess::Execute,
             },
             preview: match self.kind {
                 AgentToolKind::Spawn => ToolPreviewCapability::Required,
                 AgentToolKind::Wait
                 | AgentToolKind::ReadResult
+                | AgentToolKind::List
+                | AgentToolKind::Cancel
                 | AgentToolKind::Message
                 | AgentToolKind::Close => ToolPreviewCapability::Optional,
             },
@@ -158,8 +202,10 @@ impl Tool for AgentTool {
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let subject = match self.kind {
             AgentToolKind::Spawn => ToolSubject::agent(required_string(args, "profile_id")?),
+            AgentToolKind::List => ToolSubject::agent("all".to_owned()),
             AgentToolKind::Wait
             | AgentToolKind::ReadResult
+            | AgentToolKind::Cancel
             | AgentToolKind::Message
             | AgentToolKind::Close => ToolSubject::agent(required_string(args, "thread_id")?),
         };
@@ -176,10 +222,10 @@ impl Tool for AgentTool {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
             AgentToolKind::Spawn => Some(sigil_kernel::ApprovalMode::Ask),
-            AgentToolKind::Wait | AgentToolKind::ReadResult => {
+            AgentToolKind::Wait | AgentToolKind::ReadResult | AgentToolKind::List => {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
-            AgentToolKind::Message | AgentToolKind::Close => {
+            AgentToolKind::Cancel | AgentToolKind::Message | AgentToolKind::Close => {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
         })
@@ -193,6 +239,11 @@ impl Tool for AgentTool {
             )),
             AgentToolKind::ReadResult => Some(simple_agent_preview(
                 "Read agent result",
+                &format!("thread {}", required_string(&args, "thread_id")?),
+            )),
+            AgentToolKind::List => Some(simple_agent_preview("List agents", "all agent threads")),
+            AgentToolKind::Cancel => Some(simple_agent_preview(
+                "Cancel agent",
                 &format!("thread {}", required_string(&args, "thread_id")?),
             )),
             AgentToolKind::Message => Some(simple_agent_preview(
@@ -236,7 +287,8 @@ impl AgentTool {
     fn description(&self) -> String {
         match self.kind {
             AgentToolKind::Spawn => format!(
-                "Spawn a child agent when the user explicitly asks for delegated, parallel, sub-agent, or child-agent work. You must delegate the requested non-overlapping scope instead of completing that same scope yourself. Use mode=join_before_final when the final answer or next step depends on the child result. Use mode=background only when the parent has truly non-overlapping work; after spawning in background, continue only that non-overlapping work and call wait_agent before the final answer. Foreground users may move that run to background before execution. Use stable profile_id values, not display names.\n{}",
+                "{}\n{}",
+                spawn_agent_mode_description(self.surface.multi_agent_mode),
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
@@ -245,6 +297,14 @@ impl AgentTool {
             }
             AgentToolKind::ReadResult => {
                 "Explicitly read one bounded page from a completed child agent final answer. Use only when the parent needs details beyond the bounded agent summary; do not request full child transcripts. Prefer read_args returned by wait_agent/result_ref and next_read_args returned by this tool. max_chars is a per-page limit; values outside the supported range are clamped and reported in request metadata."
+                    .to_owned()
+            }
+            AgentToolKind::List => {
+                "List current agent threads with status, objective, result read args, and whether each thread can be messaged, cancelled, or closed. Use this instead of repeatedly probing individual thread ids."
+                    .to_owned()
+            }
+            AgentToolKind::Cancel => {
+                "Cancel a running background child agent owned by this runtime. This aborts the live runtime handle and appends cancelled agent state; close_agent is only for terminal threads."
                     .to_owned()
             }
             AgentToolKind::Message => {
@@ -301,6 +361,20 @@ impl AgentTool {
                         "default": 40000,
                         "description": "Maximum characters to return from the child agent final answer. Runtime clamps out-of-range values and reports the effective page size."
                     }
+                },
+                "required": ["thread_id"],
+                "additionalProperties": false
+            }),
+            AgentToolKind::List => json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            AgentToolKind::Cancel => json!({
+                "type": "object",
+                "properties": {
+                    "thread_id": { "type": "string" },
+                    "reason": { "type": "string" }
                 },
                 "required": ["thread_id"],
                 "additionalProperties": false
@@ -373,6 +447,20 @@ impl AgentTool {
             changed_files: Vec::new(),
             file_diffs: Vec::new(),
         })
+    }
+}
+
+fn spawn_agent_mode_description(mode: MultiAgentMode) -> &'static str {
+    match mode {
+        MultiAgentMode::None => {
+            "Multi-agent delegation is disabled by [task].multi_agent_mode=none. Do not call spawn_agent for ordinary model delegation; use list_agents/wait_agent/read_agent_result/message_agent/cancel_agent/close_agent only to manage already existing agent threads. Use stable profile_id values, not display names."
+        }
+        MultiAgentMode::ExplicitRequestOnly => {
+            "Spawn a child agent only when the user or active AGENTS/skill instructions explicitly ask for delegated, parallel, sub-agent, or child-agent work. A broad request for comprehensive review, deep analysis, or more investigation is not itself delegation authorization. You must delegate the requested non-overlapping scope instead of completing that same scope yourself. Use mode=join_before_final when the final answer or next step depends on the child result. Use mode=background only when the parent has truly non-overlapping work; after spawning in background, continue only that non-overlapping work and call wait_agent before the final answer. Write-capable worker profiles use foreground changeset-only isolation and cannot run in background until background isolation is available. Use stable profile_id values, not display names."
+        }
+        MultiAgentMode::Proactive => {
+            "Spawn a child agent when the user explicitly asks for delegation, or proactively when parallel non-overlapping work would clearly improve speed or quality. Do not spawn for overlapping work you will also complete yourself. Use mode=join_before_final when the final answer or next step depends on the child result. Use mode=background only when the parent has truly non-overlapping work; after spawning in background, continue only that non-overlapping work and call wait_agent before the final answer. Write-capable worker profiles use foreground changeset-only isolation and cannot run in background until background isolation is available. Use stable profile_id values, not display names."
+        }
     }
 }
 

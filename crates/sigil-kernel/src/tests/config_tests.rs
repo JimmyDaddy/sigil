@@ -11,8 +11,8 @@ use super::{
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind,
     ExecutionCapability, ExecutionIsolationPolicy, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, SkillConfig, StorageConfig, StorageRoot, TaskConfig, TaskMode,
-    WorkspaceConfig,
+    ExecutionSandboxProfile, MultiAgentMode, SkillConfig, StorageConfig, StorageRoot, TaskConfig,
+    TaskMode, WorkspaceConfig,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -787,6 +787,7 @@ model = "deepseek-v4-pro"
 [task]
 default_mode = "plan"
 max_plan_steps = 8
+multi_agent_mode = "proactive"
 
 [task.planner]
 model = "deepseek-reasoner"
@@ -801,6 +802,7 @@ prefixes = ["code_intel_"]
 
     assert_eq!(TaskConfig::default().default_mode, TaskMode::Chat);
     assert_eq!(config.task.default_mode, TaskMode::Plan);
+    assert_eq!(config.task.multi_agent_mode, MultiAgentMode::Proactive);
     assert_eq!(config.task.max_plan_steps, 8);
     assert_eq!(
         config.task.planner.model.as_deref(),
@@ -871,6 +873,31 @@ fn task_config_role_config_and_mode_labels_are_stable() {
     );
     assert_eq!(TaskMode::Chat.as_str(), "chat");
     assert_eq!(TaskMode::Plan.as_str(), "plan");
+    assert_eq!(MultiAgentMode::None.as_str(), "none");
+    assert_eq!(
+        MultiAgentMode::ExplicitRequestOnly.as_str(),
+        "explicit_request_only"
+    );
+    assert_eq!(MultiAgentMode::Proactive.as_str(), "proactive");
+}
+
+#[test]
+fn task_config_accepts_codex_multi_agent_mode_alias() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[task]
+multi_agent_mode = "explicitRequestOnly"
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("task config should parse alias");
+
+    assert_eq!(
+        config.task.multi_agent_mode,
+        MultiAgentMode::ExplicitRequestOnly
+    );
 }
 
 #[test]

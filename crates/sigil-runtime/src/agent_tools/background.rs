@@ -153,6 +153,21 @@ impl AgentToolBackgroundRuns {
             .filter_map(|thread_id| handles.remove(&thread_id))
             .collect()
     }
+
+    pub(super) fn cancel(
+        &self,
+        thread_id: &AgentThreadId,
+    ) -> Result<Option<BackgroundChatAgentThreadRecord>> {
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| anyhow!("agent background run lock poisoned"))?;
+        let Some(background) = handles.remove(thread_id) else {
+            return Ok(None);
+        };
+        background.handle.abort();
+        Ok(Some(background.thread))
+    }
 }
 
 pub(super) async fn run_background_chat_agent(

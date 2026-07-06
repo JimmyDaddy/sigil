@@ -58,8 +58,9 @@ mod types;
 mod write_lease;
 
 pub use changeset_only::{
-    changeset_only_child_tool_registry, changeset_only_child_tool_scope,
-    decode_changeset_only_child_output, validate_changeset_only_parent_snapshot_unchanged_for_task,
+    changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
+    changeset_only_child_tool_scope, decode_changeset_only_child_output,
+    validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use child_session::TaskChildSessionRunner;
 pub use runner::SequentialTaskOrchestrator;

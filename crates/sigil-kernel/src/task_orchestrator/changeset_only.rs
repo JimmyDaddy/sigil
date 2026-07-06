@@ -60,7 +60,12 @@ pub(super) fn with_changeset_only_child_contract(mut input: AgentRunInput) -> Ag
     input
 }
 
-pub(super) fn changeset_only_child_contract_prompt() -> &'static str {
+/// Returns the provider-visible contract for a changeset-only child writer.
+///
+/// The prompt is shared by task children and foreground chat worker agents so both surfaces
+/// produce the same reviewable changeset envelope without receiving parent-workspace write tools.
+#[must_use]
+pub fn changeset_only_child_contract_prompt() -> &'static str {
     r#"This delegated write step uses changeset-only isolation.
 
 You must not modify files, run shell commands, use terminal tools, call apply_changeset, or call any MCP/plugin tool.

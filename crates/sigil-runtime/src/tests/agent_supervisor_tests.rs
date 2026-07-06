@@ -1087,7 +1087,7 @@ fn supervisor_enforces_max_subagents_for_readonly_scoped_writer() -> Result<()> 
 }
 
 #[test]
-fn supervisor_allows_background_write_role_when_scope_is_readonly() -> Result<()> {
+fn supervisor_denies_background_worker_even_when_scope_is_readonly() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = false;
@@ -1102,15 +1102,21 @@ fn supervisor_allows_background_write_role_when_scope_is_readonly() -> Result<()
     start.role = AgentRole::SubagentWrite;
     start.invocation_mode = AgentInvocationMode::Background;
 
-    let thread = supervisor
+    let error = supervisor
         .begin_task_child_thread(&mut session, &mut handler, start)
-        .expect("read-only scoped write role should be allowed");
+        .expect_err("background worker still requires isolated merge support");
 
-    assert!(thread.thread_id.as_str().starts_with("agent_v1_"));
+    assert!(
+        error
+            .to_string()
+            .contains("background write-capable agent requires isolated merge support")
+    );
     let projection = session.agent_thread_state_projection();
     assert!(projection.threads.values().any(|thread| {
-        thread.status == sigil_kernel::AgentThreadStatus::Running
-            && thread.reason.as_deref() == Some("child session started")
+        thread.status == sigil_kernel::AgentThreadStatus::Failed
+            && thread.reason.as_deref().is_some_and(|reason| {
+                reason.contains("background write-capable agents require isolated merge support")
+            })
     }));
     Ok(())
 }
@@ -1218,14 +1224,14 @@ fn supervisor_denies_background_write_agents() -> Result<()> {
     let projection = session.agent_thread_state_projection();
     assert!(projection.threads.values().any(|thread| {
         thread.reason.as_deref().is_some_and(|reason| {
-            reason.contains("write-capable agents require guarded changeset-only scope")
+            reason.contains("background write-capable agents require isolated merge support")
         })
     }));
     Ok(())
 }
 
 #[test]
-fn supervisor_denies_unguarded_mcp_write_prefix_agents() -> Result<()> {
+fn supervisor_worker_scope_ignores_unguarded_mcp_write_prefix_config() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = true;
@@ -1244,20 +1250,29 @@ fn supervisor_denies_unguarded_mcp_write_prefix_agents() -> Result<()> {
     let mut start = child_start(write_step("mcp_write")?, temp.path().to_path_buf())?;
     start.role = AgentRole::SubagentWrite;
 
-    let error = supervisor
-        .begin_task_child_thread(&mut session, &mut handler, start)
-        .expect_err("unguarded mcp write prefix is denied");
+    let thread = supervisor.begin_task_child_thread(&mut session, &mut handler, start)?;
 
     assert!(
-        error
-            .to_string()
-            .contains("write-capable agent requires guarded changeset-only scope")
+        thread.thread_id.as_str().starts_with("agent_v1_"),
+        "worker should keep its guarded builtin scope instead of inheriting unguarded role config"
+    );
+    let profile = supervisor
+        .registry()
+        .get(&sigil_kernel::AgentProfileId::new("worker")?)
+        .expect("worker profile exists");
+    assert!(
+        !profile
+            .profile
+            .tool_scope
+            .prefixes
+            .iter()
+            .any(|prefix| prefix == "mcp__filesystem__")
     );
     Ok(())
 }
 
 #[test]
-fn supervisor_denies_foreground_write_capable_agents_without_changeset_guard() -> Result<()> {
+fn supervisor_allows_default_worker_changeset_only_foreground() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = true;
@@ -1271,20 +1286,14 @@ fn supervisor_denies_foreground_write_capable_agents_without_changeset_guard() -
     let mut start = child_start(write_step("edit")?, temp.path().to_path_buf())?;
     start.role = AgentRole::SubagentWrite;
 
-    let error = supervisor
-        .begin_task_child_thread(&mut session, &mut handler, start)
-        .expect_err("foreground write-capable agent is denied until guarded writes exist");
+    let thread = supervisor.begin_task_child_thread(&mut session, &mut handler, start)?;
 
-    assert!(
-        error
-            .to_string()
-            .contains("write-capable agent requires guarded changeset-only scope")
-    );
+    assert!(thread.thread_id.as_str().starts_with("agent_v1_"));
     Ok(())
 }
 
 #[test]
-fn supervisor_denies_apply_changeset_in_changeset_only_write_agents() -> Result<()> {
+fn supervisor_worker_scope_ignores_apply_changeset_config_widening() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = true;
@@ -1305,15 +1314,14 @@ fn supervisor_denies_apply_changeset_in_changeset_only_write_agents() -> Result<
     start.step.mode = Some(sigil_kernel::TaskStepMode::Write);
     start.step.isolation = Some(sigil_kernel::TaskIsolationMode::ChangesetOnly);
 
-    let error = supervisor
-        .begin_task_child_thread(&mut session, &mut handler, start)
-        .expect_err("apply_changeset is an unguarded parent mutation capability");
+    let thread = supervisor.begin_task_child_thread(&mut session, &mut handler, start)?;
 
-    assert!(
-        error
-            .to_string()
-            .contains("write-capable agent requires guarded changeset-only scope")
-    );
+    assert!(thread.thread_id.as_str().starts_with("agent_v1_"));
+    let profile = supervisor
+        .registry()
+        .get(&sigil_kernel::AgentProfileId::new("worker")?)
+        .expect("worker profile exists");
+    assert!(!profile.profile.tool_scope.names.contains("apply_changeset"));
     Ok(())
 }
 

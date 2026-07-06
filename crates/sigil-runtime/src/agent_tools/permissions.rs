@@ -145,6 +145,7 @@ pub(super) fn guessed_tool_access(tool_name: &str) -> ToolAccess {
         | "glob"
         | "grep"
         | "terminal_read"
+        | LIST_AGENTS_TOOL_NAME
         | "read_agent_result"
         | "code_symbols"
         | "code_workspace_symbols"
@@ -159,6 +160,7 @@ pub(super) fn guessed_tool_access(tool_name: &str) -> ToolAccess {
         | "terminal_cancel"
         | SPAWN_AGENT_TOOL_NAME
         | WAIT_AGENT_TOOL_NAME
+        | CANCEL_AGENT_TOOL_NAME
         | MESSAGE_AGENT_TOOL_NAME
         | CLOSE_AGENT_TOOL_NAME
         | crate::LOAD_SKILL_TOOL_NAME => ToolAccess::Execute,

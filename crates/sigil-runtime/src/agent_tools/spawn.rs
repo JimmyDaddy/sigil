@@ -24,13 +24,17 @@ impl AgentToolRuntime {
         if let Some(warning) = spawn_scope_overlap_warning(session, &parsed) {
             let _ = handler.handle(RunEvent::Notice(warning));
         }
-        let role = role_for_profile_id(&parsed.profile_id);
         let resolved_profile = match self.resolve_spawn_profile(&parsed.profile_id) {
             Ok(profile) => profile,
             Err(error) => {
                 return agent_spawn_denied_tool_result(call, format!("{error:#}"));
             }
         };
+        let role = resolved_profile.execution_role;
+        let changeset_only_write = profile_uses_changeset_only_write(role, &resolved_profile);
+        if changeset_only_write && matches!(parsed.mode, AgentInvocationMode::Background) {
+            return unsupported_background_write_tool_result(call, &parsed.profile_id);
+        }
         let profile_tool_scope = resolved_profile.profile.tool_scope.clone();
         let child_provider =
             match self
@@ -146,14 +150,22 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let child_registry = build_role_tool_registry(&self.base_registry, &self.root_config, role)
-            .into_registry()
-            .scoped(profile_tool_scope)
-            .into_registry();
+        let child_registry = child_tool_registry_for_profile(
+            &self.base_registry,
+            &self.root_config,
+            role,
+            changeset_only_write,
+            profile_tool_scope,
+        );
         let child_agent = Agent::new(child_provider, child_registry);
         let mut child_messages = Vec::new();
         if let Some(system_prompt) = agent_profile_system_prompt(&resolved_profile) {
             child_messages.push(ModelMessage::system(system_prompt));
+        }
+        if changeset_only_write {
+            child_messages.push(ModelMessage::system(
+                changeset_only_child_contract_prompt().to_owned(),
+            ));
         }
         child_messages.push(ModelMessage::user(parsed.prompt.clone()));
         let child_input =
@@ -235,7 +247,8 @@ impl AgentToolRuntime {
             );
         }
 
-        if matches!(parsed.mode, AgentInvocationMode::JoinBeforeFinal)
+        if !changeset_only_write
+            && matches!(parsed.mode, AgentInvocationMode::JoinBeforeFinal)
             && tool_scope_is_safe_readonly_for_auto_spawn(&resolved_profile.profile.tool_scope)
         {
             return self
@@ -253,6 +266,31 @@ impl AgentToolRuntime {
                 .await;
         }
 
+        let changeset_only_base_snapshot_id = match changeset_only_write {
+            true => match capture_chat_changeset_only_parent_snapshot_id(
+                session,
+                &child_thread.thread_id,
+                options,
+                "base",
+            ) {
+                Ok(snapshot_id) => Some(snapshot_id),
+                Err(error) => {
+                    let _ = self.supervisor.record_chat_child_failure(
+                        session,
+                        handler,
+                        &child_thread,
+                        format!("{error:#}"),
+                    );
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        error.to_string(),
+                    );
+                }
+            },
+            false => None,
+        };
         let _thread_guard = ChatChildThreadGuard {
             supervisor: self.supervisor.clone(),
             thread_id: child_thread.thread_id.clone(),
@@ -316,6 +354,35 @@ impl AgentToolRuntime {
             }
         };
         let outcome = output.outcome;
+        let changeset_only_controls =
+            if let Some(base_snapshot_id) = changeset_only_base_snapshot_id {
+                match prepare_chat_changeset_only_child_controls(
+                    session,
+                    &child_thread.thread_id,
+                    &base_snapshot_id,
+                    &materialized.final_text,
+                    &outcome,
+                    options,
+                ) {
+                    Ok(controls) => Some(controls),
+                    Err(error) => {
+                        let _ = self.supervisor.record_chat_child_failure(
+                            session,
+                            handler,
+                            &child_thread,
+                            format!("{error:#}"),
+                        );
+                        return ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::InvalidInput,
+                            format!("changeset-only child output was invalid: {error:#}"),
+                        );
+                    }
+                }
+            } else {
+                None
+            };
         let usage = usage_summary_from_stats(child_session.stats());
         let budget_warning = self
             .supervisor
@@ -332,6 +399,17 @@ impl AgentToolRuntime {
             &outcome,
             Some(usage),
         ) {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
+        if let Some(controls) = changeset_only_controls
+            && let Err(error) =
+                append_chat_changeset_only_child_controls(session, handler, controls)
+        {
             return ToolResult::error(
                 call.id.clone(),
                 call.name.clone(),
@@ -446,13 +524,15 @@ impl AgentToolRuntime {
         handler: &mut (dyn EventHandler + Send),
         approval_handler: &mut (dyn ApprovalHandler + Send),
     ) -> Result<AgentThreadId> {
-        let role = role_for_profile_id(&request.profile_id);
+        let role = request.resolved_profile.execution_role;
         if matches!(request.mode, AgentInvocationMode::Background) {
             return Err(anyhow!(
                 "background agent mode requires provider-backed agent mailbox support"
             ));
         }
 
+        let changeset_only_write =
+            profile_uses_changeset_only_write(role, &request.resolved_profile);
         let profile_tool_scope = request.resolved_profile.profile.tool_scope.clone();
         let child_provider = self
             .provider_factory
@@ -502,14 +582,22 @@ impl AgentToolRuntime {
                 return Err(error);
             }
         };
-        let child_registry = build_role_tool_registry(&self.base_registry, &self.root_config, role)
-            .into_registry()
-            .scoped(profile_tool_scope)
-            .into_registry();
+        let child_registry = child_tool_registry_for_profile(
+            &self.base_registry,
+            &self.root_config,
+            role,
+            changeset_only_write,
+            profile_tool_scope,
+        );
         let child_agent = Agent::new(child_provider, child_registry);
         let mut child_messages = Vec::new();
         if let Some(system_prompt) = agent_profile_system_prompt(&request.resolved_profile) {
             child_messages.push(ModelMessage::system(system_prompt));
+        }
+        if changeset_only_write {
+            child_messages.push(ModelMessage::system(
+                changeset_only_child_contract_prompt().to_owned(),
+            ));
         }
         child_messages.push(ModelMessage::user(request.prompt.clone()));
         let child_input =
@@ -525,7 +613,8 @@ impl AgentToolRuntime {
             &child_options.permission_config,
             &request.resolved_profile.profile.permission_policy,
         );
-        if matches!(request.mode, AgentInvocationMode::JoinBeforeFinal)
+        if !changeset_only_write
+            && matches!(request.mode, AgentInvocationMode::JoinBeforeFinal)
             && tool_scope_is_safe_readonly_for_auto_spawn(
                 &request.resolved_profile.profile.tool_scope,
             )
@@ -551,6 +640,16 @@ impl AgentToolRuntime {
         let _thread_guard = ChatChildThreadGuard {
             supervisor: self.supervisor.clone(),
             thread_id: child_thread.thread_id.clone(),
+        };
+        let changeset_only_base_snapshot_id = if changeset_only_write {
+            Some(capture_chat_changeset_only_parent_snapshot_id(
+                session,
+                &child_thread.thread_id,
+                options,
+                "base",
+            )?)
+        } else {
+            None
         };
         let output = {
             let mut child_handler = ChatChildEventHandler { inner: handler };
@@ -589,6 +688,29 @@ impl AgentToolRuntime {
         )
         .await?;
         let outcome = output.outcome;
+        let changeset_only_controls =
+            if let Some(base_snapshot_id) = changeset_only_base_snapshot_id {
+                Some(
+                    prepare_chat_changeset_only_child_controls(
+                        session,
+                        &child_thread.thread_id,
+                        &base_snapshot_id,
+                        &materialized.final_text,
+                        &outcome,
+                        options,
+                    )
+                    .inspect_err(|error| {
+                        let _ = self.supervisor.record_chat_child_failure(
+                            session,
+                            handler,
+                            &child_thread,
+                            format!("{error:#}"),
+                        );
+                    })?,
+                )
+            } else {
+                None
+            };
         let usage = usage_summary_from_stats(child_session.stats());
         let budget_warning = self
             .supervisor
@@ -605,6 +727,9 @@ impl AgentToolRuntime {
             &outcome,
             Some(usage),
         )?;
+        if let Some(controls) = changeset_only_controls {
+            append_chat_changeset_only_child_controls(session, handler, controls)?;
+        }
         if let Some(warning) = budget_warning {
             let _ = handler.handle(RunEvent::Notice(format!(
                 "agent budget warning after child completion: {warning}"
@@ -612,6 +737,190 @@ impl AgentToolRuntime {
         }
         Ok(child_thread.thread_id)
     }
+}
+
+fn profile_uses_changeset_only_write(role: AgentRole, profile: &ResolvedAgentProfile) -> bool {
+    role == AgentRole::SubagentWrite
+        && profile.profile.result_policy == sigil_kernel::AgentResultPolicy::ForegroundMergeRequired
+}
+
+fn child_tool_registry_for_profile(
+    base_registry: &ToolRegistry,
+    root_config: &RootConfig,
+    role: AgentRole,
+    changeset_only_write: bool,
+    profile_tool_scope: sigil_kernel::ToolRegistryScope,
+) -> ToolRegistry {
+    let registry = if changeset_only_write {
+        changeset_only_child_tool_registry(base_registry)
+    } else {
+        build_role_tool_registry(base_registry, root_config, role).into_registry()
+    };
+    registry.scoped(profile_tool_scope).into_registry()
+}
+
+fn unsupported_background_write_tool_result(
+    call: &ToolCall,
+    profile_id: &AgentProfileId,
+) -> ToolResult {
+    ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::Unsupported,
+        serde_json::to_string(&json!({
+            "error": "unsupported_write_background_without_isolation",
+            "message": "write-capable worker agents require foreground changeset-only isolation until background isolation and merge are available",
+            "profile_id": profile_id.as_str(),
+            "supported_modes": ["foreground", "join_before_final"]
+        }))
+        .unwrap_or_else(|error| format!("failed to serialize background write rejection: {error}")),
+    )
+    .with_error_details(
+        true,
+        json!({
+            "error": "unsupported_write_background_without_isolation",
+            "profile_id": profile_id.as_str(),
+            "supported_modes": ["foreground", "join_before_final"],
+        }),
+    )
+}
+
+fn capture_chat_changeset_only_parent_snapshot_id(
+    session: &Session,
+    thread_id: &AgentThreadId,
+    options: &sigil_kernel::AgentRunOptions,
+    label: &str,
+) -> Result<String> {
+    let scope = VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    let workspace_id = stable_workspace_id(&options.workspace_root)?;
+    let seed = format!("{}:{}:{}", thread_id.as_str(), workspace_id, label);
+    let source_event_id = format!(
+        "chat-changeset-only-{label}-snapshot-{}",
+        stable_event_uuid("sigil-chat-changeset-only-snapshot", &seed)
+    );
+    let snapshot = build_workspace_snapshot_for_event(
+        &options.workspace_root,
+        workspace_id,
+        &scope,
+        0,
+        source_event_id,
+        session.next_stream_sequence_hint().unwrap_or(1),
+    )?;
+    snapshot.workspace_snapshot_id.ok_or_else(|| {
+        anyhow!(
+            "changeset-only chat worker {} cannot bind {label} parent workspace snapshot",
+            thread_id.as_str()
+        )
+    })
+}
+
+struct PreparedChatChangesetOnlyControls {
+    change_set: ChangeSet,
+    isolated: IsolatedChangeSetProduced,
+    merge_review: MergeReviewRequested,
+}
+
+fn prepare_chat_changeset_only_child_controls(
+    session: &Session,
+    thread_id: &AgentThreadId,
+    base_snapshot_id: &str,
+    final_text: &str,
+    outcome: &sigil_kernel::AgentRunOutcome,
+    options: &sigil_kernel::AgentRunOptions,
+) -> Result<PreparedChatChangesetOnlyControls> {
+    if !outcome.changed_files.is_empty() {
+        bail!(
+            "changeset-only chat worker {} mutated parent workspace files: {}",
+            thread_id.as_str(),
+            outcome.changed_files.join(", ")
+        );
+    }
+    let after_snapshot_id =
+        capture_chat_changeset_only_parent_snapshot_id(session, thread_id, options, "after")?;
+    if after_snapshot_id != base_snapshot_id {
+        bail!(
+            "changeset-only chat worker {} changed parent workspace snapshot",
+            thread_id.as_str()
+        );
+    }
+    let proposal = decode_changeset_only_child_output(final_text)?;
+    let touched_subjects = changeset_touched_subjects(&proposal.change_set);
+    let changeset_id = proposal.change_set.id.clone();
+    let merge_review_id = chat_changeset_only_merge_review_id(thread_id, &proposal.change_set)?;
+    Ok(PreparedChatChangesetOnlyControls {
+        change_set: proposal.change_set,
+        isolated: IsolatedChangeSetProduced {
+            changeset_id: changeset_id.clone(),
+            owner_agent_id: format!("agent:{}", thread_id.as_str()),
+            base_snapshot_id: base_snapshot_id.to_owned(),
+            child_snapshot_id: None,
+            source_isolation: WriteIsolationMode::ChangesetOnly,
+            artifact_ref: Some(proposal.artifact_ref),
+            touched_subjects,
+        },
+        merge_review: MergeReviewRequested {
+            review_id: merge_review_id,
+            changeset_id,
+            parent_workspace_snapshot_id: after_snapshot_id,
+        },
+    })
+}
+
+fn append_chat_changeset_only_child_controls(
+    session: &mut Session,
+    handler: &mut (dyn EventHandler + Send),
+    controls: PreparedChatChangesetOnlyControls,
+) -> Result<()> {
+    for control in [
+        ControlEntry::ChangeSetProposed(controls.change_set),
+        ControlEntry::IsolatedChangeSetProduced(controls.isolated),
+        ControlEntry::MergeReviewRequested(controls.merge_review),
+    ] {
+        append_control_to_parent(session, handler, control)?;
+    }
+    Ok(())
+}
+
+fn append_control_to_parent(
+    session: &mut Session,
+    handler: &mut (dyn EventHandler + Send),
+    control: ControlEntry,
+) -> Result<()> {
+    session.append_control(control.clone())?;
+    handler.handle(RunEvent::Control(control))
+}
+
+fn chat_changeset_only_merge_review_id(
+    thread_id: &AgentThreadId,
+    change_set: &ChangeSet,
+) -> Result<MergeReviewId> {
+    MergeReviewId::new(format!(
+        "review-{}",
+        stable_event_uuid(
+            "sigil-chat-merge-review",
+            &format!("{}:{}", thread_id.as_str(), change_set.id.as_str())
+        )
+    ))
+}
+
+fn changeset_touched_subjects(change_set: &ChangeSet) -> Vec<MutationSubject> {
+    change_set
+        .files
+        .iter()
+        .flat_map(|file| {
+            let mut subjects = vec![MutationSubject::File {
+                path: PathBuf::from(file.path.trim()),
+                file_type: FileType::File,
+            }];
+            if let Some(previous_path) = &file.previous_path {
+                subjects.push(MutationSubject::File {
+                    path: PathBuf::from(previous_path.trim()),
+                    file_type: FileType::File,
+                });
+            }
+            subjects
+        })
+        .collect()
 }
 
 fn spawn_scope_overlap_warning(session: &Session, parsed: &SpawnAgentArgs) -> Option<String> {

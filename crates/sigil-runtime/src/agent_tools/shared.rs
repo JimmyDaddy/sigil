@@ -100,14 +100,6 @@ pub(super) fn invocation_mode_label(mode: AgentInvocationMode) -> &'static str {
     }
 }
 
-pub(super) fn role_for_profile_id(profile_id: &AgentProfileId) -> AgentRole {
-    if profile_id.as_str() == WORKER_PROFILE_ID {
-        AgentRole::SubagentWrite
-    } else {
-        AgentRole::SubagentRead
-    }
-}
-
 pub(super) fn parent_session_ref(session: &Session) -> Result<SessionRef> {
     let Some(path) = session.store_path() else {
         return SessionRef::new_relative("current.jsonl");

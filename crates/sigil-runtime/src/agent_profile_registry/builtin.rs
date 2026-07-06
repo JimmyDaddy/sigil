@@ -19,6 +19,7 @@ pub(super) struct BuiltinProfileSpec<'a> {
     pub(super) enabled: bool,
     pub(super) invocation_policy: AgentInvocationPolicy,
     pub(super) result_policy: AgentResultPolicy,
+    pub(super) tool_scope_override: Option<ToolRegistryScope>,
     pub(super) nickname_candidates: &'a [&'a str],
 }
 
@@ -35,7 +36,9 @@ pub(super) fn builtin_profile(
         .model
         .clone()
         .unwrap_or_else(|| root_config.agent.model.clone());
-    let tool_scope = role_tool_scope(root_config, spec.role);
+    let tool_scope = spec
+        .tool_scope_override
+        .unwrap_or_else(|| role_tool_scope(root_config, spec.role));
     let profile = AgentProfile {
         id: AgentProfileId::new(spec.id)?,
         kind: spec.kind,
@@ -73,6 +76,7 @@ pub(super) fn builtin_profile(
             "allow_write_subagents": root_config.task.allow_write_subagents,
         }))?,
         profile,
+        execution_role: spec.role,
         enabled: spec.enabled,
         enabled_override: None,
         user_invocable_override: None,

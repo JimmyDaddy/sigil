@@ -8,8 +8,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentInvocationPolicy, AgentProfile, AgentProfileId, AgentProfileKind, AgentProfileSource,
-    AgentResultPolicy, AgentTrustState, RootConfig, SkillDescriptor, SkillSource, SkillTrustState,
-    ToolRegistryScope,
+    AgentResultPolicy, AgentRole, AgentTrustState, RootConfig, SkillDescriptor, SkillSource,
+    SkillTrustState, ToolRegistryScope,
 };
 
 use super::{
@@ -141,6 +141,7 @@ pub(super) fn workspace_agent_profile_from_raw(
     let aliases = normalize_profile_name_list(wire.aliases.unwrap_or_default(), "agent alias")?;
     let slash_names =
         normalize_profile_name_list(wire.slash_names.unwrap_or_default(), "agent slash name")?;
+    let result_policy = wire.result_policy.unwrap_or_default();
     let profile = AgentProfile {
         id: profile_id,
         kind: wire.kind.unwrap_or(AgentProfileKind::Subagent),
@@ -154,7 +155,7 @@ pub(super) fn workspace_agent_profile_from_raw(
         tool_scope,
         permission_policy: root_config.permission.clone(),
         invocation_policy,
-        result_policy: wire.result_policy.unwrap_or_default(),
+        result_policy,
         user_invocable,
         model_invocable,
         skills: wire.skills.unwrap_or_default(),
@@ -170,6 +171,7 @@ pub(super) fn workspace_agent_profile_from_raw(
             "entrypoint": display_path(workspace_root, entrypoint),
             "sha256": hash_bytes(raw.as_bytes()),
         }))?,
+        execution_role: execution_role_for_profile(profile.kind, profile.result_policy),
         profile,
         enabled: wire.enabled.unwrap_or(true),
         enabled_override: None,
@@ -228,6 +230,7 @@ pub(super) fn plugin_agent_profile_from_raw(
     let aliases = normalize_profile_name_list(wire.aliases.unwrap_or_default(), "agent alias")?;
     let slash_names =
         normalize_profile_name_list(wire.slash_names.unwrap_or_default(), "agent slash name")?;
+    let result_policy = wire.result_policy.unwrap_or_default();
     let profile = AgentProfile {
         id: profile_id,
         kind: wire.kind.unwrap_or(AgentProfileKind::Subagent),
@@ -241,7 +244,7 @@ pub(super) fn plugin_agent_profile_from_raw(
         tool_scope,
         permission_policy: root_config.permission.clone(),
         invocation_policy,
-        result_policy: wire.result_policy.unwrap_or_default(),
+        result_policy,
         user_invocable,
         model_invocable,
         skills: wire.skills.unwrap_or_default(),
@@ -258,6 +261,7 @@ pub(super) fn plugin_agent_profile_from_raw(
             "entrypoint": display_path(workspace_root, entrypoint),
             "sha256": hash_bytes(raw.as_bytes()),
         }))?,
+        execution_role: execution_role_for_profile(profile.kind, profile.result_policy),
         profile,
         enabled: wire.enabled.unwrap_or(true),
         enabled_override: None,
@@ -327,6 +331,7 @@ pub(super) fn child_session_skill_profile(
             "model_invocable": descriptor.model_invocable,
             "user_invocable": descriptor.user_invocable,
         }))?,
+        execution_role: execution_role_for_profile(profile.kind, profile.result_policy),
         profile,
         enabled: descriptor.enabled,
         enabled_override: None,
@@ -335,6 +340,21 @@ pub(super) fn child_session_skill_profile(
         source: agent_profile_source_from_skill(descriptor),
         trust_state: agent_trust_from_skill(descriptor.trust),
     })
+}
+
+fn execution_role_for_profile(
+    kind: AgentProfileKind,
+    result_policy: AgentResultPolicy,
+) -> AgentRole {
+    if matches!(result_policy, AgentResultPolicy::ForegroundMergeRequired) {
+        return AgentRole::SubagentWrite;
+    }
+    match kind {
+        AgentProfileKind::Primary => AgentRole::Executor,
+        AgentProfileKind::Subagent | AgentProfileKind::System | AgentProfileKind::Unknown => {
+            AgentRole::SubagentRead
+        }
+    }
 }
 
 fn compatibility_skill_instructions(descriptor: &SkillDescriptor, raw: &str) -> String {

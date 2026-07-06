@@ -7,7 +7,7 @@ use sigil_kernel::{
     AgentInvocationPolicy, AgentProfile, AgentProfileId, AgentProfileKind,
     AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSource,
     AgentProfileTrustProjection, AgentResultPolicy, AgentRole, AgentTrustState, RootConfig,
-    SessionLogEntry,
+    SessionLogEntry, changeset_only_child_tool_scope,
 };
 
 mod builtin;
@@ -55,6 +55,7 @@ pub const WORKER_PROFILE_ID: &str = "worker";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAgentProfile {
     pub profile: AgentProfile,
+    pub execution_role: AgentRole,
     pub enabled: bool,
     pub enabled_override: Option<bool>,
     pub user_invocable_override: Option<bool>,
@@ -168,6 +169,7 @@ impl AgentProfileRegistry {
                     enabled: true,
                     invocation_policy: AgentInvocationPolicy::ManualOnly,
                     result_policy: AgentResultPolicy::SummaryWithPageRef,
+                    tool_scope_override: None,
                     nickname_candidates: &[],
                 },
             )?,
@@ -182,6 +184,7 @@ impl AgentProfileRegistry {
                     enabled: root_config.task.enabled,
                     invocation_policy: AgentInvocationPolicy::ManualOnly,
                     result_policy: AgentResultPolicy::SummaryOnly,
+                    tool_scope_override: None,
                     nickname_candidates: &[],
                 },
             )?,
@@ -196,6 +199,7 @@ impl AgentProfileRegistry {
                     enabled: root_config.task.enabled,
                     invocation_policy: AgentInvocationPolicy::ModelAllowed,
                     result_policy: AgentResultPolicy::SummaryWithPageRef,
+                    tool_scope_override: None,
                     nickname_candidates: &["Atlas", "Delta", "Echo"],
                 },
             )?,
@@ -205,11 +209,12 @@ impl AgentProfileRegistry {
                     id: WORKER_PROFILE_ID,
                     kind: AgentProfileKind::Subagent,
                     role: AgentRole::SubagentWrite,
-                    description: "Foreground implementation worker agent.",
-                    instructions: "Perform implementation work only through the guarded foreground path.",
+                    description: "Changeset-only foreground implementation worker agent.",
+                    instructions: "Propose implementation changes through the guarded changeset-only foreground path. Do not claim changes were applied until the parent accepts and applies the merge review.",
                     enabled: root_config.task.enabled,
-                    invocation_policy: AgentInvocationPolicy::ManualOnly,
+                    invocation_policy: AgentInvocationPolicy::ModelAllowed,
                     result_policy: AgentResultPolicy::ForegroundMergeRequired,
+                    tool_scope_override: Some(changeset_only_child_tool_scope()),
                     nickname_candidates: &["Patch", "Forge", "Quill"],
                 },
             )?,

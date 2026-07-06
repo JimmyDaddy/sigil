@@ -216,6 +216,29 @@ impl AgentToolRuntime {
         }
         Ok((result, controls))
     }
+
+    pub async fn cancel_agent_thread(
+        &mut self,
+        session: &mut Session,
+        thread_id: AgentThreadId,
+        reason: Option<String>,
+        options: &AgentRunOptions,
+    ) -> Result<ToolResult> {
+        let call = ToolCall {
+            id: format!("runtime-cancel-agent-{}", thread_id.as_str()),
+            name: CANCEL_AGENT_TOOL_NAME.to_owned(),
+            args_json: json!({
+                "thread_id": thread_id.as_str(),
+                "reason": reason,
+            })
+            .to_string(),
+        };
+        let mut handler = NoopAgentToolEventHandler;
+        let mut approval = sigil_kernel::AutoApproveHandler;
+        self.handle_agent_tool_call(session, &call, options, &mut handler, &mut approval)
+            .await?
+            .ok_or_else(|| anyhow!("cancel_agent was not handled by runtime"))
+    }
 }
 
 struct NoopAgentToolEventHandler;
@@ -271,6 +294,8 @@ impl AgentToolDelegate for AgentToolRuntime {
             }
             AgentToolKind::Wait => self.wait_agent(session, call, &args, handler).await,
             AgentToolKind::ReadResult => self.read_agent_result(session, call, &args, handler),
+            AgentToolKind::List => self.list_agents(session, call),
+            AgentToolKind::Cancel => self.cancel_agent(session, call, &args, handler),
             AgentToolKind::Message => self.message_agent(session, call, &args),
             AgentToolKind::Close => self.close_agent(session, call, &args),
         };

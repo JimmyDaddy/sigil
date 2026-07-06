@@ -300,6 +300,180 @@ impl AgentToolRuntime {
         agent_result_page_tool_result(call, result, &result_page)
     }
 
+    pub(super) fn list_agents(&self, session: &Session, call: &ToolCall) -> ToolResult {
+        let projection = session.agent_thread_state_projection();
+        let agents = projection
+            .threads
+            .values()
+            .map(|thread| {
+                let result_ref = thread.result.as_ref().map(|result| {
+                    json!({
+                        "thread_id": result.thread_id.as_str(),
+                        "status": terminal_status_label(result.status),
+                        "summary_truncated": result.summary_truncated,
+                        "original_summary_chars": result.original_summary_chars,
+                        "changed_paths_count": result.changed_paths.len(),
+                        "artifact_count": result.artifacts.len(),
+                        "read_tool": READ_AGENT_RESULT_TOOL_NAME,
+                        "read_args": {
+                            "thread_id": result.thread_id.as_str(),
+                            "offset_chars": 0,
+                            "max_chars": MAX_RESULT_PAGE_LIMIT,
+                        }
+                    })
+                });
+                let approval_pending = projection.approval_routes.values().any(|route| {
+                    route.source_thread_id == thread.thread_id
+                        && route.status == AgentRouteStatus::Requested
+                });
+                let background_handle_available = self.background_runs.contains(&thread.thread_id);
+                json!({
+                    "thread_id": thread.thread_id.as_str(),
+                    "display_name": thread.display_name.as_deref(),
+                    "profile_id": thread.profile_id.as_ref().map(AgentProfileId::as_str),
+                    "mode": thread.invocation_mode.map(invocation_mode_label),
+                    "status": thread_status_label(thread.status),
+                    "terminal": thread.status.is_terminal(),
+                    "objective": thread.objective,
+                    "messageable": !thread.status.is_terminal() && background_handle_available,
+                    "closable": thread.status.is_terminal() && !thread.closed,
+                    "cancelable": !thread.status.is_terminal() && background_handle_available,
+                    "approval_pending": approval_pending,
+                    "result_ref": result_ref,
+                })
+            })
+            .collect::<Vec<_>>();
+        let count = agents.len();
+        ToolResult::ok(
+            call.id.clone(),
+            call.name.clone(),
+            serde_json::to_string(&json!({
+                "agents": agents,
+                "count": count,
+            }))
+            .unwrap_or_else(|error| format!("failed to serialize agent list: {error}")),
+            ToolResultMeta {
+                details: json!({
+                    "count": count,
+                }),
+                ..ToolResultMeta::default()
+            },
+        )
+    }
+
+    pub(super) fn cancel_agent(
+        &self,
+        session: &mut Session,
+        call: &ToolCall,
+        args: &Value,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> ToolResult {
+        let thread_id = match thread_id_arg(args) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let reason = optional_string(args, "reason")
+            .unwrap_or_else(|| "agent cancelled by request".to_owned());
+        let projection = session.agent_thread_state_projection();
+        let Some(thread) = projection.threads.get(&thread_id) else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::NotFound,
+                format!("agent thread {} was not found", thread_id.as_str()),
+            );
+        };
+        let previous_status = thread.status;
+        if previous_status.is_terminal() {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Unsupported,
+                format!(
+                    "agent thread {} is already {}",
+                    thread_id.as_str(),
+                    thread_status_label(previous_status)
+                ),
+            );
+        }
+        let record = match self.background_runs.cancel(&thread_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Unsupported,
+                    format!(
+                        "agent thread {} has no cancellable runtime handle",
+                        thread_id.as_str()
+                    ),
+                );
+            }
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        self.supervisor.release_runtime_thread(&thread_id);
+        let interrupted = ControlEntry::AgentRunInterrupted(AgentRunInterruptedEntry {
+            thread_id: thread_id.clone(),
+            attempt_id: record.attempt_id,
+            reason: reason.clone(),
+        });
+        let cancelled = ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: AgentThreadStatus::Cancelled,
+            reason: Some(reason.clone()),
+            updated_at_ms: Some(unix_time_ms()),
+        });
+        for control in [cancelled, interrupted] {
+            if let Err(error) = session
+                .append_control(control.clone())
+                .and_then(|()| handler.handle(RunEvent::Control(control)))
+            {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        }
+        ToolResult::ok(
+            call.id.clone(),
+            call.name.clone(),
+            serde_json::to_string(&json!({
+                "thread_id": thread_id.as_str(),
+                "previous_status": thread_status_label(previous_status),
+                "status": "cancelled",
+                "reason": reason,
+                "handle_cancelled": true,
+                "next_action": "do not wait for this agent; report it as cancelled or close it if the user wants to hide it"
+            }))
+            .unwrap_or_else(|error| format!("failed to serialize agent cancel result: {error}")),
+            ToolResultMeta {
+                details: json!({
+                    "thread_id": thread_id.as_str(),
+                    "previous_status": thread_status_label(previous_status),
+                    "status": "cancelled",
+                    "handle_cancelled": true,
+                }),
+                ..ToolResultMeta::default()
+            },
+        )
+    }
+
     pub(super) fn message_agent(
         &self,
         session: &Session,

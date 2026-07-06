@@ -127,6 +127,8 @@ fn agent_tool_scope() -> ToolRegistryScope {
             agent_tools::SPAWN_AGENT_TOOL_NAME,
             agent_tools::WAIT_AGENT_TOOL_NAME,
             agent_tools::READ_AGENT_RESULT_TOOL_NAME,
+            agent_tools::LIST_AGENTS_TOOL_NAME,
+            agent_tools::CANCEL_AGENT_TOOL_NAME,
             agent_tools::MESSAGE_AGENT_TOOL_NAME,
             agent_tools::CLOSE_AGENT_TOOL_NAME,
         ],

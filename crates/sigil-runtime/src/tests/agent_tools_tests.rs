@@ -16,19 +16,21 @@ use sigil_kernel::{
     AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentThreadStatus,
     AgentToolDelegate, AgentTrustState, ApprovalMode, AutoApproveHandler, CompactionConfig,
     CompletionRequest, ControlEntry, EventHandler, InteractionMode, JsonlSessionStore,
-    MemoryConfig, MessageRole, PermissionConfig, PermissionMode, PermissionPolicy, PermissionRisk,
-    Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport,
-    RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry, ToolAccess,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolPreviewCapability,
-    ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
+    MemoryConfig, MessageRole, MultiAgentMode, PermissionConfig, PermissionMode, PermissionPolicy,
+    PermissionRisk, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
+    ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry,
+    ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision,
+    ToolCall, ToolCategory, ToolExecutionEntry, ToolExecutionStatus, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
+    WorkspaceConfig,
 };
 
 use super::{
     AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundRuns,
-    AgentToolProviderFactory, AgentToolRuntime, CLOSE_AGENT_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
-    READ_AGENT_RESULT_TOOL_NAME, SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME,
-    chat_agent_thread_id_for_call, register_agent_tools,
+    AgentToolProviderFactory, AgentToolRuntime, CANCEL_AGENT_TOOL_NAME, CLOSE_AGENT_TOOL_NAME,
+    LIST_AGENTS_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME,
+    SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call,
+    register_agent_tools, register_agent_tools_with_registry_and_mode,
     register_agent_tools_with_workspace_and_entries,
 };
 
@@ -372,6 +374,32 @@ impl Provider for ChildUsageProvider {
     }
 }
 
+struct SlowTextProvider {
+    delay: Duration,
+}
+
+#[async_trait]
+impl Provider for SlowTextProvider {
+    fn name(&self) -> &str {
+        "slow-text"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        tokio::time::sleep(self.delay).await;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("slow child done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
 struct DelayedFollowupProvider {
     delay: Duration,
     observed_followup: Arc<Mutex<bool>>,
@@ -418,12 +446,14 @@ impl Provider for DelayedFollowupProvider {
 
 struct RecordingChildProvider {
     observed_request: Arc<Mutex<Option<ChildRequestObservation>>>,
+    text: String,
 }
 
 #[derive(Debug, Clone)]
 struct ChildRequestObservation {
     system_messages: Vec<String>,
     user_messages: Vec<String>,
+    tool_names: Vec<String>,
 }
 
 #[async_trait]
@@ -453,13 +483,14 @@ impl Provider for RecordingChildProvider {
                 .filter(|message| matches!(message.role, MessageRole::User))
                 .filter_map(|message| message.content.clone())
                 .collect(),
+            tool_names: request.tools.iter().map(|tool| tool.name.clone()).collect(),
         };
         *self
             .observed_request
             .lock()
             .expect("child request observation lock should not be poisoned") = Some(observation);
         Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::TextDelta("recorded child done".to_owned())),
+            Ok(ProviderChunk::TextDelta(self.text.clone())),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -831,6 +862,21 @@ impl AgentToolProviderFactory for UsageProviderFactory {
     }
 }
 
+struct SlowTextProviderFactory {
+    delay: Duration,
+}
+
+impl AgentToolProviderFactory for SlowTextProviderFactory {
+    fn build_provider(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+        _profile_id: &sigil_kernel::AgentProfileId,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(SlowTextProvider { delay: self.delay }))
+    }
+}
+
 struct DelayedFollowupProviderFactory {
     observed_followup: Arc<Mutex<bool>>,
 }
@@ -862,6 +908,26 @@ impl AgentToolProviderFactory for RecordingProviderFactory {
     ) -> Result<Box<dyn Provider>> {
         Ok(Box::new(RecordingChildProvider {
             observed_request: self.observed_request.clone(),
+            text: "recorded child done".to_owned(),
+        }))
+    }
+}
+
+struct RecordingTextProviderFactory {
+    text: String,
+    observed_request: Arc<Mutex<Option<ChildRequestObservation>>>,
+}
+
+impl AgentToolProviderFactory for RecordingTextProviderFactory {
+    fn build_provider(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+        _profile_id: &sigil_kernel::AgentProfileId,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(RecordingChildProvider {
+            observed_request: self.observed_request.clone(),
+            text: self.text.clone(),
         }))
     }
 }
@@ -883,7 +949,11 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     assert!(spec.description.contains("must delegate"));
     assert!(spec.description.contains("mode=background"));
     assert!(spec.description.contains("mode=join_before_final when"));
-    assert!(!spec.description.contains("worker:"));
+    assert!(spec.description.contains("only when the user"));
+    assert!(spec.description.contains("comprehensive review"));
+    assert!(spec.description.contains("worker:"));
+    assert!(spec.description.contains("foreground_merge_required"));
+    assert!(spec.description.contains("Changeset-only foreground"));
     assert!(spec.input_schema["properties"].get("profile_id").is_some());
     assert!(
         spec.input_schema["required"]
@@ -934,7 +1004,73 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
         spec.input_schema["properties"]["mode"]["default"],
         "join_before_final"
     );
+    let list_spec = registry
+        .spec_for(LIST_AGENTS_TOOL_NAME)
+        .expect("list_agents registered");
+    assert!(list_spec.description.contains("List current agent threads"));
+    assert_eq!(
+        list_spec.input_schema["additionalProperties"],
+        serde_json::Value::Bool(false)
+    );
+    let cancel_spec = registry
+        .spec_for(CANCEL_AGENT_TOOL_NAME)
+        .expect("cancel_agent registered");
+    assert!(
+        cancel_spec
+            .description
+            .contains("Cancel a running background child agent")
+    );
+    assert!(
+        cancel_spec.input_schema["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|value| value == "thread_id"))
+    );
     assert!(registry.spec_for(MESSAGE_AGENT_TOOL_NAME).is_some());
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_description_reflects_multi_agent_mode() -> Result<()> {
+    let config = root_config();
+    let profile_registry = AgentProfileRegistry::from_root_config(&config)?;
+    let budget = AgentBudgetPolicy::from_root_config(&config);
+
+    let mut proactive = ToolRegistry::new();
+    register_agent_tools_with_registry_and_mode(
+        &mut proactive,
+        profile_registry.clone(),
+        budget.clone(),
+        MultiAgentMode::Proactive,
+    )?;
+    let proactive_spec = proactive
+        .spec_for(SPAWN_AGENT_TOOL_NAME)
+        .expect("spawn agent registered");
+    assert!(proactive_spec.description.contains("proactively"));
+    assert!(
+        proactive_spec
+            .description
+            .contains("clearly improve speed or quality")
+    );
+
+    let mut disabled = ToolRegistry::new();
+    register_agent_tools_with_registry_and_mode(
+        &mut disabled,
+        profile_registry,
+        budget,
+        MultiAgentMode::None,
+    )?;
+    let disabled_spec = disabled
+        .spec_for(SPAWN_AGENT_TOOL_NAME)
+        .expect("spawn agent registered");
+    assert!(
+        disabled_spec
+            .description
+            .contains("[task].multi_agent_mode=none")
+    );
+    assert!(disabled_spec.description.contains("list_agents"));
+    assert!(disabled_spec.description.contains("cancel_agent"));
+    assert!(!disabled_spec.description.contains("proactively"));
+    assert!(!disabled_spec.description.contains("comprehensive review"));
     Ok(())
 }
 
@@ -1715,6 +1851,134 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
         .get(&thread_id)
         .expect("background thread should be started");
     assert_eq!(thread.status, AgentThreadStatus::Running);
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_and_cancel_agent_manage_running_background_thread() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(SlowTextProviderFactory {
+            delay: Duration::from_secs(5),
+        }),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let options = run_options(std::env::temp_dir());
+    let thread_id =
+        chat_agent_thread_id_for_call("call-cancel-live", &AgentProfileId::new("explore")?)?;
+
+    let spawn = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-cancel-live".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "explore",
+                    "objective": "inspect",
+                    "prompt": "inspect slowly",
+                    "mode": "background"
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn handled");
+    assert!(!spawn.is_error());
+
+    let listed = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-list-live".to_owned(),
+                name: LIST_AGENTS_TOOL_NAME.to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("list_agents handled");
+    assert!(!listed.is_error());
+    let list_payload: serde_json::Value = serde_json::from_str(&listed.content)?;
+    assert_eq!(list_payload["count"], 1);
+    let agent = &list_payload["agents"][0];
+    assert_eq!(agent["thread_id"], thread_id.as_str());
+    assert_eq!(agent["status"], "running");
+    assert_eq!(agent["cancelable"], true);
+    assert_eq!(agent["messageable"], true);
+    assert_eq!(agent["closable"], false);
+
+    let cancelled = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-cancel-agent".to_owned(),
+                name: CANCEL_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "reason": "test cancel"
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("cancel_agent handled");
+    assert!(!cancelled.is_error());
+    let cancel_payload: serde_json::Value = serde_json::from_str(&cancelled.content)?;
+    assert_eq!(cancel_payload["previous_status"], "running");
+    assert_eq!(cancel_payload["status"], "cancelled");
+    assert_eq!(cancel_payload["handle_cancelled"], true);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(entry, SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interrupted))
+            if interrupted.thread_id == thread_id && interrupted.reason == "test cancel")
+    }));
+    assert!(handler.events.iter().any(|event| {
+        matches!(
+            event,
+            RunEvent::Control(ControlEntry::AgentThreadStatusChanged(status))
+                if status.thread_id == thread_id && status.status == AgentThreadStatus::Cancelled
+        )
+    }));
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("cancelled thread projected");
+    assert_eq!(thread.status, AgentThreadStatus::Cancelled);
+
+    let wait = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-wait-cancelled".to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("wait_agent handled");
+    let wait_payload: serde_json::Value = serde_json::from_str(&wait.content)?;
+    assert_eq!(wait_payload["status"], "cancelled");
+    assert_eq!(wait_payload["result_available"], false);
     Ok(())
 }
 
@@ -2887,6 +3151,200 @@ async fn manual_agent_invocation_allows_user_invocable_model_hidden_profile() ->
     assert_ne!(invocation.thread_id, second_invocation.thread_id);
     assert_child_transcript_events_not_forwarded(&handler);
     assert_parent_agent_thread_controls_forwarded(&handler);
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_changeset_only_invocation_records_merge_review_without_parent_mutation()
+-> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let observed_request = Arc::new(Mutex::new(None));
+    let worker_output = r#"{
+  "change_set": {
+    "id": "change-note",
+    "title": "Update README",
+    "summary": "Update the README wording.",
+    "risk": "low",
+    "files": [
+      {
+        "path": "README.md",
+        "action": "update",
+        "risk": "low",
+        "additions": 1,
+        "deletions": 1
+      }
+    ],
+    "validations": []
+  },
+  "artifact": {
+    "media_type": "text/x-diff",
+    "content": "--- current/README.md\n+++ proposed/README.md\n@@\n-old\n+new\n"
+  }
+}"#;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RecordingTextProviderFactory {
+            text: worker_output.to_owned(),
+            observed_request: observed_request.clone(),
+        }),
+    );
+    let temp = tempfile::tempdir()?;
+    let readme = temp.path().join("README.md");
+    fs::write(&readme, "old\n")?;
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let invocation = runtime
+        .invoke_agent_profile(
+            &mut session,
+            AgentProfileId::new("worker")?,
+            "update README wording".to_owned(),
+            &run_options(temp.path().to_path_buf()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+
+    assert_eq!(fs::read_to_string(&readme)?, "old\n");
+    assert_eq!(invocation.status, Some(AgentThreadStatus::Completed));
+    let changesets = session.changeset_projection();
+    let change = changesets
+        .changesets
+        .get(&sigil_kernel::ChangeSetId::new("change-note")?)
+        .expect("worker changeset should be projected");
+    assert!(change.proposal.is_some());
+    assert!(change.result.is_none());
+    let write_isolation = session.write_isolation_projection();
+    let review = write_isolation
+        .merge_reviews
+        .values()
+        .find(|review| {
+            review
+                .requested
+                .as_ref()
+                .is_some_and(|requested| requested.changeset_id.as_str() == "change-note")
+        })
+        .expect("worker changeset should request merge review");
+    assert!(review.is_pending());
+    let isolated = write_isolation
+        .isolated_changesets
+        .get(&sigil_kernel::ChangeSetId::new("change-note")?)
+        .expect("worker changeset should be recorded as isolated output");
+    assert_eq!(
+        isolated.source_isolation,
+        sigil_kernel::WriteIsolationMode::ChangesetOnly
+    );
+    assert_eq!(
+        isolated
+            .touched_subjects
+            .iter()
+            .filter(|subject| matches!(subject, sigil_kernel::MutationSubject::File { .. }))
+            .count(),
+        1
+    );
+    let control_order = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(control) => Some(control),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let result_index = control_order
+        .iter()
+        .position(|control| matches!(control, ControlEntry::AgentThreadResultRecorded(_)))
+        .expect("worker result should be recorded before merge controls");
+    let changeset_index = control_order
+        .iter()
+        .position(|control| matches!(control, ControlEntry::ChangeSetProposed(_)))
+        .expect("worker changeset should be proposed");
+    let isolated_index = control_order
+        .iter()
+        .position(|control| matches!(control, ControlEntry::IsolatedChangeSetProduced(_)))
+        .expect("worker isolated changeset should be recorded");
+    let review_index = control_order
+        .iter()
+        .position(|control| matches!(control, ControlEntry::MergeReviewRequested(_)))
+        .expect("worker merge review should be requested");
+    assert!(
+        result_index < changeset_index
+            && result_index < isolated_index
+            && result_index < review_index,
+        "worker terminal result must be durable before merge review controls"
+    );
+    let observation = observed_request
+        .lock()
+        .expect("child request observation lock should not be poisoned")
+        .clone()
+        .expect("worker provider should observe a request");
+    assert!(
+        observation
+            .system_messages
+            .iter()
+            .any(|message| message.contains("changeset-only isolation"))
+    );
+    assert!(!observation.tool_names.contains(&"write_file".to_owned()));
+    assert!(!observation.tool_names.contains(&"edit_file".to_owned()));
+    assert!(
+        !observation
+            .tool_names
+            .contains(&"apply_changeset".to_owned())
+    );
+    assert!(!observation.tool_names.contains(&"bash".to_owned()));
+    assert_parent_agent_thread_controls_forwarded(&handler);
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_background_spawn_is_rejected_without_creating_thread() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(RejectingProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-worker-background".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "worker",
+                    "objective": "edit files",
+                    "prompt": "edit files",
+                    "mode": "background"
+                })
+                .to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn handled");
+
+    assert!(result.is_error());
+    assert!(
+        result
+            .content
+            .contains("unsupported_write_background_without_isolation")
+    );
+    assert!(session.agent_thread_state_projection().threads.is_empty());
     Ok(())
 }
 

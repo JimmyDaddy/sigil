@@ -881,6 +881,8 @@ pub struct TaskConfig {
     pub max_subagents: usize,
     #[serde(default = "default_allow_write_subagents")]
     pub allow_write_subagents: bool,
+    #[serde(default)]
+    pub multi_agent_mode: MultiAgentMode,
 }
 
 impl Default for TaskConfig {
@@ -896,6 +898,7 @@ impl Default for TaskConfig {
             max_replans: default_max_replans(),
             max_subagents: default_max_subagents(),
             allow_write_subagents: default_allow_write_subagents(),
+            multi_agent_mode: MultiAgentMode::default(),
         }
     }
 }
@@ -919,6 +922,27 @@ pub enum TaskMode {
     #[default]
     Chat,
     Plan,
+}
+
+/// Model delegation policy for agent tools.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiAgentMode {
+    None,
+    #[default]
+    #[serde(alias = "explicitRequestOnly")]
+    ExplicitRequestOnly,
+    Proactive,
+}
+
+impl MultiAgentMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ExplicitRequestOnly => "explicit_request_only",
+            Self::Proactive => "proactive",
+        }
+    }
 }
 
 impl TaskMode {

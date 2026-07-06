@@ -65,13 +65,13 @@ pub use config::{
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS,
     DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES, LanguageServerConfig, McpServerConfig,
     McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, McpTrustClass, MemoryConfig,
-    ModelRequestConfig, ModelRequestTimeouts, MutationArtifactRetentionConfig, RoleModelConfig,
-    RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
-    SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SessionConfig, SkillConfig, StorageConfig,
-    StorageRoot, SyntaxThemeId, TaskConfig, TaskMode, TerminalKeyboardEnhancement,
-    ThemeColorOverrides, ThemeId, ToolAllowlistConfig, UsageCostCurrency, WorkspaceConfig,
-    default_user_config_dir, default_user_config_path, preferred_config_path,
-    resolve_workspace_root,
+    ModelRequestConfig, ModelRequestTimeouts, MultiAgentMode, MutationArtifactRetentionConfig,
+    RoleModelConfig, RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV,
+    SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV,
+    SessionConfig, SkillConfig, StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskMode,
+    TerminalKeyboardEnhancement, ThemeColorOverrides, ThemeId, ToolAllowlistConfig,
+    UsageCostCurrency, WorkspaceConfig, default_user_config_dir, default_user_config_path,
+    preferred_config_path, resolve_workspace_root,
 };
 pub use context_engine::{
     CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION, CONTEXT_QUALITY_REPORT_SCHEMA_VERSION, ContextBodyRef,
@@ -237,9 +237,9 @@ pub use task_memory::{
 pub use task_orchestrator::{
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
     SequentialTaskStepOutput, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, changeset_only_child_tool_registry,
-    changeset_only_child_tool_scope, decode_changeset_only_child_output,
-    validate_changeset_only_parent_snapshot_unchanged_for_task,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, changeset_only_child_contract_prompt,
+    changeset_only_child_tool_registry, changeset_only_child_tool_scope,
+    decode_changeset_only_child_output, validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
