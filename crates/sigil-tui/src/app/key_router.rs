@@ -136,7 +136,9 @@ impl AppState {
                 if !self.composer.agent_panel_focused {
                     self.focus_composer_agent_panel();
                 }
-                self.move_composer_agent_selection(false);
+                if !self.move_composer_agent_selection(false) {
+                    self.blur_composer_agent_panel();
+                }
                 None
             }
             RoutedKeyCommand::AgentActivate => {

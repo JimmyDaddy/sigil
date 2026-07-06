@@ -3,8 +3,8 @@ use super::super::{
     format_token_compact, format_token_count, format_tool_content_block_redacted_for_restore,
     format_tool_result_block_redacted, hash_timeline_line, human_file_size,
     line_has_visible_content, non_empty_or, normalize_command_prefix_character,
-    normalize_runtime_model, parse_reasoning_effort, persisted_root_config, plain_line_text,
-    ratio_to_percent, sidebar_width_for_terminal, summarize_error,
+    parse_reasoning_effort, persisted_root_config, plain_line_text, ratio_to_percent,
+    sidebar_width_for_terminal, summarize_error,
 };
 use super::*;
 use ratatui::text::{Line, Span};
@@ -37,16 +37,6 @@ fn formatting_helpers_cover_normalization_and_layout() {
     assert_eq!(sidebar_width_for_terminal(95), 0);
     assert_eq!(sidebar_width_for_terminal(120), 24);
     assert_eq!(sidebar_width_for_terminal(220), 42);
-
-    assert_eq!(
-        normalize_runtime_model(" flash "),
-        Some("deepseek-v4-flash".to_owned())
-    );
-    assert_eq!(
-        normalize_runtime_model("v4-pro"),
-        Some("deepseek-v4-pro".to_owned())
-    );
-    assert_eq!(normalize_runtime_model(" "), None);
 
     assert_eq!(normalize_command_prefix_character('/'), Some('/'));
     assert_eq!(normalize_command_prefix_character('、'), Some('/'));
@@ -418,19 +408,6 @@ fn build_model_picker_options_uses_known_models_and_appends_custom_current() {
 
     assert!(options.iter().any(|option| option == "deepseek-v4-flash"));
     assert!(options.iter().any(|option| option == "custom-model"));
-}
-
-#[test]
-fn normalize_runtime_model_maps_aliases_and_trims() {
-    assert_eq!(
-        normalize_runtime_model("  flash "),
-        Some("deepseek-v4-flash".to_owned())
-    );
-    assert_eq!(
-        normalize_runtime_model("v4-pro"),
-        Some("deepseek-v4-pro".to_owned())
-    );
-    assert_eq!(normalize_runtime_model("   "), None);
 }
 
 #[test]

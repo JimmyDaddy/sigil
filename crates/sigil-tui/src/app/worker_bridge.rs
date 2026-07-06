@@ -1,29 +1,40 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
-use sha2::{Digest, Sha256};
+
+mod agent_thread;
+mod background_requests;
+mod command_conversion;
+mod message_labels;
+mod run_event_handler;
+mod run_event_helpers;
+mod run_status;
+mod status_sync;
+mod tool_card_lifecycle;
+#[cfg(test)]
+use status_sync::{
+    code_diagnostics_by_path, code_diagnostics_sidebar_line, code_diagnostics_status_line,
+    code_intelligence_server_lines, mcp_activation_event_detail, normalize_diagnostic_path,
+};
+use tool_card_lifecycle::tool_card_replacement_indices;
+pub(super) use tool_card_lifecycle::tool_card_replacement_key;
+#[cfg(test)]
+use tool_card_lifecycle::{
+    agent_tool_name, wait_agent_pending_key_from_result, wait_agent_pending_key_from_tool_block,
+    wait_agent_pending_replacement_indices,
+};
 
 use super::{
-    AgentView, AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary,
-    McpServerRuntimeStatus, ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase,
-    TimelineEntry, TimelineRole,
-    formatting::{
-        agent_result_poll_tool_name, format_agent_thread_started_block,
-        format_agent_thread_status_block, format_terminal_task_block_redacted,
-        format_tool_result_block_redacted, summarize_error,
-    },
-    session_flow::render_control_entry_line,
+    AppState, RunPhase, TimelineRole,
+    formatting::{format_terminal_task_block_redacted, summarize_error},
 };
-use crate::config_panel::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
-use crate::runner::{
-    CompactionTrigger, McpActivationStatus, WorkerApprovalCommand, WorkerCommand,
-    WorkerCommandEnvelope, WorkerMessage,
+use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
+use message_labels::{
+    plan_approval_permission_label, queued_prompt_summary_noun, summarize_queued_prompt,
+    task_run_finish_notice, task_run_status_label,
 };
-use sigil_kernel::{
-    ControlEntry, EventHandler, RunEvent, ToolCall, ToolDiffBudget, ToolExecutionStatus,
-    ToolPreviewSnapshot, ToolProgressEvent, ToolResult, ToolResultMeta,
-};
-use sigil_runtime::{BalanceSnapshot, deepseek_provider_status_config};
+use run_event_helpers::notice_is_timeline_worthy;
+#[cfg(test)]
+use sigil_kernel::ToolResult;
+use sigil_kernel::{ControlEntry, EventHandler};
 
 impl AppState {
     fn timeline_has_user_prompt(&self, prompt: &str) -> bool {
@@ -90,150 +101,6 @@ impl AppState {
         self.reload_active_agent_child_transcript()
     }
 
-    fn handle_agent_thread_event(
-        &mut self,
-        thread_id: &sigil_kernel::AgentThreadId,
-        event: RunEvent,
-    ) {
-        let AgentView::Child { child_task_id, .. } = &self.active_agent_view else {
-            return;
-        };
-        if child_task_id != thread_id.as_str() {
-            return;
-        }
-        if self.active_agent_child_transcript.is_none() {
-            self.reload_active_agent_child_transcript();
-        }
-        if self.append_live_agent_thread_event(event) {
-            self.rerender_active_agent_child_transcript();
-        }
-    }
-
-    fn append_live_agent_thread_event(&mut self, event: RunEvent) -> bool {
-        match event {
-            RunEvent::TextDelta(delta) => {
-                self.append_live_child_delta(TimelineRole::Assistant, delta)
-            }
-            RunEvent::ReasoningDelta(delta) => {
-                self.append_live_child_delta(TimelineRole::Thinking, delta)
-            }
-            RunEvent::ToolCallStarted(call) => {
-                self.push_live_child_entry(TimelineRole::Tool, format!("Started {}", call.name))
-            }
-            RunEvent::ToolCallCompleted(call) => {
-                self.push_live_child_entry(TimelineRole::Tool, format!("Completed {}", call.name))
-            }
-            RunEvent::ToolResult(result) => {
-                self.push_live_child_entry(TimelineRole::Tool, result.content)
-            }
-            RunEvent::ToolProgress(progress) => {
-                self.push_live_child_entry(TimelineRole::Tool, tool_progress_summary(&progress))
-            }
-            RunEvent::AssistantMessage(message) => {
-                if message.assistant_kind == Some(sigil_kernel::AssistantMessageKind::ToolPreamble)
-                {
-                    return false;
-                }
-                let Some(content) = message.content.filter(|content| !content.is_empty()) else {
-                    return false;
-                };
-                self.replace_or_push_live_child_entry(TimelineRole::Assistant, content)
-            }
-            RunEvent::Notice(notice) => {
-                if notice_is_timeline_worthy(&notice) {
-                    self.push_live_child_entry(TimelineRole::Notice, notice)
-                } else {
-                    false
-                }
-            }
-            RunEvent::ToolApprovalRequested { call, .. } => self.push_live_child_entry(
-                TimelineRole::Notice,
-                format!("Approve {} in child agent", call.name),
-            ),
-            RunEvent::ToolApprovalResolved {
-                call_id, approved, ..
-            } => self.push_live_child_entry(
-                TimelineRole::Notice,
-                format!(
-                    "Approval {} for {}",
-                    if approved { "allowed" } else { "denied" },
-                    call_id
-                ),
-            ),
-            RunEvent::ToolCallArgsDelta { .. }
-            | RunEvent::Usage(_)
-            | RunEvent::ContinuationState(_)
-            | RunEvent::Control(_) => false,
-        }
-    }
-
-    fn append_live_child_delta(&mut self, role: TimelineRole, delta: String) -> bool {
-        if delta.is_empty() {
-            return false;
-        }
-        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
-            return false;
-        };
-        transcript.load_error = None;
-        if let Some(entry) = transcript
-            .timeline_entries
-            .last_mut()
-            .filter(|entry| entry.role == role)
-        {
-            if entry.text.trim().is_empty() && delta.trim().is_empty() {
-                return false;
-            }
-            entry.text.push_str(&delta);
-        } else {
-            if delta.trim().is_empty() {
-                return false;
-            }
-            transcript
-                .timeline_entries
-                .push(TimelineEntry { role, text: delta });
-            transcript.total_timeline_entries = transcript
-                .total_timeline_entries
-                .max(transcript.timeline_entries.len());
-        }
-        true
-    }
-
-    fn push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
-        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
-            return false;
-        };
-        transcript.load_error = None;
-        transcript
-            .timeline_entries
-            .push(TimelineEntry { role, text });
-        transcript.total_timeline_entries = transcript
-            .total_timeline_entries
-            .max(transcript.timeline_entries.len());
-        true
-    }
-
-    fn replace_or_push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
-        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
-            return false;
-        };
-        transcript.load_error = None;
-        if let Some(entry) = transcript
-            .timeline_entries
-            .last_mut()
-            .filter(|entry| entry.role == role)
-        {
-            entry.text = text;
-        } else {
-            transcript
-                .timeline_entries
-                .push(TimelineEntry { role, text });
-            transcript.total_timeline_entries = transcript
-                .total_timeline_entries
-                .max(transcript.timeline_entries.len());
-        }
-        true
-    }
-
     pub fn has_pending_worker_commands(&self) -> bool {
         !self.runtime.pending_worker_commands.is_empty()
     }
@@ -246,141 +113,48 @@ impl AppState {
         self.runtime.pending_worker_commands.push(command);
     }
 
-    pub(super) fn next_background_request_id(&mut self) -> u64 {
-        let request_id = self.runtime.next_background_request_id;
-        self.runtime.next_background_request_id =
-            self.runtime.next_background_request_id.saturating_add(1);
-        request_id
-    }
-
-    pub(super) fn cancel_model_picker_refresh(&mut self) {
-        if let Some(refresh) = self.runtime.active_model_picker_refresh.take() {
-            self.enqueue_worker_command(WorkerCommand::CancelProviderModelsRefresh {
-                request_id: refresh.request_id,
-            });
-        }
-    }
-
-    pub(super) fn schedule_balance_refresh(&mut self) {
-        if self.runtime.active_balance_refresh_id.is_some() || self.is_setup_mode() {
-            return;
-        }
-        let Some(root_config) = self.config_snapshot.as_ref() else {
-            self.runtime.balance_snapshot.status = "n/a".to_owned();
-            self.refresh_usage_sidebar_cache();
-            return;
-        };
-        if normalize_provider_name(&root_config.agent.provider) != DEEPSEEK_PROVIDER_KEY {
-            self.runtime.balance_snapshot.available = false;
-            self.runtime.balance_snapshot.status = "n/a".to_owned();
-            self.refresh_usage_sidebar_cache();
-            return;
-        }
-        let provider_config = deepseek_provider_status_config(root_config);
-        let Ok(provider_config) = provider_config else {
-            self.runtime.balance_snapshot.status = "balance unavailable".to_owned();
-            self.refresh_usage_sidebar_cache();
-            return;
-        };
-        if provider_config.api_key.is_none() {
-            self.runtime.balance_snapshot.available = false;
-            self.runtime.balance_snapshot.status = "missing auth".to_owned();
-            self.refresh_usage_sidebar_cache();
-            return;
-        }
-
-        self.runtime.balance_snapshot.status = "loading".to_owned();
-        self.refresh_usage_sidebar_cache();
-        let request_id = self.next_background_request_id();
-        self.runtime.active_balance_refresh_id = Some(request_id);
-        self.enqueue_worker_command(WorkerCommand::RefreshProviderBalance {
-            request_id,
-            provider_config,
-        });
-    }
-
-    fn apply_provider_balance_refresh(
-        &mut self,
-        request_id: u64,
-        snapshot: BalanceSnapshot,
-    ) -> bool {
-        if self.runtime.active_balance_refresh_id != Some(request_id) {
-            return false;
-        }
-        self.runtime.active_balance_refresh_id = None;
-        self.runtime.balance_snapshot = snapshot.clone();
-        self.push_event("balance", snapshot.status);
-        self.refresh_usage_sidebar_cache();
-        true
-    }
-
-    fn apply_provider_models_refresh(
-        &mut self,
-        request_id: u64,
-        base_url: String,
-        result: Result<Vec<String>, String>,
-    ) -> bool {
-        let Some(active) = self.runtime.active_model_picker_refresh.as_ref() else {
-            return false;
-        };
-        if active.request_id != request_id {
-            return false;
-        }
-        let active = self
-            .runtime
-            .active_model_picker_refresh
-            .take()
-            .expect("active refresh checked above");
-        self.apply_model_picker_refresh(ModelPickerRefresh {
-            target: active.target,
-            current: active.current,
-            base_url,
-            result,
-        })
-    }
-
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
         match message {
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
-                self.runtime.is_busy = true;
-                self.runtime.run_phase = RunPhase::Thinking;
-                self.runtime.mcp_progress = None;
-                self.last_notice = Some("thinking".to_owned());
-                self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
+                self.start_worker_run_phase(
+                    RunPhase::Thinking,
+                    "thinking",
+                    format!("thinking|{}", self.runtime.model_name),
+                );
                 self.push_event("run:start", prompt);
             }
             WorkerMessage::SkillRunStarted { skill_id, prompt } => {
-                self.runtime.is_busy = true;
-                self.runtime.run_phase = RunPhase::Thinking;
-                self.runtime.mcp_progress = None;
-                self.last_notice = Some(format!("skill {skill_id} running"));
-                self.push_phase_marker(format!("skill|{skill_id}"));
+                self.start_worker_run_phase(
+                    RunPhase::Thinking,
+                    format!("skill {skill_id} running"),
+                    format!("skill|{skill_id}"),
+                );
                 self.push_timeline(TimelineRole::Notice, format!("skill {skill_id} started"));
                 self.push_event("skill:start", prompt);
             }
             WorkerMessage::PlanRunStarted { prompt } => {
-                self.runtime.is_busy = true;
-                self.runtime.run_phase = RunPhase::Thinking;
-                self.runtime.mcp_progress = None;
-                self.last_notice = Some("planning".to_owned());
-                self.push_phase_marker(format!("plan|{}", self.runtime.model_name));
+                self.start_worker_run_phase(
+                    RunPhase::Thinking,
+                    "planning",
+                    format!("plan|{}", self.runtime.model_name),
+                );
                 self.push_event("plan:start", prompt);
             }
             WorkerMessage::AgentRunStarted { profile_id, prompt } => {
-                self.runtime.is_busy = true;
-                self.runtime.run_phase = RunPhase::Agent(profile_id.clone());
-                self.runtime.mcp_progress = None;
-                self.last_notice = Some(format!("waiting for agent @{profile_id}"));
-                self.push_phase_marker(format!("agent|{profile_id}"));
+                self.start_worker_run_phase(
+                    RunPhase::Agent(profile_id.clone()),
+                    format!("waiting for agent @{profile_id}"),
+                    format!("agent|{profile_id}"),
+                );
                 self.push_event("agent:start", prompt);
             }
             WorkerMessage::AgentResultContinuationStarted { thread_ids } => {
-                self.runtime.is_busy = true;
-                self.runtime.run_phase = RunPhase::Thinking;
-                self.runtime.mcp_progress = None;
-                self.last_notice = Some("agent result ready; resuming main".to_owned());
-                self.push_phase_marker(format!("agent-result|{}", self.runtime.model_name));
+                self.start_worker_run_phase(
+                    RunPhase::Thinking,
+                    "agent result ready; resuming main",
+                    format!("agent-result|{}", self.runtime.model_name),
+                );
                 let threads = thread_ids
                     .iter()
                     .map(sigil_kernel::AgentThreadId::as_str)
@@ -419,11 +193,11 @@ impl AppState {
                 self.push_event("follow-up:update", summary);
             }
             WorkerMessage::ConversationQueueDispatchStarted { queue_id, prompt } => {
-                self.runtime.is_busy = true;
-                self.runtime.run_phase = RunPhase::Thinking;
-                self.runtime.mcp_progress = None;
-                self.last_notice = Some("running follow-up".to_owned());
-                self.push_phase_marker(format!("follow-up|{}", self.runtime.model_name));
+                self.start_worker_run_phase(
+                    RunPhase::Thinking,
+                    "running follow-up",
+                    format!("follow-up|{}", self.runtime.model_name),
+                );
                 if !self.timeline_has_user_prompt(&prompt) {
                     self.push_timeline(TimelineRole::User, prompt.clone());
                 }
@@ -447,14 +221,8 @@ impl AppState {
                 result,
                 entries,
             } => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
                 self.recompute_compaction_status(false);
@@ -474,22 +242,16 @@ impl AppState {
                 );
             }
             WorkerMessage::TaskRunStarted { task_id, objective } => {
-                self.runtime.is_busy = true;
-                self.runtime.run_phase = RunPhase::Thinking;
-                self.runtime.mcp_progress = None;
-                self.last_notice = Some(format!("planning task {task_id}"));
-                self.push_phase_marker(format!("task|{}", self.runtime.model_name));
+                self.start_worker_run_phase(
+                    RunPhase::Thinking,
+                    format!("planning task {task_id}"),
+                    format!("task|{}", self.runtime.model_name),
+                );
                 self.push_event("task:start", format!("{task_id} {objective}"));
             }
             WorkerMessage::RunFinished { result, entries } => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
                 self.last_notice = Some("agent idle".to_owned());
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
@@ -505,14 +267,8 @@ impl AppState {
                 );
             }
             WorkerMessage::PlanRunFinished { result, entries } => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
                 self.recompute_compaction_status(false);
@@ -592,14 +348,8 @@ impl AppState {
                 entries,
             } => {
                 let notice = task_run_finish_notice(&task_id, status, &entries);
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
                 self.last_notice = Some(notice);
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
@@ -616,14 +366,8 @@ impl AppState {
                 model_name,
                 entries,
             } => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
                 self.restore_session_view(
                     session_log_path,
                     provider_name,
@@ -663,14 +407,8 @@ impl AppState {
                 model_name,
                 entries,
             } => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
                     session_log_path,
@@ -687,14 +425,8 @@ impl AppState {
                 model_name,
                 entries,
             } => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
                     session_log_path,
@@ -713,14 +445,8 @@ impl AppState {
                 trigger,
                 entries,
             } => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.streaming_assistant_index = None;
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.discard_worker_streaming_assistant_and_finish_reasoning();
                 match trigger {
                     CompactionTrigger::Manual => {
                         self.restore_session_view(
@@ -802,14 +528,8 @@ impl AppState {
                 self.open_mcp_elicitation(request, response_tx);
             }
             WorkerMessage::RunFailed(error) => {
-                self.runtime.is_busy = false;
-                self.runtime.run_phase = RunPhase::Idle;
-                self.runtime.mcp_progress = None;
-                self.approval.pending = None;
-                self.modal_state = None;
-                self.runtime.last_phase_marker = None;
-                self.streaming_assistant_index = None;
-                self.finish_streaming_reasoning_entry();
+                self.clear_worker_run_state();
+                self.discard_worker_streaming_assistant_and_finish_reasoning();
                 self.refresh_usage_sidebar_cache();
                 let summary = summarize_error(&error);
                 self.last_notice = Some(summary.clone());
@@ -818,1183 +538,6 @@ impl AppState {
             }
         }
         Ok(())
-    }
-
-    fn apply_mcp_activation_status(
-        &mut self,
-        server_name: Option<String>,
-        status: McpActivationStatus,
-    ) {
-        let Some(server_name) = server_name else {
-            self.push_event("mcp", mcp_activation_event_detail(None, &status));
-            return;
-        };
-        let runtime_status = match &status {
-            McpActivationStatus::Activating => McpServerRuntimeStatus::Activating,
-            McpActivationStatus::Refreshing => McpServerRuntimeStatus::Refreshing,
-            McpActivationStatus::Deferred => McpServerRuntimeStatus::Deferred,
-            McpActivationStatus::Stale { capability } => McpServerRuntimeStatus::Stale {
-                capability: capability.clone(),
-            },
-            McpActivationStatus::Ready {
-                added_tools,
-                process_coverage,
-            } => McpServerRuntimeStatus::Ready {
-                tool_count: Some(*added_tools),
-                process_coverage: process_coverage.clone(),
-            },
-            McpActivationStatus::Failed { error } => McpServerRuntimeStatus::Failed {
-                message: error.clone(),
-            },
-        };
-        self.runtime
-            .mcp_server_statuses
-            .insert(server_name.clone(), runtime_status);
-        self.push_event(
-            "mcp",
-            mcp_activation_event_detail(Some(&server_name), &status),
-        );
-    }
-
-    fn apply_mcp_progress(&mut self, notification: sigil_runtime::McpProgressNotification) {
-        self.runtime.mcp_progress = Some(super::McpProgressState {
-            server_name: notification.server_name.clone(),
-            detail: mcp_progress_detail(&notification),
-        });
-    }
-
-    fn apply_mcp_list_changed(&mut self, notification: sigil_runtime::McpListChangedNotification) {
-        let server_name = notification.server_name.clone();
-        let capability = notification.kind.as_str().to_owned();
-        self.apply_mcp_activation_status(
-            Some(server_name.clone()),
-            McpActivationStatus::Stale {
-                capability: capability.clone(),
-            },
-        );
-        self.last_notice = Some(format!(
-            "MCP {server_name} {capability} changed; refresh queued"
-        ));
-    }
-
-    pub fn shutdown_command() -> WorkerCommand {
-        WorkerCommand::Shutdown
-    }
-
-    pub fn into_worker_command(&self, action: AppAction) -> WorkerCommand {
-        match action {
-            AppAction::SubmitPrompt(prompt) => WorkerCommand::SubmitPrompt {
-                prompt,
-                reasoning_effort: self.runtime.reasoning_effort.clone(),
-            },
-            AppAction::QueueConversationInput {
-                prompt,
-                kind,
-                target,
-            } => WorkerCommand::QueueConversationInput {
-                prompt,
-                kind,
-                target,
-                reasoning_effort: self.runtime.reasoning_effort.clone(),
-            },
-            AppAction::CancelQueuedConversationInput { queue_id } => {
-                WorkerCommand::CancelQueuedConversationInput { queue_id }
-            }
-            AppAction::EditQueuedConversationInput { queue_id, prompt } => {
-                WorkerCommand::EditQueuedConversationInput {
-                    queue_id,
-                    prompt,
-                    reasoning_effort: self.runtime.reasoning_effort.clone(),
-                }
-            }
-            AppAction::MoveQueuedConversationInput {
-                queue_id,
-                direction,
-            } => WorkerCommand::MoveQueuedConversationInput {
-                queue_id,
-                direction,
-            },
-            AppAction::PromoteQueuedConversationInput { queue_id } => {
-                WorkerCommand::PromoteQueuedConversationInput { queue_id }
-            }
-            AppAction::SendQueuedConversationInputNow { queue_id } => {
-                WorkerCommand::SendQueuedConversationInputNow { queue_id }
-            }
-            AppAction::SetConversationQueuePaused { paused } => {
-                WorkerCommand::SetConversationQueuePaused { paused }
-            }
-            AppAction::SubmitPlanPrompt(prompt) => WorkerCommand::SubmitPlanPrompt {
-                prompt,
-                reasoning_effort: self.runtime.reasoning_effort.clone(),
-            },
-            AppAction::ApprovePlan {
-                plan_text,
-                permission,
-                scope_summary,
-                clear_planning_context,
-            } => WorkerCommand::ApprovePlan {
-                plan_text,
-                permission,
-                scope_summary,
-                clear_planning_context,
-            },
-            AppAction::CreateTaskFromPlan {
-                plan_id,
-                expected_plan_hash,
-                start_mode,
-                permission_grant,
-            } => WorkerCommand::CreateTaskFromPlan {
-                plan_id,
-                expected_plan_hash,
-                start_mode,
-                permission_grant,
-            },
-            AppAction::RejectPlan {
-                plan_id,
-                expected_plan_hash,
-            } => WorkerCommand::RejectPlan {
-                plan_id,
-                expected_plan_hash,
-            },
-            AppAction::InvokeInlineSkill {
-                skill_id,
-                arguments,
-            } => WorkerCommand::InvokeInlineSkill {
-                skill_id,
-                arguments,
-                reasoning_effort: self.runtime.reasoning_effort.clone(),
-            },
-            AppAction::InvokeChildSessionSkill {
-                skill_id,
-                arguments,
-            } => WorkerCommand::InvokeChildSessionSkill {
-                skill_id,
-                arguments,
-            },
-            AppAction::InvokeAgentProfile {
-                profile_id,
-                prompt,
-                parent_prompt,
-            } => WorkerCommand::InvokeAgentProfile {
-                profile_id,
-                prompt,
-                parent_prompt,
-            },
-            AppAction::SubmitTask(prompt) => WorkerCommand::SubmitTask { prompt },
-            AppAction::ContinueTask { task_id, guidance } => {
-                WorkerCommand::ContinueTask { task_id, guidance }
-            }
-            AppAction::ApprovalDecision { call_id, approved } => {
-                self.approval_worker_command(WorkerApprovalCommand::Decision { call_id, approved })
-            }
-            AppAction::ApprovalSessionDecision { call_id } => {
-                self.approval_worker_command(WorkerApprovalCommand::DecisionForSession { call_id })
-            }
-            AppAction::ApprovalDecisionWithArgs { call_id, args_json } => self
-                .approval_worker_command(WorkerApprovalCommand::DecisionWithArgs {
-                    call_id,
-                    args_json,
-                }),
-            AppAction::BackgroundActiveAgent => WorkerCommand::BackgroundActiveAgent,
-            AppAction::CancelRun => WorkerCommand::CancelRun,
-            AppAction::CancelTerminalTask { task_id } => {
-                WorkerCommand::CancelTerminalTask { task_id }
-            }
-            AppAction::CloseAgent { thread_id, reason } => {
-                WorkerCommand::CloseAgent { thread_id, reason }
-            }
-            AppAction::MessageAgent { thread_id, prompt } => {
-                WorkerCommand::MessageAgent { thread_id, prompt }
-            }
-            AppAction::CompactNow => WorkerCommand::CompactNow,
-            AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
-            AppAction::CleanMutationArtifacts { target } => {
-                WorkerCommand::CleanMutationArtifacts { target }
-            }
-            AppAction::DeleteMutationArtifact { artifact_id } => {
-                WorkerCommand::DeleteMutationArtifact { artifact_id }
-            }
-            AppAction::ApproveVerificationCheck { check_spec_id } => {
-                WorkerCommand::ApproveVerificationCheck { check_spec_id }
-            }
-            AppAction::SandboxVerificationCheck { check_spec_id } => {
-                WorkerCommand::SandboxVerificationCheck { check_spec_id }
-            }
-            AppAction::ActivateLazyMcp { server_name } => {
-                WorkerCommand::ActivateLazyMcp { server_name }
-            }
-            AppAction::RefreshMcpServer { server_name } => {
-                WorkerCommand::RefreshMcpServer { server_name }
-            }
-            AppAction::StartNewSession { session_log_path } => {
-                WorkerCommand::StartNewSession { session_log_path }
-            }
-            AppAction::SwitchSession { session_log_path } => {
-                WorkerCommand::SwitchSession { session_log_path }
-            }
-            AppAction::SetupCompleted { .. }
-            | AppAction::TrustWorkspace
-            | AppAction::ConfigSaved { .. }
-            | AppAction::RuntimeConfigUpdated { .. }
-            | AppAction::CopyToClipboard { .. } => unreachable!(
-                "setup/config/runtime updates are handled before worker command conversion"
-            ),
-        }
-    }
-
-    fn apply_code_intelligence_tool_status(&mut self, result: &ToolResult) {
-        if !result.tool_name.starts_with("code_") {
-            return;
-        }
-        let updated_server_lines = if let Some(lines) = code_intelligence_server_lines(result) {
-            for (key, line) in lines {
-                self.runtime
-                    .code_intelligence_server_lines
-                    .insert(key, line);
-            }
-            true
-        } else {
-            false
-        };
-        if let Some(status_line) = code_diagnostics_status_line(result) {
-            self.runtime.code_intelligence_status = status_line;
-            self.runtime.code_intelligence_diagnostics_line = Some(code_diagnostics_sidebar_line(
-                &self.runtime.code_intelligence_status,
-            ));
-            if let Some(summaries) = code_diagnostics_by_path(result) {
-                self.runtime.code_intelligence_diagnostics_by_path = summaries;
-            }
-        } else if let Some(status_line) = result
-            .metadata
-            .details
-            .get("code_intelligence")
-            .and_then(|details| details.get("status_line"))
-            .and_then(serde_json::Value::as_str)
-        {
-            self.runtime.code_intelligence_status = status_line.to_owned();
-            if result.is_error() && !updated_server_lines {
-                self.runtime.code_intelligence_server_lines.insert(
-                    "status".to_owned(),
-                    format!("status: {}", self.runtime.code_intelligence_status),
-                );
-            }
-        } else if result.is_error() {
-            self.runtime.code_intelligence_status = "degraded tool error".to_owned();
-            if !updated_server_lines {
-                self.runtime.code_intelligence_server_lines.insert(
-                    "status".to_owned(),
-                    format!("status: {}", self.runtime.code_intelligence_status),
-                );
-            }
-        } else {
-            self.runtime.code_intelligence_status = "ready".to_owned();
-        }
-        self.push_event(
-            "code_intelligence",
-            self.runtime.code_intelligence_status.clone(),
-        );
-    }
-
-    fn apply_mcp_activation_tool_status(&mut self, result: &ToolResult) {
-        if result.tool_name != "mcp_activate_server" || result.is_error() {
-            return;
-        }
-        let Ok(content) = serde_json::from_str::<serde_json::Value>(&result.content) else {
-            return;
-        };
-        let Some(server_name) = content
-            .get("server_name")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let status = content
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("ready");
-        if status != "ready" && status != "already_ready" {
-            return;
-        }
-        let added_tools = content
-            .get("added_tools")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(0);
-        let process_coverage = content
-            .get("process_coverage")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        self.apply_mcp_activation_status(
-            Some(server_name.to_owned()),
-            McpActivationStatus::Ready {
-                added_tools,
-                process_coverage,
-            },
-        );
-    }
-
-    fn approval_worker_command(&self, payload: WorkerApprovalCommand) -> WorkerCommand {
-        let session_id = self.session_log_path.display().to_string();
-        let command_id = stable_approval_command_id(&session_id, &payload);
-        WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
-            command_id,
-            "sigil-tui",
-            session_id,
-            payload,
-        ))
-    }
-}
-
-fn stable_approval_command_id(session_id: &str, payload: &WorkerApprovalCommand) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"sigil-tui-approval-command-v1\0");
-    hasher.update(session_id.as_bytes());
-    hasher.update(b"\0");
-    match payload {
-        WorkerApprovalCommand::Decision { call_id, approved } => {
-            hasher.update(b"decision\0");
-            hasher.update(call_id.as_bytes());
-            hasher.update(b"\0");
-            let decision_label: &[u8] = if *approved { b"approve" } else { b"deny" };
-            hasher.update(decision_label);
-        }
-        WorkerApprovalCommand::DecisionForSession { call_id } => {
-            hasher.update(b"decision_for_session\0");
-            hasher.update(call_id.as_bytes());
-        }
-        WorkerApprovalCommand::DecisionWithArgs { call_id, args_json } => {
-            hasher.update(b"decision_with_args\0");
-            hasher.update(call_id.as_bytes());
-            hasher.update(b"\0");
-            hasher.update(args_json.as_bytes());
-        }
-    }
-    let digest = hasher.finalize();
-    let short_hash = digest
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("tui-approval-{short_hash}")
-}
-
-fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskRunStatus::Started => "started",
-        sigil_kernel::TaskRunStatus::Running => "running",
-        sigil_kernel::TaskRunStatus::Paused => "paused",
-        sigil_kernel::TaskRunStatus::Completed => "completed",
-        sigil_kernel::TaskRunStatus::Failed => "failed",
-        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
-        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
-fn task_run_finish_notice(
-    task_id: &str,
-    status: sigil_kernel::TaskRunStatus,
-    entries: &[sigil_kernel::SessionLogEntry],
-) -> String {
-    let label = task_run_status_label(status);
-    let reason = entries.iter().rev().find_map(|entry| {
-        let sigil_kernel::SessionLogEntry::Control(ControlEntry::TaskRun(run)) = entry else {
-            return None;
-        };
-        if run.task_id.as_str() == task_id
-            && run.status == status
-            && !matches!(status, sigil_kernel::TaskRunStatus::Completed)
-        {
-            return run
-                .reason
-                .as_deref()
-                .filter(|value| !value.trim().is_empty());
-        }
-        None
-    });
-    if let Some(reason) = reason {
-        format!("task {task_id} {label}: {reason}")
-    } else {
-        format!("task {task_id} {label}")
-    }
-}
-
-fn mcp_activation_event_detail(server_name: Option<&str>, status: &McpActivationStatus) -> String {
-    let scope = server_name
-        .map(|name| format!("server={name} "))
-        .unwrap_or_default();
-    let status = match status {
-        McpActivationStatus::Activating => "activating".to_owned(),
-        McpActivationStatus::Refreshing => "refreshing".to_owned(),
-        McpActivationStatus::Deferred => "deferred".to_owned(),
-        McpActivationStatus::Stale { capability } => format!("stale {capability}"),
-        McpActivationStatus::Ready {
-            added_tools,
-            process_coverage,
-        } => process_coverage
-            .as_deref()
-            .map(|coverage| format!("ready tools={added_tools} coverage={coverage}"))
-            .unwrap_or_else(|| format!("ready tools={added_tools}")),
-        McpActivationStatus::Failed { error } => format!("failed {}", summarize_error(error)),
-    };
-    format!("{scope}{status}")
-}
-
-fn mcp_progress_detail(notification: &sigil_runtime::McpProgressNotification) -> String {
-    let message = notification
-        .message
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("working");
-    match (notification.progress, notification.total) {
-        (Some(progress), Some(total)) if total > 0.0 => format!(
-            "{}: {} {:.0}%",
-            notification.server_name,
-            message,
-            (progress / total * 100.0).clamp(0.0, 100.0)
-        ),
-        (Some(progress), _) => format!("{}: {} {:.0}", notification.server_name, message, progress),
-        _ => format!("{}: {}", notification.server_name, message),
-    }
-}
-
-fn code_intelligence_server_lines(result: &ToolResult) -> Option<Vec<(String, String)>> {
-    let servers = result
-        .metadata
-        .details
-        .get("code_intelligence")
-        .and_then(|details| details.get("servers"))
-        .and_then(serde_json::Value::as_array)?;
-    let mut lines = Vec::new();
-    for server in servers {
-        let server_name = server
-            .get("server")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("server");
-        let status = server
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("ready");
-        let languages = server
-            .get("languages")
-            .and_then(serde_json::Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .filter(|language| !language.trim().is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let label = if languages.is_empty() {
-            server_name.to_owned()
-        } else {
-            languages.join("/")
-        };
-        let line = match status {
-            "ready" => format!("{label}: ready {server_name}"),
-            "fallback" => format!("{label}: fallback {server_name}"),
-            "installed" => format!("{label}: installed {server_name}"),
-            "missing" => format!("{label}: missing {server_name}"),
-            "configured" => format!("{label}: configured {server_name}"),
-            "disabled" => format!("{label}: disabled {server_name}"),
-            other => format!("{label}: {other}"),
-        };
-        lines.push((server_name.to_owned(), line));
-    }
-    Some(lines)
-}
-
-fn code_diagnostics_status_line(result: &ToolResult) -> Option<String> {
-    if result.tool_name != "code_diagnostics" || result.is_error() {
-        return None;
-    }
-    let content = serde_json::from_str::<serde_json::Value>(&result.content).ok()?;
-    let diagnostics = content
-        .get("diagnostics")
-        .or_else(|| content.get("results"))?
-        .as_array()?;
-    let errors = diagnostics
-        .iter()
-        .filter(|diagnostic| {
-            diagnostic
-                .get("severity")
-                .and_then(serde_json::Value::as_str)
-                == Some("error")
-        })
-        .count();
-    let warnings = diagnostics
-        .iter()
-        .filter(|diagnostic| {
-            diagnostic
-                .get("severity")
-                .and_then(serde_json::Value::as_str)
-                == Some("warning")
-        })
-        .count();
-    if errors == 0 && warnings == 0 {
-        Some("diagnostics clean".to_owned())
-    } else {
-        Some(format!("diagnostics {errors} errors {warnings} warnings"))
-    }
-}
-
-fn code_diagnostics_by_path(
-    result: &ToolResult,
-) -> Option<BTreeMap<String, ApprovalDiagnosticSummary>> {
-    if result.tool_name != "code_diagnostics" || result.is_error() {
-        return None;
-    }
-    let content = serde_json::from_str::<serde_json::Value>(&result.content).ok()?;
-    let mut summaries = BTreeMap::<String, ApprovalDiagnosticSummary>::new();
-    if let Some(paths) = content
-        .get("query")
-        .and_then(|query| query.get("paths"))
-        .and_then(serde_json::Value::as_array)
-    {
-        for path in paths.iter().filter_map(serde_json::Value::as_str) {
-            summaries
-                .entry(normalize_diagnostic_path(path))
-                .or_default();
-        }
-    }
-
-    let diagnostics = content
-        .get("diagnostics")
-        .or_else(|| content.get("results"))?
-        .as_array()?;
-    for diagnostic in diagnostics {
-        let Some(path) = diagnostic
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .map(normalize_diagnostic_path)
-        else {
-            continue;
-        };
-        let summary = summaries.entry(path).or_default();
-        match diagnostic
-            .get("severity")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("error") => summary.errors += 1,
-            Some("warning") => summary.warnings += 1,
-            _ => {}
-        }
-    }
-    Some(summaries)
-}
-
-fn normalize_diagnostic_path(path: &str) -> String {
-    path.replace('\\', "/").trim_start_matches("./").to_owned()
-}
-
-fn code_diagnostics_sidebar_line(status_line: &str) -> String {
-    if status_line == "diagnostics clean" {
-        return "diagnostics: clean".to_owned();
-    }
-    status_line
-        .strip_prefix("diagnostics ")
-        .map(|summary| format!("diagnostics: {summary}"))
-        .unwrap_or_else(|| format!("diagnostics: {status_line}"))
-}
-
-impl EventHandler for AppState {
-    fn handle(&mut self, event: RunEvent) -> Result<()> {
-        match event {
-            RunEvent::TextDelta(delta) => {
-                self.runtime.run_phase = RunPhase::Streaming;
-                self.push_phase_marker("streaming".to_owned());
-                self.append_assistant_delta(&delta);
-            }
-            RunEvent::ReasoningDelta(delta) => {
-                self.runtime.run_phase = RunPhase::Thinking;
-                self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
-                self.append_reasoning_delta(&delta);
-            }
-            RunEvent::ToolCallStarted(call) => {
-                self.runtime.run_phase = RunPhase::Tool(call.name.clone());
-                if agent_tool_name(&call.name) {
-                    self.downgrade_streaming_assistant_entry_to_thinking();
-                }
-                self.finish_streaming_assistant_entry();
-                if suppress_reasoning_before_tool_call(&call.name) {
-                    self.discard_streaming_reasoning_entry();
-                } else {
-                    self.finish_streaming_reasoning_entry();
-                }
-                self.push_phase_marker(format!("tool|{}", call.name));
-                self.push_event("tool:start", format!("{} {}", call.name, call.id));
-            }
-            RunEvent::ToolCallArgsDelta { .. } => {
-                if !matches!(self.runtime.run_phase, RunPhase::Tool(_)) {
-                    self.runtime.run_phase = RunPhase::Tool("tool".to_owned());
-                }
-            }
-            RunEvent::ToolCallCompleted(call) => {
-                if agent_tool_name(&call.name) {
-                    self.downgrade_streaming_assistant_entry_to_thinking();
-                }
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
-                if let Some(profile_id) = spawn_agent_profile_id(&call) {
-                    self.set_agent_wait_phase(&profile_id);
-                } else {
-                    self.runtime.run_phase = RunPhase::Tool(call.name.clone());
-                    self.push_phase_marker(format!("tool|{}", call.name));
-                }
-                self.push_event("tool:complete", format!("{} {}", call.name, call.id));
-            }
-            RunEvent::ToolApprovalRequested {
-                call,
-                spec,
-                subjects,
-                operation,
-                risk,
-                subject_zones,
-                confirmation,
-                snapshot_required,
-                preview,
-            } => {
-                self.runtime.run_phase = RunPhase::Tool(call.name.clone());
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
-                if let Some(preview) = preview.as_ref() {
-                    self.tool_preview_snapshots
-                        .entry(call.id.clone())
-                        .or_insert_with(|| {
-                            ToolPreviewSnapshot::from_preview(
-                                call.id.clone(),
-                                call.name.clone(),
-                                preview,
-                                ToolDiffBudget::default(),
-                                None,
-                            )
-                        });
-                }
-                let session_grant_available =
-                    sigil_kernel::tool_approval_session_grant_available_for_parts(
-                        spec.access,
-                        operation,
-                        risk,
-                        &subjects,
-                        &subject_zones,
-                        confirmation.as_ref(),
-                        snapshot_required,
-                    );
-                self.approval.pending = Some(PendingApproval {
-                    call: call.clone(),
-                    session_grant_available,
-                    spec,
-                    subjects,
-                    operation,
-                    risk,
-                    subject_zones,
-                    confirmation,
-                    snapshot_required,
-                    preview,
-                });
-                self.active_pane = PaneFocus::Activity;
-                self.approval.scroll_back = 0;
-                self.approval.metadata_collapsed = false;
-                self.approval.selected_file_index = 0;
-                self.approval.selected_hunk_index = 0;
-                self.approval.selected_action =
-                    ApprovalAction::default_for(risk, session_grant_available);
-                self.last_notice = Some(format!("approve {}", call.name));
-                self.push_event("approval:request", format!("{} {}", call.name, call.id));
-                self.push_timeline(
-                    TimelineRole::Notice,
-                    format!("Approve {}? Y allow once, N deny.", call.name),
-                );
-            }
-            RunEvent::ToolApprovalResolved {
-                call_id,
-                approved,
-                reason,
-            } => {
-                let approved_agent_profile = approved.then(|| {
-                    self.approval
-                        .pending
-                        .as_ref()
-                        .and_then(|pending| spawn_agent_profile_id(&pending.call))
-                });
-                self.approval.pending = None;
-                self.active_pane = PaneFocus::Composer;
-                if let Some(Some(profile_id)) = approved_agent_profile {
-                    self.set_agent_wait_phase(&profile_id);
-                } else {
-                    self.runtime.run_phase = RunPhase::Thinking;
-                    self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
-                }
-                self.push_event(
-                    "approval:resolved",
-                    format!(
-                        "{} {}",
-                        call_id,
-                        if approved { "approved" } else { "denied" }
-                    ),
-                );
-                if approved {
-                    self.push_timeline(TimelineRole::Notice, format!("Approved {call_id}."));
-                } else {
-                    self.push_timeline(
-                        TimelineRole::Notice,
-                        format!(
-                            "Denied {call_id}: {}",
-                            reason.unwrap_or_else(|| "denied".to_owned())
-                        ),
-                    );
-                }
-            }
-            RunEvent::ToolProgress(progress) => {
-                self.runtime.run_phase = RunPhase::Tool(progress.tool_name.clone());
-                self.finish_streaming_assistant_entry();
-                self.finish_streaming_reasoning_entry();
-                self.push_phase_marker(format!("tool|{}", progress.tool_name));
-                let result = tool_progress_result(progress);
-                let rendered =
-                    format_tool_result_block_redacted(&result, None, &self.secret_redactor);
-                if let Some(indices) = tool_card_replacement_indices(&self.timeline, &rendered) {
-                    self.replace_tool_timeline_entries(&indices, rendered);
-                } else {
-                    self.push_timeline(TimelineRole::Tool, rendered);
-                }
-                self.push_event(
-                    "tool:progress",
-                    format!("{} {}", result.tool_name, result.content),
-                );
-            }
-            RunEvent::ToolResult(result) => {
-                let is_agent_tool = agent_tool_name(&result.tool_name);
-                if !is_agent_tool {
-                    self.runtime.run_phase = RunPhase::Tool(result.tool_name.clone());
-                }
-                self.finish_streaming_reasoning_entry();
-                if is_agent_tool {
-                    self.runtime.run_phase = RunPhase::Thinking;
-                    self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
-                } else {
-                    self.push_phase_marker(format!("tool|{}", result.tool_name));
-                }
-                let status = if result.is_error() { "error" } else { "ok" };
-                self.apply_code_intelligence_tool_status(&result);
-                self.apply_mcp_activation_tool_status(&result);
-                let preview = self.tool_preview_snapshots.get(&result.call_id);
-                let rendered =
-                    format_tool_result_block_redacted(&result, preview, &self.secret_redactor);
-                if let Some(indices) =
-                    wait_agent_pending_replacement_indices(&self.timeline, &result, &rendered)
-                {
-                    self.replace_tool_timeline_entries(&indices, rendered);
-                } else if let Some(indices) =
-                    tool_card_replacement_indices(&self.timeline, &rendered)
-                {
-                    self.replace_tool_timeline_entries(&indices, rendered);
-                } else {
-                    self.push_timeline(TimelineRole::Tool, rendered);
-                }
-                self.push_event("tool:result", format!("{} {}", result.tool_name, status));
-            }
-            RunEvent::Usage(usage) => {
-                self.runtime.stats.apply_usage(&usage);
-                self.runtime.session_delta_stats.apply_usage(&usage);
-                self.recompute_compaction_status(true);
-                self.refresh_usage_sidebar_cache();
-                self.push_event(
-                    "usage",
-                    format!(
-                        "prompt={} completion={} cache_hit={} cache_miss={}",
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        usage.cache_hit_tokens,
-                        usage.cache_miss_tokens
-                    ),
-                );
-            }
-            RunEvent::Control(control) => match control {
-                ControlEntry::ToolPreviewCaptured(snapshot) => {
-                    let control = ControlEntry::ToolPreviewCaptured(snapshot.clone());
-                    self.push_event(
-                        "control",
-                        format!(
-                            "preview {} {} files={} +{} -{}",
-                            snapshot.call_id,
-                            snapshot.tool_name,
-                            snapshot.file_diffs.len(),
-                            snapshot.original_stats.added,
-                            snapshot.original_stats.removed
-                        ),
-                    );
-                    self.tool_preview_snapshots
-                        .insert(snapshot.call_id.clone(), snapshot);
-                    self.append_current_session_control(control);
-                }
-                ControlEntry::TerminalTask(task) => {
-                    self.push_event(
-                        "terminal",
-                        format!(
-                            "{} status={}",
-                            task.handle.task_id.as_str(),
-                            task.status.as_str()
-                        ),
-                    );
-                    self.replace_or_push_tool_card(format_terminal_task_block_redacted(
-                        &task,
-                        &self.secret_redactor,
-                    ));
-                    self.append_current_session_control(ControlEntry::TerminalTask(task));
-                }
-                ControlEntry::ToolExecution(execution) => {
-                    if matches!(execution.status, ToolExecutionStatus::Started) {
-                        self.runtime.run_phase = RunPhase::Tool(execution.tool_name.clone());
-                        self.push_phase_marker(format!("tool|{}", execution.tool_name));
-                    }
-                    let control = ControlEntry::ToolExecution(execution);
-                    self.push_event("control", render_control_entry_line(&control));
-                    self.append_current_session_control(control);
-                }
-                ControlEntry::AgentThreadStarted(entry) => {
-                    let control = ControlEntry::AgentThreadStarted(entry.clone());
-                    if matches!(
-                        entry.invocation_source,
-                        sigil_kernel::AgentInvocationSource::Chat
-                            | sigil_kernel::AgentInvocationSource::Mention
-                    ) {
-                        let profile_id = entry.profile_id.as_str();
-                        self.set_agent_wait_phase(profile_id);
-                        self.replace_or_push_tool_card(format_agent_thread_started_block(&entry));
-                        self.push_event("agent:start", entry.objective.clone());
-                    } else {
-                        self.push_event("control", render_control_entry_line(&control));
-                    }
-                    self.append_current_session_control(control);
-                }
-                ControlEntry::AgentThreadStatusChanged(entry) => {
-                    self.push_event(
-                        "agent:status",
-                        format!("{} {:?}", entry.thread_id.as_str(), entry.status),
-                    );
-                    self.replace_or_push_tool_card(format_agent_thread_status_block(&entry));
-                    self.append_current_session_control(ControlEntry::AgentThreadStatusChanged(
-                        entry,
-                    ));
-                }
-                other => {
-                    self.push_event("control", render_control_entry_line(&other));
-                    self.append_current_session_control(other);
-                }
-            },
-            RunEvent::ContinuationState(state) => {
-                self.push_event("continuation", state.state_kind);
-            }
-            RunEvent::AssistantMessage(message) => {
-                if let Some(tool_name) = message.tool_calls.first().map(|call| call.name.clone()) {
-                    self.runtime.run_phase = RunPhase::Tool(tool_name.clone());
-                    self.push_phase_marker(format!("tool|{tool_name}"));
-                } else {
-                    self.runtime.run_phase = RunPhase::Streaming;
-                    self.push_phase_marker("streaming".to_owned());
-                }
-                self.finish_streaming_assistant_entry();
-                if message
-                    .tool_calls
-                    .iter()
-                    .any(|call| suppress_reasoning_before_tool_call(call.name.as_str()))
-                {
-                    self.discard_streaming_reasoning_entry();
-                } else {
-                    self.finish_streaming_reasoning_entry();
-                }
-                if message.assistant_kind != Some(sigil_kernel::AssistantMessageKind::ToolPreamble)
-                    && let Some(content) = message.content
-                {
-                    if message.assistant_kind
-                        == Some(sigil_kernel::AssistantMessageKind::FinalAnswer)
-                    {
-                        self.push_final_assistant_message_once(content);
-                    } else {
-                        self.push_assistant_message_once(content);
-                    }
-                }
-            }
-            RunEvent::Notice(note) => {
-                if notice_rejects_current_final_candidate(&note) {
-                    self.discard_streaming_assistant_entry();
-                }
-                self.last_notice = Some(note.clone());
-                if notice_is_timeline_worthy(&note) {
-                    self.push_timeline(TimelineRole::Notice, note.clone());
-                }
-                self.push_event("notice", note);
-            }
-        }
-        Ok(())
-    }
-}
-
-fn plan_approval_permission_label(
-    permission: sigil_kernel::PlanApprovalPermission,
-) -> &'static str {
-    match permission {
-        sigil_kernel::PlanApprovalPermission::Ask => "ask",
-        sigil_kernel::PlanApprovalPermission::WorkspaceEdits => "workspace_edits",
-    }
-}
-
-fn agent_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "spawn_agent" | "wait_agent" | "read_agent_result" | "message_agent" | "close_agent"
-    )
-}
-
-fn suppress_reasoning_before_tool_call(name: &str) -> bool {
-    agent_result_poll_tool_name(name)
-}
-
-fn tool_card_replacement_indices(timeline: &[TimelineEntry], rendered: &str) -> Option<Vec<usize>> {
-    let current_key = tool_card_replacement_key(rendered)?;
-    const RECENT_TOOL_CARD_SCAN: usize = 96;
-    let start_index = timeline.len().saturating_sub(RECENT_TOOL_CARD_SCAN);
-    let indices = timeline
-        .iter()
-        .enumerate()
-        .skip(start_index)
-        .filter_map(|(index, previous)| {
-            if previous.role != TimelineRole::Tool {
-                return None;
-            }
-            let previous_key = tool_card_replacement_key(&previous.text)?;
-            (previous_key == current_key).then_some(index)
-        })
-        .collect::<Vec<_>>();
-    (!indices.is_empty()).then_some(indices)
-}
-
-pub(super) fn tool_card_replacement_key(text: &str) -> Option<String> {
-    terminal_task_key_from_tool_block(text)
-        .or_else(|| execution_key_from_tool_block(text))
-        .or_else(|| agent_thread_key_from_tool_block(text))
-}
-
-fn tool_progress_result(progress: ToolProgressEvent) -> ToolResult {
-    let content = progress
-        .output_preview
-        .clone()
-        .filter(|preview| !preview.is_empty())
-        .unwrap_or_else(|| tool_progress_summary(&progress));
-    let details = tool_progress_details(progress.execution_id.as_str(), progress.details);
-    ToolResult::ok(
-        progress.call_id,
-        progress.tool_name,
-        content,
-        ToolResultMeta {
-            bytes: progress.total_bytes,
-            total_bytes: progress.total_bytes,
-            returned_bytes: progress
-                .output_preview
-                .as_ref()
-                .map(|preview| preview.len() as u64),
-            returned_lines: progress
-                .output_preview
-                .as_ref()
-                .map(|preview| preview.lines().count() as u64),
-            details,
-            ..ToolResultMeta::default()
-        },
-    )
-}
-
-fn tool_progress_summary(progress: &ToolProgressEvent) -> String {
-    progress.message.clone().unwrap_or_else(|| {
-        format!(
-            "{} {}",
-            progress.tool_name,
-            progress.status.replace('_', " ")
-        )
-    })
-}
-
-fn terminal_task_key_from_tool_block(text: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    let tool_name = value.get("tool_name")?.as_str()?;
-    if !matches!(
-        tool_name,
-        "terminal_task" | "terminal_start" | "terminal_read" | "terminal_cancel"
-    ) {
-        return None;
-    }
-    let details = value.get("metadata")?.get("details")?;
-    let terminal_task = details.get("terminal_task").unwrap_or(details);
-    terminal_task
-        .get("status")
-        .and_then(serde_json::Value::as_str)?;
-    let task_id = terminal_task
-        .get("task_id")
-        .and_then(serde_json::Value::as_str)?
-        .trim();
-    (!task_id.is_empty()).then(|| format!("terminal_task:{task_id}"))
-}
-
-fn execution_key_from_tool_block(text: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    let execution_id = value
-        .get("metadata")?
-        .get("details")?
-        .get("execution_id")
-        .and_then(serde_json::Value::as_str)?
-        .trim();
-    (!execution_id.is_empty()).then(|| format!("tool_execution:{execution_id}"))
-}
-
-fn agent_thread_key_from_tool_block(text: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    let tool_name = value.get("tool_name")?.as_str()?;
-    if !matches!(tool_name, "spawn_agent" | "wait_agent") {
-        return None;
-    }
-    let thread_id = value
-        .get("preview_value")
-        .and_then(|preview| preview.get("thread_id"))
-        .and_then(serde_json::Value::as_str)?
-        .trim();
-    (!thread_id.is_empty()).then(|| format!("agent_thread:{thread_id}"))
-}
-
-fn tool_progress_details(execution_id: &str, details: serde_json::Value) -> serde_json::Value {
-    match details {
-        serde_json::Value::Object(mut object) => {
-            object
-                .entry("execution_id".to_owned())
-                .or_insert_with(|| serde_json::Value::String(execution_id.to_owned()));
-            serde_json::Value::Object(object)
-        }
-        other => serde_json::json!({
-            "execution_id": execution_id,
-            "progress_details": other,
-        }),
-    }
-}
-
-fn wait_agent_pending_replacement_indices(
-    timeline: &[TimelineEntry],
-    result: &ToolResult,
-    rendered: &str,
-) -> Option<Vec<usize>> {
-    let current_key = wait_agent_pending_key_from_result(result, rendered)?;
-    const RECENT_PENDING_WAIT_AGENT_SCAN: usize = 64;
-    let start_index = timeline
-        .len()
-        .saturating_sub(RECENT_PENDING_WAIT_AGENT_SCAN);
-    let indices = timeline
-        .iter()
-        .enumerate()
-        .skip(start_index)
-        .filter_map(|(index, previous)| {
-            (previous.role == TimelineRole::Tool
-                && wait_agent_pending_key_from_tool_block(&previous.text)
-                    .is_some_and(|previous_key| previous_key == current_key))
-            .then_some(index)
-        })
-        .collect::<Vec<_>>();
-    (!indices.is_empty()).then_some(indices)
-}
-
-fn wait_agent_pending_key_from_result(result: &ToolResult, rendered: &str) -> Option<String> {
-    if result.tool_name != "wait_agent" || result.is_error() {
-        return None;
-    }
-    wait_agent_pending_key_from_tool_block(rendered)
-}
-
-fn wait_agent_pending_key_from_tool_block(text: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    if value.get("tool_name")?.as_str()? != "wait_agent" {
-        return None;
-    }
-    if value.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
-        return None;
-    }
-    let preview = value.get("preview_value")?;
-    if preview
-        .get("terminal")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    preview.get("retry_after_ms")?;
-    preview
-        .get("coalescing_key")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            preview
-                .get("thread_id")
-                .and_then(serde_json::Value::as_str)
-                .map(|thread_id| format!("wait_agent:{thread_id}"))
-        })
-}
-
-fn notice_is_timeline_worthy(note: &str) -> bool {
-    let normalized = note.to_ascii_lowercase();
-    [
-        "failed",
-        "failure",
-        "error",
-        "denied",
-        "timeout",
-        "timed out",
-        "deadline",
-        "exceeded",
-        "unavailable",
-        "invalid",
-        "cancelled",
-        "canceled",
-        "interrupted",
-        "panic",
-        "rejected",
-        "budget",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
-}
-
-fn notice_rejects_current_final_candidate(note: &str) -> bool {
-    matches!(
-        note,
-        "agent delegation required before final answer; retrying with explicit agent-tool instruction"
-            | "agent delegation requirement was not satisfied; no final answer was recorded"
-            | "pending agent state blocks final answer; continuing"
-            | "recorded run facts added before final answer; continuing"
-    )
-}
-
-fn spawn_agent_profile_id(call: &ToolCall) -> Option<String> {
-    if call.name != "spawn_agent" {
-        return None;
-    }
-    serde_json::from_str::<serde_json::Value>(&call.args_json)
-        .ok()?
-        .get("profile_id")?
-        .as_str()
-        .filter(|profile_id| !profile_id.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn summarize_queued_prompt(prompt: &str) -> String {
-    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= 48 {
-        normalized
-    } else {
-        format!("{}...", normalized.chars().take(45).collect::<String>())
-    }
-}
-
-fn queued_prompt_summary_noun(target: &sigil_kernel::ConversationInputTarget) -> &'static str {
-    match target {
-        sigil_kernel::ConversationInputTarget::MainThread => "follow-up",
-        sigil_kernel::ConversationInputTarget::AgentThread { .. } => "agent message",
     }
 }
 

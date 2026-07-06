@@ -129,6 +129,9 @@ impl AppState {
         } else {
             current.saturating_sub(1)
         };
+        if next_position == current {
+            return false;
+        }
         self.sidebar_agent_selected = selectable[next_position];
         true
     }

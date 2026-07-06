@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::ModelRequestConfig;
 use sigil_runtime::{
-    DEEPSEEK_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse, ProviderConfigFields,
-    ProviderStatusConfig, deepseek_provider_status_config, default_provider_config_fields,
-    provider_status_config_from_fields,
+    DEFAULT_SETUP_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse,
+    ProviderConfigFields, ProviderStatusConfig, default_provider_config_fields,
+    provider_model_status_config, provider_model_status_config_from_fields,
 };
 
 use super::{
@@ -434,7 +434,8 @@ impl AppState {
                 ModelPickerTarget::ProviderFim => state.draft.provider_model.trim(),
                 _ => current.trim(),
             };
-            let defaults = default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, fallback_model);
+            let provider_name = state.draft.provider_name.as_str();
+            let defaults = default_provider_config_fields(provider_name, fallback_model);
             let model_request = model_request_config_from_draft_or_default(
                 &state.draft.model_request_timeout_secs,
                 &state.draft.model_request_stream_idle_timeout_secs,
@@ -444,27 +445,41 @@ impl AppState {
                 api_key: state.draft.provider_api_key.trim().to_owned(),
                 base_url: non_empty_or(&state.draft.provider_base_url, &defaults.base_url),
             };
-            return provider_status_config_from_fields(&fields, &model_request);
+            return provider_model_status_config_from_fields(
+                provider_name,
+                &fields,
+                &model_request,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("provider model list unavailable"));
         }
 
         if let Some(state) = &self.setup_state {
-            let defaults = default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, current.trim());
+            let defaults =
+                default_provider_config_fields(DEFAULT_SETUP_PROVIDER_KEY, current.trim());
             let fields = ProviderConfigFields {
                 model: current.trim().to_owned(),
                 api_key: state.api_key.trim().to_owned(),
                 base_url: defaults.base_url,
             };
-            return provider_status_config_from_fields(&fields, &ModelRequestConfig::default());
+            return provider_model_status_config_from_fields(
+                DEFAULT_SETUP_PROVIDER_KEY,
+                &fields,
+                &ModelRequestConfig::default(),
+            )?
+            .ok_or_else(|| anyhow::anyhow!("provider model list unavailable"));
         }
 
         if let Some(root_config) = self.config_snapshot.as_ref() {
-            return deepseek_provider_status_config(root_config);
+            return provider_model_status_config(root_config)?
+                .ok_or_else(|| anyhow::anyhow!("provider model list unavailable"));
         }
 
-        provider_status_config_from_fields(
-            &default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, current.trim()),
+        provider_model_status_config_from_fields(
+            DEFAULT_SETUP_PROVIDER_KEY,
+            &default_provider_config_fields(DEFAULT_SETUP_PROVIDER_KEY, current.trim()),
             &ModelRequestConfig::default(),
         )
+        .and_then(|config| config.ok_or_else(|| anyhow::anyhow!("provider model list unavailable")))
     }
 
     pub(super) fn open_secret_input(&mut self, target: SecretInputTarget, current: &str) {

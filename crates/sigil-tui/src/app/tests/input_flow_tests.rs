@@ -783,7 +783,7 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
 }
 
 #[test]
-fn composer_agent_up_at_first_item_does_not_focus_queue_panel() -> Result<()> {
+fn composer_agent_up_at_first_item_returns_to_composer() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     let mut entries = app.session_browser.current_entries.clone();
@@ -800,8 +800,9 @@ fn composer_agent_up_at_first_item_does_not_focus_queue_panel() -> Result<()> {
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert!(app.is_composer_agent_panel_focused());
+    assert!(!app.is_composer_agent_panel_focused());
     assert!(!app.is_composer_queue_panel_focused());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.sidebar_agent_selected, 0);
     Ok(())
 }
@@ -1702,7 +1703,7 @@ fn composer_down_moves_wrapped_input_before_agent_panel_focus() -> Result<()> {
 }
 
 #[test]
-fn composer_agent_panel_up_stays_in_agent_panel_and_escape_returns_to_input() -> Result<()> {
+fn composer_agent_panel_up_at_first_item_returns_to_input() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     let mut entries = app.session_browser.current_entries.clone();
@@ -1716,13 +1717,10 @@ fn composer_agent_panel_up_stays_in_agent_panel_and_escape_returns_to_input() ->
     assert!(!app.is_composer_queue_panel_focused());
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert!(app.is_composer_agent_panel_focused());
+    assert!(!app.is_composer_agent_panel_focused());
     assert_eq!(app.sidebar_agent_selected, 0);
     assert!(!app.is_composer_queue_panel_focused());
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-    assert!(!app.is_composer_agent_panel_focused());
-    assert!(!app.is_composer_queue_panel_focused());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
     assert!(app.composer.input.is_empty());
     Ok(())
 }

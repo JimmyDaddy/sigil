@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,6 +12,10 @@ use sigil_kernel::{
 };
 
 use crate::slash::KNOWN_MODEL_IDS;
+
+use super::file_type::{
+    path_has_code_or_data_extension, path_has_document_extension, path_language,
+};
 
 const TOOL_DISPLAY_CONTENT_MAX_BYTES: usize = 64 * 1024;
 const RESTORED_TOOL_ENVELOPE_PARSE_MAX_BYTES: usize = 128 * 1024;
@@ -91,20 +94,6 @@ pub(super) fn sidebar_width_for_terminal(total_width: usize) -> usize {
         return 24;
     }
     ((total_width * 28) / 100).clamp(28, 42)
-}
-
-pub(super) fn normalize_runtime_model(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let normalized = match trimmed.to_ascii_lowercase().as_str() {
-        "flash" | "v4-flash" => "deepseek-v4-flash".to_owned(),
-        "pro" | "v4-pro" => "deepseek-v4-pro".to_owned(),
-        _ => trimmed.to_owned(),
-    };
-    Some(normalized)
 }
 
 pub(super) fn normalize_command_prefix_character(character: char) -> Option<char> {
@@ -349,7 +338,10 @@ pub(super) fn format_terminal_task_block_redacted(
             "details": redactor.redact_value(&details)
         }
     });
-    serde_json::to_string(&object).expect("terminal task payload should serialize")
+    serde_json::to_string(&object).unwrap_or_else(|_| {
+        r#"{"tool_name":"terminal_task","status":"error","summary":"failed to serialize terminal task payload","preview_kind":"text","preview_lines":[],"hidden_lines":0}"#
+            .to_owned()
+    })
 }
 
 pub(super) fn format_tool_content_block_redacted_for_restore(
@@ -922,108 +914,6 @@ fn call_summary_value(call_summary: &str, key: &str) -> Option<String> {
         .find(|character: char| character.is_whitespace())
         .unwrap_or(tail.len());
     Some(tail[..end].trim().to_owned()).filter(|value| !value.is_empty())
-}
-
-fn path_language(path: String) -> Option<String> {
-    path_extension(&path)
-        .and_then(|extension| match extension.as_str() {
-            "rs" => Some("rust"),
-            "toml" | "lock" => Some("toml"),
-            "json" | "jsonl" => Some("json"),
-            "yaml" | "yml" => Some("yaml"),
-            "js" | "jsx" => Some("javascript"),
-            "ts" | "tsx" => Some("typescript"),
-            "py" => Some("python"),
-            "go" => Some("go"),
-            "java" => Some("java"),
-            "kt" | "kts" => Some("kotlin"),
-            "c" | "h" => Some("c"),
-            "cc" | "cpp" | "cxx" | "hpp" => Some("cpp"),
-            "cs" => Some("c#"),
-            "swift" => Some("swift"),
-            "rb" => Some("ruby"),
-            "php" => Some("php"),
-            "sh" | "bash" | "zsh" | "fish" => Some("bash"),
-            "sql" => Some("sql"),
-            "html" => Some("html"),
-            "css" | "scss" | "sass" => Some("css"),
-            "xml" | "svg" => Some("xml"),
-            "lua" => Some("lua"),
-            "vim" => Some("vim"),
-            "dockerfile" => Some("dockerfile"),
-            _ => None,
-        })
-        .map(str::to_owned)
-}
-
-fn path_has_document_extension(path: &str) -> bool {
-    path_extension(path).is_some_and(|extension| {
-        matches!(
-            extension.as_str(),
-            "md" | "markdown" | "mdown" | "mkd" | "rst" | "adoc" | "asciidoc"
-        )
-    })
-}
-
-fn path_has_code_or_data_extension(path: &str) -> bool {
-    path_extension(path).is_some_and(|extension| {
-        matches!(
-            extension.as_str(),
-            "rs" | "toml"
-                | "lock"
-                | "json"
-                | "jsonl"
-                | "yaml"
-                | "yml"
-                | "js"
-                | "jsx"
-                | "ts"
-                | "tsx"
-                | "py"
-                | "go"
-                | "java"
-                | "kt"
-                | "kts"
-                | "c"
-                | "h"
-                | "cc"
-                | "cpp"
-                | "cxx"
-                | "hpp"
-                | "cs"
-                | "swift"
-                | "rb"
-                | "php"
-                | "sh"
-                | "bash"
-                | "zsh"
-                | "fish"
-                | "sql"
-                | "html"
-                | "css"
-                | "scss"
-                | "sass"
-                | "xml"
-                | "svg"
-                | "lua"
-                | "vim"
-                | "dockerfile"
-        )
-    })
-}
-
-fn path_extension(path: &str) -> Option<String> {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .or_else(|| {
-            Path::new(path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| name.eq_ignore_ascii_case("Dockerfile"))
-                .map(|_| "dockerfile".to_owned())
-        })
 }
 
 fn agent_tool_preview_source(

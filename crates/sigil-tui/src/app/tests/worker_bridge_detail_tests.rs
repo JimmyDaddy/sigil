@@ -2,6 +2,8 @@ use super::*;
 use serde_json::json;
 use sigil_kernel::{ToolErrorKind, ToolResultMeta};
 
+use crate::{approval::ApprovalDiagnosticSummary, runner::McpActivationStatus};
+
 #[test]
 fn mcp_activation_event_detail_formats_scope_and_errors() {
     assert_eq!(

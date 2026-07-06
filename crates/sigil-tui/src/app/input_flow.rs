@@ -1,10 +1,13 @@
 use std::ops::Range;
 
+use crossterm::event::{KeyCode, KeyEvent};
 use unicode_width::UnicodeWidthChar;
 
 use super::{
-    AppState, ComposerPasteSpan, PaneFocus, char_to_byte_index,
-    formatting::sidebar_width_for_terminal,
+    AppAction, AppState, ComposerPasteSpan, PaneFocus, char_to_byte_index,
+    formatting::{normalize_command_prefix_character, sidebar_width_for_terminal},
+    has_alt_without_control, has_control_without_alt, is_composer_newline_key,
+    is_composer_submit_key, is_composer_text_key,
 };
 
 const LARGE_PASTE_COLLAPSE_THRESHOLD_CHARS: usize = 10_000;
@@ -127,6 +130,219 @@ impl AppState {
             char_count,
             line_count: text.matches('\n').count() + 1,
         });
+    }
+
+    pub(super) fn handle_composer_key_event(
+        &mut self,
+        key: KeyEvent,
+    ) -> anyhow::Result<Option<Option<AppAction>>> {
+        match key.code {
+            KeyCode::Char('z') | KeyCode::Char('Z')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                if self.restore_cleared_input_draft() {
+                    self.reset_input_history_navigation();
+                    self.reset_slash_selector();
+                    self.last_notice = Some("draft restored".to_owned());
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_line_start();
+            }
+            KeyCode::Char('e') | KeyCode::Char('E')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_line_end();
+            }
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_left();
+            }
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_right();
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.remove_input_character_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('w') | KeyCode::Char('W')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.remove_input_word_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('k') | KeyCode::Char('K')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.kill_input_to_line_end();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.yank_input_kill_buffer();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('j') | KeyCode::Char('J')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.insert_input_character('\n');
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if self.active_pane == PaneFocus::Composer && has_alt_without_control(key) =>
+            {
+                self.move_input_cursor_word_left();
+            }
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if self.active_pane == PaneFocus::Composer && has_alt_without_control(key) =>
+            {
+                self.move_input_cursor_word_right();
+            }
+            KeyCode::Tab
+                if self.active_pane == PaneFocus::Composer && self.has_slash_selector() =>
+            {
+                self.accept_slash_selector();
+            }
+            KeyCode::BackTab
+                if self.active_pane == PaneFocus::Composer && self.has_slash_selector() =>
+            {
+                self.move_slash_selector(false);
+            }
+            KeyCode::Tab if self.active_pane == PaneFocus::Composer && key.modifiers.is_empty() => {
+                self.focus_composer_queue_panel();
+            }
+            KeyCode::Up
+                if self.active_pane == PaneFocus::Composer
+                    && self.composer.input_history_index.is_some()
+                    && key.modifiers.is_empty() =>
+            {
+                self.navigate_input_history(true);
+            }
+            KeyCode::Down
+                if self.active_pane == PaneFocus::Composer
+                    && self.composer.input_history_index.is_some()
+                    && key.modifiers.is_empty() =>
+            {
+                self.navigate_input_history(false);
+            }
+            KeyCode::Up if self.active_pane == PaneFocus::Composer && self.has_slash_selector() => {
+                self.move_slash_selector(false)
+            }
+            KeyCode::Down
+                if self.active_pane == PaneFocus::Composer && self.has_slash_selector() =>
+            {
+                self.move_slash_selector(true)
+            }
+            KeyCode::Up if self.active_pane == PaneFocus::Composer => {
+                if self.input_cursor_visual_row() == 0 {
+                    self.navigate_input_history(true);
+                } else {
+                    self.move_input_cursor_vertical(true);
+                }
+            }
+            KeyCode::Down if self.active_pane == PaneFocus::Composer => {
+                if self.input_cursor_visual_row() == self.input_last_visual_row() {
+                    self.navigate_input_history(false);
+                } else {
+                    self.move_input_cursor_vertical(false);
+                }
+            }
+            KeyCode::Home if self.active_pane == PaneFocus::Composer => {
+                self.move_input_cursor_home()
+            }
+            KeyCode::End if self.active_pane == PaneFocus::Composer => self.move_input_cursor_end(),
+            KeyCode::Left
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.move_input_cursor_word_left();
+            }
+            KeyCode::Right
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.move_input_cursor_word_right();
+            }
+            KeyCode::Left if self.active_pane == PaneFocus::Composer => {
+                self.move_input_cursor_left()
+            }
+            KeyCode::Right if self.active_pane == PaneFocus::Composer => {
+                self.move_input_cursor_right()
+            }
+            KeyCode::Backspace
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.remove_input_word_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Backspace => {
+                self.active_pane = PaneFocus::Composer;
+                self.blur_composer_aux_panels();
+                self.remove_input_character_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Delete
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.remove_input_word_after_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Delete if self.active_pane == PaneFocus::Composer => {
+                self.remove_input_character_at_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            _ if self.active_pane == PaneFocus::Composer && is_composer_newline_key(key) => {
+                self.active_pane = PaneFocus::Composer;
+                self.blur_composer_aux_panels();
+                self.insert_input_character('\n');
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            _ if is_composer_submit_key(key) => {
+                self.active_pane = PaneFocus::Composer;
+                self.blur_composer_aux_panels();
+                if self.should_accept_slash_selector_on_enter() {
+                    self.accept_slash_selector();
+                    return Ok(Some(None));
+                }
+                return self.submit_input().map(Some);
+            }
+            KeyCode::Char(character) if is_composer_text_key(key) => {
+                self.active_pane = PaneFocus::Composer;
+                self.blur_composer_aux_panels();
+                let normalized = if normalize_command_prefix_character(character).is_some()
+                    && self.composer.input.trim().is_empty()
+                {
+                    '/'
+                } else {
+                    character
+                };
+                self.insert_input_character(normalized);
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            _ => return Ok(None),
+        }
+        Ok(Some(None))
     }
 
     pub(crate) fn composer_display_input(&self) -> String {
