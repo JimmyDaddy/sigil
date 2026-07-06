@@ -2,7 +2,9 @@ use super::*;
 
 pub(super) struct ResultPageRequest {
     offset_chars: usize,
+    requested_max_chars: Option<usize>,
     max_chars: usize,
+    max_chars_clamped: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -13,19 +15,23 @@ pub(super) struct ResultPage {
     pub(super) total_chars: usize,
     pub(super) next_offset_chars: Option<usize>,
     pub(super) truncated: bool,
+    pub(super) requested_max_chars: Option<usize>,
+    pub(super) max_chars: usize,
+    pub(super) max_chars_clamped: bool,
 }
 
 pub(super) fn required_result_page_request_arg(args: &Value) -> Result<ResultPageRequest> {
     let offset_chars = optional_usize_arg(args, "offset_chars")?.unwrap_or(0);
-    let max_chars = optional_usize_arg(args, "max_chars")?.unwrap_or(DEFAULT_RESULT_PAGE_LIMIT);
-    if !(MIN_RESULT_SUMMARY_LIMIT..=MAX_RESULT_PAGE_LIMIT).contains(&max_chars) {
-        return Err(anyhow!(
-            "max_chars must be between {MIN_RESULT_SUMMARY_LIMIT} and {MAX_RESULT_PAGE_LIMIT}"
-        ));
-    }
+    let requested_max_chars = optional_usize_arg(args, "max_chars")?;
+    let max_chars = requested_max_chars
+        .unwrap_or(DEFAULT_RESULT_PAGE_LIMIT)
+        .clamp(MIN_RESULT_SUMMARY_LIMIT, MAX_RESULT_PAGE_LIMIT);
+    let max_chars_clamped = requested_max_chars.is_some_and(|requested| requested != max_chars);
     Ok(ResultPageRequest {
         offset_chars,
+        requested_max_chars,
         max_chars,
+        max_chars_clamped,
     })
 }
 
@@ -118,6 +124,9 @@ pub(super) fn slice_result_page(full_text: &str, request: ResultPageRequest) -> 
         total_chars,
         next_offset_chars: truncated.then_some(end_offset),
         truncated,
+        requested_max_chars: request.requested_max_chars,
+        max_chars: request.max_chars,
+        max_chars_clamped: request.max_chars_clamped,
     }
 }
 
@@ -151,12 +160,16 @@ pub(super) fn agent_result_tool_result(
     let summary = bounded_summary(&result.summary, max_summary_chars);
     let summary_truncated =
         result.summary_truncated || summary.chars().count() < result.summary.chars().count();
-    let result_fetch = json!({
-        "tool": READ_AGENT_RESULT_TOOL_NAME,
+    let read_args = json!({
         "thread_id": result.thread_id.as_str(),
         "offset_chars": 0,
-        "max_chars": DEFAULT_RESULT_PAGE_LIMIT,
-        "max_page_chars": MAX_RESULT_PAGE_LIMIT
+        "max_chars": MAX_RESULT_PAGE_LIMIT
+    });
+    let result_fetch = json!({
+        "tool": READ_AGENT_RESULT_TOOL_NAME,
+        "args": read_args,
+        "max_page_chars": MAX_RESULT_PAGE_LIMIT,
+        "next_action": "call read_agent_result with result_fetch.args exactly; do not estimate max_chars from char_count"
     });
     let payload = json!({
         "thread_id": result.thread_id.as_str(),
@@ -257,9 +270,10 @@ pub(super) fn agent_status_tool_result(
             "read_args": {
                 "thread_id": result.thread_id.as_str(),
                 "offset_chars": 0,
-                "max_chars": DEFAULT_RESULT_PAGE_LIMIT,
-                "max_page_chars": MAX_RESULT_PAGE_LIMIT
-            }
+                "max_chars": MAX_RESULT_PAGE_LIMIT
+            },
+            "max_page_chars": MAX_RESULT_PAGE_LIMIT,
+            "next_action": "call read_agent_result with result_ref.read_args exactly; do not estimate max_chars from char_count"
         })),
     });
     ToolResult::ok(
@@ -336,6 +350,26 @@ pub(super) fn agent_result_page_tool_result(
     result: &AgentThreadResult,
     page: &ResultPage,
 ) -> ToolResult {
+    let next_read_args = page.next_offset_chars.map(|offset_chars| {
+        json!({
+            "thread_id": result.thread_id.as_str(),
+            "offset_chars": offset_chars,
+            "max_chars": MAX_RESULT_PAGE_LIMIT,
+        })
+    });
+    let next_action = if page.truncated {
+        "call read_agent_result with next_read_args to read the next page; do not increase max_chars"
+    } else {
+        "this child result page reaches the end; do not call read_agent_result again for this result"
+    };
+    let request = json!({
+        "offset_chars": page.offset_chars,
+        "requested_max_chars": page.requested_max_chars,
+        "max_chars": page.max_chars,
+        "max_chars_clamped": page.max_chars_clamped,
+        "min_page_chars": MIN_RESULT_SUMMARY_LIMIT,
+        "max_page_chars": MAX_RESULT_PAGE_LIMIT,
+    });
     let persistent_payload = json!({
         "thread_id": result.thread_id.as_str(),
         "status": terminal_status_label(result.status),
@@ -355,7 +389,10 @@ pub(super) fn agent_result_page_tool_result(
             "truncated": page.truncated,
             "text_omitted": true,
             "text_delivery": "transient_context"
-        }
+        },
+        "request": request.clone(),
+        "next_read_args": next_read_args.clone(),
+        "next_action": next_action,
     });
     let transient_payload = json!({
         "thread_id": result.thread_id.as_str(),
@@ -375,7 +412,10 @@ pub(super) fn agent_result_page_tool_result(
             "total_chars": page.total_chars,
             "next_offset_chars": page.next_offset_chars,
             "truncated": page.truncated
-        }
+        },
+        "request": request,
+        "next_read_args": next_read_args,
+        "next_action": next_action,
     });
     ToolResult::ok(
         call.id.clone(),
@@ -390,8 +430,12 @@ pub(super) fn agent_result_page_tool_result(
                 "status": terminal_status_label(result.status),
                 "output_hash": result.output_hash,
                 "offset_chars": page.offset_chars,
+                "requested_max_chars": page.requested_max_chars,
+                "max_chars": page.max_chars,
+                "max_chars_clamped": page.max_chars_clamped,
                 "returned_chars": page.returned_chars,
                 "total_chars": page.total_chars,
+                "next_offset_chars": page.next_offset_chars,
             }),
             ..ToolResultMeta::default()
         },

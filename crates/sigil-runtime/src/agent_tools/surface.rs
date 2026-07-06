@@ -244,7 +244,7 @@ impl AgentTool {
                     .to_owned()
             }
             AgentToolKind::ReadResult => {
-                "Explicitly read a bounded page from a completed child agent final answer. Use only when the parent needs details beyond the bounded agent summary; do not request full child transcripts."
+                "Explicitly read one bounded page from a completed child agent final answer. Use only when the parent needs details beyond the bounded agent summary; do not request full child transcripts. Prefer read_args returned by wait_agent/result_ref and next_read_args returned by this tool. max_chars is a per-page limit; values outside the supported range are clamped and reported in request metadata."
                     .to_owned()
             }
             AgentToolKind::Message => {
@@ -298,10 +298,8 @@ impl AgentTool {
                     },
                     "max_chars": {
                         "type": "integer",
-                        "minimum": 200,
-                        "maximum": 12000,
-                        "default": 4000,
-                        "description": "Maximum characters to return from the child agent final answer."
+                        "default": 40000,
+                        "description": "Maximum characters to return from the child agent final answer. Runtime clamps out-of-range values and reports the effective page size."
                     }
                 },
                 "required": ["thread_id"],

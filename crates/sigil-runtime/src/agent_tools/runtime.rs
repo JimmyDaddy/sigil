@@ -318,18 +318,25 @@ impl AgentToolDelegate for AgentToolRuntime {
                 thread.invocation_mode == Some(AgentInvocationMode::JoinBeforeFinal)
                     && thread.status.is_terminal()
                     && thread.result.is_some()
-                    && !thread.result_delivered
+                    && !thread.result_fully_delivered
                     && !agent_thread_is_backgrounded(thread)
             })
             .map(|thread| {
+                let offset_chars = thread.result_delivered_chars;
                 json!({
                     "thread_id": thread.thread_id.as_str(),
                     "display_name": thread.display_name.as_deref(),
                     "status": thread_status_label(thread.status),
                     "objective": &thread.objective,
+                    "result_delivered_chars": thread.result_delivered_chars,
+                    "result_fully_delivered": thread.result_fully_delivered,
                     "required_action": {
                         "tool": READ_AGENT_RESULT_TOOL_NAME,
-                        "args": { "thread_id": thread.thread_id.as_str() }
+                        "args": {
+                            "thread_id": thread.thread_id.as_str(),
+                            "offset_chars": offset_chars,
+                            "max_chars": MAX_RESULT_PAGE_LIMIT
+                        }
                     }
                 })
             })
@@ -552,6 +559,8 @@ fn collect_session_facts(
             "mode": thread.invocation_mode.map(invocation_mode_label),
             "result_available": thread.result.is_some(),
             "result_read": thread.result_delivered,
+            "result_fully_read": thread.result_fully_delivered,
+            "result_delivered_chars": thread.result_delivered_chars,
             "result_delivery_call_ids": &thread.result_delivery_call_ids,
         }));
     }

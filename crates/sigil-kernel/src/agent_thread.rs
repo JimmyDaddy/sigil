@@ -1306,6 +1306,10 @@ impl AgentThreadStateProjection {
         let thread = self.ensure_thread(&result.thread_id);
         thread.thread_session_ref = Some(result.session_ref.clone());
         thread.result = Some(result.clone());
+        thread.result_delivered = false;
+        thread.result_fully_delivered = false;
+        thread.result_delivered_chars = 0;
+        thread.result_delivery_call_ids.clear();
         if thread.unresolved {
             thread.reason = Some("agent thread start entry missing".to_owned());
             return;
@@ -1324,6 +1328,23 @@ impl AgentThreadStateProjection {
         let thread = self.ensure_thread(&entry.thread_id);
         thread.result_delivered = true;
         thread.result_delivery_call_ids.push(entry.call_id.clone());
+        let result_matches = thread
+            .result
+            .as_ref()
+            .is_some_and(|result| result.output_hash == entry.output_hash);
+        if !result_matches {
+            return;
+        }
+        let page_end = entry.offset_chars.saturating_add(entry.returned_chars);
+        if entry.offset_chars <= thread.result_delivered_chars {
+            thread.result_delivered_chars = thread.result_delivered_chars.max(page_end);
+        }
+        if !entry.truncated
+            && entry.total_chars > 0
+            && thread.result_delivered_chars >= entry.total_chars
+        {
+            thread.result_fully_delivered = true;
+        }
     }
 
     fn apply_display_name(&mut self, entry: &AgentThreadDisplayNameEntry) {
@@ -1413,6 +1434,10 @@ pub struct AgentThreadProjection {
     #[serde(default)]
     pub result_delivered: bool,
     #[serde(default)]
+    pub result_fully_delivered: bool,
+    #[serde(default)]
+    pub result_delivered_chars: usize,
+    #[serde(default)]
     pub result_delivery_call_ids: Vec<String>,
     pub attempts: BTreeMap<AgentRunAttemptId, AgentRunAttemptProjection>,
     pub merge_safe_points: Vec<AgentMergeSafePointEntry>,
@@ -1442,6 +1467,8 @@ impl AgentThreadProjection {
             reason: None,
             result: None,
             result_delivered: false,
+            result_fully_delivered: false,
+            result_delivered_chars: 0,
             result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
@@ -1471,6 +1498,8 @@ impl AgentThreadProjection {
             reason: Some("agent thread start entry missing".to_owned()),
             result: None,
             result_delivered: false,
+            result_fully_delivered: false,
+            result_delivered_chars: 0,
             result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),

@@ -14,9 +14,9 @@ use sigil_kernel::{
 };
 
 use super::{
-    AgentSupervisor, AgentTaskChildStart, BoxedAgent, agent_final_answer_ref, append_control,
-    hash_text,
+    AgentSupervisor, AgentTaskChildStart, BoxedAgent, append_control, hash_text,
     ids::{agent_route_id_for_call, task_route_id_for_call},
+    materialize_child_agent_final_answer,
 };
 
 /// Runtime child runner that connects kernel task orchestration to the supervisor.
@@ -184,8 +184,13 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             } else {
                 None
             };
-        let final_answer_ref = agent_final_answer_ref(&child_session_ref, &output.result);
-        let final_text = output.result.final_text;
+        let materialized = materialize_child_agent_final_answer(
+            &mut child_session,
+            &child_session_ref,
+            &child_thread.thread_id,
+            &output.result,
+        )
+        .await?;
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
         let budget_warning = self
@@ -193,7 +198,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             .validate_usage_budget(&request.task.task_id, &usage)
             .err()
             .map(|error| format!("{error:#}"));
-        let status = task_child_status_from_outcome(&final_text, &outcome);
+        let status = task_child_status_from_outcome(&materialized.final_text, &outcome);
         append_task_child_session(
             route_handler.parent_session,
             handler,
@@ -201,7 +206,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             &child_task_id,
             &child_session_ref,
             status,
-            Some(hash_text(&final_text)),
+            Some(hash_text(&materialized.final_text)),
         )?;
         self.supervisor.record_task_child_result(
             route_handler.parent_session,
@@ -209,10 +214,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             &child_thread,
             child_session_ref.clone(),
             status,
-            &final_text,
+            &materialized,
             &outcome,
             Some(usage),
-            final_answer_ref,
         )?;
         if let Some(warning) = budget_warning {
             let _ = handler.handle(RunEvent::Notice(format!(
@@ -220,7 +224,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             )));
         }
         Ok(TaskChildSessionRunOutput {
-            final_text,
+            final_text: materialized.final_text,
             outcome,
             changeset_proposal,
             changeset_only_after_snapshot_id,

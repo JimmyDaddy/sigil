@@ -1,4 +1,4 @@
-use std::fs;
+use std::{collections::BTreeMap, fs};
 
 use super::*;
 use crate::app::tests::common::test_config;
@@ -123,6 +123,61 @@ fn active_agent_terminal_status_and_transcript_error_paths_are_bounded() -> anyh
         missing_ref,
     )?;
     assert!(!app.active_agent_view_is_terminal());
+    Ok(())
+}
+
+#[test]
+fn agent_thread_sidebar_detail_handles_fully_delivered_result_projection() -> anyhow::Result<()> {
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_done")?;
+    let session_ref = sigil_kernel::SessionRef::new_relative("children/agent_done.jsonl")?;
+    let thread = sigil_kernel::AgentThreadProjection {
+        thread_id: thread_id.clone(),
+        parent_thread_id: None,
+        parent_session_ref: None,
+        thread_session_ref: Some(session_ref.clone()),
+        profile_id: Some(sigil_kernel::AgentProfileId::new("explore")?),
+        profile_snapshot_id: None,
+        run_context: None,
+        objective: "inspect result".to_owned(),
+        prompt_hash: "sha256:prompt".to_owned(),
+        invocation_mode: Some(sigil_kernel::AgentInvocationMode::JoinBeforeFinal),
+        invocation_source: Some(sigil_kernel::AgentInvocationSource::Chat),
+        display_name: None,
+        status: sigil_kernel::AgentThreadStatus::Completed,
+        reason: None,
+        result: Some(sigil_kernel::AgentThreadResult {
+            thread_id,
+            session_ref,
+            status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+            summary: "done".to_owned(),
+            summary_truncated: false,
+            original_summary_chars: None,
+            artifacts: Vec::new(),
+            changed_paths: Vec::new(),
+            risks: Vec::new(),
+            followups: Vec::new(),
+            usage: None,
+            output_hash: "sha256:done".to_owned(),
+            final_answer_ref: None,
+        }),
+        result_delivered: true,
+        result_fully_delivered: true,
+        result_delivered_chars: 40_000,
+        result_delivery_call_ids: vec!["call-read-result".to_owned()],
+        attempts: BTreeMap::new(),
+        merge_safe_points: Vec::new(),
+        duplicate_terminal_entries: 0,
+        closed: false,
+        unresolved: false,
+        profile_snapshot_missing: false,
+        profile_snapshot_mismatch: false,
+    };
+
+    let detail = agent_thread_sidebar_detail(&thread, None, false);
+
+    assert!(detail.contains("completed"));
+    assert!(detail.contains("join-before-final chat"));
+    assert!(detail.contains("result ready"));
     Ok(())
 }
 

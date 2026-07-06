@@ -291,9 +291,30 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let final_answer_ref =
-            agent_final_answer_ref(&child_thread.child_session_ref, &output.result);
-        let final_text = output.result.final_text;
+        let materialized = match materialize_child_agent_final_answer(
+            &mut child_session,
+            &child_thread.child_session_ref,
+            &child_thread.thread_id,
+            &output.result,
+        )
+        .await
+        {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                let _ = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &child_thread,
+                    format!("{error:#}"),
+                );
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
         let budget_warning = self
@@ -301,16 +322,15 @@ impl AgentToolRuntime {
             .validate_usage_budget(&budget_scope_id, &usage)
             .err()
             .map(|error| format!("{error:#}"));
-        let status = child_status_from_outcome(&final_text, &outcome);
+        let status = child_status_from_outcome(&materialized.final_text, &outcome);
         if let Err(error) = self.supervisor.record_chat_child_result(
             session,
             handler,
             &child_thread,
             status,
-            &final_text,
+            &materialized,
             &outcome,
             Some(usage),
-            final_answer_ref,
         ) {
             return ToolResult::error(
                 call.id.clone(),
@@ -561,9 +581,13 @@ impl AgentToolRuntime {
                 return Err(error).context("child agent failed");
             }
         };
-        let final_answer_ref =
-            agent_final_answer_ref(&child_thread.child_session_ref, &output.result);
-        let final_text = output.result.final_text;
+        let materialized = materialize_child_agent_final_answer(
+            &mut child_session,
+            &child_thread.child_session_ref,
+            &child_thread.thread_id,
+            &output.result,
+        )
+        .await?;
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
         let budget_warning = self
@@ -571,16 +595,15 @@ impl AgentToolRuntime {
             .validate_usage_budget(&budget_scope_id, &usage)
             .err()
             .map(|error| format!("{error:#}"));
-        let status = child_status_from_outcome(&final_text, &outcome);
+        let status = child_status_from_outcome(&materialized.final_text, &outcome);
         self.supervisor.record_chat_child_result(
             session,
             handler,
             &child_thread,
             status,
-            &final_text,
+            &materialized,
             &outcome,
             Some(usage),
-            final_answer_ref,
         )?;
         if let Some(warning) = budget_warning {
             let _ = handler.handle(RunEvent::Notice(format!(

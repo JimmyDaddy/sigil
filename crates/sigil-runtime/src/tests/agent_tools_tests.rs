@@ -922,6 +922,10 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
             .get("max_chars")
             .is_some()
     );
+    assert_eq!(
+        read_spec.input_schema["properties"]["max_chars"]["default"],
+        serde_json::Value::from(40_000)
+    );
     let modes = spec.input_schema["properties"]["mode"]["enum"]
         .as_array()
         .expect("mode enum");
@@ -1284,6 +1288,11 @@ async fn ordinary_chat_explicit_subagent_prompt_spawns_child() -> Result<()> {
     let projection = session.agent_thread_state_projection();
     let thread = projection.latest_thread().expect("child agent projected");
     assert!(thread.result_delivered);
+    assert!(thread.result_fully_delivered);
+    assert_eq!(
+        thread.result_delivered_chars,
+        "child summary only".chars().count()
+    );
     assert_eq!(
         thread.result_delivery_call_ids,
         vec!["call-read-spawn-1".to_owned()]
@@ -2048,14 +2057,47 @@ fn final_answer_blocker_requires_completed_join_result_to_be_read() -> Result<()
         payload["unread_threads"][0]["required_action"]["tool"],
         READ_AGENT_RESULT_TOOL_NAME
     );
+    assert_eq!(
+        payload["unread_threads"][0]["required_action"]["args"],
+        json!({
+            "thread_id": thread_id.as_str(),
+            "offset_chars": 0,
+            "max_chars": 40_000
+        })
+    );
 
     session.append_control(ControlEntry::AgentThreadResultDelivered(
         sigil_kernel::AgentThreadResultDeliveredEntry {
             thread_id: thread_id.clone(),
-            call_id: "call-read-result".to_owned(),
+            call_id: "call-read-result-partial".to_owned(),
             output_hash: "sha256:child-result".to_owned(),
             offset_chars: 0,
-            returned_chars: 20,
+            returned_chars: 10,
+            total_chars: 20,
+            truncated: true,
+            delivered_at_ms: None,
+        },
+    ))?;
+    let blocker = runtime
+        .final_answer_blocker(&mut session)?
+        .expect("partial child result page should still block final answer");
+    let payload: serde_json::Value = serde_json::from_str(&blocker)?;
+    assert_eq!(
+        payload["unread_threads"][0]["required_action"]["args"],
+        json!({
+            "thread_id": thread_id.as_str(),
+            "offset_chars": 10,
+            "max_chars": 40_000
+        })
+    );
+
+    session.append_control(ControlEntry::AgentThreadResultDelivered(
+        sigil_kernel::AgentThreadResultDeliveredEntry {
+            thread_id: thread_id.clone(),
+            call_id: "call-read-result-final".to_owned(),
+            output_hash: "sha256:child-result".to_owned(),
+            offset_chars: 10,
+            returned_chars: 10,
             total_chars: 20,
             truncated: false,
             delivered_at_ms: None,
@@ -2926,7 +2968,15 @@ async fn wait_agent_reports_status_without_repeating_bounded_summary() -> Result
     assert_eq!(payload["result_ref"]["original_summary_chars"], 5_001);
     assert_eq!(
         payload["result_ref"]["read_args"]["max_chars"],
-        serde_json::Value::from(4_000)
+        serde_json::Value::from(40_000)
+    );
+    assert_eq!(
+        payload["result_ref"]["max_page_chars"],
+        serde_json::Value::from(40_000)
+    );
+    assert_eq!(
+        payload["result_ref"]["next_action"],
+        "call read_agent_result with result_ref.read_args exactly; do not estimate max_chars from char_count"
     );
     assert!(payload.get("summary").is_none());
     assert!(!wait.content.contains(&"x".repeat(200)));
@@ -2939,7 +2989,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let full_text = format!("alpha\n{}\nomega", "x".repeat(5_200));
+    let full_text = format!("alpha\n{}\nomega", "x".repeat(3_200));
     let mut runtime = AgentToolRuntime::with_provider_factory(
         supervisor,
         config,
@@ -3010,7 +3060,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let wait_payload = wait_payload.expect("wait_agent should collect child result");
-    assert_eq!(wait_payload["result_ref"]["summary_truncated"], true);
+    assert_eq!(wait_payload["result_ref"]["summary_truncated"], false);
     assert_eq!(
         wait_payload["result_ref"]["read_tool"],
         READ_AGENT_RESULT_TOOL_NAME
@@ -3024,7 +3074,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
                 name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
                 args_json: json!({
                     "thread_id": thread_id.as_str(),
-                    "offset_chars": 4_900,
+                    "offset_chars": 2_900,
                     "max_chars": 800
                 })
                 .to_string(),
@@ -3039,7 +3089,7 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
     assert!(read_payload.get("summary").is_none());
     let page = &read_payload["page"];
 
-    assert_eq!(page["offset_chars"], 4_900);
+    assert_eq!(page["offset_chars"], 2_900);
     assert_eq!(page["total_chars"], full_text.chars().count());
     assert!(page.get("text").is_none());
     assert_eq!(page["text_omitted"], true);
@@ -3059,6 +3109,8 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         .get(&thread_id)
         .expect("thread should remain projected after read_agent_result");
     assert!(thread.result_delivered);
+    assert!(!thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 0);
     assert_eq!(
         thread.result_delivery_call_ids,
         vec!["call-page-read".to_owned()]
@@ -3068,6 +3120,295 @@ async fn read_agent_result_pages_full_child_result_from_child_session() -> Resul
         RunEvent::Control(ControlEntry::AgentThreadResultDelivered(entry))
             if entry.thread_id == thread_id
     )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_agent_result_clamps_oversized_page_and_blocks_until_tail_is_read() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let full_text = format!("alpha\n{}\nomega", "x".repeat(40_500));
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(TextProviderFactory {
+            text: String::new(),
+        }),
+    );
+    let temp = tempfile::tempdir()?;
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("parent", "model", parent_store)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let options = run_options(temp.path().to_path_buf());
+    let thread_id = append_projected_agent_thread(
+        &mut session,
+        "agent_chat_clamp_page",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+        AgentThreadStatus::Completed,
+        None,
+    )?;
+    let child_session_ref =
+        sigil_kernel::SessionRef::new_relative(format!("children/{}.jsonl", thread_id.as_str()))?;
+    let child_store = JsonlSessionStore::new(child_session_ref.resolve(temp.path()))?;
+    let mut child_session = Session::load_from_store("child", "model", child_store)?;
+    let child_final_message = sigil_kernel::ModelMessage::assistant_with_kind(
+        Some(full_text.clone()),
+        Vec::new(),
+        sigil_kernel::AssistantMessageKind::FinalAnswer,
+    );
+    let output_hash = super::hash_text(&full_text);
+    let final_answer_ref = sigil_kernel::AgentFinalAnswerRef {
+        session_ref: child_session_ref.clone(),
+        message_id: child_final_message.id.clone(),
+        content_hash: output_hash.clone(),
+        char_count: full_text.chars().count(),
+    };
+    child_session.append_assistant_message(child_final_message)?;
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        sigil_kernel::AgentThreadResultRecordedEntry {
+            result: sigil_kernel::AgentThreadResult {
+                thread_id: thread_id.clone(),
+                session_ref: child_session_ref,
+                status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                summary: full_text.chars().take(4_000).collect(),
+                summary_truncated: true,
+                original_summary_chars: Some(full_text.chars().count()),
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash,
+                final_answer_ref: Some(final_answer_ref),
+            },
+        },
+    ))?;
+
+    let first = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-clamp-page-read-1".to_owned(),
+                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "offset_chars": 0,
+                    "max_chars": 80_000
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("first read handled");
+
+    assert!(!first.is_error());
+    let first_payload: serde_json::Value = serde_json::from_str(&first.content)?;
+    assert_eq!(first_payload["request"]["requested_max_chars"], 80_000);
+    assert_eq!(first_payload["request"]["max_chars"], 40_000);
+    assert_eq!(first_payload["request"]["max_chars_clamped"], true);
+    assert_eq!(first_payload["page"]["offset_chars"], 0);
+    assert_eq!(first_payload["page"]["returned_chars"], 40_000);
+    assert_eq!(first_payload["page"]["truncated"], true);
+    assert_eq!(first_payload["page"]["next_offset_chars"], 40_000);
+    assert_eq!(
+        first_payload["next_read_args"],
+        json!({
+            "thread_id": thread_id.as_str(),
+            "offset_chars": 40_000,
+            "max_chars": 40_000
+        })
+    );
+
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("thread should remain projected");
+    assert!(thread.result_delivered);
+    assert!(!thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 40_000);
+    let blocker = runtime
+        .final_answer_blocker(&mut session)?
+        .expect("partial result page should still block final answer");
+    let blocker_payload: serde_json::Value = serde_json::from_str(&blocker)?;
+    assert_eq!(
+        blocker_payload["error"],
+        "join_before_final_agent_result_unread"
+    );
+    assert_eq!(
+        blocker_payload["unread_threads"][0]["required_action"]["args"],
+        json!({
+            "thread_id": thread_id.as_str(),
+            "offset_chars": 40_000,
+            "max_chars": 40_000
+        })
+    );
+
+    let second = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-clamp-page-read-2".to_owned(),
+                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                args_json: serde_json::to_string(&first_payload["next_read_args"])?,
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("second read handled");
+    let second_payload: serde_json::Value = serde_json::from_str(&second.content)?;
+    assert_eq!(second_payload["page"]["offset_chars"], 40_000);
+    assert_eq!(second_payload["page"]["truncated"], false);
+    assert!(second_payload["page"]["next_offset_chars"].is_null());
+    assert!(second_payload["next_read_args"].is_null());
+
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("thread should remain projected");
+    assert!(thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, full_text.chars().count());
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_none(),
+        "fully delivered child result should unblock final answer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let tail_marker = "TAIL_MARKER_SHOULD_ONLY_BE_IN_ARTIFACT";
+    let full_text = format!("long report start\n{}\n{tail_marker}", "x".repeat(5_100));
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(TextProviderFactory {
+            text: full_text.clone(),
+        }),
+    );
+    let temp = tempfile::tempdir()?;
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("parent", "model", parent_store)?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let options = run_options(temp.path().to_path_buf());
+    let spawn_call = ToolCall {
+        id: "call-long-artifact".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect",
+            "mode": "join_before_final"
+        })
+        .to_string(),
+    };
+
+    runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &spawn_call,
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn handled");
+    let thread_id = chat_agent_thread_id_for_call(
+        &spawn_call.id,
+        &sigil_kernel::AgentProfileId::new("explore")?,
+    )?;
+    wait_until_agent_result_available(
+        &mut runtime,
+        &mut session,
+        &thread_id,
+        &options,
+        &mut handler,
+        &mut approval,
+    )
+    .await?;
+
+    let projection = session.agent_thread_state_projection();
+    let result = projection
+        .threads
+        .get(&thread_id)
+        .and_then(|thread| thread.result.as_ref())
+        .expect("thread result should be recorded");
+    assert!(result.summary_truncated);
+    assert_eq!(
+        result.original_summary_chars,
+        Some(full_text.chars().count())
+    );
+    assert!(result.summary.contains("full_result_artifact"));
+    assert!(!result.summary.contains(tail_marker));
+    let final_answer_ref = result
+        .final_answer_ref
+        .as_ref()
+        .expect("compact final answer ref should be recorded");
+    assert!(final_answer_ref.char_count < full_text.chars().count());
+    let full_text_hash = super::hash_text(&full_text);
+    assert_ne!(final_answer_ref.content_hash, full_text_hash);
+    let artifact = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "final_report")
+        .expect("final report artifact should be recorded");
+    assert_eq!(artifact.hash.as_deref(), Some(full_text_hash.as_str()));
+    let artifact_text = fs::read_to_string(temp.path().join(&artifact.path))?;
+    assert_eq!(artifact_text, full_text);
+
+    let read = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-long-artifact-read".to_owned(),
+                name: READ_AGENT_RESULT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "max_chars": 40_000
+                })
+                .to_string(),
+            },
+            &options,
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("read handled");
+    let payload: serde_json::Value = serde_json::from_str(&read.content)?;
+    assert_eq!(payload["page"]["truncated"], false);
+    assert!(payload["next_read_args"].is_null());
+    assert!(
+        payload["page"]["total_chars"]
+            .as_u64()
+            .is_some_and(|chars| chars < full_text.chars().count() as u64)
+    );
+    let transient_text = read
+        .transient_context
+        .first()
+        .and_then(|message| message.content.as_deref())
+        .expect("read page should be transient");
+    assert!(transient_text.contains("full_result_artifact"));
+    assert!(!transient_text.contains(tail_marker));
+    assert!(
+        runtime.final_answer_blocker(&mut session)?.is_none(),
+        "compact child result page should unblock final answer"
+    );
     Ok(())
 }
 
@@ -3162,6 +3503,7 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
     assert_eq!(first.transient_context.len(), 1);
     let first_payload: serde_json::Value = serde_json::from_str(&first.content)?;
     assert_eq!(first_payload["page"]["truncated"], false);
+    assert!(first_payload["next_read_args"].is_null());
     assert_eq!(
         first_payload["page"]["total_chars"],
         full_text.chars().count()
@@ -3224,6 +3566,8 @@ async fn read_agent_result_does_not_repeat_full_result_after_delivery() -> Resul
         thread.result_delivery_call_ids,
         vec!["call-repeat-read-1".to_owned()]
     );
+    assert!(thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, full_text.chars().count());
     Ok(())
 }
 

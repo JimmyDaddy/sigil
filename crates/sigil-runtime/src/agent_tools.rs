@@ -27,7 +27,8 @@ use sigil_kernel::{
 
 use crate::{
     AgentBudgetPolicy, AgentMailboxMessage, AgentProfileRegistry, AgentSupervisor,
-    ResolvedAgentProfile, WORKER_PROFILE_ID, agent_supervisor::agent_final_answer_ref,
+    ResolvedAgentProfile, WORKER_PROFILE_ID,
+    agent_supervisor::{AgentResultMaterialization, materialize_child_agent_final_answer},
     build_role_provider, build_role_run_options, build_role_tool_registry,
     chat_agent_thread_id_for_call,
 };
@@ -41,8 +42,8 @@ pub const CLOSE_AGENT_TOOL_NAME: &str = "close_agent";
 const MAIN_THREAD_ID: &str = "main";
 const DEFAULT_RESULT_SUMMARY_LIMIT: usize = 4_000;
 const MIN_RESULT_SUMMARY_LIMIT: usize = 200;
-const DEFAULT_RESULT_PAGE_LIMIT: usize = 4_000;
-const MAX_RESULT_PAGE_LIMIT: usize = 12_000;
+const MAX_RESULT_PAGE_LIMIT: usize = 40_000;
+const DEFAULT_RESULT_PAGE_LIMIT: usize = MAX_RESULT_PAGE_LIMIT;
 const WAIT_AGENT_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WAIT_AGENT_FOREGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const WAIT_AGENT_RUNNING_RETRY_AFTER_MS: u64 = 30 * 60 * 1_000;

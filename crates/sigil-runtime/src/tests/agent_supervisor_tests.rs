@@ -27,8 +27,8 @@ use sigil_kernel::{
 
 use super::{
     AgentBudgetPolicy, AgentChatChildStart, AgentMailboxMessage, AgentProfileRegistry,
-    AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart,
-    agent_terminal_status_from_task_child, task_child_status_from_outcome,
+    AgentResultMaterialization, AgentSupervisor, AgentSupervisorTaskChildRunner,
+    AgentTaskChildStart, agent_terminal_status_from_task_child, task_child_status_from_outcome,
     tool_scope_is_write_capable,
 };
 use crate::{AgentToolRuntime, EXPLORE_PROFILE_ID};
@@ -634,10 +634,9 @@ fn record_chat_child_result_persists_final_answer_ref_and_releases_budget() -> R
         handler_dyn,
         &thread,
         TaskChildSessionStatus::Completed,
-        "child done",
+        &AgentResultMaterialization::inline("child done", Some(final_answer_ref.clone())),
         &AgentRunOutcome::default(),
         None,
-        Some(final_answer_ref.clone()),
     )?;
 
     assert!(supervisor.active_profile_ids().is_empty());
@@ -907,9 +906,8 @@ fn release_allows_next_spawn_after_max_subagents_slot_opens() -> Result<()> {
         &first,
         SessionRef::new_relative("children/task_1/one.jsonl")?,
         TaskChildSessionStatus::Completed,
-        "one done",
+        &AgentResultMaterialization::inline("one done", None),
         &AgentRunOutcome::default(),
-        None,
         None,
     )?;
     supervisor.begin_task_child_thread(
@@ -1382,10 +1380,9 @@ fn supervisor_records_changed_paths_and_usage_in_agent_result() -> Result<()> {
         &thread,
         SessionRef::new_relative("children/task_1/inspect.jsonl")?,
         sigil_kernel::TaskChildSessionStatus::Completed,
-        "done",
+        &AgentResultMaterialization::inline("done", None),
         &outcome,
         Some(usage.clone()),
-        None,
     )?;
 
     let projection = session.agent_thread_state_projection();

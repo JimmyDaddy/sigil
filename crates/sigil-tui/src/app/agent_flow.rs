@@ -1297,6 +1297,8 @@ mod tests {
             reason: None,
             result: None,
             result_delivered: false,
+            result_fully_delivered: false,
+            result_delivered_chars: 0,
             result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),

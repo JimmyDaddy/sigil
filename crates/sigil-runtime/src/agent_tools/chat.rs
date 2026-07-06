@@ -161,10 +161,9 @@ impl AgentToolRuntime {
                     handler,
                     &thread,
                     output.status,
-                    &output.final_text,
+                    &output.materialized,
                     &output.outcome,
                     Some(output.usage),
-                    output.final_answer_ref,
                 )?;
                 self.supervisor.record_chat_mailbox_consumed(
                     session,
@@ -502,18 +501,30 @@ fn full_agent_result_delivery(
     thread_id: &AgentThreadId,
     output_hash: &str,
 ) -> Option<AgentThreadResultDeliveredEntry> {
-    session.entries().iter().rev().find_map(|entry| {
+    let mut delivered_chars = 0usize;
+    let mut full_delivery = None;
+    for entry in session.entries() {
         let SessionLogEntry::Control(ControlEntry::AgentThreadResultDelivered(delivered)) = entry
         else {
-            return None;
+            continue;
         };
-        (delivered.thread_id == *thread_id
-            && delivered.output_hash == output_hash
-            && delivered.offset_chars == 0
-            && delivered.returned_chars == delivered.total_chars
-            && !delivered.truncated)
-            .then(|| delivered.clone())
-    })
+        if delivered.thread_id != *thread_id || delivered.output_hash != output_hash {
+            continue;
+        }
+        let page_end = delivered
+            .offset_chars
+            .saturating_add(delivered.returned_chars);
+        if delivered.offset_chars <= delivered_chars {
+            delivered_chars = delivered_chars.max(page_end);
+        }
+        if !delivered.truncated
+            && delivered.total_chars > 0
+            && delivered_chars >= delivered.total_chars
+        {
+            full_delivery = Some(delivered.clone());
+        }
+    }
+    full_delivery
 }
 
 pub(super) fn wait_throttle_remaining_since(last_wait: Instant) -> Option<Duration> {

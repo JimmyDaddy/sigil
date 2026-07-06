@@ -61,11 +61,10 @@ impl BackgroundChatAgentThreadRecord {
 }
 
 pub(super) struct BackgroundChatAgentResult {
-    pub(super) final_text: String,
+    pub(super) materialized: AgentResultMaterialization,
     pub(super) outcome: AgentRunOutcome,
     pub(super) usage: AgentUsageSummary,
     pub(super) status: TaskChildSessionStatus,
-    pub(super) final_answer_ref: Option<sigil_kernel::AgentFinalAnswerRef>,
     pub(super) consumed_mailbox_route_ids: Vec<AgentRouteId>,
 }
 
@@ -234,11 +233,16 @@ pub(super) async fn run_background_chat_agent(
         };
     }
 
-    let final_answer_ref = agent_final_answer_ref(&child_session_ref, &latest_output.result);
-    let final_text = latest_output.result.final_text;
+    let materialized = materialize_child_agent_final_answer(
+        &mut child_session,
+        &child_session_ref,
+        &thread_id,
+        &latest_output.result,
+    )
+    .await?;
     let outcome = latest_output.outcome;
     let usage = usage_summary_from_stats(child_session.stats());
-    let status = child_status_from_outcome(&final_text, &outcome);
+    let status = child_status_from_outcome(&materialized.final_text, &outcome);
     emit_background_agent_status(
         event_sink.as_ref(),
         &thread_id,
@@ -246,11 +250,10 @@ pub(super) async fn run_background_chat_agent(
         None,
     );
     Ok(BackgroundChatAgentResult {
-        final_text,
+        materialized,
         outcome,
         usage,
         status,
-        final_answer_ref,
         consumed_mailbox_route_ids,
     })
 }

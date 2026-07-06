@@ -1,27 +1,26 @@
 use anyhow::Result;
 use sigil_kernel::{
-    AgentFinalAnswerRef, AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry,
-    AgentRouteId, AgentThreadResultRecordedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry, AgentRouteId,
+    AgentThreadResultRecordedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
     AgentUsageSummary, ControlEntry, EventHandler, Session, SessionRef, TaskChildSessionStatus,
 };
 
 use super::{
-    AgentChatChildThread, AgentSupervisor, AgentTaskChildThread,
+    AgentChatChildThread, AgentResultMaterialization, AgentSupervisor, AgentTaskChildThread,
     agent_terminal_status_from_task_child, append_control, build_agent_thread_result, hash_text,
 };
 
 impl AgentSupervisor {
-    pub fn record_task_child_result<H>(
+    pub(crate) fn record_task_child_result<H>(
         &self,
         session: &mut Session,
         handler: &mut H,
         thread: &AgentTaskChildThread,
         child_session_ref: SessionRef,
         status: TaskChildSessionStatus,
-        final_text: &str,
+        materialized: &AgentResultMaterialization,
         outcome: &sigil_kernel::AgentRunOutcome,
         usage: Option<AgentUsageSummary>,
-        final_answer_ref: Option<AgentFinalAnswerRef>,
     ) -> Result<()>
     where
         H: EventHandler + Send,
@@ -31,10 +30,9 @@ impl AgentSupervisor {
             thread.thread_id.clone(),
             child_session_ref.clone(),
             terminal_status,
-            final_text,
+            materialized,
             outcome,
             usage,
-            final_answer_ref,
         );
         append_control(
             session,
@@ -47,23 +45,22 @@ impl AgentSupervisor {
             ControlEntry::AgentMergeSafePoint(AgentMergeSafePointEntry {
                 thread_id: thread.thread_id.clone(),
                 parent_thread_id: thread.parent_thread_id.clone(),
-                result_hash: hash_text(final_text),
+                result_hash: hash_text(&materialized.final_text),
             }),
         )?;
         self.release_thread(&thread.thread_id);
         Ok(())
     }
 
-    pub fn record_chat_child_result<H>(
+    pub(crate) fn record_chat_child_result<H>(
         &self,
         session: &mut Session,
         handler: &mut H,
         thread: &AgentChatChildThread,
         status: TaskChildSessionStatus,
-        final_text: &str,
+        materialized: &AgentResultMaterialization,
         outcome: &sigil_kernel::AgentRunOutcome,
         usage: Option<AgentUsageSummary>,
-        final_answer_ref: Option<AgentFinalAnswerRef>,
     ) -> Result<()>
     where
         H: EventHandler + Send + ?Sized,
@@ -73,10 +70,9 @@ impl AgentSupervisor {
             thread.thread_id.clone(),
             thread.child_session_ref.clone(),
             terminal_status,
-            final_text,
+            materialized,
             outcome,
             usage,
-            final_answer_ref,
         );
         append_control(
             session,
@@ -89,7 +85,7 @@ impl AgentSupervisor {
             ControlEntry::AgentMergeSafePoint(AgentMergeSafePointEntry {
                 thread_id: thread.thread_id.clone(),
                 parent_thread_id: thread.parent_thread_id.clone(),
-                result_hash: hash_text(final_text),
+                result_hash: hash_text(&materialized.final_text),
             }),
         )?;
         self.release_thread(&thread.thread_id);

@@ -521,6 +521,8 @@ fn agent_thread_projection_replays_lifecycle_and_result() -> Result<()> {
         Some("done")
     );
     assert!(thread.result_delivered);
+    assert!(thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 4);
     assert_eq!(
         thread.result_delivery_call_ids,
         vec!["call-read-result".to_owned()]
@@ -532,6 +534,67 @@ fn agent_thread_projection_replays_lifecycle_and_result() -> Result<()> {
             .map(|context| context.model.as_str()),
         Some("deepseek-v4-pro")
     );
+    Ok(())
+}
+
+#[test]
+fn agent_thread_projection_tracks_full_result_delivery_across_pages() -> Result<()> {
+    let mut session = Session::new("test", "model");
+    session.append_control(ControlEntry::AgentThreadStarted(sample_started_entry()?))?;
+    let thread_id = thread_id("thread_1")?;
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        AgentThreadResultRecordedEntry {
+            result: AgentThreadResult {
+                thread_id: thread_id.clone(),
+                session_ref: session_ref("children/thread_1.jsonl")?,
+                status: AgentThreadTerminalStatus::Completed,
+                summary: "done".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: "sha256:done".to_owned(),
+                final_answer_ref: None,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadResultDelivered(
+        AgentThreadResultDeliveredEntry {
+            thread_id: thread_id.clone(),
+            call_id: "call-prefix".to_owned(),
+            output_hash: "sha256:done".to_owned(),
+            offset_chars: 0,
+            returned_chars: 10,
+            total_chars: 20,
+            truncated: true,
+            delivered_at_ms: None,
+        },
+    ))?;
+    let projection = session.agent_thread_state_projection();
+    let thread = projection.latest_thread().expect("latest thread");
+    assert!(thread.result_delivered);
+    assert!(!thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 10);
+
+    session.append_control(ControlEntry::AgentThreadResultDelivered(
+        AgentThreadResultDeliveredEntry {
+            thread_id,
+            call_id: "call-tail".to_owned(),
+            output_hash: "sha256:done".to_owned(),
+            offset_chars: 10,
+            returned_chars: 10,
+            total_chars: 20,
+            truncated: false,
+            delivered_at_ms: None,
+        },
+    ))?;
+    let projection = session.agent_thread_state_projection();
+    let thread = projection.latest_thread().expect("latest thread");
+    assert!(thread.result_fully_delivered);
+    assert_eq!(thread.result_delivered_chars, 20);
     Ok(())
 }
 
