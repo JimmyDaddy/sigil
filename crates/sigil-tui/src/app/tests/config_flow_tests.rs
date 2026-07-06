@@ -1715,17 +1715,17 @@ slash_names = ["review-agent"]
     assert!(detail.contains("- Compatibility: 0 agents"));
     assert!(detail.contains("- Selected: agent 4/5 · review"));
     assert!(detail.contains("[agents]"));
-    assert!(
-        detail
-            .contains("> review: trusted · subagent · workspace · enabled=yes user=yes model=yes")
-    );
+    assert!(detail.contains(
+        "> review: trusted · subagent · workspace · enabled=yes user=yes model_visibility=model allowed"
+    ));
     assert!(detail.contains("[agent]"));
     assert!(detail.contains("Agent: review"));
     assert!(detail.contains("- Description: Review this repository."));
     assert!(detail.contains("- Kind: subagent"));
     assert!(detail.contains("- Enabled: yes"));
     assert!(detail.contains("- User: yes"));
-    assert!(detail.contains("- Model: yes"));
+    assert!(detail.contains("- Model visibility: model allowed"));
+    assert!(detail.contains("- Write policy: not write-capable"));
     assert!(detail.contains("- Trust: trusted"));
     assert!(detail.contains("- Source: workspace"));
     assert!(detail.contains("- Source hash:"));
@@ -1934,7 +1934,10 @@ allowed_tools = ["grep"]
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("agent review model=no"));
+    assert_eq!(
+        app.last_notice(),
+        Some("agent review model_visibility=manual only")
+    );
     assert!(
         app.session_browser
             .current_entries

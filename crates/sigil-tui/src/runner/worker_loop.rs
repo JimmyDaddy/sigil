@@ -66,8 +66,8 @@ pub(in crate::runner) use active_run::{
     ActiveRun, RunTaskPayload, RunTaskResult, cancel_active_run,
 };
 pub(in crate::runner) use agent_runtime::{
-    WorkerAgentEventSink, agent_result_continuation_new_thread_ids, close_agent_thread,
-    collect_finished_background_agent_runs, extend_agent_thread_ids_unique,
+    WorkerAgentEventSink, agent_result_continuation_new_thread_ids, cancel_agent_thread,
+    close_agent_thread, collect_finished_background_agent_runs, extend_agent_thread_ids_unique,
     manual_agent_invocation_result, manual_agent_parent_summary, message_agent_thread,
     start_agent_result_continuation_run, start_queued_conversation_run,
 };

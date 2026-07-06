@@ -40,6 +40,7 @@ fn resolved_agent(id: &str) -> sigil_runtime::ResolvedAgentProfile {
             aliases: Vec::new(),
             slash_names: Vec::new(),
         },
+        execution_role: sigil_kernel::AgentRole::SubagentRead,
         enabled: true,
         enabled_override: None,
         user_invocable_override: None,
@@ -445,6 +446,7 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
             aliases: Vec::new(),
             slash_names: Vec::new(),
         },
+        execution_role: sigil_kernel::AgentRole::SubagentRead,
         enabled: true,
         enabled_override: Some(false),
         user_invocable_override: Some(false),
@@ -459,7 +461,8 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
     assert!(detail.contains("- Description: none"));
     assert!(detail.contains("- Enabled: no (source yes)"));
     assert!(detail.contains("- User: no (source yes)"));
-    assert!(detail.contains("- Model: yes (source no)"));
+    assert!(detail.contains("- Model visibility: model allowed (source manual only)"));
+    assert!(detail.contains("- Write policy: not write-capable"));
     assert!(detail.contains("- Provider: session"));
     assert!(detail.contains("- Model name: session"));
     assert!(detail.contains("- Reasoning: session"));
@@ -473,6 +476,22 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
         selected_agent_summary(&ConfigState::from_root_config(&test_config())),
         "none"
     );
+}
+
+#[test]
+fn agent_detail_helpers_explain_write_worker_policy() {
+    let mut agent = resolved_agent("worker");
+    agent.profile.invocation_policy = sigil_kernel::AgentInvocationPolicy::ModelAllowed;
+    agent.profile.model_invocable = true;
+    agent.profile.result_policy = sigil_kernel::AgentResultPolicy::ForegroundMergeRequired;
+    agent.execution_role = sigil_kernel::AgentRole::SubagentWrite;
+
+    let detail = render_agent_detail_lines(&agent).join("\n");
+
+    assert!(detail.contains("- Model visibility: model allowed"));
+    assert!(detail.contains(
+        "- Write policy: changeset-only foreground merge; sandbox/approval enforced; background writes rejected"
+    ));
 }
 
 #[test]

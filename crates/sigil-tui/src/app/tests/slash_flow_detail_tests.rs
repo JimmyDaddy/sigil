@@ -27,6 +27,7 @@ fn profile(
             aliases: Vec::new(),
             slash_names: Vec::new(),
         },
+        execution_role: sigil_kernel::AgentRole::SubagentRead,
         enabled: true,
         enabled_override: None,
         user_invocable_override: None,

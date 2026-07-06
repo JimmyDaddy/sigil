@@ -400,6 +400,10 @@ pub enum AppAction {
         thread_id: AgentThreadId,
         reason: Option<String>,
     },
+    CancelAgent {
+        thread_id: AgentThreadId,
+        reason: Option<String>,
+    },
     MessageAgent {
         thread_id: AgentThreadId,
         prompt: String,

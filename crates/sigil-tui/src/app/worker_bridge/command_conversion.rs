@@ -130,6 +130,9 @@ impl AppState {
             AppAction::CloseAgent { thread_id, reason } => {
                 WorkerCommand::CloseAgent { thread_id, reason }
             }
+            AppAction::CancelAgent { thread_id, reason } => {
+                WorkerCommand::CancelAgent { thread_id, reason }
+            }
             AppAction::MessageAgent { thread_id, prompt } => {
                 WorkerCommand::MessageAgent { thread_id, prompt }
             }

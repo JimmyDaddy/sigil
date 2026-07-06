@@ -1258,16 +1258,17 @@ impl AppState {
         let label = match toggle {
             AgentPolicyToggle::Enabled => "enabled",
             AgentPolicyToggle::UserInvocable => "user",
-            AgentPolicyToggle::ModelInvocable => "model",
+            AgentPolicyToggle::ModelInvocable => "model_visibility",
+        };
+        let value = match toggle {
+            AgentPolicyToggle::Enabled => bool_summary(target_enabled).to_owned(),
+            AgentPolicyToggle::UserInvocable => bool_summary(target_user).to_owned(),
+            AgentPolicyToggle::ModelInvocable if target_model => "model allowed".to_owned(),
+            AgentPolicyToggle::ModelInvocable => "manual only".to_owned(),
         };
         self.last_notice = Some(format!(
-            "agent {} {label}={}",
-            agent.profile.id.as_str(),
-            match toggle {
-                AgentPolicyToggle::Enabled => bool_summary(target_enabled),
-                AgentPolicyToggle::UserInvocable => bool_summary(target_user),
-                AgentPolicyToggle::ModelInvocable => bool_summary(target_model),
-            }
+            "agent {} {label}={value}",
+            agent.profile.id.as_str()
         ));
         self.push_event(
             "agent",

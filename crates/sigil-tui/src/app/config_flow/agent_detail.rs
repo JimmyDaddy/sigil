@@ -19,7 +19,7 @@ pub(super) fn render_agent_detail_lines(agent: &ResolvedAgentProfile) -> Vec<Str
         render_config_readonly_row("Description", description),
         render_config_readonly_row("Enabled", &agent_enabled_summary(agent)),
         render_config_readonly_row("User", &agent_user_invocable_summary(agent)),
-        render_config_readonly_row("Model", &agent_model_invocable_summary(agent)),
+        render_config_readonly_row("Model visibility", &agent_model_visibility_summary(agent)),
         render_config_readonly_row("Trust", agent_trust_state_label(agent.trust_state)),
         render_config_readonly_row("Source", &agent_profile_source_summary(&agent.source)),
         render_config_readonly_row("Source hash", &short_hash(&agent.source_hash)),
@@ -28,6 +28,7 @@ pub(super) fn render_agent_detail_lines(agent: &ResolvedAgentProfile) -> Vec<Str
         render_config_readonly_row("Reasoning", reasoning),
         render_config_readonly_row("Invocation", agent.profile.invocation_policy.as_str()),
         render_config_readonly_row("Result", agent.profile.result_policy.as_str()),
+        render_config_readonly_row("Write policy", agent_write_policy_summary(agent)),
         render_config_readonly_row("Tools", &tool_scope_summary(&agent.profile.tool_scope)),
         render_config_readonly_row("Permission", agent.profile.permission_policy.mode.as_str()),
         render_config_readonly_row("Skills", &list_summary(&agent.profile.skills)),
@@ -78,10 +79,10 @@ pub(super) fn selected_agent_summary(config_state: &ConfigState) -> String {
 
 pub(super) fn agent_policy_flags(agent: &ResolvedAgentProfile) -> String {
     format!(
-        "enabled={} user={} model={}",
+        "enabled={} user={} model_visibility={}",
         bool_summary(agent.effective_enabled()),
         bool_summary(agent.effective_user_invocation_allowed()),
-        bool_summary(agent.effective_model_invocation_allowed())
+        agent_model_visibility_effective_label(agent)
     )
 }
 
@@ -101,12 +102,55 @@ pub(super) fn agent_user_invocable_summary(agent: &ResolvedAgentProfile) -> Stri
     )
 }
 
-pub(super) fn agent_model_invocable_summary(agent: &ResolvedAgentProfile) -> String {
-    bool_override_summary(
+pub(super) fn agent_model_visibility_summary(agent: &ResolvedAgentProfile) -> String {
+    let effective = agent_model_visibility_label(
         agent.effective_model_invocation_allowed(),
+        agent.profile.invocation_policy,
+    );
+    let source = agent_model_visibility_label(
         agent.profile.model_invocation_allowed(),
-        agent.model_invocable_override,
+        agent.profile.invocation_policy,
+    );
+    match agent.model_invocable_override {
+        Some(_) => format!("{effective} (source {source})"),
+        None => effective.to_owned(),
+    }
+}
+
+fn agent_model_visibility_effective_label(agent: &ResolvedAgentProfile) -> &'static str {
+    agent_model_visibility_label(
+        agent.effective_model_invocation_allowed(),
+        agent.profile.invocation_policy,
     )
+}
+
+fn agent_model_visibility_label(
+    model_invocation_allowed: bool,
+    invocation_policy: sigil_kernel::AgentInvocationPolicy,
+) -> &'static str {
+    if model_invocation_allowed {
+        "model allowed"
+    } else if matches!(
+        invocation_policy,
+        sigil_kernel::AgentInvocationPolicy::SystemOnly
+    ) {
+        "system only"
+    } else {
+        "manual only"
+    }
+}
+
+fn agent_write_policy_summary(agent: &ResolvedAgentProfile) -> &'static str {
+    match (agent.execution_role, agent.profile.result_policy) {
+        (
+            sigil_kernel::AgentRole::SubagentWrite,
+            sigil_kernel::AgentResultPolicy::ForegroundMergeRequired,
+        ) => {
+            "changeset-only foreground merge; sandbox/approval enforced; background writes rejected"
+        }
+        (sigil_kernel::AgentRole::SubagentWrite, _) => "write-capable; sandbox/approval enforced",
+        _ => "not write-capable",
+    }
 }
 
 pub(super) fn agent_slash_name_summary(agent: &ResolvedAgentProfile) -> String {

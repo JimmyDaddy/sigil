@@ -1489,6 +1489,33 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::CancelAgent { thread_id, reason }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before cancelling agent".to_owned(),
+                    ));
+                    continue;
+                }
+                match cancel_agent_thread(
+                    &runtime,
+                    &background_agent_runs,
+                    &agent_supervisor,
+                    &root_config,
+                    agent.tool_registry(),
+                    &options,
+                    &mut current_session,
+                    thread_id,
+                    reason,
+                ) {
+                    Ok((thread_id, entries)) => {
+                        let _ = message_tx
+                            .send(WorkerMessage::AgentThreadCancelled { thread_id, entries });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
+                }
+            }
             Ok(WorkerCommand::MessageAgent { thread_id, prompt }) => {
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(

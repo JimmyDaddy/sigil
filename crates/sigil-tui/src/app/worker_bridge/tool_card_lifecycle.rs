@@ -5,7 +5,13 @@ use super::super::{TimelineEntry, TimelineRole, formatting::agent_result_poll_to
 pub(super) fn agent_tool_name(name: &str) -> bool {
     matches!(
         name,
-        "spawn_agent" | "wait_agent" | "read_agent_result" | "message_agent" | "close_agent"
+        "spawn_agent"
+            | "wait_agent"
+            | "read_agent_result"
+            | "list_agents"
+            | "cancel_agent"
+            | "message_agent"
+            | "close_agent"
     )
 }
 

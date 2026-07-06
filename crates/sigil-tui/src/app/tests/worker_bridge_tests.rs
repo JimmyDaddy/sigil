@@ -2366,6 +2366,17 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         } if thread_id.as_str() == "thread-1" && reason == "done"
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::CancelAgent {
+            thread_id: sigil_kernel::AgentThreadId::new("thread-1")
+                .expect("test thread id should be valid"),
+            reason: Some("stop".to_owned()),
+        }),
+        WorkerCommand::CancelAgent {
+            thread_id,
+            reason: Some(reason),
+        } if thread_id.as_str() == "thread-1" && reason == "stop"
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::MessageAgent {
             thread_id: sigil_kernel::AgentThreadId::new("thread-1")
                 .expect("test thread id should be valid"),

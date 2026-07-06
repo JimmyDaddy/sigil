@@ -401,6 +401,9 @@ impl AppState {
             WorkerMessage::AgentThreadClosed { thread_id, entries } => {
                 self.apply_agent_thread_closed(thread_id, entries);
             }
+            WorkerMessage::AgentThreadCancelled { thread_id, entries } => {
+                self.apply_agent_thread_cancelled(thread_id, entries);
+            }
             WorkerMessage::SessionSwitched {
                 session_log_path,
                 provider_name,

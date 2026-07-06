@@ -249,8 +249,7 @@ impl AppState {
         }
         if agent_cancel_prefix(value) {
             if let Some(target) = agent_action_target(value, "cancel") {
-                self.cancel_agent_from_command(target)?;
-                return Ok(None);
+                return self.cancel_agent_from_command(target);
             }
             self.last_notice = Some("usage: /agent cancel <agent|current>".to_owned());
             return Ok(None);
@@ -342,21 +341,40 @@ impl AppState {
         self.push_event("agent:close", thread_id.as_str());
     }
 
-    fn cancel_agent_from_command(&mut self, target: &str) -> anyhow::Result<()> {
+    pub(super) fn apply_agent_thread_cancelled(
+        &mut self,
+        thread_id: AgentThreadId,
+        entries: Vec<SessionLogEntry>,
+    ) {
+        self.sync_current_session_state(entries);
+        self.last_notice = Some(format!("agent cancelled: {}", thread_id.as_str()));
+        self.push_event("agent:cancel", thread_id.as_str());
+    }
+
+    fn cancel_agent_from_command(&mut self, target: &str) -> anyhow::Result<Option<AppAction>> {
         let Some(view) = self.agent_view_for_action_target(target) else {
             self.last_notice = Some(format!("agent not found: {target}"));
-            return Ok(());
+            return Ok(None);
         };
-        let Some(thread_id) = self.agent_thread_id_for_view(&view) else {
+        let Some(thread) = self.agent_thread_projection_for_view(&view) else {
             self.last_notice = Some(format!("agent cancel unavailable: {target}"));
-            return Ok(());
+            return Ok(None);
         };
-        self.last_notice = Some(format!(
-            "agent cancel unavailable until runtime support: {}",
-            thread_id.as_str()
-        ));
-        self.push_event("agent:cancel-unavailable", thread_id.as_str());
-        Ok(())
+        let thread_id = thread.thread_id.clone();
+        if thread.status.is_terminal() {
+            self.last_notice = Some(format!(
+                "agent cancel unavailable after terminal: {}",
+                thread_id.as_str()
+            ));
+            self.push_event("agent:cancel-unavailable", thread_id.as_str());
+            return Ok(None);
+        }
+        self.last_notice = Some(format!("agent cancel requested: {}", thread_id.as_str()));
+        self.push_event("agent:cancel-requested", thread_id.as_str());
+        Ok(Some(AppAction::CancelAgent {
+            thread_id,
+            reason: Some("cancelled from TUI /agent".to_owned()),
+        }))
     }
 
     pub(super) fn cycle_agent_view(&mut self, reverse: bool) -> bool {

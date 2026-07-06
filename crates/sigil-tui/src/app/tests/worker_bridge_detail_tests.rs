@@ -47,6 +47,8 @@ fn agent_tool_name_matches_all_agent_tool_surfaces() {
         "spawn_agent",
         "wait_agent",
         "read_agent_result",
+        "list_agents",
+        "cancel_agent",
         "message_agent",
         "close_agent",
     ] {

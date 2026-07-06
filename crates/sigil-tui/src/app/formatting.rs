@@ -929,7 +929,9 @@ fn agent_tool_preview_source(
             .filter(|summary| !summary.trim().is_empty())
             .map(|summary| ("markdown", summary.to_owned()))
             .or_else(|| Some(("text", String::new()))),
-        "wait_agent" | "message_agent" | "close_agent" => Some(("text", String::new())),
+        "wait_agent" | "list_agents" | "cancel_agent" | "message_agent" | "close_agent" => {
+            Some(("text", String::new()))
+        }
         _ => None,
     }
 }
@@ -940,7 +942,13 @@ fn agent_tool_metadata_preview_value(
 ) -> Option<serde_json::Value> {
     if !matches!(
         tool_name,
-        "spawn_agent" | "wait_agent" | "read_agent_result" | "message_agent" | "close_agent"
+        "spawn_agent"
+            | "wait_agent"
+            | "read_agent_result"
+            | "list_agents"
+            | "cancel_agent"
+            | "message_agent"
+            | "close_agent"
     ) {
         return None;
     }

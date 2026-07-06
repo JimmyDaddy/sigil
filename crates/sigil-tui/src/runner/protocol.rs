@@ -155,6 +155,10 @@ pub enum WorkerCommand {
         thread_id: AgentThreadId,
         reason: Option<String>,
     },
+    CancelAgent {
+        thread_id: AgentThreadId,
+        reason: Option<String>,
+    },
     MessageAgent {
         thread_id: AgentThreadId,
         prompt: String,
@@ -282,6 +286,10 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     AgentThreadClosed {
+        thread_id: AgentThreadId,
+        entries: Vec<SessionLogEntry>,
+    },
+    AgentThreadCancelled {
         thread_id: AgentThreadId,
         entries: Vec<SessionLogEntry>,
     },

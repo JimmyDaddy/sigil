@@ -806,10 +806,18 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     );
 
     app.composer.input = "/agent cancel current".to_owned();
-    assert!(app.submit_input()?.is_none());
+    let action = app.submit_input()?;
+    assert!(matches!(
+        action,
+        Some(AppAction::CancelAgent {
+            ref thread_id,
+            ref reason,
+        }) if thread_id.as_str() == "thread_1"
+            && reason.as_deref() == Some("cancelled from TUI /agent")
+    ));
     assert_eq!(
         app.last_notice.as_deref(),
-        Some("agent cancel unavailable until runtime support: thread_1")
+        Some("agent cancel requested: thread_1")
     );
     let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
     assert!(!persisted.iter().any(|entry| {

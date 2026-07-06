@@ -396,6 +396,26 @@ aliases = ["rr"]
 }
 
 #[test]
+fn agent_mention_submit_dispatches_builtin_worker_invocation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.composer.input = "@worker fix README wording".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::InvokeAgentProfile { profile_id, prompt, parent_prompt })
+            if profile_id == "worker"
+                && prompt == "fix README wording"
+                && parent_prompt == "@worker fix README wording"
+    ));
+    assert!(app.runtime.is_busy);
+    assert_eq!(app.last_notice(), Some("waiting for agent @worker"));
+    assert_eq!(app.composer.input, "");
+    Ok(())
+}
+
+#[test]
 fn agent_mention_alias_submit_dispatches_canonical_profile() -> Result<()> {
     let workspace = tempdir()?;
     write_workspace_agent(

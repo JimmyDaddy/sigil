@@ -115,7 +115,7 @@ pub(crate) const EFFORT_SELECTOR_OPTIONS: &[SlashArgumentOption] = &[
     SlashArgumentOption {
         label: "medium",
         value: "medium",
-        description: "balanced default",
+        description: "default reasoning",
         keywords: &["medium", "med"],
     },
     SlashArgumentOption {

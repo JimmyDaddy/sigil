@@ -625,6 +625,36 @@ pub(in crate::runner) fn close_agent_thread(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(in crate::runner) fn cancel_agent_thread(
+    runtime: &tokio::runtime::Runtime,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    root_config: &RootConfig,
+    base_registry: &ToolRegistry,
+    options: &AgentRunOptions,
+    current_session: &mut Option<Session>,
+    thread_id: AgentThreadId,
+    reason: Option<String>,
+) -> std::result::Result<(AgentThreadId, Vec<SessionLogEntry>), String> {
+    let Some(session) = current_session.as_mut() else {
+        return Err("session state is unavailable before agent cancel".to_owned());
+    };
+    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
+        agent_supervisor.clone(),
+        root_config.clone(),
+        base_registry.clone(),
+    )
+    .with_background_runs(background_runs.clone());
+    let result = runtime
+        .block_on(agent_delegate.cancel_agent_thread(session, thread_id.clone(), reason, options))
+        .map_err(|error| format!("agent cancel failed: {error:#}"))?;
+    if result.is_error() {
+        return Err(format!("agent cancel failed: {}", result.content));
+    }
+    Ok((thread_id, session.entries().to_vec()))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn message_agent_thread(
     runtime: &tokio::runtime::Runtime,
     background_runs: &sigil_runtime::AgentToolBackgroundRuns,

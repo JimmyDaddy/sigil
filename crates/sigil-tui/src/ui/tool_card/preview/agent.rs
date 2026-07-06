@@ -4,6 +4,8 @@ pub(in crate::ui::tool_card) fn agent_tool(summary: &ToolCardRender) -> bool {
     tool_name_matches(&summary.tool_name, "spawn_agent")
         || tool_name_matches(&summary.tool_name, "wait_agent")
         || tool_name_matches(&summary.tool_name, "read_agent_result")
+        || tool_name_matches(&summary.tool_name, "list_agents")
+        || tool_name_matches(&summary.tool_name, "cancel_agent")
         || tool_name_matches(&summary.tool_name, "message_agent")
         || tool_name_matches(&summary.tool_name, "close_agent")
 }
@@ -217,6 +219,12 @@ pub(in crate::ui::tool_card) fn agent_tool_title(summary: &ToolCardRender) -> To
     }
     if tool_name_matches(&summary.tool_name, "read_agent_result") {
         return ToolCardTitle::new("Read", "agent result", Some(thread));
+    }
+    if tool_name_matches(&summary.tool_name, "list_agents") {
+        return ToolCardTitle::new("Listed", "agents", None);
+    }
+    if tool_name_matches(&summary.tool_name, "cancel_agent") {
+        return ToolCardTitle::new("Cancelled", "agent", Some(thread));
     }
     if tool_name_matches(&summary.tool_name, "message_agent") {
         return ToolCardTitle::new("Messaged", "agent", Some(thread));
