@@ -27,11 +27,11 @@ use sigil_kernel::{
 
 use super::{
     AgentBudgetPolicy, AgentChatChildStart, AgentMailboxMessage, AgentProfileRegistry,
-    AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart, EXPLORE_PROFILE_ID,
+    AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart,
     agent_terminal_status_from_task_child, task_child_status_from_outcome,
     tool_scope_is_write_capable,
 };
-use crate::AgentToolRuntime;
+use crate::{AgentToolRuntime, EXPLORE_PROFILE_ID};
 
 #[derive(Default)]
 struct RecordingEventHandler {

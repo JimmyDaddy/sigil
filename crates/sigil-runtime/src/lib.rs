@@ -100,11 +100,13 @@ pub use product_view::{
 pub use provider_config::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DEFAULT_SETUP_API_KEY_ENV,
     DEFAULT_SETUP_PROVIDER_KEY, DeepSeekProviderConfigFields, GEMINI_PROVIDER_KEY,
-    ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, ProviderConfigFields,
+    ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, PROVIDER_KEYS, ProviderConfigFields,
     ProviderStatusConfig, ProviderStrictToolsMode, deepseek_provider_config_fields,
     deepseek_provider_status_config, deepseek_provider_value_for_setup,
     default_provider_config_fields, default_setup_provider_model, model_request_config_fields,
-    normalize_provider_name, provider_api_key_env_name, provider_config_fields,
+    next_provider_name, normalize_provider_model_alias, normalize_provider_name,
+    provider_api_key_env_name, provider_balance_status_config, provider_config_fields,
+    provider_model_status_config, provider_model_status_config_from_fields,
     provider_status_config_from_fields, set_active_provider_model, set_model_request_config_fields,
     set_provider_config_fields, supported_provider_name,
 };

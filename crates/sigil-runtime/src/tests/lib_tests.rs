@@ -575,6 +575,11 @@ fn provider_capability_view_uses_provider_neutral_rows() {
     assert!(
         view.rows
             .iter()
+            .any(|row| { row.key == "reasoning_stream" && row.status.as_str() == "supported" })
+    );
+    assert!(
+        view.rows
+            .iter()
             .any(|row| { row.key == "reasoning_effort" && row.status.as_str() == "unsupported" })
     );
     assert!(view.rows.iter().any(|row| {
@@ -647,14 +652,26 @@ fn build_run_options_carries_shared_runtime_defaults() {
 }
 
 #[test]
-fn build_run_options_uses_max_reasoning_for_non_deepseek() {
+fn build_run_options_omits_default_reasoning_for_unsupported_providers() {
     let options = build_run_options(
-        &test_root_config("other"),
+        &test_root_config("openai_compat"),
         Path::new("/tmp/sigil-runtime-test").to_path_buf(),
         InteractionMode::Headless,
     );
 
-    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Max));
+    assert_eq!(options.reasoning_effort, None);
+}
+
+#[test]
+fn build_run_options_keeps_uncanonical_workspace_root_observable_but_tolerant() {
+    let workspace_root = Path::new("/tmp/sigil-runtime-test-missing").to_path_buf();
+    let options = build_run_options(
+        &test_root_config("deepseek"),
+        workspace_root.clone(),
+        InteractionMode::Headless,
+    );
+
+    assert_eq!(options.workspace_root, workspace_root);
 }
 
 #[test]

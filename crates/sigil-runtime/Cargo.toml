@@ -22,6 +22,7 @@ sigil-provider-openai-compat = { path = "../sigil-provider-openai-compat" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 tokio.workspace = true
 toml.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

@@ -19,6 +19,12 @@ pub const GEMINI_PROVIDER_KEY: &str = "gemini";
 
 pub const DEFAULT_SETUP_PROVIDER_KEY: &str = DEEPSEEK_PROVIDER_KEY;
 pub const DEFAULT_SETUP_API_KEY_ENV: &str = SIGIL_API_KEY_ENV;
+pub const PROVIDER_KEYS: [&str; 4] = [
+    DEEPSEEK_PROVIDER_KEY,
+    OPENAI_COMPAT_PROVIDER_KEY,
+    ANTHROPIC_PROVIDER_KEY,
+    GEMINI_PROVIDER_KEY,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderConfigFields {
@@ -107,6 +113,16 @@ pub fn supported_provider_name(provider: &str) -> Result<&str> {
 }
 
 #[must_use]
+pub fn next_provider_name(provider: &str) -> &'static str {
+    match normalize_provider_name(provider) {
+        DEEPSEEK_PROVIDER_KEY => OPENAI_COMPAT_PROVIDER_KEY,
+        OPENAI_COMPAT_PROVIDER_KEY => ANTHROPIC_PROVIDER_KEY,
+        ANTHROPIC_PROVIDER_KEY => GEMINI_PROVIDER_KEY,
+        _ => DEEPSEEK_PROVIDER_KEY,
+    }
+}
+
+#[must_use]
 pub fn provider_api_key_env_name(provider: &str) -> Option<&'static str> {
     match normalize_provider_name(provider) {
         DEEPSEEK_PROVIDER_KEY => Some(SIGIL_API_KEY_ENV),
@@ -120,6 +136,24 @@ pub fn provider_api_key_env_name(provider: &str) -> Option<&'static str> {
 #[must_use]
 pub fn default_setup_provider_model() -> String {
     DeepSeekProviderConfig::default().model
+}
+
+#[must_use]
+pub fn normalize_provider_model_alias(provider_name: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = match normalize_provider_name(provider_name) {
+        DEEPSEEK_PROVIDER_KEY => match trimmed.to_ascii_lowercase().as_str() {
+            "flash" | "v4-flash" => "deepseek-v4-flash".to_owned(),
+            "pro" | "v4-pro" => "deepseek-v4-pro".to_owned(),
+            _ => trimmed.to_owned(),
+        },
+        _ => trimmed.to_owned(),
+    };
+    Some(normalized)
 }
 
 #[must_use]
@@ -351,6 +385,45 @@ pub fn deepseek_provider_status_config(root_config: &RootConfig) -> Result<Provi
         base_url: config.base_url,
         request_timeout_secs: root_config.model_request.request_timeout_secs,
     })
+}
+
+pub fn provider_balance_status_config(
+    root_config: &RootConfig,
+) -> Result<Option<ProviderStatusConfig>> {
+    match normalize_provider_name(&root_config.agent.provider) {
+        DEEPSEEK_PROVIDER_KEY => deepseek_provider_status_config(root_config).map(Some),
+        _ => Ok(None),
+    }
+}
+
+pub fn provider_model_status_config(
+    root_config: &RootConfig,
+) -> Result<Option<ProviderStatusConfig>> {
+    match normalize_provider_name(&root_config.agent.provider) {
+        DEEPSEEK_PROVIDER_KEY => deepseek_provider_status_config(root_config).map(Some),
+        OPENAI_COMPAT_PROVIDER_KEY => {
+            let fields = provider_config_fields(
+                root_config,
+                OPENAI_COMPAT_PROVIDER_KEY,
+                &root_config.agent.model,
+            );
+            provider_status_config_from_fields(&fields, &root_config.model_request).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn provider_model_status_config_from_fields(
+    provider_name: &str,
+    fields: &ProviderConfigFields,
+    model_request: &ModelRequestConfig,
+) -> Result<Option<ProviderStatusConfig>> {
+    match normalize_provider_name(provider_name) {
+        DEEPSEEK_PROVIDER_KEY | OPENAI_COMPAT_PROVIDER_KEY => {
+            provider_status_config_from_fields(fields, model_request).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn provider_config_fields_from_deepseek(config: DeepSeekProviderConfig) -> ProviderConfigFields {

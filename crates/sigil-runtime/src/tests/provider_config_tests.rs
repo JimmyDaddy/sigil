@@ -4,8 +4,10 @@ use sigil_kernel::{AgentConfig, ModelRequestConfig, RootConfig};
 use super::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DeepSeekProviderConfigFields,
     GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY, ProviderConfigFields, ProviderStrictToolsMode,
-    deepseek_provider_config_fields, default_provider_config_fields, normalize_provider_name,
-    provider_api_key_env_name, provider_config_fields, provider_status_config_from_fields,
+    deepseek_provider_config_fields, default_provider_config_fields, next_provider_name,
+    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
+    provider_balance_status_config, provider_config_fields, provider_model_status_config,
+    provider_model_status_config_from_fields, provider_status_config_from_fields,
     set_provider_config_fields,
 };
 
@@ -65,6 +67,32 @@ fn provider_helpers_use_only_canonical_names_and_env_labels() {
         Some("SIGIL_GEMINI_API_KEY")
     );
     assert_eq!(provider_api_key_env_name("claude"), None);
+}
+
+#[test]
+fn provider_model_alias_normalization_is_provider_aware() {
+    assert_eq!(
+        normalize_provider_model_alias("deepseek", "  flash "),
+        Some("deepseek-v4-flash".to_owned())
+    );
+    assert_eq!(
+        normalize_provider_model_alias("deepseek", "v4-pro"),
+        Some("deepseek-v4-pro".to_owned())
+    );
+    assert_eq!(
+        normalize_provider_model_alias("openai_compat", "  flash "),
+        Some("flash".to_owned())
+    );
+    assert_eq!(normalize_provider_model_alias("deepseek", "   "), None);
+}
+
+#[test]
+fn provider_cycling_is_runtime_owned() {
+    assert_eq!(next_provider_name("deepseek"), "openai_compat");
+    assert_eq!(next_provider_name("openai_compat"), "anthropic");
+    assert_eq!(next_provider_name("anthropic"), "gemini");
+    assert_eq!(next_provider_name("gemini"), "deepseek");
+    assert_eq!(next_provider_name("unknown"), "deepseek");
 }
 
 #[test]
@@ -197,5 +225,48 @@ fn provider_status_config_from_fields_validates_common_status_surface() {
     assert_eq!(
         error.to_string(),
         "model_request.request_timeout_secs must be greater than 0"
+    );
+}
+
+#[test]
+fn provider_status_helpers_expose_supported_status_surfaces() {
+    let mut config = test_root_config();
+    let balance = provider_balance_status_config(&config)
+        .expect("balance status should resolve")
+        .expect("deepseek exposes balance status");
+    assert_eq!(balance.base_url, "https://api.deepseek.com");
+
+    config.agent.provider = OPENAI_COMPAT_PROVIDER_KEY.to_owned();
+    config.agent.model = "gpt-test".to_owned();
+    config.providers.insert(
+        OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
+        json!({
+            "base_url": "https://openai.example.com/v1",
+            "api_key": "openai-key"
+        }),
+    );
+    assert!(
+        provider_balance_status_config(&config)
+            .expect("openai-compatible balance status should resolve")
+            .is_none()
+    );
+    let models = provider_model_status_config(&config)
+        .expect("openai-compatible model status should resolve")
+        .expect("openai-compatible exposes model listing");
+    assert_eq!(models.base_url, "https://openai.example.com/v1");
+
+    let fields = ProviderConfigFields {
+        model: "claude".to_owned(),
+        api_key: "anthropic-key".to_owned(),
+        base_url: "https://anthropic.example.com".to_owned(),
+    };
+    assert!(
+        provider_model_status_config_from_fields(
+            ANTHROPIC_PROVIDER_KEY,
+            &fields,
+            &ModelRequestConfig::default(),
+        )
+        .expect("anthropic model status should resolve")
+        .is_none()
     );
 }

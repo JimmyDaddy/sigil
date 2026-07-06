@@ -13,7 +13,7 @@ pub fn build_run_options(
         workspace_root,
         max_turns: root_config.agent.max_turns,
         tool_timeout_secs: root_config.agent.tool_timeout_secs,
-        reasoning_effort: Some(default_reasoning_effort(root_config)),
+        reasoning_effort: default_reasoning_effort(root_config),
         interaction_mode,
         permission_config: root_config.permission.clone(),
         permission_context: permission_evaluation_context(&paths),
@@ -144,16 +144,36 @@ fn role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolRegistrySco
 }
 
 pub(super) fn canonical_workspace_root(workspace_root: PathBuf) -> PathBuf {
-    workspace_root.canonicalize().unwrap_or(workspace_root)
+    match workspace_root.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            tracing::warn!(
+                workspace_root = %workspace_root.display(),
+                error = %error,
+                "failed to canonicalize workspace root; using original path"
+            );
+            workspace_root
+        }
+    }
 }
 
-fn default_reasoning_effort(root_config: &RootConfig) -> ReasoningEffort {
-    if provider_config_key(&root_config.agent.provider) == "deepseek"
-        && let Ok(config) = load_deepseek_config(root_config)
-    {
-        return config.profile().default_reasoning_effort;
+fn default_reasoning_effort(root_config: &RootConfig) -> Option<ReasoningEffort> {
+    let capabilities = provider_capabilities_for_name(&root_config.agent.provider)?;
+    if !capabilities.supports_reasoning_effort {
+        return None;
     }
-    ReasoningEffort::Max
+    provider_configured_default_reasoning_effort(root_config).or(Some(ReasoningEffort::Max))
+}
+
+fn provider_configured_default_reasoning_effort(
+    root_config: &RootConfig,
+) -> Option<ReasoningEffort> {
+    match provider_config_key(&root_config.agent.provider) {
+        crate::DEEPSEEK_PROVIDER_KEY => load_deepseek_config(root_config)
+            .ok()
+            .map(|config| config.profile().default_reasoning_effort),
+        _ => None,
+    }
 }
 
 fn configured_allowlist_is_empty(config: &ToolAllowlistConfig) -> bool {
