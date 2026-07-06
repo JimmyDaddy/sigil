@@ -105,7 +105,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     assert!(!config_hits.sections.is_empty());
     assert!(config_hits.sections.len() <= ConfigSection::FLOW.len());
     assert!(!config_hits.fields.is_empty());
-    assert_eq!(config_hits.footer_actions.len(), 2);
+    assert_eq!(config_hits.footer_actions.len(), 3);
     let provider_section = config_hits
         .sections
         .iter()
@@ -494,7 +494,7 @@ fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<(
         .expect("wide config layout should expose hit areas");
     assert_eq!(hits.sections.len(), ConfigSection::DEFAULT_FLOW.len());
     assert!(!hits.fields.is_empty());
-    assert_eq!(hits.footer_actions.len(), 2);
+    assert_eq!(hits.footer_actions.len(), 3);
     Ok(())
 }
 

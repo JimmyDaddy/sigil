@@ -133,19 +133,23 @@ fn config_section_flow_wraps() {
 fn config_footer_action_navigation_wraps() {
     assert_eq!(
         ConfigFooterAction::Save.next_for_section(ConfigSection::Provider),
-        ConfigFooterAction::Close
+        ConfigFooterAction::SaveAndClose
     );
     assert_eq!(
         ConfigFooterAction::Save.previous_for_section(ConfigSection::Provider),
         ConfigFooterAction::Close
     );
     assert_eq!(
-        ConfigFooterAction::CleanMutationArtifacts.next_for_section(ConfigSection::Storage),
+        ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Provider),
         ConfigFooterAction::Close
     );
     assert_eq!(
+        ConfigFooterAction::CleanMutationArtifacts.next_for_section(ConfigSection::Storage),
+        ConfigFooterAction::SaveAndClose
+    );
+    assert_eq!(
         ConfigFooterAction::Close.previous_for_section(ConfigSection::Storage),
-        ConfigFooterAction::CleanMutationArtifacts
+        ConfigFooterAction::SaveAndClose
     );
     assert_eq!(
         ConfigFooterAction::Close.next_for_section(ConfigSection::Permissions),
@@ -153,15 +157,15 @@ fn config_footer_action_navigation_wraps() {
     );
     assert_eq!(
         ConfigFooterAction::ActivateMcp.next_for_section(ConfigSection::Mcp),
-        ConfigFooterAction::Close
+        ConfigFooterAction::SaveAndClose
     );
     assert_eq!(
         ConfigFooterAction::Close.previous_for_section(ConfigSection::Mcp),
-        ConfigFooterAction::ActivateMcp
+        ConfigFooterAction::SaveAndClose
     );
     assert_eq!(
         ConfigFooterAction::UseSkill.next_for_section(ConfigSection::Skills),
-        ConfigFooterAction::Close
+        ConfigFooterAction::SaveAndClose
     );
     assert_eq!(
         ConfigFooterAction::Close.next_for_section(ConfigSection::Skills),
@@ -173,7 +177,7 @@ fn config_footer_action_navigation_wraps() {
     );
     assert_eq!(
         ConfigFooterAction::BlockAgent.next_for_section(ConfigSection::Agents),
-        ConfigFooterAction::TrustAgent
+        ConfigFooterAction::SaveAndClose
     );
     assert_eq!(
         ConfigFooterAction::ApprovePlugin.next_for_section(ConfigSection::Plugins),
@@ -181,7 +185,7 @@ fn config_footer_action_navigation_wraps() {
     );
     assert_eq!(
         ConfigFooterAction::DenyPlugin.next_for_section(ConfigSection::Plugins),
-        ConfigFooterAction::ApprovePlugin
+        ConfigFooterAction::SaveAndClose
     );
 }
 
@@ -1047,6 +1051,11 @@ fn config_state_moves_fields_and_footer_boundaries() {
     );
     state.focus_footer(ConfigFooterAction::Close);
     assert!(state.footer_selected);
+    state.move_footer_action(false);
+    assert_eq!(
+        state.selected_footer_action,
+        ConfigFooterAction::SaveAndClose
+    );
     state.move_footer_action(false);
     assert_eq!(state.selected_footer_action, ConfigFooterAction::Save);
     assert!(state.focus_last_field());

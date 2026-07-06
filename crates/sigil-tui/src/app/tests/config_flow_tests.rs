@@ -69,7 +69,10 @@ fn config_storage_footer_dispatches_mutation_artifact_cleanup() -> Result<()> {
     state.set_section(ConfigSection::Storage);
     state.focus_footer(ConfigFooterAction::CleanMutationArtifacts);
 
-    assert_eq!(app.config_footer_action_labels(), vec!["clean", "close"]);
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["clean", "save+close", "close"]
+    );
     assert_eq!(app.config_selected_field_label(), Some("clean_artifacts"));
     assert!(
         app.config_nav_lines()
@@ -125,7 +128,10 @@ fn config_storage_footer_keeps_artifact_delete_out_of_primary_actions() -> Resul
         detail
             .contains("i footer clean records lifecycle events; artifact details are audit/debug")
     );
-    assert_eq!(app.config_footer_action_labels(), vec!["clean", "close"]);
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["clean", "save+close", "close"]
+    );
     assert!(!app.config_footer_action_labels().contains(&"delete"));
     Ok(())
 }
@@ -482,6 +488,9 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
     assert_eq!(app.config_selected_field_label(), Some("save"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("close"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -535,6 +544,8 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
         .set_section(ConfigSection::Mcp);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
@@ -1740,7 +1751,10 @@ slash_names = ["review-agent"]
     assert!(nav.contains("Agents: Up/Down select"));
     assert!(nav.contains("Agents: PgUp/PgDn wrap"));
     assert!(nav.contains("Agents: footer trust/disable"));
-    assert_eq!(app.config_footer_action_labels(), vec!["trust", "disable"]);
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["trust", "disable", "save+close"]
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
     assert!(
@@ -2497,7 +2511,10 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(nav.contains("Plugins: Up/Down select"));
     assert!(nav.contains("Plugins: PgUp/PgDn wrap"));
     assert!(nav.contains("Plugins: footer approve/deny"));
-    assert_eq!(app.config_footer_action_labels(), vec!["approve", "deny"]);
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["approve", "deny", "save+close"]
+    );
     Ok(())
 }
 
@@ -3220,6 +3237,54 @@ fn config_save_is_blocked_while_busy() -> Result<()> {
     assert_eq!(app.last_notice(), Some("busy; save later"));
     let saved = RootConfig::load(&config_path)?;
     assert_eq!(saved.agent.model, "deepseek-v4-flash");
+    Ok(())
+}
+
+#[test]
+fn config_clean_save_skips_worker_restart_even_when_busy() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config().save(&config_path)?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.config_path = config_path;
+    app.open_config_panel();
+    app.runtime.is_busy = true;
+    app.config_state
+        .as_mut()
+        .expect("config state should exist after opening /config")
+        .close_guard_armed = true;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert!(app.is_config_mode());
+    assert!(!app.config_is_dirty());
+    assert!(!app.config_close_guard_armed());
+    assert_eq!(app.last_notice(), Some("saved config"));
+    Ok(())
+}
+
+#[test]
+fn config_clean_footer_save_and_close_closes_without_worker_restart() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config().save(&config_path)?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.config_path = config_path;
+    app.open_config_panel();
+    app.runtime.is_busy = true;
+    app.config_state
+        .as_mut()
+        .expect("config state should exist after opening /config")
+        .focus_footer(ConfigFooterAction::SaveAndClose);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(!app.is_config_mode());
+    assert_eq!(app.last_notice(), Some("saved config and closed"));
     Ok(())
 }
 
@@ -4081,8 +4146,8 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
         state.focus_footer(ConfigFooterAction::SaveAndClose);
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("close"));
-    assert_eq!(app.last_notice(), Some("action close"));
+    assert_eq!(app.config_selected_field_label(), Some("save"));
+    assert_eq!(app.last_notice(), Some("action save"));
 
     {
         let state = app

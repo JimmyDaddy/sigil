@@ -586,7 +586,6 @@ impl AppState {
                 {
                     return match config_state.selected_footer_action {
                         ConfigFooterAction::Save => self.save_config_draft(),
-                        #[cfg(test)]
                         ConfigFooterAction::SaveAndClose => self.save_config_draft_and_close(),
                         ConfigFooterAction::CleanMutationArtifacts => {
                             self.clean_selected_mutation_artifacts()
@@ -1542,6 +1541,16 @@ impl AppState {
     }
 
     fn save_config_draft(&mut self) -> Result<Option<AppAction>> {
+        let Some(is_dirty) = self.config_state.as_ref().map(|state| state.dirty) else {
+            return Ok(None);
+        };
+        if !is_dirty {
+            if let Some(config_state) = self.config_state.as_mut() {
+                config_state.close_guard_armed = false;
+            }
+            self.last_notice = Some("saved config".to_owned());
+            return Ok(None);
+        }
         if self.runtime.is_busy {
             self.last_notice = Some("busy; save later".to_owned());
             return Ok(None);
@@ -1579,8 +1588,12 @@ impl AppState {
     }
 
     fn save_config_draft_and_close(&mut self) -> Result<Option<AppAction>> {
+        let was_clean = self
+            .config_state
+            .as_ref()
+            .is_some_and(|config_state| !config_state.dirty);
         let action = self.save_config_draft()?;
-        if action.is_some() {
+        if action.is_some() || was_clean {
             self.config_state = None;
             self.last_notice = Some("saved config and closed".to_owned());
         }

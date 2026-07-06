@@ -886,6 +886,10 @@ fn config_private_helpers_cover_missing_snapshot_and_save_guards() -> anyhow::Re
         .draft
         .provider_model
         .clear();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .dirty = true;
     assert!(app.save_config_draft()?.is_none());
     assert_eq!(app.last_notice.as_deref(), Some("model cannot be empty"));
     assert!(app.events.iter().any(|event| {

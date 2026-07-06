@@ -3,7 +3,6 @@ use super::ConfigSection;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigFooterAction {
     Save,
-    #[cfg(test)]
     SaveAndClose,
     CleanMutationArtifacts,
     ActivateMcp,
@@ -22,13 +21,17 @@ pub(crate) enum ConfigFooterAction {
 }
 
 impl ConfigFooterAction {
-    const DEFAULT_ORDER: [Self; 2] = [Self::Save, Self::Close];
-    const STORAGE_ORDER: [Self; 2] = [Self::CleanMutationArtifacts, Self::Close];
-    const PERMISSIONS_ORDER: [Self; 2] = [Self::Save, Self::Close];
-    const MCP_ORDER: [Self; 2] = [Self::ActivateMcp, Self::Close];
-    const AGENTS_ORDER: [Self; 2] = [Self::TrustAgent, Self::BlockAgent];
-    const SKILLS_ORDER: [Self; 2] = [Self::UseSkill, Self::Close];
-    const PLUGINS_ORDER: [Self; 2] = [Self::ApprovePlugin, Self::DenyPlugin];
+    const DEFAULT_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
+    const STORAGE_ORDER: [Self; 3] = [
+        Self::CleanMutationArtifacts,
+        Self::SaveAndClose,
+        Self::Close,
+    ];
+    const PERMISSIONS_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
+    const MCP_ORDER: [Self; 3] = [Self::ActivateMcp, Self::SaveAndClose, Self::Close];
+    const AGENTS_ORDER: [Self; 3] = [Self::TrustAgent, Self::BlockAgent, Self::SaveAndClose];
+    const SKILLS_ORDER: [Self; 3] = [Self::UseSkill, Self::SaveAndClose, Self::Close];
+    const PLUGINS_ORDER: [Self; 3] = [Self::ApprovePlugin, Self::DenyPlugin, Self::SaveAndClose];
 
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
@@ -54,7 +57,6 @@ impl ConfigFooterAction {
     pub(crate) fn button_label(self) -> &'static str {
         match self {
             Self::Save => "save",
-            #[cfg(test)]
             Self::SaveAndClose => "save+close",
             Self::CleanMutationArtifacts => "clean",
             Self::ActivateMcp => "activate",
@@ -76,7 +78,6 @@ impl ConfigFooterAction {
     pub(crate) fn field_label(self) -> &'static str {
         match self {
             Self::Save => "save",
-            #[cfg(test)]
             Self::SaveAndClose => "save_and_close",
             Self::CleanMutationArtifacts => "clean_artifacts",
             Self::ActivateMcp => "activate_mcp",
