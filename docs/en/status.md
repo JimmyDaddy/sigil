@@ -64,4 +64,4 @@ These are not the current supported path unless a later release says otherwise:
 
 ## How To Read The Docs
 
-User docs describe current behavior unless a section explicitly says "future work" or "advanced". Developer docs under `dev/docs/*` can describe architecture direction and implementation snapshots; they are not always the same as stable user support commitments.
+User docs describe current behavior unless a section explicitly says "future work" or "advanced". Developer docs under `dev/docs/*` can describe architecture direction and RFC-level implementation detail; they are not always the same as stable user support commitments.

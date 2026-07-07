@@ -8,7 +8,7 @@
 
 审阅基线：`main` 分支 `d44b2f82a4c6fff330c3b30e878d176dbfe2dc5d` 附近的静态源码审阅。本文不代表已经完成编译、TUI 冒烟或测试验证。
 
-当前完成度快照（2026-07-01）：本 Roadmap 仍保持 frozen，不再扩充 phase 或交付范围；实时执行状态以 [`.repo-local-dev/rfcs/STATUS.md`](../../.repo-local-dev/rfcs/STATUS.md) 为准。本次完成度审计记录在 [`.repo-local-dev/review/2026-07-01-sigil-capability-roadmap-completion-audit.md`](../../.repo-local-dev/review/2026-07-01-sigil-capability-roadmap-completion-audit.md)。截至该审计，roadmap 的核心语义大多已落地，剩余工作主要是 evidence/platform/product-pressure gated：E06.6 persistent repo graph / semantic retrieval、E13.11 model eval runner、E08.5/E16.7 projection escalation、E14.4 physical worktree、E14.8 cleanup hardening、E05.10 Windows backend 和 Docker/container PTY productization。
+当前完成度快照（2026-07-01）：本 Roadmap 仍保持 frozen，不再扩充 phase 或交付范围；实时执行状态由 repo-local RFC status board 跟踪，属于 `.repo-local-dev/` 下的工作区本地材料，不作为仓库内稳定链接提交。截至该审计，roadmap 的核心语义大多已落地，剩余工作主要是 evidence/platform/product-pressure gated：E06.6 persistent repo graph / semantic retrieval、E13.11 model eval runner、E08.5/E16.7 projection escalation、E14.4 physical worktree、E14.8 cleanup hardening、E05.10 Windows backend 和 Docker/container PTY productization。
 
 注意：下文第 3 节中的“当前状态”和各 phase “当前问题”保留 2026-06-25 frozen baseline，用于说明路线图设计时的缺口，不应解读为 2026-07-01 的实时完成表。
 

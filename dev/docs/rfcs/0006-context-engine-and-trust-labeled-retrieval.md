@@ -117,7 +117,7 @@ Implementation progress:
 
 - 当前实现是 V0 Context Engine：ContextDigestV0、session archive BM25、code-intel adapter、token budget packer、runtime repo-file provider、source/symbol auto-context scheduling、TUI provenance summary、deterministic context quality evidence pack 和 evidence sweep。
 - 它不是完整持久 repo graph、semantic vector retrieval、call/impact graph 或跨 session repo knowledge。
-- 这些更重能力由 `.repo-local-dev/rfcs/0006-context-engine/e06-06-persistent-repo-graph-semantic-retrieval-trigger.md` 作为 gated trigger 跟踪，只有真实 context-quality 证据或明确产品需求出现后才开工。
+- 这些更重能力由 repo-local RFC status board 作为 gated trigger 跟踪，只有真实 context-quality 证据或明确产品需求出现后才开工；该 status board 属于 `.repo-local-dev/` 工作区本地材料，不作为仓库内稳定链接提交。
 
 ## 6. ContextDigestV0
 

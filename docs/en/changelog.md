@@ -48,4 +48,4 @@ Tagged releases build archives, checksums, GitHub provenance attestations, `sigi
 - User support status: [status.md](status.md)
 - Install and update: [installation.md](installation.md)
 - Full configuration: [configuration.md](configuration.md)
-- Developer implementation snapshot: `dev/docs/current-implementation-notes.en.md`
+- Developer architecture and RFC details: `dev/docs/sigil-rust-agent-core-technical-solution.md` and `dev/docs/rfcs/`
