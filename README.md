@@ -13,7 +13,7 @@ Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, 
 
 [Website](https://jimmydaddy.github.io/sigil/) · [Docs](docs/en/README.md) · [Quickstart](docs/en/quickstart.md) · [Visual tour](docs/en/visual-tour.md) · [Provider guide](docs/en/providers.md)
 
-Sigil's first release is prepared for npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
+Sigil's first alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
 
 ## Quickstart
 

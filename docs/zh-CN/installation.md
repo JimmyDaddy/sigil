@@ -42,7 +42,7 @@ sigil --version
 sigil doctor
 ```
 
-release workflow 会从 macOS release archives 生成 `sigil-ai.rb`。维护者把该 formula 发布到 `JimmyDaddy/homebrew-sigil` tap。
+release workflow 会从 macOS release archives 生成 `sigil-ai.rb`。该 formula 已发布到 `JimmyDaddy/homebrew-sigil` tap。
 
 ## 通过 Cargo 安装
 

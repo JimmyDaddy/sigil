@@ -13,7 +13,7 @@ Sigil 是一个 TUI-first 的 Rust coding agent，用来在真实仓库里协助
 
 [网站](https://jimmydaddy.github.io/sigil/) · [文档](docs/zh-CN/README.md) · [快速上手](docs/zh-CN/quickstart.md) · [视觉导览](docs/zh-CN/visual-tour.md) · [Provider 指南](docs/zh-CN/providers.md)
 
-Sigil 的首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发。`v0.0.1-alpha` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
+Sigil 的首个 alpha release 已通过 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 发布。`v0.0.1-alpha` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
 
 ## 快速开始
 

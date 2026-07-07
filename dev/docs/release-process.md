@@ -78,6 +78,11 @@ Prefer npm trusted publishing or provenance-capable CI for registry publication.
 If a platform archive is not present, do not list or publish that optional
 package for the release.
 
+For the first published prerelease of a package, npm can keep `latest` pointing
+at the only available version even when the package is published with
+`--tag alpha`; the registry rejects removing `latest` when no alternate version
+exists. User-facing install docs should still prefer `@alpha` for prereleases.
+
 Cargo distribution for the first release uses the Git tag:
 
 ```bash

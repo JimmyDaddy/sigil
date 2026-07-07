@@ -32,8 +32,8 @@ This page separates what users can rely on today from what is experimental, limi
 | Area | Current expectation |
 | --- | --- |
 | Release archives | Can be built locally and by tagged release workflows; package-manager artifacts are derived from them. |
-| Homebrew formula asset | `sigil-ai.rb` is generated for tap maintainers; the tap repository update is performed outside this repository. |
-| npm package tarballs | Generated from release archives for registry publishing and release-asset inspection. |
+| Homebrew formula asset | `sigil-ai.rb` is generated from release archives and published in the `JimmyDaddy/homebrew-sigil` tap. |
+| npm package tarballs | Generated from release archives for npm registry publishing and release-asset inspection. |
 | OpenAI-compatible differences | The provider intentionally omits DeepSeek-only prefix/FIM/beta behaviors. |
 | Provider-specific semantics | Anthropic and Gemini request/event details stay in provider crates; `sigil-kernel` only exposes provider-neutral capabilities and chunks. |
 | Code intelligence | Depends on installed language servers and local environment; normal chat does not require it. |

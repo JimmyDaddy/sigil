@@ -61,7 +61,7 @@ Sigil 围绕几个用户可感知的概念工作：
 
 ## 当前分发状态
 
-首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发。`v0.0.1-alpha` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。
+首个 alpha release 已通过 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 发布。`v0.0.1-alpha` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。
 
 ```bash
 npm install -g @sigil-ai/sigil@alpha

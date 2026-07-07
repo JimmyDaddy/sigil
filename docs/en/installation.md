@@ -42,7 +42,7 @@ sigil --version
 sigil doctor
 ```
 
-The release workflow generates `sigil-ai.rb` from the macOS release archives. Maintainers publish that formula to the `JimmyDaddy/homebrew-sigil` tap.
+The release workflow generates `sigil-ai.rb` from the macOS release archives. The formula is published in the `JimmyDaddy/homebrew-sigil` tap.
 
 ## Install With Cargo
 
