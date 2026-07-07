@@ -5,7 +5,8 @@ use std::{
 
 use serde_json::{Value, json};
 use sigil_kernel::{
-    PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision, ToolProgressEvent,
+    PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision, ToolExecutionId,
+    ToolProgressEvent,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -996,7 +997,8 @@ async fn live_event_bus_delivers_transient_events_without_replay_id() {
 async fn live_event_bus_treats_tool_progress_as_transient() {
     let bus = HttpLiveEventBus::new(8);
     let progress = ToolProgressEvent {
-        execution_id: "execution-1".to_owned(),
+        execution_id: ToolExecutionId::new("execution-1")
+            .expect("test tool execution id should be valid"),
         call_id: "call-1".to_owned(),
         tool_name: "terminal_start".to_owned(),
         sequence: 1,
