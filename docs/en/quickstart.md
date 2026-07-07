@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [简体中文](../zh-CN/quickstart.md)
 
-This guide gets you from a first-release install to a useful Sigil session. It is written for users who want to try Sigil in a real repository, not for maintainers changing Sigil itself. `v0.0.1` is an early preview.
+This guide gets you from a first-release install to a useful Sigil session. It is written for users who want to try Sigil in a real repository, not for maintainers changing Sigil itself. `v0.0.1-alpha` is an early preview.
 
 ## Before You Begin
 
@@ -19,7 +19,7 @@ For the smoothest first run, start in a repository where you can inspect `git di
 Use one of the first-release install paths:
 
 ```bash
-npm install -g @sigil-ai/sigil
+npm install -g @sigil-ai/sigil@alpha
 ```
 
 ```bash
@@ -27,7 +27,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 ```
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil
 ```
 
 Confirm the binary is on `PATH`:

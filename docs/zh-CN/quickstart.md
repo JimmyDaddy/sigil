@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [English](../en/quickstart.md)
 
-这份指南帮助你从首发安装路径安装 Sigil，并完成一次真实有用的 TUI session。它面向想试用 Sigil 的用户，而不是修改 Sigil 本身的维护者。`v0.0.1` 是 early preview。
+这份指南帮助你从首发安装路径安装 Sigil，并完成一次真实有用的 TUI session。它面向想试用 Sigil 的用户，而不是修改 Sigil 本身的维护者。`v0.0.1-alpha` 是 early preview。
 
 ## 开始前
 
@@ -19,7 +19,7 @@
 使用首发安装路径之一：
 
 ```bash
-npm install -g @sigil-ai/sigil
+npm install -g @sigil-ai/sigil@alpha
 ```
 
 ```bash
@@ -27,7 +27,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 ```
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil
 ```
 
 确认 binary 可用：

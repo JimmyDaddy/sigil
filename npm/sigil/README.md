@@ -8,7 +8,7 @@ platform-specific optional packages generated from the GitHub release archives.
 ## Install
 
 ```bash
-npm install -g @sigil-ai/sigil
+npm install -g @sigil-ai/sigil@alpha
 sigil --version
 sigil doctor
 ```
@@ -19,5 +19,5 @@ Do not publish this directory directly. Generate publishable package directories
 from release archives:
 
 ```bash
-scripts/prepare-npm-packages.sh --version 0.0.1 --dist-dir dist --out-dir dist/npm-packages
+scripts/prepare-npm-packages.sh --version 0.0.1-alpha --dist-dir dist --out-dir dist/npm-packages
 ```

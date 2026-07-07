@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
 
-This guide covers the first-release install paths. If you want a first-run walkthrough, start with [quickstart.md](quickstart.md). `v0.0.1` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
+This guide covers the first-release install paths. If you want a first-run walkthrough, start with [quickstart.md](quickstart.md). `v0.0.1-alpha` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
 
 ## Requirements
 
@@ -15,7 +15,7 @@ This guide covers the first-release install paths. If you want a first-run walkt
 The npm package is scoped as `@sigil-ai/sigil`. It installs a small Node.js launcher plus a platform-specific optional binary package. The installed command is still `sigil`.
 
 ```bash
-npm install -g @sigil-ai/sigil
+npm install -g @sigil-ai/sigil@alpha
 ```
 
 Confirm the install:
@@ -49,7 +49,7 @@ The release workflow generates `sigil-ai.rb` from the macOS release archives. Ma
 For the first release, Cargo installs from the Git tag rather than crates.io:
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil
 ```
 
 This installs the `sigil` binary into Cargo's binary directory. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
@@ -120,9 +120,9 @@ Tagged releases are built by the release workflow and include checksums, GitHub 
 Use the installer you used originally:
 
 ```bash
-npm install -g @sigil-ai/sigil@latest
+npm install -g @sigil-ai/sigil@alpha
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

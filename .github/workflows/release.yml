@@ -144,7 +144,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          release_flags=()
+          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "${RELEASE_TAG}" dist/* \
             --title "Sigil ${RELEASE_TAG}" \
             --notes-file RELEASE_NOTES.md \
-            --verify-tag
+            --verify-tag \
+            "${release_flags[@]}"
