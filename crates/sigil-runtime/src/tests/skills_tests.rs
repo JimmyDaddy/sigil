@@ -199,6 +199,19 @@ description: Project asset review skill.
 "#,
     );
     write_skill(
+        workspace.path().join(".sigil/commands/plan-chapter.md"),
+        r#"---
+name: plan-chapter
+description: Project asset command skill.
+trust: trusted
+argument-hint: chapter notes
+allowed-tools: [read_file, grep]
+---
+
+# Plan Chapter
+"#,
+    );
+    write_skill(
         workspace.path().join(".sigil/agents/audit.md"),
         r#"---
 name: audit
@@ -219,11 +232,19 @@ description: Project asset agent skill.
             .iter()
             .map(|descriptor| descriptor.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["audit", "review"]
+        vec!["audit", "plan-chapter", "review"]
     );
     let review = descriptor(&report, "review");
     assert_eq!(review.source, SkillSource::Workspace);
     assert!(review.entrypoint.starts_with(Path::new(".sigil/skills")));
+    let command = descriptor(&report, "plan-chapter");
+    assert_eq!(command.source, SkillSource::Workspace);
+    assert_eq!(command.run_as, SkillRunMode::Inline);
+    assert_eq!(command.trust, SkillTrustState::Trusted);
+    assert_eq!(command.argument_hint.as_deref(), Some("chapter notes"));
+    assert!(command.allowed_tools.names.contains("read_file"));
+    assert!(command.allowed_tools.names.contains("grep"));
+    assert!(command.entrypoint.starts_with(Path::new(".sigil/commands")));
     let audit = descriptor(&report, "audit");
     assert_eq!(audit.run_as, SkillRunMode::ChildSession);
     assert!(audit.entrypoint.starts_with(Path::new(".sigil/agents")));
@@ -1078,6 +1099,10 @@ fn directory_noise_missing_entrypoints_and_invalid_agents_are_non_fatal() {
         workspace.path().join(".sigil/agents/bad name.md"),
         "# Bad Agent",
     );
+    write_skill(
+        workspace.path().join(".sigil/commands/bad name.md"),
+        "# Bad Command",
+    );
 
     let report = discover_skill_index(workspace.path(), &SkillConfig::default())
         .expect("discovery should succeed with warnings");
@@ -1089,6 +1114,9 @@ fn directory_noise_missing_entrypoints_and_invalid_agents_are_non_fatal() {
     assert!(report.warnings.iter().any(|warning| warning.kind
         == SkillDiscoveryWarningKind::InvalidName
         && warning.message.contains("invalid agent file name")));
+    assert!(report.warnings.iter().any(|warning| warning.kind
+        == SkillDiscoveryWarningKind::InvalidName
+        && warning.message.contains("invalid command file name")));
 }
 
 #[test]

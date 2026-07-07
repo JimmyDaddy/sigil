@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow, bail};
-use serde::Deserialize;
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, de};
 use sigil_kernel::{
-    AgentInvocationPolicy, AgentProfileKind, AgentResultPolicy, AgentTrustState, ReasoningEffort,
-    ToolRegistryScope,
+    AgentInvocationPolicy, AgentProfileKind, AgentResultPolicy, AgentTrustState, ApprovalMode,
+    ExternalDirectoryConfig, ExternalDirectoryRule, PermissionConfig, PermissionRule,
+    ReasoningEffort, ToolRegistryScope,
 };
+
+use crate::{LOAD_SKILL_TOOL_NAME, SPAWN_AGENT_TOOL_NAME};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +29,8 @@ pub(super) struct NativeAgentProfileWire {
     pub(super) reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub(super) tool_scope: Option<ToolRegistryScope>,
+    #[serde(default)]
+    pub(super) permission: Option<AgentPermissionWire>,
     #[serde(default)]
     pub(super) allowed_tools: Option<Vec<String>>,
     #[serde(default)]
@@ -56,6 +61,34 @@ pub(super) struct NativeAgentProfileWire {
     pub(super) slash_names: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AgentPermissionWire {
+    Action(ApprovalMode),
+    Rules(Vec<AgentPermissionRuleWire>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AgentPermissionRuleWire {
+    key: String,
+    value: AgentPermissionValueWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentPermissionValueWire {
+    Action(ApprovalMode),
+    Patterns(Vec<(String, ApprovalMode)>),
+}
+
+impl<'de> Deserialize<'de> for AgentPermissionWire {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = toml::Value::deserialize(deserializer)?;
+        agent_permission_wire_from_toml_value(&value).map_err(de::Error::custom)
+    }
+}
+
 pub(super) fn markdown_agent_profile_wire(
     raw: &str,
 ) -> Result<(NativeAgentProfileWire, Option<String>)> {
@@ -81,7 +114,10 @@ pub(super) fn markdown_agent_profile_wire(
     }
     body.extend(lines.map(str::to_owned));
     let fields = parse_markdown_frontmatter_fields(&frontmatter)?;
-    Ok((wire_from_frontmatter_fields(fields)?, Some(body.join("\n"))))
+    Ok((
+        wire_from_frontmatter_fields(fields, &frontmatter)?,
+        Some(body.join("\n")),
+    ))
 }
 
 pub(super) fn markdown_body_without_frontmatter(raw: &str) -> &str {
@@ -136,6 +172,7 @@ fn parse_markdown_frontmatter_fields(lines: &[String]) -> Result<BTreeMap<String
 
 fn wire_from_frontmatter_fields(
     fields: BTreeMap<String, Vec<String>>,
+    frontmatter: &[String],
 ) -> Result<NativeAgentProfileWire> {
     let string = |key: &str| -> Option<String> {
         fields
@@ -160,6 +197,7 @@ fn wire_from_frontmatter_fields(
             .map(|value| parse_reasoning_effort(&value))
             .transpose()?,
         tool_scope: None,
+        permission: parse_markdown_permission_wire(frontmatter)?,
         allowed_tools: list("allowed_tools"),
         tools: list("tools"),
         invocation_policy: string("invocation_policy")
@@ -189,6 +227,287 @@ fn wire_from_frontmatter_fields(
         aliases: list("aliases").or_else(|| list("alias")),
         slash_names: list("slash_names").or_else(|| list("slash_name")),
     })
+}
+
+pub(super) fn resolve_agent_permission_config(
+    root: &PermissionConfig,
+    wire: Option<AgentPermissionWire>,
+) -> Result<PermissionConfig> {
+    let mut config = root.clone();
+    let Some(wire) = wire else {
+        return Ok(config);
+    };
+    apply_agent_permission_wire(&mut config, &wire)?;
+    Ok(config)
+}
+
+fn apply_agent_permission_wire(
+    config: &mut PermissionConfig,
+    wire: &AgentPermissionWire,
+) -> Result<()> {
+    match wire {
+        AgentPermissionWire::Action(mode) => {
+            config.rules.push(PermissionRule {
+                tool_name: Some("*".to_owned()),
+                subject_glob: None,
+                mode: *mode,
+            });
+        }
+        AgentPermissionWire::Rules(rules) => {
+            for rule in rules {
+                apply_agent_permission_rule(config, rule)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_agent_permission_rule(
+    config: &mut PermissionConfig,
+    rule: &AgentPermissionRuleWire,
+) -> Result<()> {
+    let key = normalized_permission_key(&rule.key);
+    if key == "external_directory" {
+        apply_external_directory_permission(config, &rule.value);
+        return Ok(());
+    }
+    let tools = permission_key_tools(&key);
+    match &rule.value {
+        AgentPermissionValueWire::Action(mode) => {
+            for tool_name in tools {
+                config.rules.push(PermissionRule {
+                    tool_name: Some(tool_name),
+                    subject_glob: None,
+                    mode: *mode,
+                });
+            }
+        }
+        AgentPermissionValueWire::Patterns(patterns) => {
+            for (pattern, mode) in patterns {
+                for tool_name in &tools {
+                    config.rules.push(PermissionRule {
+                        tool_name: Some(tool_name.clone()),
+                        subject_glob: permission_subject_glob(pattern),
+                        mode: *mode,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_external_directory_permission(
+    config: &mut PermissionConfig,
+    value: &AgentPermissionValueWire,
+) {
+    match value {
+        AgentPermissionValueWire::Action(mode) => {
+            config.external_directory.enabled = true;
+            config.external_directory.default_mode = *mode;
+        }
+        AgentPermissionValueWire::Patterns(patterns) => {
+            config.external_directory.enabled = true;
+            if config.external_directory == ExternalDirectoryConfig::default() {
+                config.external_directory.default_mode = ApprovalMode::Ask;
+            }
+            config
+                .external_directory
+                .rules
+                .extend(
+                    patterns
+                        .iter()
+                        .map(|(path_glob, mode)| ExternalDirectoryRule {
+                            path_glob: path_glob.clone(),
+                            mode: *mode,
+                        }),
+                );
+        }
+    }
+}
+
+fn permission_subject_glob(pattern: &str) -> Option<String> {
+    let normalized = pattern.trim();
+    if normalized == "*" {
+        None
+    } else {
+        Some(normalized.to_owned())
+    }
+}
+
+fn normalized_permission_key(key: &str) -> String {
+    key.trim().replace('-', "_").to_ascii_lowercase()
+}
+
+fn permission_key_tools(key: &str) -> Vec<String> {
+    match key {
+        "read" => vec!["read_file".to_owned()],
+        "edit" | "write" => ["write_file", "edit_file", "delete_file", "apply_changeset"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        "glob" => vec!["glob".to_owned()],
+        "grep" => vec!["grep".to_owned()],
+        "list" => vec!["ls".to_owned()],
+        "bash" => vec!["bash".to_owned()],
+        "task" => vec![SPAWN_AGENT_TOOL_NAME.to_owned()],
+        "skill" => vec![LOAD_SKILL_TOOL_NAME.to_owned()],
+        "webfetch" => vec!["webfetch".to_owned()],
+        "websearch" => vec!["websearch".to_owned()],
+        "lsp" => [
+            "code_symbols",
+            "code_workspace_symbols",
+            "code_definition",
+            "code_references",
+            "code_diagnostics",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        other => vec![other.to_owned()],
+    }
+}
+
+fn agent_permission_wire_from_toml_value(value: &toml::Value) -> Result<AgentPermissionWire> {
+    match value {
+        toml::Value::String(action) => {
+            Ok(AgentPermissionWire::Action(parse_approval_mode(action)?))
+        }
+        toml::Value::Table(table) => table
+            .iter()
+            .map(|(key, value)| {
+                Ok(AgentPermissionRuleWire {
+                    key: key.clone(),
+                    value: agent_permission_value_from_toml_value(key, value)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(AgentPermissionWire::Rules),
+        other => bail!("invalid agent permission value {other:?}"),
+    }
+}
+
+fn agent_permission_value_from_toml_value(
+    key: &str,
+    value: &toml::Value,
+) -> Result<AgentPermissionValueWire> {
+    match value {
+        toml::Value::String(action) => Ok(AgentPermissionValueWire::Action(parse_approval_mode(
+            action,
+        )?)),
+        toml::Value::Table(table) => table
+            .iter()
+            .map(|(pattern, value)| {
+                let toml::Value::String(action) = value else {
+                    bail!("invalid agent permission pattern action for {key}.{pattern}");
+                };
+                Ok((pattern.clone(), parse_approval_mode(action)?))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(AgentPermissionValueWire::Patterns),
+        other => bail!("invalid agent permission value for {key}: {other:?}"),
+    }
+}
+
+fn parse_markdown_permission_wire(lines: &[String]) -> Result<Option<AgentPermissionWire>> {
+    let Some((index, value)) = lines.iter().enumerate().find_map(|(index, line)| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("permission:")
+            .map(|value| (index, value.trim()))
+    }) else {
+        return Ok(None);
+    };
+    if !value.is_empty() {
+        return Ok(Some(AgentPermissionWire::Action(parse_approval_mode(
+            value,
+        )?)));
+    }
+
+    let mut rules = Vec::new();
+    let mut cursor = index + 1;
+    while cursor < lines.len() {
+        let line = &lines[cursor];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            cursor += 1;
+            continue;
+        }
+        let indent = leading_space_count(line);
+        if indent == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        let Some((raw_key, raw_value)) = trimmed.split_once(':') else {
+            bail!("invalid permission frontmatter line {trimmed:?}");
+        };
+        let key = strip_scalar_quotes(raw_key.trim()).to_owned();
+        let raw_value = raw_value.trim();
+        if !raw_value.is_empty() {
+            rules.push(AgentPermissionRuleWire {
+                key,
+                value: AgentPermissionValueWire::Action(parse_approval_mode(raw_value)?),
+            });
+            cursor += 1;
+            continue;
+        }
+        let (patterns, next_cursor) =
+            parse_markdown_permission_pattern_block(lines, cursor + 1, indent)?;
+        rules.push(AgentPermissionRuleWire {
+            key,
+            value: AgentPermissionValueWire::Patterns(patterns),
+        });
+        cursor = next_cursor;
+    }
+
+    Ok(Some(AgentPermissionWire::Rules(rules)))
+}
+
+fn parse_markdown_permission_pattern_block(
+    lines: &[String],
+    mut cursor: usize,
+    parent_indent: usize,
+) -> Result<(Vec<(String, ApprovalMode)>, usize)> {
+    let mut patterns = Vec::new();
+    while cursor < lines.len() {
+        let line = &lines[cursor];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            cursor += 1;
+            continue;
+        }
+        let indent = leading_space_count(line);
+        if indent <= parent_indent {
+            break;
+        }
+        let trimmed = line.trim();
+        let Some((raw_pattern, raw_action)) = trimmed.split_once(':') else {
+            bail!("invalid permission pattern line {trimmed:?}");
+        };
+        let action = raw_action.trim();
+        if action.is_empty() {
+            bail!("missing permission action for pattern {raw_pattern:?}");
+        }
+        patterns.push((
+            strip_scalar_quotes(raw_pattern.trim()).to_owned(),
+            parse_approval_mode(action).with_context(|| {
+                format!("invalid permission action for pattern {raw_pattern:?}")
+            })?,
+        ));
+        cursor += 1;
+    }
+    Ok((patterns, cursor))
+}
+
+fn leading_space_count(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
+}
+
+fn parse_approval_mode(value: &str) -> Result<ApprovalMode> {
+    match normalized_scalar(value).as_str() {
+        "allow" => Ok(ApprovalMode::Allow),
+        "ask" => Ok(ApprovalMode::Ask),
+        "deny" => Ok(ApprovalMode::Deny),
+        other => Err(anyhow!("invalid permission action {other:?}")),
+    }
 }
 
 pub(super) fn parse_bool(value: &str) -> Result<bool> {

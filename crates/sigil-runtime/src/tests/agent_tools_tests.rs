@@ -98,7 +98,7 @@ fn child_permission_config_profile_deny_narrows_parent_allow() -> Result<()> {
 }
 
 #[test]
-fn child_permission_config_profile_tool_allow_cannot_widen_parent_deny() -> Result<()> {
+fn child_permission_config_read_only_parent_remains_hard_cap() -> Result<()> {
     let parent = PermissionConfig {
         mode: PermissionMode::ReadOnly,
         ..PermissionConfig::default()
@@ -121,7 +121,7 @@ fn child_permission_config_profile_tool_allow_cannot_widen_parent_deny() -> Resu
 }
 
 #[test]
-fn child_permission_config_profile_tool_allow_cannot_widen_parent_tool_deny() -> Result<()> {
+fn child_permission_config_profile_tool_allow_overrides_parent_tool_deny() -> Result<()> {
     let parent = PermissionConfig {
         tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Deny)]),
         ..PermissionConfig::default()
@@ -139,7 +139,7 @@ fn child_permission_config_profile_tool_allow_cannot_widen_parent_tool_deny() ->
         vec![ToolSubject::command("cargo test", "cargo test")],
     )?;
 
-    assert_eq!(decision.mode, ApprovalMode::Deny);
+    assert_eq!(decision.mode, ApprovalMode::Allow);
     Ok(())
 }
 
@@ -150,7 +150,7 @@ fn child_permission_config_default_role_and_profile_inherit_parent_tool_allow() 
         ..PermissionConfig::default()
     };
     let role = PermissionConfig::default();
-    let profile = PermissionConfig::default();
+    let profile = parent.clone();
 
     let effective = super::effective_child_permission_config(&parent, &role, &profile);
     let decision = PermissionPolicy::new(&effective).decide(
@@ -187,7 +187,7 @@ fn child_permission_config_explicit_tool_ask_narrows_parent_allow() -> Result<()
 }
 
 #[test]
-fn child_permission_config_profile_rule_allow_cannot_widen_parent_default_deny() -> Result<()> {
+fn child_permission_config_profile_rule_allow_cannot_widen_parent_read_only_cap() -> Result<()> {
     let parent = PermissionConfig {
         mode: PermissionMode::ReadOnly,
         ..PermissionConfig::default()
@@ -214,7 +214,7 @@ fn child_permission_config_profile_rule_allow_cannot_widen_parent_default_deny()
 }
 
 #[test]
-fn child_permission_config_external_rule_allow_cannot_widen_parent_default_deny() -> Result<()> {
+fn child_permission_config_profile_external_rule_can_override_parent_default_deny() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let external_root = temp.path().canonicalize()?;
     let external_path = external_root.join("allowed").join("note.txt");
@@ -260,7 +260,7 @@ fn child_permission_config_external_rule_allow_cannot_widen_parent_default_deny(
         )],
     )?;
 
-    assert_eq!(decision.mode, ApprovalMode::Deny);
+    assert_eq!(decision.mode, ApprovalMode::Allow);
     Ok(())
 }
 

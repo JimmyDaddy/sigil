@@ -14,7 +14,7 @@ use sigil_kernel::{
 
 use super::{
     ResolvedAgentProfile, display_path, hash_json, normalize_profile_name_list,
-    read_only_role_tool_scope,
+    read_only_role_tool_scope, resolve_agent_permission_config,
     wire::{
         NativeAgentProfileWire, markdown_agent_profile_wire, markdown_body_without_frontmatter,
     },
@@ -142,6 +142,8 @@ pub(super) fn workspace_agent_profile_from_raw(
     let slash_names =
         normalize_profile_name_list(wire.slash_names.unwrap_or_default(), "agent slash name")?;
     let result_policy = wire.result_policy.unwrap_or_default();
+    let permission_policy =
+        resolve_agent_permission_config(&root_config.permission, wire.permission)?;
     let profile = AgentProfile {
         id: profile_id,
         kind: wire.kind.unwrap_or(AgentProfileKind::Subagent),
@@ -153,7 +155,7 @@ pub(super) fn workspace_agent_profile_from_raw(
             .or_else(|| Some(root_config.agent.provider.clone())),
         reasoning_effort: wire.reasoning_effort,
         tool_scope,
-        permission_policy: root_config.permission.clone(),
+        permission_policy,
         invocation_policy,
         result_policy,
         user_invocable,
@@ -231,6 +233,8 @@ pub(super) fn plugin_agent_profile_from_raw(
     let slash_names =
         normalize_profile_name_list(wire.slash_names.unwrap_or_default(), "agent slash name")?;
     let result_policy = wire.result_policy.unwrap_or_default();
+    let permission_policy =
+        resolve_agent_permission_config(&root_config.permission, wire.permission)?;
     let profile = AgentProfile {
         id: profile_id,
         kind: wire.kind.unwrap_or(AgentProfileKind::Subagent),
@@ -242,7 +246,7 @@ pub(super) fn plugin_agent_profile_from_raw(
             .or_else(|| Some(root_config.agent.provider.clone())),
         reasoning_effort: wire.reasoning_effort,
         tool_scope,
-        permission_policy: root_config.permission.clone(),
+        permission_policy,
         invocation_policy,
         result_policy,
         user_invocable,

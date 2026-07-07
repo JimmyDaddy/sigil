@@ -30,7 +30,10 @@ pub(super) fn render_agent_detail_lines(agent: &ResolvedAgentProfile) -> Vec<Str
         render_config_readonly_row("Result", agent.profile.result_policy.as_str()),
         render_config_readonly_row("Write policy", agent_write_policy_summary(agent)),
         render_config_readonly_row("Tools", &tool_scope_summary(&agent.profile.tool_scope)),
-        render_config_readonly_row("Permission", agent.profile.permission_policy.mode.as_str()),
+        render_config_readonly_row(
+            "Permission",
+            &permission_policy_summary(&agent.profile.permission_policy),
+        ),
         render_config_readonly_row("Skills", &list_summary(&agent.profile.skills)),
         render_config_readonly_row("MCP", &list_summary(&agent.profile.mcp_servers)),
         render_config_readonly_row(
@@ -151,6 +154,24 @@ fn agent_write_policy_summary(agent: &ResolvedAgentProfile) -> &'static str {
         (sigil_kernel::AgentRole::SubagentWrite, _) => "write-capable; sandbox/approval enforced",
         _ => "not write-capable",
     }
+}
+
+fn permission_policy_summary(policy: &sigil_kernel::PermissionConfig) -> String {
+    let external = if policy.external_directory.enabled {
+        format!(
+            "external={} external_rules={}",
+            policy.external_directory.default_mode.as_str(),
+            policy.external_directory.rules.len()
+        )
+    } else {
+        "external=off external_rules=0".to_owned()
+    };
+    format!(
+        "mode={} tools={} rules={} {external}",
+        policy.mode.as_str(),
+        policy.tools.len(),
+        policy.rules.len()
+    )
 }
 
 pub(super) fn agent_slash_name_summary(agent: &ResolvedAgentProfile) -> String {

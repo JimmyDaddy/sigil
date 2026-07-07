@@ -150,6 +150,7 @@ cache_root = "auto"
 | 路径 | 职责 |
 | --- | --- |
 | `.sigil/skills` | Sigil-native workspace skills。 |
+| `.sigil/commands` | Sigil-native Markdown slash commands。每个 `*.md` 文件会作为 user-invocable inline command 发现。 |
 | `.sigil/agents` | Sigil-native workspace agent profiles。 |
 | `.sigil/plugins` | Workspace plugin manifests 和 plugin-owned assets。 |
 
@@ -405,11 +406,34 @@ Skill 和 agent discovery 分成三类 source：
 | 配置 | 职责 |
 | --- | --- |
 | `.sigil/skills` | 当前 workspace 固定的 Sigil-native reusable skills。 |
+| `.sigil/commands` | 当前 workspace 固定的 Sigil-native Markdown slash commands。每个 `*.md` 文件会通过 `/command-id` 作为 inline skill context 运行。 |
 | `.sigil/agents` | 当前 workspace 固定的 Sigil-native agent profiles。Agents 会作为 child session 运行，而不是 inline skill context。 |
 | `user_skills` / `user_agents` | 是否加载用户配置目录里的 per-user skills 和 agents。它们不会改变 workspace discovery roots。 |
 | `compatibility_sources` | 显式导入外部生态目录。当前支持 `claude` 和 `reasonix`；默认值为空，因此普通 workspace source 只来自 Sigil-native `.sigil/*`。 |
 
 Compatibility source 会在 Agents / Skills 浏览器里通过 source/trust 标出来，并且仍需经过同一套 trust lifecycle 才能被模型或用户调用。TUI `/config` 的 Agents 和 Skills 区块用于浏览已发现条目、展示 source/trust/hash/run mode，并提供 trust/use action。Workspace discovery roots 固定在 `.sigil/*`。
+
+Workspace agent profile 可以在 `.sigil/agents/<id>/agent.toml` 或 `.sigil/agents/<id>/AGENT.md` 里声明 OpenCode 风格的权限。`permission` 表达 agent 可以做什么；`tool_scope` / `allowed_tools` 只用于收窄这个 profile 能看到哪些工具，不授予权限：
+
+```toml
+description = "Focused implementation worker"
+trust = "trusted"
+invocation_policy = "model_allowed"
+result_policy = "foreground_merge_required"
+
+[permission]
+read = "allow"
+glob = "allow"
+grep = "allow"
+edit = "ask"
+
+[permission.bash]
+"*" = "ask"
+"cargo test *" = "allow"
+"git push*" = "deny"
+```
+
+Agent permission 会在全局 `[permission]` 之后合并，因此 agent rule 可以覆盖 global `allow`、`ask` 或 `deny`。全局 `read-only` mode 仍是硬上限；protected path、destructive operation、external-directory gate 和写型 subagent 隔离仍然 fail-closed。可写 subagent 在更强隔离模式可用前，仍只能走 foreground changeset-only merge review。
 
 ## Compaction
 

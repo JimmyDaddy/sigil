@@ -28,6 +28,10 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         &paths.workspace_skills_dir.display().to_string(),
     ));
     lines.push(render_config_readonly_row(
+        "Workspace commands",
+        &paths.workspace_commands_dir.display().to_string(),
+    ));
+    lines.push(render_config_readonly_row(
         "Workspace agents",
         &paths.workspace_agents_dir.display().to_string(),
     ));

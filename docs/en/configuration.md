@@ -150,6 +150,7 @@ Repo-local Sigil assets are fixed under the workspace `.sigil` directory and are
 | Path | Responsibility |
 | --- | --- |
 | `.sigil/skills` | Sigil-native workspace skills. |
+| `.sigil/commands` | Sigil-native Markdown slash commands. Each `*.md` file is discovered as a user-invocable inline command. |
 | `.sigil/agents` | Sigil-native workspace agent profiles. |
 | `.sigil/plugins` | Workspace plugin manifests and plugin-owned assets. |
 
@@ -405,11 +406,34 @@ Skill and agent discovery has three separate source classes:
 | Setting | Responsibility |
 | --- | --- |
 | `.sigil/skills` | Fixed Sigil-native reusable skills for the current workspace. |
+| `.sigil/commands` | Fixed Sigil-native Markdown slash commands for the current workspace. Each `*.md` file runs as inline skill context through `/command-id`. |
 | `.sigil/agents` | Fixed Sigil-native workspace agent profiles. Agents run as child sessions rather than inline skill context. |
 | `user_skills` / `user_agents` | Whether to include per-user skills and agents from the user config directory. These do not change workspace discovery roots. |
 | `compatibility_sources` | Explicit imports from foreign layouts. Supported values are `claude` and `reasonix`; the default is empty so Sigil-native `.sigil/*` remains the ordinary workspace source. |
 
 Compatibility sources are marked by source/trust in the Agents and Skills browsers and still go through the same trust lifecycle before model or user invocation. The TUI `/config` Agents and Skills sections browse discovered entries, show source/trust/hash/run mode, and expose trust/use actions. Workspace discovery roots are fixed under `.sigil/*`.
+
+Workspace agent profiles can define OpenCode-style permissions in `.sigil/agents/<id>/agent.toml` or `.sigil/agents/<id>/AGENT.md`. Use `permission` for what the agent may do, and use `tool_scope` / `allowed_tools` only to narrow which tools are visible to that profile:
+
+```toml
+description = "Focused implementation worker"
+trust = "trusted"
+invocation_policy = "model_allowed"
+result_policy = "foreground_merge_required"
+
+[permission]
+read = "allow"
+glob = "allow"
+grep = "allow"
+edit = "ask"
+
+[permission.bash]
+"*" = "ask"
+"cargo test *" = "allow"
+"git push*" = "deny"
+```
+
+Agent permissions are merged after the global `[permission]` config, so an agent rule can override a global `allow`, `ask`, or `deny`. The global `read-only` mode remains a hard cap, and protected paths, destructive operations, external-directory gates, and write-subagent isolation still fail closed. Write-capable subagents still use foreground changeset-only merge review until a stronger write isolation mode is available.
 
 ## Compaction
 

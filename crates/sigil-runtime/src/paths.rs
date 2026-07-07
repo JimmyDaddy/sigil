@@ -21,6 +21,7 @@ pub const DEFAULT_TERMINAL_TASKS_DIR: &str = "tasks";
 pub const DEFAULT_SCRATCH_DIR: &str = "tmp";
 pub const DEFAULT_PROJECT_ASSETS_DIR: &str = ".sigil";
 pub const DEFAULT_WORKSPACE_SKILLS_LEAF: &str = "skills";
+pub const DEFAULT_WORKSPACE_COMMANDS_LEAF: &str = "commands";
 pub const DEFAULT_WORKSPACE_AGENTS_LEAF: &str = "agents";
 pub const DEFAULT_WORKSPACE_PLUGINS_LEAF: &str = "plugins";
 
@@ -40,6 +41,7 @@ pub struct SigilPaths {
     pub scratch_root: PathBuf,
     pub project_assets_root: PathBuf,
     pub workspace_skills_dir: PathBuf,
+    pub workspace_commands_dir: PathBuf,
     pub workspace_agents_dir: PathBuf,
     pub workspace_plugins_dir: PathBuf,
 }
@@ -103,6 +105,7 @@ pub fn resolve_sigil_paths_with_env(
     let workspace_root = canonical_or_absolute(workspace_root.as_ref());
     let project_assets_root = workspace_root.join(DEFAULT_PROJECT_ASSETS_DIR);
     let workspace_skills_dir = project_assets_root.join(DEFAULT_WORKSPACE_SKILLS_LEAF);
+    let workspace_commands_dir = project_assets_root.join(DEFAULT_WORKSPACE_COMMANDS_LEAF);
     let workspace_agents_dir = project_assets_root.join(DEFAULT_WORKSPACE_AGENTS_LEAF);
     let workspace_plugins_dir = project_assets_root.join(DEFAULT_WORKSPACE_PLUGINS_LEAF);
     let workspace_id = workspace_id_for_root(&workspace_root);
@@ -132,6 +135,7 @@ pub fn resolve_sigil_paths_with_env(
         scratch_root,
         project_assets_root,
         workspace_skills_dir,
+        workspace_commands_dir,
         workspace_agents_dir,
         workspace_plugins_dir,
     }

@@ -109,9 +109,15 @@ pub(super) fn skill_is_agent(skill: &SkillDescriptor) -> bool {
     matches!(skill.run_as, SkillRunMode::ChildSession)
 }
 
+pub(super) fn skill_is_command(skill: &SkillDescriptor) -> bool {
+    !skill_is_agent(skill) && skill.entrypoint.starts_with(Path::new(".sigil/commands"))
+}
+
 pub(super) fn skill_display_noun(skill: &SkillDescriptor) -> &'static str {
     if skill_is_agent(skill) {
         "agent"
+    } else if skill_is_command(skill) {
+        "command"
     } else {
         "skill"
     }
@@ -120,6 +126,8 @@ pub(super) fn skill_display_noun(skill: &SkillDescriptor) -> &'static str {
 pub(super) fn skill_display_title(skill: &SkillDescriptor) -> &'static str {
     if skill_is_agent(skill) {
         "Agent"
+    } else if skill_is_command(skill) {
+        "Command"
     } else {
         "Skill"
     }

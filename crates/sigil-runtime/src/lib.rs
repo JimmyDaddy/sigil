@@ -84,9 +84,9 @@ pub use context_window::{
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR,
     DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF,
-    DEFAULT_WORKSPACE_PLUGINS_LEAF, DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE,
-    PathResolverEnv, SIGIL_CACHE_HOME_ENV, SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform,
-    resolve_sigil_paths, resolve_sigil_paths_with_env, workspace_id_for_root,
+    DEFAULT_WORKSPACE_COMMANDS_LEAF, DEFAULT_WORKSPACE_PLUGINS_LEAF, DEFAULT_WORKSPACE_SKILLS_LEAF,
+    INPUT_HISTORY_FILE, PathResolverEnv, SIGIL_CACHE_HOME_ENV, SIGIL_STATE_HOME_ENV, SigilPaths,
+    StoragePlatform, resolve_sigil_paths, resolve_sigil_paths_with_env, workspace_id_for_root,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,

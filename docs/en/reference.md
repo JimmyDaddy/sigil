@@ -91,7 +91,7 @@ Default user config path:
 | User state root `workspaces/<workspace-id>/artifacts/` | Terminal and changeset artifacts |
 | User cache root `workspaces/<workspace-id>/tmp/` | Shell scratch directory exposed as `$SIGIL_SCRATCH_DIR` and shown as `cache/tmp` |
 | User config `sigil.toml` | Default local machine config |
-| `.sigil/agents/`, `.sigil/skills/`, `.sigil/plugins/` | Optional workspace project assets |
+| `.sigil/agents/`, `.sigil/commands/`, `.sigil/skills/`, `.sigil/plugins/` | Optional workspace project assets |
 | `SIGIL.md` | Stable workspace memory file |
 | `AGENTS.md` | Agent collaboration instructions that Sigil can load as memory |
 | `SIGIL.local.md` | Local-only memory file |

@@ -625,7 +625,7 @@ fn permission_rules_override_tool_and_mode_defaults() -> Result<()> {
 }
 
 #[test]
-fn permission_deny_dominates_among_matching_rules() -> Result<()> {
+fn permission_last_matching_rule_wins_for_one_subject() -> Result<()> {
     let config = PermissionConfig {
         rules: vec![
             PermissionRule {
@@ -637,6 +637,11 @@ fn permission_deny_dominates_among_matching_rules() -> Result<()> {
                 tool_name: Some("write_file".to_owned()),
                 subject_glob: Some("src/**/*.md".to_owned()),
                 mode: ApprovalMode::Deny,
+            },
+            PermissionRule {
+                tool_name: Some("write_file".to_owned()),
+                subject_glob: Some("src/docs/public/**".to_owned()),
+                mode: ApprovalMode::Allow,
             },
         ],
         ..PermissionConfig::default()
@@ -651,9 +656,48 @@ fn permission_deny_dominates_among_matching_rules() -> Result<()> {
         "write_file",
         vec![path_subject("src/docs/guide.md")],
     )?;
+    let public = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![path_subject("src/docs/public/guide.md")],
+    )?;
 
     assert_eq!(allow.mode, ApprovalMode::Allow);
     assert_eq!(deny.mode, ApprovalMode::Deny);
+    assert_eq!(public.mode, ApprovalMode::Allow);
+    Ok(())
+}
+
+#[test]
+fn permission_tool_name_glob_rules_match_tools() -> Result<()> {
+    let config = PermissionConfig {
+        rules: vec![
+            PermissionRule {
+                tool_name: Some("mcp__*".to_owned()),
+                subject_glob: None,
+                mode: ApprovalMode::Deny,
+            },
+            PermissionRule {
+                tool_name: Some("mcp__docs__search".to_owned()),
+                subject_glob: None,
+                mode: ApprovalMode::Allow,
+            },
+        ],
+        ..PermissionConfig::default()
+    };
+    let deny = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Network),
+        "mcp__files__read",
+        vec![],
+    )?;
+    let allow = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Network),
+        "mcp__docs__search",
+        vec![],
+    )?;
+
+    assert_eq!(deny.mode, ApprovalMode::Deny);
+    assert_eq!(allow.mode, ApprovalMode::Allow);
     Ok(())
 }
 
@@ -958,7 +1002,7 @@ fn permission_external_directory_rules_are_compiled_once_per_policy() -> Result<
 }
 
 #[test]
-fn permission_external_directory_deny_rule_dominates_allow() -> Result<()> {
+fn permission_external_directory_last_matching_rule_wins() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let external_root = temp.path().canonicalize()?;
     std::fs::create_dir_all(external_root.join("allowed"))?;
@@ -977,6 +1021,10 @@ fn permission_external_directory_deny_rule_dominates_allow() -> Result<()> {
                     path_glob: format!("{}/allowed/secret.txt", external_root.display()),
                     mode: ApprovalMode::Deny,
                 },
+                ExternalDirectoryRule {
+                    path_glob: format!("{}/allowed/secret.txt", external_root.display()),
+                    mode: ApprovalMode::Allow,
+                },
             ],
         },
         ..PermissionConfig::default()
@@ -987,7 +1035,7 @@ fn permission_external_directory_deny_rule_dominates_allow() -> Result<()> {
         vec![external_path_subject(external_path)],
     )?;
 
-    assert_eq!(decision.mode, ApprovalMode::Deny);
+    assert_eq!(decision.mode, ApprovalMode::Allow);
     Ok(())
 }
 
@@ -1073,7 +1121,7 @@ fn permission_helper_matchers_cover_any_missing_subject_and_invalid_external_rul
         mode: ApprovalMode::Allow,
     };
     let any_compiled = super::CompiledPermissionRule::new(&any_rule);
-    assert!(any_compiled.matches_subject("read_file", None)?);
+    assert!(any_compiled.matches("read_file", None)?);
 
     let subject_rule = PermissionRule {
         tool_name: Some("read_file".to_owned()),
@@ -1082,7 +1130,7 @@ fn permission_helper_matchers_cover_any_missing_subject_and_invalid_external_rul
     };
     let subject_compiled = super::CompiledPermissionRule::new(&subject_rule);
     let error = subject_compiled
-        .matches_subject("read_file", None)
+        .matches("read_file", None)
         .expect_err("subject-specific rules should require a subject");
     assert!(error.to_string().contains("requires a subject"));
 

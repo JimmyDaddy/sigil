@@ -40,6 +40,7 @@ use profiles::{
     plugin_agent_profile_format, plugin_agent_profile_from_raw, tool_scope_is_empty,
     workspace_agent_profile_from_raw,
 };
+use wire::resolve_agent_permission_config;
 #[cfg(test)]
 use wire::{
     markdown_agent_profile_wire, markdown_body_without_frontmatter, parse_agent_kind, parse_bool,

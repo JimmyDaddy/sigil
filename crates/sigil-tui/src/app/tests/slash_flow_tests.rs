@@ -18,6 +18,16 @@ fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<
     Ok(())
 }
 
+fn write_workspace_command(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
+    let path = workspace_root
+        .join(".sigil")
+        .join("commands")
+        .join(format!("{id}.md"));
+    std::fs::create_dir_all(path.parent().expect("command path should have parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 fn write_workspace_agent(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
     let path = workspace_root
         .join(".sigil")
@@ -769,6 +779,41 @@ run-as: inline
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "/repo-review crates/sigil-tui"
     }));
+    Ok(())
+}
+
+#[test]
+fn slash_command_discovery_resolves_workspace_command_markdown() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_command(
+        workspace.path(),
+        "plan-chapter",
+        r#"---
+name: plan-chapter
+description: Plan a chapter.
+trust: trusted
+user-invocable: true
+---
+
+# Plan Chapter
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.composer.input = "/plan-chapter chapter 3".to_owned();
+
+    let rows = app.slash_selector_rows();
+    assert!(rows.iter().any(|(label, description)| {
+        label == "/plan-chapter" && description.contains("command · inline")
+    }));
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::InvokeInlineSkill { skill_id, arguments })
+            if skill_id == "plan-chapter" && arguments == "chapter 3"
+    ));
+    assert_eq!(app.last_notice(), Some("using command plan-chapter"));
     Ok(())
 }
 

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use sigil_kernel::{SkillDescriptor, SkillRunMode, SkillTrustState};
 
@@ -399,7 +401,7 @@ impl AppState {
 
         self.timeline_scroll_back = 0;
         self.push_timeline(TimelineRole::User, prompt.to_owned());
-        self.push_event("input", format!("invoked skill {skill_id}"));
+        self.push_event("input", format!("invoked {item_kind} {skill_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
@@ -412,7 +414,7 @@ impl AppState {
         let arguments = command.arg.trim().to_owned();
         match skill.run_as {
             SkillRunMode::Inline => {
-                self.last_notice = Some(format!("using skill {skill_id}"));
+                self.last_notice = Some(format!("using {item_kind} {skill_id}"));
                 self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
                 Ok(Some(AppAction::InvokeInlineSkill {
                     skill_id: skill_id.to_owned(),
@@ -434,6 +436,8 @@ impl AppState {
 fn slash_skill_display_kind(skill: &SkillDescriptor) -> &'static str {
     if matches!(skill.run_as, SkillRunMode::ChildSession) {
         "agent"
+    } else if skill.entrypoint.starts_with(Path::new(".sigil/commands")) {
+        "command"
     } else {
         "skill"
     }

@@ -466,7 +466,9 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
     assert!(detail.contains("- Provider: session"));
     assert!(detail.contains("- Model name: session"));
     assert!(detail.contains("- Reasoning: session"));
-    assert!(detail.contains("- Permission: manual"));
+    assert!(
+        detail.contains("- Permission: mode=manual tools=0 rules=0 external=off external_rules=0")
+    );
     assert!(detail.contains("- Skills: review,audit"));
     assert!(detail.contains("- MCP: filesystem"));
     assert!(detail.contains("- Nicknames: none"));

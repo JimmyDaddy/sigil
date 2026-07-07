@@ -219,7 +219,7 @@ Default scope:
 - User explicit include paths.
 - Exclude `.git`, Sigil state directories, common build/cache directories, dependency caches and generated roots.
 - Current default excludes are `.git/**`, `.sigil/sessions/**`, `.sigil/tasks/**`, `.sigil/terminal/**`, `.sigil/cache/**`, `.sigil/artifacts/**`, `.sigil/tmp/**`, `.sigil/input-history.jsonl`, `.sigil-state/**`, `.sigil-recovery/**`, `target/**`, `node_modules/**`, `dist/**`, `coverage/**`, `.pytest_cache/**`, `.env` and `.env.*`.
-- Repo-local `.sigil/skills/**`, `.sigil/agents/**`, `.sigil/plugins/**` and `.sigil/verification.toml` are not excluded by default; they are repository inputs and must affect the content-bound workspace snapshot when present.
+- Repo-local `.sigil/skills/**`, `.sigil/commands/**`, `.sigil/agents/**`, `.sigil/plugins/**` and `.sigil/verification.toml` are not excluded by default; they are repository inputs and must affect the content-bound workspace snapshot when present.
 
 Rules:
 
@@ -528,7 +528,7 @@ Required deterministic tests:
 - 已实现 verification policy、policy merge、scope/trust/sandbox requirement、check spec hash 和 receipt applicability。
 - 已实现候选检查 discovery：用户全局配置、`.sigil/verification.toml`、CI、package scripts、Cargo、Makefile；未信任 workspace 只产生 candidate，不自动提升为 trusted check；CI discovery 在 trust 前只做静态 workflow `run:` 白名单扫描，不执行 workflow/action。
 - 已实现 `WorkspaceSnapshotManifestV1`、scope include/exclude/generated roots、git tracked/unignored snapshot、symlink/external/unsupported/missing entry 处理和 content-bound `WorkspaceSnapshotId`。
-- 已收窄默认 exclude：legacy runtime state（`.sigil/sessions/**`、terminal/cache/artifacts 等）、常见 build/cache 目录和 dotenv secret-like 文件仍排除，但 repo-local `.sigil/skills/**`、agents、plugins 和 verification config 会进入 workspace snapshot。
+- 已收窄默认 exclude：legacy runtime state（`.sigil/sessions/**`、terminal/cache/artifacts 等）、常见 build/cache 目录和 dotenv secret-like 文件仍排除，但 repo-local `.sigil/skills/**`、commands、agents、plugins 和 verification config 会进入 workspace snapshot。
 - 已实现 workspace snapshot 大文件 fail-closed：超过 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES` 的文件标记为 `Unsupported`，不产生 clean snapshot id，避免把未覆盖的大文件误判为 verified。
 - 已实现 `run_verification_check` MVP：执行 trusted check、记录 command/check evidence、绑定 snapshot/policy/trust/sandbox/environment hash，并识别写型或自修改 check 不能产生最终 passed evidence。
 - 已将写型或自修改 check 接入 RFC-0002 mutation evidence：runner 会追加 `WorkspaceMutationDetected`，使 replay/audit/stale-cause 能看到 check 本身造成或可能造成的 workspace 污染。

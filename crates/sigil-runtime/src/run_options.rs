@@ -28,6 +28,7 @@ fn permission_evaluation_context(paths: &SigilPaths) -> PermissionEvaluationCont
         project_asset_roots: vec![
             paths.project_assets_root.clone(),
             paths.workspace_skills_dir.clone(),
+            paths.workspace_commands_dir.clone(),
             paths.workspace_agents_dir.clone(),
             paths.workspace_plugins_dir.clone(),
         ],

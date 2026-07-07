@@ -31,6 +31,7 @@ fn config_storage_section_shows_resolved_paths_readonly() {
     assert!(detail.contains("Workspace state"));
     assert!(detail.contains("Project assets"));
     assert!(detail.contains("Workspace skills"));
+    assert!(detail.contains("Workspace commands"));
     assert!(detail.contains("Workspace agents"));
     assert!(detail.contains("Workspace plugins"));
     assert!(detail.contains("[files]"));
@@ -1742,6 +1743,9 @@ slash_names = ["review-agent"]
     assert!(detail.contains("- Source hash:"));
     assert!(detail.contains("- Invocation: model_allowed"));
     assert!(detail.contains("- Tools: names=grep,read_file"));
+    assert!(
+        detail.contains("- Permission: mode=manual tools=0 rules=0 external=off external_rules=0")
+    );
     assert!(detail.contains("- Nicknames: Repo Review"));
     assert!(detail.contains("- Aliases: rr"));
     assert!(detail.contains("- Slash: /review-agent"));

@@ -9,7 +9,8 @@ use anyhow::Result;
 use sigil_kernel::{SkillConfig, SkillDescriptor, SkillIndexSnapshot, SkillRunMode, SkillSource};
 
 use crate::{
-    DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_SKILLS_LEAF,
+    DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_COMMANDS_LEAF,
+    DEFAULT_WORKSPACE_SKILLS_LEAF,
 };
 
 use super::{
@@ -50,6 +51,13 @@ pub fn discover_skill_index_with_user_dir(
     let project_assets_root = workspace_root.join(DEFAULT_PROJECT_ASSETS_DIR);
     let workspace_skills = project_assets_root.join(DEFAULT_WORKSPACE_SKILLS_LEAF);
     discovery.discover_skill_dir(&workspace_skills, SkillCandidateKind::WorkspaceSkill);
+
+    let workspace_commands = project_assets_root.join(DEFAULT_WORKSPACE_COMMANDS_LEAF);
+    discovery.discover_markdown_file_dir(
+        &workspace_commands,
+        SkillCandidateKind::WorkspaceCommand,
+        "command",
+    );
 
     let workspace_agents = project_assets_root.join(DEFAULT_WORKSPACE_AGENTS_LEAF);
     discovery.discover_agent_dir(&workspace_agents, SkillCandidateKind::WorkspaceAgent);
@@ -147,6 +155,10 @@ impl SkillDiscovery {
     }
 
     fn discover_agent_dir(&mut self, dir: &Path, kind: SkillCandidateKind) {
+        self.discover_markdown_file_dir(dir, kind, "agent");
+    }
+
+    fn discover_markdown_file_dir(&mut self, dir: &Path, kind: SkillCandidateKind, noun: &str) {
         if !self.directory_is_valid(dir, &kind) {
             return;
         }
@@ -164,7 +176,7 @@ impl SkillDiscovery {
                 self.warn(
                     SkillDiscoveryWarningKind::InvalidName,
                     &path,
-                    format!("invalid agent file name {fallback_id:?}"),
+                    format!("invalid {noun} file name {fallback_id:?}"),
                 );
                 continue;
             }
@@ -296,6 +308,7 @@ impl SkillDiscovery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SkillCandidateKind {
     WorkspaceSkill,
+    WorkspaceCommand,
     WorkspaceAgent,
     ClaudeSkill,
     ClaudeAgent,
@@ -320,6 +333,7 @@ impl SkillCandidateKind {
     pub(super) fn source(&self) -> SkillSource {
         match self {
             Self::WorkspaceSkill
+            | Self::WorkspaceCommand
             | Self::WorkspaceAgent
             | Self::ClaudeSkill
             | Self::ClaudeAgent

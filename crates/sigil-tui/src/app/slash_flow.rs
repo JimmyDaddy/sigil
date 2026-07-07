@@ -13,6 +13,7 @@ use sigil_kernel::{
     SkillTrustState, default_user_config_dir,
 };
 use sigil_runtime::{AgentProfileRegistry, ResolvedAgentProfile};
+use std::path::Path;
 
 impl AppState {
     fn slash_query(prompt: &str) -> Option<(&str, String)> {
@@ -739,6 +740,8 @@ impl AppState {
 fn slash_skill_display_kind(skill: &SkillDescriptor) -> &'static str {
     if matches!(skill.run_as, SkillRunMode::ChildSession) {
         "agent"
+    } else if skill.entrypoint.starts_with(Path::new(".sigil/commands")) {
+        "command"
     } else {
         "skill"
     }

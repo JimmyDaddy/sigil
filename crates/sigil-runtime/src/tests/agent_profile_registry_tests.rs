@@ -8,10 +8,12 @@ use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentInvocationPolicy, AgentProfileId, AgentProfilePolicyEntry,
-    AgentProfileSource, AgentProfileTrustEntry, AgentResultPolicy, AgentTrustState, ControlEntry,
-    MemoryConfig, PermissionConfig, PluginTrustDecision, PluginTrustEntry, RootConfig,
-    SessionConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState,
-    TaskConfig, ToolAllowlistConfig, ToolRegistryScope, WorkspaceConfig,
+    AgentProfileSource, AgentProfileTrustEntry, AgentResultPolicy, AgentTrustState, ApprovalMode,
+    ControlEntry, MemoryConfig, PermissionConfig, PermissionPolicy, PermissionRule,
+    PluginTrustDecision, PluginTrustEntry, RootConfig, SessionConfig, SessionLogEntry,
+    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, ToolAccess,
+    ToolAllowlistConfig, ToolCategory, ToolPreviewCapability, ToolRegistryScope, ToolSpec,
+    ToolSubject, WorkspaceConfig,
 };
 
 use super::{
@@ -80,6 +82,17 @@ fn skill_descriptor(id: &str, entrypoint: impl Into<std::path::PathBuf>) -> Skil
         allowed_tools: ToolRegistryScope::default(),
         disallowed_tools: ToolRegistryScope::default(),
         path_patterns: Vec::new(),
+    }
+}
+
+fn permission_spec(name: &str, access: ToolAccess) -> ToolSpec {
+    ToolSpec {
+        name: name.to_owned(),
+        description: name.to_owned(),
+        input_schema: json!({"type":"object"}),
+        category: ToolCategory::File,
+        access,
+        preview: ToolPreviewCapability::None,
     }
 }
 
@@ -1404,6 +1417,119 @@ description: Missing close
             .iter()
             .any(|warning| { warning.contains("unterminated agent frontmatter") })
     );
+    Ok(())
+}
+
+#[test]
+fn registry_toml_agent_permission_overrides_root_policy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let agent_dir = workspace.join(".sigil").join("agents").join("writer");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("agent.toml"),
+        r#"
+description = "Workspace writer"
+trust = "trusted"
+
+[permission]
+edit = "allow"
+
+[permission.bash]
+"*" = "ask"
+"cargo test *" = "allow"
+"git push*" = "deny"
+"#,
+    )?;
+    let mut config = root_config();
+    config.permission.rules.push(PermissionRule {
+        tool_name: Some("write_file".to_owned()),
+        subject_glob: None,
+        mode: ApprovalMode::Deny,
+    });
+
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
+    let writer = registry
+        .get(&AgentProfileId::new("writer")?)
+        .expect("writer profile is discovered");
+    let write_decision = PermissionPolicy::new(&writer.profile.permission_policy).decide(
+        &permission_spec("write_file", ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path("crates/lib.rs", "crates/lib.rs")],
+    )?;
+    let test_decision = PermissionPolicy::new(&writer.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "cargo test -p sigil-runtime",
+            "cargo test -p sigil-runtime",
+        )],
+    )?;
+    let push_decision = PermissionPolicy::new(&writer.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git push origin main",
+            "git push origin main",
+        )],
+    )?;
+
+    assert_eq!(write_decision.mode, ApprovalMode::Allow);
+    assert_eq!(test_decision.mode, ApprovalMode::Allow);
+    assert_eq!(push_decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn registry_markdown_agent_permission_nested_maps_are_parsed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let agent_dir = workspace.join(".sigil").join("agents").join("reviewer");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("AGENT.md"),
+        r#"---
+description: "Markdown reviewer"
+trust: trusted
+permission:
+  edit:
+    "*": ask
+    "docs/**": allow
+  bash:
+    "*": ask
+    "git diff *": allow
+    "git push*": deny
+---
+Review and edit docs.
+"#,
+    )?;
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let reviewer = registry
+        .get(&AgentProfileId::new("reviewer")?)
+        .expect("reviewer profile is discovered");
+    let docs_write = PermissionPolicy::new(&reviewer.profile.permission_policy).decide(
+        &permission_spec("edit_file", ToolAccess::Write),
+        "edit_file",
+        vec![ToolSubject::path("docs/guide.md", "docs/guide.md")],
+    )?;
+    let src_write = PermissionPolicy::new(&reviewer.profile.permission_policy).decide(
+        &permission_spec("edit_file", ToolAccess::Write),
+        "edit_file",
+        vec![ToolSubject::path("src/lib.rs", "src/lib.rs")],
+    )?;
+    let git_diff = PermissionPolicy::new(&reviewer.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git diff -- crates",
+            "git diff -- crates",
+        )],
+    )?;
+
+    assert_eq!(docs_write.mode, ApprovalMode::Allow);
+    assert_eq!(src_write.mode, ApprovalMode::Ask);
+    assert_eq!(git_diff.mode, ApprovalMode::Allow);
     Ok(())
 }
 

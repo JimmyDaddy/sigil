@@ -651,27 +651,14 @@ impl<'a> PermissionPolicy<'a> {
         let matching_rule_modes = self
             .rules
             .iter()
-            .filter(|compiled| {
-                compiled
-                    .rule
-                    .tool_name
-                    .as_deref()
-                    .is_none_or(|configured| configured == tool_name)
+            .filter_map(|compiled| match compiled.matches(tool_name, subject) {
+                Ok(true) => Some(Ok(compiled.rule.mode)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
             })
-            .filter_map(
-                |compiled| match compiled.matches_subject(tool_name, subject) {
-                    Ok(true) => Some(Ok(compiled.rule.mode)),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                },
-            )
             .collect::<Result<Vec<_>>>()?;
 
-        let tool_policy_mode = if matching_rule_modes.is_empty() {
-            mode
-        } else {
-            combine_modes(matching_rule_modes)
-        };
+        let tool_policy_mode = matching_rule_modes.last().copied().unwrap_or(mode);
 
         let Some(subject) = subject else {
             return Ok(tool_policy_mode);
@@ -702,11 +689,10 @@ impl<'a> PermissionPolicy<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        if matching_rule_modes.is_empty() {
-            Ok(config.default_mode)
-        } else {
-            Ok(combine_modes(matching_rule_modes))
-        }
+        Ok(matching_rule_modes
+            .last()
+            .copied()
+            .unwrap_or(config.default_mode))
     }
 }
 
@@ -1234,22 +1220,31 @@ fn workspace_config_secret_path(path: &str) -> bool {
 
 struct CompiledPermissionRule<'a> {
     rule: &'a PermissionRule,
+    tool_matcher: CompiledMatcher,
     subject_matcher: CompiledMatcher,
 }
 
 impl<'a> CompiledPermissionRule<'a> {
     fn new(rule: &'a PermissionRule) -> Self {
+        let tool_matcher = match rule.tool_name.as_deref() {
+            Some(tool_name) => compile_permission_tool_glob(tool_name),
+            None => CompiledMatcher::Any,
+        };
         let subject_matcher = match rule.subject_glob.as_deref() {
             Some(subject_glob) => compile_permission_glob(subject_glob),
             None => CompiledMatcher::Any,
         };
         Self {
             rule,
+            tool_matcher,
             subject_matcher,
         }
     }
 
-    fn matches_subject(&self, tool_name: &str, subject: Option<&ToolSubject>) -> Result<bool> {
+    fn matches(&self, tool_name: &str, subject: Option<&ToolSubject>) -> Result<bool> {
+        if !self.tool_matcher.is_match(tool_name)? {
+            return Ok(false);
+        }
         let CompiledMatcher::Any = &self.subject_matcher else {
             let subject_ref = subject
                 .map(|subject| subject.normalized.as_str())
@@ -1304,6 +1299,15 @@ fn compile_permission_glob(subject_glob: &str) -> CompiledMatcher {
     Glob::new(subject_glob).map_or_else(
         |error| {
             CompiledMatcher::Invalid(format!("invalid permission glob {subject_glob}: {error}"))
+        },
+        |glob| CompiledMatcher::Glob(glob.compile_matcher()),
+    )
+}
+
+fn compile_permission_tool_glob(tool_glob: &str) -> CompiledMatcher {
+    Glob::new(tool_glob).map_or_else(
+        |error| {
+            CompiledMatcher::Invalid(format!("invalid permission tool glob {tool_glob}: {error}"))
         },
         |glob| CompiledMatcher::Glob(glob.compile_matcher()),
     )

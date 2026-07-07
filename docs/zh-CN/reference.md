@@ -91,7 +91,7 @@ Sigil 按以下顺序解析 config：
 | 用户态 state root `workspaces/<workspace-id>/artifacts/` | terminal 和 changeset artifacts |
 | 用户态 cache root `workspaces/<workspace-id>/tmp/` | shell scratch 目录，通过 `$SIGIL_SCRATCH_DIR` 暴露，对模型显示为 `cache/tmp` |
 | 用户配置目录 `sigil.toml` | 默认本机配置 |
-| `.sigil/agents/`、`.sigil/skills/`、`.sigil/plugins/` | 可选 workspace project assets |
+| `.sigil/agents/`、`.sigil/commands/`、`.sigil/skills/`、`.sigil/plugins/` | 可选 workspace project assets |
 | `SIGIL.md` | 稳定 workspace memory file |
 | `AGENTS.md` | Sigil 可作为 memory 加载的 agent 协作说明 |
 | `SIGIL.local.md` | 本地专用 memory file |
