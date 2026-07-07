@@ -1,4 +1,4 @@
-# @jimmydaddy/sigil
+# @sigil-ai/sigil
 
 This package installs the `sigil` command for the current platform.
 
@@ -8,7 +8,7 @@ platform-specific optional packages generated from the GitHub release archives.
 ## Install
 
 ```bash
-npm install -g @jimmydaddy/sigil
+npm install -g @sigil-ai/sigil
 sigil --version
 sigil doctor
 ```

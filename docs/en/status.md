@@ -9,7 +9,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Area | Status |
 | --- | --- |
 | TUI entrypoint | `sigil` opens the TUI and is the primary product surface. |
-| npm install | `npm install -g @jimmydaddy/sigil` is the scoped first-release npm package path. |
+| npm install | `npm install -g @sigil-ai/sigil` is the scoped first-release npm package path. |
 | Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` installs the tap formula while keeping the binary name `sigil`. |
 | Cargo git install | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil` installs from the release tag. |
 | Source install | `cargo install --path crates/sigil --locked` remains supported for local checkout development. |

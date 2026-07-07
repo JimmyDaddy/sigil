@@ -12,10 +12,10 @@ This guide covers the first-release install paths. If you want a first-run walkt
 
 ## Install With npm
 
-The npm package is scoped as `@jimmydaddy/sigil`. It installs a small Node.js launcher plus a platform-specific optional binary package. The installed command is still `sigil`.
+The npm package is scoped as `@sigil-ai/sigil`. It installs a small Node.js launcher plus a platform-specific optional binary package. The installed command is still `sigil`.
 
 ```bash
-npm install -g @jimmydaddy/sigil
+npm install -g @sigil-ai/sigil
 ```
 
 Confirm the install:
@@ -120,7 +120,7 @@ Tagged releases are built by the release workflow and include checksums, GitHub 
 Use the installer you used originally:
 
 ```bash
-npm install -g @jimmydaddy/sigil@latest
+npm install -g @sigil-ai/sigil@latest
 brew upgrade sigil-ai
 cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil --force
 cargo install --path crates/sigil --locked --force
@@ -131,7 +131,7 @@ cargo install --path crates/sigil --locked --force
 Use the matching uninstall command:
 
 ```bash
-npm uninstall -g @jimmydaddy/sigil
+npm uninstall -g @sigil-ai/sigil
 brew uninstall sigil-ai
 cargo uninstall sigil
 ```

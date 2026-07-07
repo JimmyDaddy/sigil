@@ -1,10 +1,19 @@
 # Sigil GitHub Pages Site
 
-This directory contains the zero-dependency static site published to GitHub Pages.
+This directory contains the zero-dependency source assets for the static site
+published to GitHub Pages.
 
 The Pages workflow stages this directory, copies `assets/logo/*.png` and docs examples into the published artifact, generates HTML pages from `docs/en/*.md` and `docs/zh-CN/*.md`, checks the required files, and deploys it with GitHub's Pages actions.
 
-The site intentionally stays static and small. The homepage introduces Sigil, while `docs/` and `zh-CN/docs/` provide stable documentation hubs. Build output also includes generated pages such as `docs/quickstart/` and `zh-CN/docs/quickstart/`.
+The site intentionally stays static and small. The homepage introduces Sigil,
+while `docs/` and `zh-CN/docs/` provide stable documentation hubs. Build output
+also includes generated pages such as `docs/quickstart/`,
+`zh-CN/docs/quickstart/`, `search.json`, and `sitemap.xml`.
+
+Do not edit generated staging artifacts directly. Regenerate the staged Pages
+site with `scripts/build-pages-site.sh`; update the checked-in files here only
+when changing source assets, hand-written hub pages, CSS, JavaScript, screenshots,
+or static metadata such as `robots.txt`.
 
 Expected project site URL after Pages is enabled:
 
@@ -36,4 +45,4 @@ Static artifact check:
 scripts/check-pages-site.sh
 ```
 
-The check runs Markdown link, bilingual mirror, command metadata, Pages artifact, sitemap, SEO metadata, and local-only URL checks.
+The check runs Markdown link, bilingual mirror, command metadata, Pages artifact, repository blob link, sitemap, SEO metadata, and local-only URL checks.

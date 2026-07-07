@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN_VERSION: 1.94.1
+
 jobs:
   build:
     name: Build ${{ matrix.os }}
@@ -40,8 +44,8 @@ jobs:
         shell: bash
         run: |
           rustup set profile minimal
-          rustup toolchain install stable
-          rustup default stable
+          rustup toolchain install "${RUST_TOOLCHAIN_VERSION}"
+          rustup default "${RUST_TOOLCHAIN_VERSION}"
 
       - name: Build release archive
         shell: bash

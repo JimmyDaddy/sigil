@@ -25,53 +25,57 @@
     <rect x="33" y="228" width="981" height="18" fill="#14161b"/>
     <rect x="1086" y="228" width="378" height="18" fill="#1a1c22"/>
     <rect x="33" y="246" width="981" height="18" fill="#14161b"/>
-    <rect x="1086" y="246" width="378" height="18" fill="#1a1c22"/>
+    <rect x="1086" y="246" width="27" height="18" fill="#1a1c22"/>
+    <rect x="1113" y="246" width="117" height="18" fill="#1e232b"/>
+    <rect x="1230" y="246" width="234" height="18" fill="#1a1c22"/>
     <rect x="33" y="264" width="981" height="18" fill="#14161b"/>
     <rect x="1086" y="264" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="282" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="300" width="27" height="18" fill="#1a1c22"/>
-    <rect x="1113" y="300" width="117" height="18" fill="#1e232b"/>
-    <rect x="1230" y="300" width="234" height="18" fill="#1a1c22"/>
+    <rect x="1113" y="300" width="72" height="18" fill="#1e232b"/>
+    <rect x="1185" y="300" width="279" height="18" fill="#1a1c22"/>
     <rect x="1086" y="318" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="336" width="378" height="18" fill="#1a1c22"/>
-    <rect x="195" y="354" width="36" height="18" fill="#1e232b"/>
-    <rect x="1086" y="354" width="378" height="18" fill="#1a1c22"/>
+    <rect x="195" y="354" width="54" height="18" fill="#1e232b"/>
+    <rect x="1086" y="354" width="27" height="18" fill="#1a1c22"/>
+    <rect x="1113" y="354" width="45" height="18" fill="#1e232b"/>
+    <rect x="1158" y="354" width="306" height="18" fill="#1a1c22"/>
     <rect x="1086" y="372" width="378" height="18" fill="#1a1c22"/>
-    <rect x="51" y="390" width="45" height="18" fill="#1e232b"/>
-    <rect x="1086" y="390" width="27" height="18" fill="#1a1c22"/>
-    <rect x="1113" y="390" width="72" height="18" fill="#1e232b"/>
-    <rect x="1185" y="390" width="279" height="18" fill="#1a1c22"/>
-    <rect x="69" y="408" width="99" height="18" fill="#1c2129"/>
-    <rect x="1086" y="408" width="378" height="18" fill="#1a1c22"/>
+    <rect x="51" y="390" width="54" height="18" fill="#1e232b"/>
+    <rect x="1086" y="390" width="378" height="18" fill="#1a1c22"/>
+    <rect x="51" y="408" width="99" height="18" fill="#1c2129"/>
+    <rect x="1086" y="408" width="27" height="18" fill="#1a1c22"/>
+    <rect x="1113" y="408" width="63" height="18" fill="#1e232b"/>
+    <rect x="1176" y="408" width="288" height="18" fill="#1a1c22"/>
+    <rect x="51" y="426" width="459" height="18" fill="#1c2129"/>
     <rect x="1086" y="426" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="444" width="378" height="18" fill="#1a1c22"/>
-    <rect x="330" y="462" width="36" height="18" fill="#1e232b"/>
-    <rect x="1086" y="462" width="27" height="18" fill="#1a1c22"/>
-    <rect x="1113" y="462" width="45" height="18" fill="#1e232b"/>
-    <rect x="1158" y="462" width="306" height="18" fill="#1a1c22"/>
+    <rect x="33" y="462" width="1008" height="18" fill="#172224"/>
+    <rect x="1086" y="462" width="378" height="18" fill="#1a1c22"/>
+    <rect x="33" y="480" width="1008" height="18" fill="#172224"/>
     <rect x="1086" y="480" width="378" height="18" fill="#1a1c22"/>
-    <rect x="51" y="498" width="54" height="18" fill="#1e232b"/>
+    <rect x="33" y="498" width="1008" height="18" fill="#172224"/>
     <rect x="1086" y="498" width="378" height="18" fill="#1a1c22"/>
-    <rect x="69" y="516" width="324" height="18" fill="#261c22"/>
+    <rect x="33" y="516" width="1008" height="18" fill="#172224"/>
     <rect x="1086" y="516" width="27" height="18" fill="#1a1c22"/>
-    <rect x="1113" y="516" width="63" height="18" fill="#1e232b"/>
-    <rect x="1176" y="516" width="288" height="18" fill="#1a1c22"/>
-    <rect x="69" y="534" width="396" height="18" fill="#261c22"/>
+    <rect x="1113" y="516" width="90" height="18" fill="#1e232b"/>
+    <rect x="1203" y="516" width="261" height="18" fill="#1a1c22"/>
+    <rect x="33" y="534" width="1008" height="18" fill="#172224"/>
     <rect x="1086" y="534" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="552" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="570" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="588" width="378" height="18" fill="#1a1c22"/>
-    <rect x="24" y="606" width="1062" height="18" fill="#181a1f"/>
+    <rect x="24" y="606" width="1062" height="18" fill="#1b1e25"/>
     <rect x="1086" y="606" width="378" height="18" fill="#1a1c22"/>
-    <rect x="24" y="624" width="1062" height="18" fill="#181a1f"/>
+    <rect x="24" y="624" width="1062" height="18" fill="#1b1e25"/>
     <rect x="1086" y="624" width="378" height="18" fill="#1a1c22"/>
-    <rect x="24" y="642" width="1062" height="18" fill="#181a1f"/>
+    <rect x="24" y="642" width="1062" height="18" fill="#1b1e25"/>
     <rect x="1086" y="642" width="378" height="18" fill="#1a1c22"/>
-    <rect x="24" y="660" width="27" height="18" fill="#181a1f"/>
-    <rect x="51" y="660" width="1008" height="18" fill="#121419"/>
-    <rect x="1059" y="660" width="27" height="18" fill="#181a1f"/>
+    <rect x="24" y="660" width="27" height="18" fill="#1b1e25"/>
+    <rect x="51" y="660" width="1008" height="18" fill="#0e1015"/>
+    <rect x="1059" y="660" width="27" height="18" fill="#1b1e25"/>
     <rect x="1086" y="660" width="378" height="18" fill="#1a1c22"/>
-    <rect x="24" y="678" width="1062" height="18" fill="#181a1f"/>
+    <rect x="24" y="678" width="1062" height="18" fill="#1b1e25"/>
     <rect x="1086" y="678" width="378" height="18" fill="#1a1c22"/>
     <rect x="1086" y="696" width="378" height="18" fill="#1a1c22"/>
     <text x="1113" y="98" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">info</text>
@@ -79,94 +83,96 @@
     <text x="1113" y="116" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">ident...</text>
     <text x="1113" y="134" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">~/study/turbods/crates/sigil-tui</text>
     <text x="1122" y="170" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">session</text>
-    <text x="33" y="188" fill="#11a8cd" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">system</text>
-    <text x="1131" y="188" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">provider:</text>
-    <text x="1221" y="188" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">deepseek</text>
+    <text x="33" y="188" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">system</text>
+    <text x="1131" y="188" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">model:</text>
+    <text x="1194" y="188" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">deepseek-v4-flash · max</text>
     <text x="51" y="206" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">sigil ready.</text>
-    <text x="1131" y="206" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">model:</text>
-    <text x="1194" y="206" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">deepseek-v4-flash</text>
-    <text x="1131" y="224" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">effort:</text>
-    <text x="1203" y="224" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">max</text>
-    <text x="33" y="242" fill="#f2ab7a" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
-    <text x="1131" y="242" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">phase:</text>
-    <text x="1194" y="242" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">streaming</text>
-    <text x="33" y="260" fill="#f2ab7a" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
-    <text x="60" y="260" fill="#e6ecf4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Explain the repo layout and identify the main entrypoints.</text>
-    <text x="1131" y="260" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">session:</text>
-    <text x="1212" y="260" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">21238fef</text>
-    <text x="33" y="278" fill="#f2ab7a" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
-    <text x="1131" y="278" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">memory:</text>
-    <text x="1203" y="278" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">0 docs · ok</text>
-    <text x="33" y="314" fill="#9e9478" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">thought</text>
-    <text x="114" y="314" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">showing first 1/1 lines · Ctrl-T expand</text>
-    <text x="1122" y="314" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">permissions</text>
-    <text x="51" y="332" fill="#aaa698" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">I will inspect the workspace metadata, crates, and user docs first.</text>
-    <text x="1131" y="332" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">mode:</text>
-    <text x="1185" y="332" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">ask</text>
-    <text x="1131" y="350" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Shift-Tab cycle + save</text>
-    <text x="33" y="368" fill="#c68e96" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▎</text>
+    <text x="1131" y="206" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">state:</text>
+    <text x="1194" y="206" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">streaming · e145c7d5</text>
+    <text x="1131" y="224" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">memory:</text>
+    <text x="1203" y="224" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">0 docs · ok</text>
+    <text x="33" y="242" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
+    <text x="33" y="260" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
+    <text x="60" y="260" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Explain the repo layout and identify the main entrypoints.</text>
+    <text x="1122" y="260" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">permissions</text>
+    <text x="33" y="278" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
+    <text x="1131" y="278" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">mode:</text>
+    <text x="1185" y="278" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">manual · saved mode</text>
+    <text x="33" y="314" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">●</text>
+    <text x="51" y="314" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">thought</text>
+    <text x="132" y="314" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1 line</text>
+    <text x="1122" y="314" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">agents</text>
+    <text x="33" y="332" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">└</text>
+    <text x="51" y="332" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">I will inspect the workspace metadata, crates, and user docs first.</text>
+    <text x="1131" y="332" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">◉</text>
+    <text x="1149" y="332" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">main:</text>
+    <text x="1203" y="332" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">○</text>
+    <text x="1221" y="332" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">current session</text>
+    <text x="33" y="368" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">●</text>
     <text x="51" y="368" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Read</text>
     <text x="96" y="368" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">workspace</text>
-    <text x="204" y="368" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">OK</text>
-    <text x="1131" y="368" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">scope:</text>
-    <text x="1194" y="368" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">saved default</text>
+    <text x="204" y="368" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">✓ OK</text>
+    <text x="1122" y="368" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">LSP</text>
+    <text x="33" y="386" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">└</text>
     <text x="51" y="386" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">2 lines · 63 B</text>
-    <text x="60" y="404" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">doc</text>
-    <text x="105" y="404" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">document excerpt</text>
-    <text x="1122" y="404" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">agents</text>
-    <text x="51" y="422" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">│</text>
-    <text x="69" y="422" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">[workspace]</text>
-    <text x="1131" y="422" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">&gt; main:</text>
-    <text x="1203" y="422" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">idle in current session</text>
-    <text x="51" y="440" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">members = [&quot;crates/sigil&quot;, &quot;crates/sigil-tui&quot;, ...]</text>
-    <text x="1131" y="440" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">- subagents:</text>
-    <text x="1248" y="440" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">available via /plan</text>
-    <text x="33" y="476" fill="#c68e96" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▎</text>
+    <text x="1131" y="386" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">status:</text>
+    <text x="1203" y="386" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">off</text>
+    <text x="60" y="404" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">code</text>
+    <text x="114" y="404" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">code excerpt</text>
+    <text x="51" y="422" fill="#9399b2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">[</text>
+    <text x="60" y="422" fill="#94e2d5" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">workspace</text>
+    <text x="141" y="422" fill="#9399b2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">]</text>
+    <text x="1122" y="422" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">usage</text>
+    <text x="51" y="440" fill="#89b4fa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">members</text>
+    <text x="123" y="440" fill="#9399b2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">=</text>
+    <text x="141" y="440" fill="#9399b2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">[</text>
+    <text x="150" y="440" fill="#a6e3a1" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">&quot;crates/sigil&quot;</text>
+    <text x="276" y="440" fill="#9399b2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">,</text>
+    <text x="294" y="440" fill="#a6e3a1" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">&quot;crates/sigil-tui&quot;</text>
+    <text x="456" y="440" fill="#9399b2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">,</text>
+    <text x="474" y="440" fill="#cdd6f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">...</text>
+    <text x="501" y="440" fill="#9399b2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">]</text>
+    <text x="1131" y="440" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">ctx:</text>
+    <text x="1176" y="440" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">0% · prompt 0 / 1.0M provi...</text>
+    <text x="1131" y="458" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">compact:</text>
+    <text x="1212" y="458" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">ready</text>
+    <text x="33" y="476" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">●</text>
     <text x="51" y="476" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Searched</text>
     <text x="132" y="476" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">pattern</text>
     <text x="204" y="476" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">in workspace</text>
-    <text x="339" y="476" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">OK</text>
-    <text x="375" y="476" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">●</text>
-    <text x="1122" y="476" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">LSP</text>
+    <text x="339" y="476" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">✓ OK</text>
+    <text x="1131" y="476" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">spent since opening:</text>
+    <text x="1320" y="476" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">USD 0.0000</text>
+    <text x="33" y="494" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">└</text>
     <text x="51" y="494" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">2 lines · 81 B</text>
-    <text x="1131" y="494" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">status:</text>
-    <text x="1203" y="494" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">off</text>
+    <text x="1131" y="494" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">balance:</text>
+    <text x="1212" y="494" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">missing auth</text>
     <text x="60" y="512" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">text</text>
     <text x="114" y="512" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">captured output</text>
     <text x="51" y="530" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">│</text>
     <text x="69" y="530" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">crates/sigil/src/main.rs:92: run_tui</text>
-    <text x="1122" y="530" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">usage</text>
+    <text x="1122" y="530" fill="#c68e96" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">controls</text>
     <text x="51" y="548" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">│</text>
     <text x="69" y="548" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">crates/sigil-tui/src/launcher.rs:53: run_tui</text>
-    <text x="1131" y="548" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">ctx:</text>
-    <text x="1176" y="548" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">0% · 0 / 1.0M tok</text>
-    <text x="1131" y="566" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">compact:</text>
-    <text x="1212" y="566" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">ready</text>
+    <text x="1131" y="548" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">F2:</text>
+    <text x="1167" y="548" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">info rail</text>
+    <text x="1131" y="566" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Ctrl-T:</text>
+    <text x="1203" y="566" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">toggle activity</text>
     <text x="51" y="584" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Sigil is TUI-first. Runtime wires providers and tools; kernel owns the agent contracts.</text>
-    <text x="1131" y="584" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">policy:</text>
-    <text x="1203" y="584" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1,000,000 provider · so...</text>
-    <text x="1131" y="602" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">activities:</text>
-    <text x="1239" y="602" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">none</text>
+    <text x="1131" y="584" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Ctrl-G:</text>
+    <text x="1203" y="584" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">latest activity</text>
     <text x="33" y="620" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
-    <text x="1131" y="620" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">cache:</text>
-    <text x="1194" y="620" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">0% · save USD 0.0000</text>
+    <text x="51" y="620" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">───────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
     <text x="33" y="638" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
-    <text x="51" y="638" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Build</text>
-    <text x="114" y="638" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">·  deepseek-v4-flash  ·</text>
-    <text x="339" y="638" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">deepseek</text>
-    <text x="429" y="638" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">·</text>
-    <text x="456" y="638" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">max</text>
-    <text x="1131" y="638" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">total spent:</text>
-    <text x="1248" y="638" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">USD 0.0000</text>
+    <text x="51" y="638" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Build · agent: main</text>
+    <text x="240" y="638" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">·  deepseek-v4-flash  ·</text>
+    <text x="465" y="638" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">deepseek</text>
+    <text x="555" y="638" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">·</text>
+    <text x="582" y="638" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">max</text>
     <text x="33" y="656" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
-    <text x="1131" y="656" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">spent since opening:</text>
-    <text x="1320" y="656" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">USD 0.0000</text>
     <text x="33" y="674" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
-    <text x="1131" y="674" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">balance:</text>
-    <text x="1212" y="674" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">missing auth</text>
     <text x="33" y="692" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
-    <text x="42" y="710" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">ready    Enter send · Shift-Enter newline · / commands</text>
-    <text x="870" y="710" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">ctx: 0% · 0 / 1.0M tok</text>
+    <text x="690" y="710" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">ctx: 0% · prompt 0 / 1.0M provider · so...</text>
   </g>
   <metadata>Generated from Sigil TUI renderer by render_docs_screenshot_assets.</metadata>
 </svg>

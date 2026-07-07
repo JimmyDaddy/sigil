@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/prepare-npm-packages.sh --version <version> [--dist-dir <dir>] [--out-dir <dir>] [--pack-destination <dir>]
 
-Generate npm package directories for @jimmydaddy/sigil from Sigil release
+Generate npm package directories for @sigil-ai/sigil from Sigil release
 archives. The root package is a Node.js launcher; platform-specific optional
 packages carry the built Rust binaries.
 
@@ -25,7 +25,7 @@ version=""
 dist_dir="dist"
 out_dir="dist/npm-packages"
 pack_destination=""
-scope="@jimmydaddy"
+scope="@sigil-ai"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

@@ -6,7 +6,7 @@
     <title>Sigil - TUI-first Rust coding agent</title>
     <meta
       name="description"
-      content="Sigil 是一个 TUI-first Rust coding agent，用于仓库开发、审批、diff、计划任务、MCP 工具和 session 恢复。"
+      content="Sigil 是一个 TUI-first Rust coding agent，用于仓库开发、durable task、child agent、审批、verification、MCP 工具和 session 恢复。"
     >
     <link rel="canonical" href="https://jimmydaddy.github.io/sigil/zh-CN/">
     <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/">
@@ -19,7 +19,7 @@
     <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       property="og:description"
-      content="把仓库开发、审批、diff、计划任务、MCP 工具和 session 恢复放进一个终端界面。"
+      content="把仓库开发、durable task、child agent、审批、verification、MCP 工具和 session 恢复放进一个终端界面。"
     >
     <meta property="og:url" content="https://jimmydaddy.github.io/sigil/zh-CN/">
     <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
@@ -28,7 +28,7 @@
     <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       name="twitter:description"
-      content="把仓库开发、审批、diff、计划任务、MCP 工具和 session 恢复放进一个终端界面。"
+      content="把仓库开发、durable task、child agent、审批、verification、MCP 工具和 session 恢复放进一个终端界面。"
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
     <link rel="stylesheet" href="../assets/site.css">
@@ -55,7 +55,7 @@
           <p class="eyebrow">TUI-first Rust coding agent</p>
           <h1>把真实仓库开发收进一个终端界面。</h1>
           <p class="lede">
-            Sigil 把对话、工具调用、审批、diff、诊断、计划任务和 session 恢复放进面向 coding session 的终端产品里。
+            Sigil 把对话、durable task、child agent、审批、diff、诊断、verification 和 session 恢复放进面向 coding session 的终端产品里。
           </p>
           <div class="hero-actions" aria-label="Primary actions">
             <a class="button primary" href="#quickstart">开始使用</a>
@@ -67,12 +67,12 @@
             <span></span><span></span><span></span>
             <strong>sigil</strong>
           </div>
-          <pre><code>&gt; /plan 重构 approval flow
+          <pre><code>&gt; /task audit the release docs
 planner  写入 durable steps
-executor 读取 crates/sigil-tui/src/app/approval_flow.rs
-tool     edit_file 等待审批
-diff     2 files, 5 hunks
-status   ready for review</code></pre>
+worker   完成只读 review
+tool     edit_file preview ready
+verify   pages check, docs links
+status   ready for alpha review</code></pre>
         </div>
       </section>
 
@@ -85,7 +85,7 @@ status   ready for review</code></pre>
           <div class="step">
             <span>1</span>
             <h3>安装</h3>
-            <pre><code>npm install -g @jimmydaddy/sigil
+            <pre><code>npm install -g @sigil-ai/sigil
 # 或：brew install JimmyDaddy/sigil/sigil-ai
 # 或：cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil</code></pre>
           </div>
@@ -106,24 +106,24 @@ sigil</code></pre>
       <section class="section contrast" id="workflow">
         <div class="section-heading">
           <p class="eyebrow">工作流</p>
-          <h2>为真实工具执行的 coding session 设计。</h2>
+          <h2>为可审计的 coding session 设计。</h2>
         </div>
         <div class="feature-grid">
           <article>
-            <h3>Chat-first TUI</h3>
-            <p>直接在 composer 输入任务，查看流式输出，并保持 session、usage、permissions、agents 和 LSP 状态可见。</p>
+            <h3>Workspace TUI</h3>
+            <p>直接在 composer 输入任务，查看流式输出，并保持 session、usage、permissions、agents、LSP 和 controls 可见。</p>
           </article>
           <article>
-            <h3>Durable tasks</h3>
-            <p>用 <code>/task</code> 处理多步骤任务；需要先只读规划时再使用 <code>/plan</code>。</p>
+            <h3>Durable tasks and agents</h3>
+            <p>用 <code>/task</code> 处理多步骤任务，用 <code>/plan</code> 做只读规划，用 child agent 承接有边界的委派工作。</p>
           </article>
           <article>
-            <h3>Diff-aware tools</h3>
-            <p>文件写入、编辑、删除、命令、MCP 调用和 code-intel edit 都经过结构化工具与审批界面。</p>
+            <h3>Approval and verification</h3>
+            <p>文件编辑、命令、MCP 调用、LSP edit 和配置化检查都经过结构化 preview、receipt 和 review surface。</p>
           </article>
           <article>
-            <h3>Session recovery</h3>
-            <p>Append-only JSONL 日志让 Sigil 恢复上下文，同时不会静默重放中断的工具执行。</p>
+            <h3>Configurable runtime</h3>
+            <p>Provider、permission、terminal、appearance、code intelligence、MCP、plugins、skills 和 agents 都收敛在 TUI-first 工作流里。</p>
           </article>
         </div>
       </section>
@@ -135,14 +135,14 @@ sigil</code></pre>
         </div>
         <div class="split-list">
           <ul>
-            <li>写入、执行、网络、MCP 和外部数据访问都经过 permission decision。</li>
-            <li>文件变更工具在审批前提供有边界的 preview 和 diff。</li>
+            <li>写入、执行、网络、MCP、LSP edit 和外部目录访问都经过 permission decision。</li>
+            <li>高风险动作完成前保留有边界的 preview、diff 和 verification evidence。</li>
             <li>Provider 专项行为留在 provider crate，不污染通用 kernel。</li>
           </ul>
           <ul>
-            <li>Tool approval 和 execution lifecycle 都是 durable control records。</li>
+            <li>Tool、task、agent、approval 和 execution lifecycle 都是 durable control records。</li>
             <li>中断工具在恢复时变成 interrupted result，而不是隐藏重试。</li>
-            <li>MCP server 受显式 trust、approval 和 secret-egress policy 约束。</li>
+            <li>MCP server、plugin、workspace agent 和外部数据都受显式 trust policy 约束。</li>
           </ul>
         </div>
       </section>
@@ -163,7 +163,7 @@ sigil</code></pre>
           </a>
           <a href="docs/#config">
             <span>配置</span>
-            Provider、permission、memory、terminal 和环境变量设置。
+            Provider、permission、appearance、agents、skills、plugins、verification、terminal 和环境变量设置。
           </a>
           <a href="docs/#troubleshooting">
             <span>排障</span>

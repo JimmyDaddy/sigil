@@ -26,7 +26,7 @@ Prerequisites:
 Install Sigil with one of the first-release package paths:
 
 ```bash
-npm install -g @jimmydaddy/sigil
+npm install -g @sigil-ai/sigil
 ```
 
 ```bash

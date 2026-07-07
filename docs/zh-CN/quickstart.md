@@ -19,7 +19,7 @@
 使用首发安装路径之一：
 
 ```bash
-npm install -g @jimmydaddy/sigil
+npm install -g @sigil-ai/sigil
 ```
 
 ```bash

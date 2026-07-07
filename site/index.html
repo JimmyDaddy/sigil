@@ -6,7 +6,7 @@
     <title>Sigil - TUI-first Rust coding agent</title>
     <meta
       name="description"
-      content="Sigil is a TUI-first Rust coding agent for repository work, approvals, diffs, planning, MCP tools, and session recovery."
+      content="Sigil is a TUI-first Rust coding agent for repository work, durable tasks, child agents, approvals, verification, MCP tools, and session recovery."
     >
     <link rel="canonical" href="https://jimmydaddy.github.io/sigil/">
     <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/">
@@ -19,7 +19,7 @@
     <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       property="og:description"
-      content="Repository work, approvals, diffs, planning, MCP tools, and session recovery inside one terminal interface."
+      content="Repository work, durable tasks, child agents, approvals, verification, MCP tools, and session recovery inside one terminal interface."
     >
     <meta property="og:url" content="https://jimmydaddy.github.io/sigil/">
     <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
@@ -28,7 +28,7 @@
     <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       name="twitter:description"
-      content="Repository work, approvals, diffs, planning, MCP tools, and session recovery inside one terminal interface."
+      content="Repository work, durable tasks, child agents, approvals, verification, MCP tools, and session recovery inside one terminal interface."
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
     <link rel="stylesheet" href="assets/site.css">
@@ -55,7 +55,7 @@
           <p class="eyebrow">TUI-first Rust coding agent</p>
           <h1>Repository work, kept inside one terminal interface.</h1>
           <p class="lede">
-            Sigil brings chat, tool calls, approvals, diffs, diagnostics, planning, and session recovery into a terminal product built for real coding sessions.
+            Sigil brings chat, durable tasks, child agents, approvals, diffs, diagnostics, verification, and session recovery into a terminal product built for real coding sessions.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
             <a class="button primary" href="#quickstart">Get started</a>
@@ -67,12 +67,12 @@
             <span></span><span></span><span></span>
             <strong>sigil</strong>
           </div>
-          <pre><code>&gt; /plan refactor the approval flow
+          <pre><code>&gt; /task audit the release docs
 planner  wrote durable steps
-executor read crates/sigil-tui/src/app/approval_flow.rs
-tool     edit_file waiting for approval
-diff     2 files, 5 hunks
-status   ready for review</code></pre>
+worker   ran a read-only review
+tool     edit_file preview ready
+verify   pages check, docs links
+status   ready for alpha review</code></pre>
         </div>
       </section>
 
@@ -85,7 +85,7 @@ status   ready for review</code></pre>
           <div class="step">
             <span>1</span>
             <h3>Install</h3>
-            <pre><code>npm install -g @jimmydaddy/sigil
+            <pre><code>npm install -g @sigil-ai/sigil
 # or: brew install JimmyDaddy/sigil/sigil-ai
 # or: cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil</code></pre>
           </div>
@@ -106,24 +106,24 @@ sigil</code></pre>
       <section class="section contrast" id="workflow">
         <div class="section-heading">
           <p class="eyebrow">Workflow</p>
-          <h2>Designed for tool-backed coding sessions.</h2>
+          <h2>Designed for auditable coding sessions.</h2>
         </div>
         <div class="feature-grid">
           <article>
-            <h3>Chat-first TUI</h3>
-            <p>Use the composer for ordinary coding work, inspect streamed output, and keep session, usage, permissions, agents, and LSP state visible.</p>
+            <h3>Workspace TUI</h3>
+            <p>Use the composer for ordinary coding work, inspect streamed output, and keep sessions, usage, permissions, agents, LSP, and controls visible.</p>
           </article>
           <article>
-            <h3>Durable tasks</h3>
-            <p>Use <code>/task</code> for multi-step work. Use <code>/plan</code> when you want a read-only planning prompt before editing.</p>
+            <h3>Durable tasks and agents</h3>
+            <p>Use <code>/task</code> for multi-step work, <code>/plan</code> for read-only planning, and child agents for scoped delegated work.</p>
           </article>
           <article>
-            <h3>Diff-aware tools</h3>
-            <p>File writes, edits, deletes, shell commands, MCP calls, and code-intel edits run through structured tool and approval surfaces.</p>
+            <h3>Approval and verification</h3>
+            <p>File edits, shell commands, MCP calls, LSP edits, and configured checks run through structured previews, receipts, and review surfaces.</p>
           </article>
           <article>
-            <h3>Session recovery</h3>
-            <p>Append-only JSONL logs let Sigil restore context without silently replaying interrupted tool execution.</p>
+            <h3>Configurable runtime</h3>
+            <p>Configure providers, permissions, terminal behavior, appearance, code intelligence, MCP, plugins, skills, and agents from one TUI-first workflow.</p>
           </article>
         </div>
       </section>
@@ -135,14 +135,14 @@ sigil</code></pre>
         </div>
         <div class="split-list">
           <ul>
-            <li>Permission decisions for write, execute, network, MCP, and external data access.</li>
-            <li>Bounded previews and diffs before file-changing tools are approved.</li>
+            <li>Permission decisions for write, execute, network, MCP, LSP edit, and external-directory access.</li>
+            <li>Bounded previews, diffs, and verification evidence before risky work is treated as complete.</li>
             <li>Provider-specific behavior stays in provider crates, not in the generic kernel.</li>
           </ul>
           <ul>
-            <li>Tool approval and execution lifecycle are durable control records.</li>
-            <li>Interrupted tools become interrupted results on restore, not hidden retries.</li>
-            <li>MCP servers run under explicit trust, approval, and secret-egress policy.</li>
+            <li>Tool, task, agent, approval, and execution lifecycle events are durable control records.</li>
+            <li>Interrupted tools restore as interrupted results, not hidden retries.</li>
+            <li>MCP servers, plugins, workspace agents, and external data run under explicit trust policy.</li>
           </ul>
         </div>
       </section>
@@ -163,7 +163,7 @@ sigil</code></pre>
           </a>
           <a href="docs/#config">
             <span>Config</span>
-            Provider, permission, memory, terminal, and environment settings.
+            Provider, permission, appearance, agents, skills, plugins, verification, terminal, and environment settings.
           </a>
           <a href="docs/#troubleshooting">
             <span>Troubleshooting</span>

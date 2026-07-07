@@ -41,8 +41,8 @@ Each release should contain:
 - `sigil-<version>-<target>.tar.gz.sha256`
 - `checksums.txt`
 - `sigil-ai.rb` with arm64 and Intel macOS archive URLs when both macOS artifacts are available
-- `jimmydaddy-sigil-<version>.tgz`
-- `jimmydaddy-sigil-<platform>-<version>.tgz` for each supported npm platform package
+- `sigil-ai-sigil-<version>.tgz`
+- `sigil-ai-sigil-<platform>-<version>.tgz` for each supported npm platform package
 
 Each tar archive should include the `sigil` binary, README files, `assets/logo/*`, and installation docs so repository-relative README image links keep working after extraction.
 
@@ -60,7 +60,7 @@ scripts/prepare-npm-packages.sh \
   --pack-destination dist
 ```
 
-The root npm package is `@jimmydaddy/sigil`; platform-specific optional packages
+The root npm package is `@sigil-ai/sigil`; platform-specific optional packages
 carry the actual binaries. Publish the platform packages first, then publish the
 root package:
 

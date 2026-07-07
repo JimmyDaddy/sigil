@@ -11,6 +11,7 @@ stage_dir="${stage_root}/public"
 scripts/check-docs.sh >/dev/null
 scripts/build-pages-site.sh "${stage_dir}" >/dev/null
 scripts/check-site-artifact-links.rb "${stage_dir}" >/dev/null
+scripts/check-site-repo-links.rb "${stage_dir}" >/dev/null
 
 required_files=(
   "index.html"

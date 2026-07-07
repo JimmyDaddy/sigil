@@ -12,10 +12,10 @@
 
 ## 通过 npm 安装
 
-npm 包名使用 scoped package：`@jimmydaddy/sigil`。它安装一个很小的 Node.js launcher，并通过 platform-specific optional package 携带实际 binary。最终命令仍然是 `sigil`。
+npm 包名使用 scoped package：`@sigil-ai/sigil`。它安装一个很小的 Node.js launcher，并通过 platform-specific optional package 携带实际 binary。最终命令仍然是 `sigil`。
 
 ```bash
-npm install -g @jimmydaddy/sigil
+npm install -g @sigil-ai/sigil
 ```
 
 确认安装：
@@ -119,7 +119,7 @@ archive 内包含 `sigil` binary、README、logo assets 和安装文档。tagged
 使用原来的安装器更新：
 
 ```bash
-npm install -g @jimmydaddy/sigil@latest
+npm install -g @sigil-ai/sigil@latest
 brew upgrade sigil-ai
 cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil --force
 cargo install --path crates/sigil --locked --force
@@ -130,7 +130,7 @@ cargo install --path crates/sigil --locked --force
 使用对应卸载命令：
 
 ```bash
-npm uninstall -g @jimmydaddy/sigil
+npm uninstall -g @sigil-ai/sigil
 brew uninstall sigil-ai
 cargo uninstall sigil
 ```

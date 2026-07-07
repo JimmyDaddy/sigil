@@ -9,7 +9,7 @@
 | 领域 | 状态 |
 | --- | --- |
 | TUI 入口 | `sigil` 打开 TUI，是主要产品表面。 |
-| npm 安装 | `npm install -g @jimmydaddy/sigil` 是首个 release 的 scoped npm package 路径。 |
+| npm 安装 | `npm install -g @sigil-ai/sigil` 是首个 release 的 scoped npm package 路径。 |
 | Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` 安装 tap formula，binary 名仍然是 `sigil`。 |
 | Cargo git 安装 | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1 --locked sigil` 从 release tag 安装。 |
 | 源码安装 | `cargo install --path crates/sigil --locked` 仍支持本地 checkout 开发。 |

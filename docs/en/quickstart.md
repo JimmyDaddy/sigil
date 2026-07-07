@@ -19,7 +19,7 @@ For the smoothest first run, start in a repository where you can inspect `git di
 Use one of the first-release install paths:
 
 ```bash
-npm install -g @jimmydaddy/sigil
+npm install -g @sigil-ai/sigil
 ```
 
 ```bash

@@ -1725,7 +1725,7 @@ fn render_docs_screenshot_assets() -> anyhow::Result<()> {
     write_terminal_svg(
         &screenshot_dir.join("config-panel.svg"),
         "Sigil config panel preview",
-        "Generated from the Sigil TUI renderer: provider, memory, compaction, tools, terminal, and MCP settings.",
+        "Generated from the Sigil TUI renderer: provider, permissions, memory, compaction, code intelligence, terminal, appearance, Agents, Skills, Plugins trust review, and MCP settings.",
         &mut config_app,
     )?;
 
