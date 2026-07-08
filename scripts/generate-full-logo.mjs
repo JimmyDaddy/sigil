@@ -218,6 +218,59 @@ function cleanWhiteHalo(image, options = {}) {
   return { width, height, pixels: out };
 }
 
+function clearBrightEdgeHalos(image, options = {}) {
+  const {
+    edgeLumaThreshold = 200,
+    edgeSaturationThreshold = 0.6
+  } = options;
+
+  const { width, height, pixels } = image;
+  const out = Buffer.from(pixels);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4;
+      const alpha = out[idx + 3];
+      if (alpha === 0) {
+        continue;
+      }
+
+      let hasTransparentNeighbor = false;
+      for (let ny = Math.max(0, y - 1); ny <= Math.min(height - 1, y + 1); ny += 1) {
+        for (let nx = Math.max(0, x - 1); nx <= Math.min(width - 1, x + 1); nx += 1) {
+          if (nx === x && ny === y) {
+            continue;
+          }
+          if (pixels[(ny * width + nx) * 4 + 3] < 255) {
+            hasTransparentNeighbor = true;
+            break;
+          }
+        }
+        if (hasTransparentNeighbor) {
+          break;
+        }
+      }
+
+      if (!hasTransparentNeighbor) {
+        continue;
+      }
+
+      const red = out[idx];
+      const green = out[idx + 1];
+      const blue = out[idx + 2];
+      const luma = lightness(red, green, blue);
+      const sat = saturation(red, green, blue);
+      if (luma <= edgeLumaThreshold || sat >= edgeSaturationThreshold) {
+        continue;
+      }
+
+      out[idx + 3] = 0;
+    }
+  }
+
+  return { width, height, pixels: out };
+}
+
 function alphaBounds(image) {
   let minX = image.width;
   let minY = image.height;
@@ -333,8 +386,8 @@ function writePng(filePath, width, height, pixels) {
   fs.writeFileSync(filePath, png);
 }
 
-const mark = cleanWhiteHalo(readPng(markPath));
-const wordmark = cleanWhiteHalo(readPng(wordmarkPath));
+const mark = clearBrightEdgeHalos(cleanWhiteHalo(readPng(markPath)));
+const wordmark = clearBrightEdgeHalos(cleanWhiteHalo(readPng(wordmarkPath)));
 
 writePng(markPath, mark.width, mark.height, mark.pixels);
 writePng(wordmarkPath, wordmark.width, wordmark.height, wordmark.pixels);

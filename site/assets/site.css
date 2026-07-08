@@ -407,6 +407,35 @@ h1 {
   .terminal-preview::after {
     animation: terminalShimmer 6.5s linear infinite;
   }
+
+  .docs-hero {
+    animation: heroFloat 8s ease-in-out infinite;
+  }
+
+  .docs-logo {
+    animation: heroReveal 700ms cubic-bezier(0.21, 1.02, 0.73, 1) both;
+  }
+
+  .docs-hero-copy {
+    animation: heroReveal 780ms cubic-bezier(0.21, 1.02, 0.73, 1) both;
+    animation-delay: 0.08s;
+  }
+
+  .resource-card {
+    animation: heroReveal 700ms cubic-bezier(0.21, 1.02, 0.73, 1) both;
+  }
+
+  .resource-card:nth-child(1) {
+    animation-delay: 0.18s;
+  }
+
+  .resource-card:nth-child(2) {
+    animation-delay: 0.24s;
+  }
+
+  .resource-card:nth-child(3) {
+    animation-delay: 0.3s;
+  }
 }
 
 .terminal-bar {
