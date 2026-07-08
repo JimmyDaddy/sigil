@@ -1304,11 +1304,15 @@ footer a {
 @media (prefers-color-scheme: dark) {
   .brand-mark,
   .brand-wordmark {
-    filter: brightness(1.22) contrast(1.08) saturate(1.02);
+    filter: brightness(1.45) saturate(1.16) contrast(1.18) drop-shadow(0 3px 8px rgb(20 32 47 / 38%));
   }
 
   .docs-logo {
-    filter: brightness(1.2) contrast(1.06) saturate(1.03);
+    filter: brightness(1.36) contrast(1.12) saturate(1.08) drop-shadow(0 8px 22px rgb(20 32 47 / 30%));
+  }
+
+  .hero-logo {
+    filter: brightness(1.35) contrast(1.12) saturate(1.08) drop-shadow(0 12px 30px rgb(20 32 47 / 40%));
   }
 
   :root {

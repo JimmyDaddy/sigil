@@ -1,7 +1,7 @@
 # Sigil
 
 <p align="center">
-  <img src="assets/logo/sigil-full-staff-glow.png" alt="Sigil logo" width="560">
+  <img src="assets/logo/sigil-wordmark-header.svg" alt="Sigil logo" width="420">
 </p>
 
 English | [简体中文](README.zh-CN.md)
