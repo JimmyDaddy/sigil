@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [安装](installation.md) · [Changelog](changelog.md) · [English](../en/status.md)
 
-这一页把用户今天可以依赖的能力，与 experimental、limited 或 future packaging work 分开说明。`v0.0.1-alpha` 是 early preview，不承诺稳定 API 或插件兼容性。
+这一页把用户今天可以依赖的能力，与 experimental、limited 或 future packaging work 分开说明。`v0.0.1-alpha.1` 是 early preview，不承诺稳定 API 或插件兼容性。
 
 ## 当前支持
 
@@ -11,7 +11,7 @@
 | TUI 入口 | `sigil` 打开 TUI，是主要产品表面。 |
 | npm 安装 | `npm install -g @sigil-ai/sigil@alpha` 是首个 release 的 scoped npm package 路径。 |
 | Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` 安装 tap formula，binary 名仍然是 `sigil`。 |
-| Cargo git 安装 | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil` 从 release tag 安装。 |
+| Cargo git 安装 | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil` 从 release tag 安装。 |
 | 源码安装 | `cargo install --path crates/sigil --locked` 仍支持本地 checkout 开发。 |
 | Quick Setup | 首次运行 setup 可以创建可用本地配置。 |
 | Doctor | `sigil doctor` 和 `/doctor` 报告 config、auth、workspace、MCP、code intelligence 和 terminal readiness。 |

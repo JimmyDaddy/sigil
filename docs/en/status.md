@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Installation](installation.md) · [Changelog](changelog.md) · [简体中文](../zh-CN/status.md)
 
-This page separates what users can rely on today from what is experimental, limited, or future packaging work. `v0.0.1-alpha` is an early preview, not a stable API or plugin compatibility promise.
+This page separates what users can rely on today from what is experimental, limited, or future packaging work. `v0.0.1-alpha.1` is an early preview, not a stable API or plugin compatibility promise.
 
 ## Supported Today
 
@@ -11,7 +11,7 @@ This page separates what users can rely on today from what is experimental, limi
 | TUI entrypoint | `sigil` opens the TUI and is the primary product surface. |
 | npm install | `npm install -g @sigil-ai/sigil@alpha` is the scoped first-release npm package path. |
 | Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` installs the tap formula while keeping the binary name `sigil`. |
-| Cargo git install | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil` installs from the release tag. |
+| Cargo git install | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil` installs from the release tag. |
 | Source install | `cargo install --path crates/sigil --locked` remains supported for local checkout development. |
 | Quick Setup | First-run setup can create a usable local config. |
 | Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |

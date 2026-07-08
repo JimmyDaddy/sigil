@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本文说明首个 release 的安装路径。如果你想按首次使用流程走一遍，先看 [quickstart.md](quickstart.md)。`v0.0.1-alpha` 是 early preview，不承诺配置、插件、高级 sandbox 行为或自动化入口的稳定兼容。
+本文说明首个 release 的安装路径。如果你想按首次使用流程走一遍，先看 [quickstart.md](quickstart.md)。`v0.0.1-alpha.1` 是 early preview，不承诺配置、插件、高级 sandbox 行为或自动化入口的稳定兼容。
 
 ## 前置条件
 
@@ -49,7 +49,7 @@ release workflow 会从 macOS release archives 生成 `sigil-ai.rb`。该 formul
 首个 release 通过 Git tag 安装，而不是 crates.io：
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
 ```
 
 这会把 `sigil` binary 安装到 Cargo 的 binary 目录。macOS 和 Linux 默认是 `~/.cargo/bin`，Windows 默认是 `%USERPROFILE%\.cargo\bin`。
@@ -121,7 +121,7 @@ archive 内包含 `sigil` binary、README、logo assets 和安装文档。tagged
 ```bash
 npm install -g @sigil-ai/sigil@alpha
 brew upgrade sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil --force
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 

@@ -61,12 +61,12 @@ Sigil is built around a few user-facing ideas:
 
 ## Current Distribution Status
 
-The first alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha` is an early preview: the core TUI workflow is usable, while config, plugin APIs, advanced sandbox coverage, and automation surfaces may still change.
+The first alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha.1` is an early preview: the core TUI workflow is usable, while config, plugin APIs, advanced sandbox coverage, and automation surfaces may still change.
 
 ```bash
 npm install -g @sigil-ai/sigil@alpha
 brew install JimmyDaddy/sigil/sigil-ai
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
 ```
 
 Local checkout installs remain useful for development:

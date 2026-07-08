@@ -161,6 +161,7 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         subject_zones: vec![sigil_kernel::PathTrustZone::WorkspaceSource],
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(ToolPreview {
             title: "Write".to_owned(),
             summary: "1 file changed".to_owned(),
@@ -714,6 +715,7 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
         subject_zones: vec![sigil_kernel::PathTrustZone::WorkspaceSource],
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(ToolPreview {
             title: "Preview".to_owned(),
             summary: "read README".to_owned(),
