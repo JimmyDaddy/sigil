@@ -160,6 +160,12 @@ a {
   background: transparent;
 }
 
+.brand-mark,
+.brand-wordmark,
+.docs-logo {
+  transition: filter 220ms ease;
+}
+
 .brand-mark {
   border-radius: 6px;
 }
@@ -1296,6 +1302,12 @@ footer a {
 }
 
 @media (prefers-color-scheme: dark) {
+  .brand-mark,
+  .brand-wordmark,
+  .docs-logo {
+    filter: brightness(1.9) contrast(1.12) saturate(1.05) drop-shadow(0 0 1px rgba(255, 255, 255, 0.28));
+  }
+
   :root {
     --ink: #e6edf3;
     --muted: #a0adbe;
