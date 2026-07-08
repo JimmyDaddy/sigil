@@ -90,6 +90,27 @@
   }
 }
 
+@keyframes heroGlowSweep {
+  0% {
+    transform: translateX(-22%);
+    opacity: 0;
+  }
+  6% {
+    opacity: 0.16;
+  }
+  40% {
+    transform: translateX(8%);
+    opacity: 0.24;
+  }
+  74% {
+    opacity: 0.1;
+  }
+  100% {
+    transform: translateX(22%);
+    opacity: 0;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -201,6 +222,18 @@ nav a:focus-visible {
   pointer-events: none;
 }
 
+.hero::after {
+  content: "";
+  position: absolute;
+  inset: 6% -15% 10% -15%;
+  background: linear-gradient(120deg, transparent 12%, rgba(30, 207, 197, 0.18) 48%, transparent 84%);
+  opacity: 0.16;
+  pointer-events: none;
+  transform: translateX(-22%);
+  mix-blend-mode: screen;
+  z-index: 0;
+}
+
 .hero-logo {
   position: absolute;
   top: clamp(24px, 5vw, 52px);
@@ -208,6 +241,7 @@ nav a:focus-visible {
   width: min(420px, 58vw);
   height: auto;
   opacity: 1;
+  filter: drop-shadow(0 12px 30px rgb(15 23 34 / 18%));
 }
 
 .hero-copy {
@@ -215,6 +249,7 @@ nav a:focus-visible {
   max-width: 780px;
   padding-top: 132px;
   opacity: 1;
+  z-index: 1;
 }
 
 .eyebrow {
@@ -328,12 +363,16 @@ h1 {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .hero {
-    animation: heroFloat 8s ease-in-out infinite;
-  }
+.hero {
+  animation: heroFloat 8s ease-in-out infinite;
+}
 
   .hero::before {
     animation: heroWatermarkDrift 24s linear infinite;
+  }
+
+  .hero::after {
+    animation: heroGlowSweep 10s ease-in-out infinite;
   }
 
   .hero-logo {
