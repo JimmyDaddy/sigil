@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [简体中文](../zh-CN/quickstart.md)
 
-This guide gets you from a first-release install to a useful Sigil session. It is written for users who want to try Sigil in a real repository, not for maintainers changing Sigil itself. `v0.0.1-alpha.1` is an early preview.
+This guide gets you from a first-release install to a useful Sigil session in a real repository. `v0.0.1-alpha.1` is an early preview.
 
 ## Before You Begin
 

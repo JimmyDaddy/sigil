@@ -6,7 +6,7 @@
     <title>Sigil 文档</title>
     <meta
       name="description"
-      content="Sigil 文档入口，覆盖安装、TUI 工作流、配置、verification、terminal 兼容性、MCP、agents 和开发者参考。"
+      content="Sigil 文档入口，覆盖安装、TUI 工作流、配置、verification、terminal 兼容性、MCP、agents 和用户支持。"
     >
     <link rel="canonical" href="https://jimmydaddy.github.io/sigil/zh-CN/docs/">
     <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/docs/">
@@ -19,7 +19,7 @@
     <meta property="og:title" content="Sigil 文档">
     <meta
       property="og:description"
-      content="按安装、TUI 工作流、配置、verification、MCP、agents 和项目开发选择对应的 Sigil 文档。"
+      content="按安装、TUI 工作流、配置、verification、MCP、agents 和用户支持选择对应的 Sigil 文档。"
     >
     <meta property="og:url" content="https://jimmydaddy.github.io/sigil/zh-CN/docs/">
     <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
@@ -28,7 +28,7 @@
     <meta name="twitter:title" content="Sigil 文档">
     <meta
       name="twitter:description"
-      content="按安装、TUI 工作流、配置、verification、MCP、agents 和项目开发选择对应的 Sigil 文档。"
+      content="按安装、TUI 工作流、配置、verification、MCP、agents 和用户支持选择对应的 Sigil 文档。"
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
     <link rel="stylesheet" href="../../assets/site.css">
@@ -56,7 +56,7 @@
           <p class="eyebrow">文档</p>
           <h1>按当前任务选择对应指南。</h1>
           <p class="lede">
-            Sigil 保持 README 作为简洁入口，把操作细节拆到聚焦文档里。本页是用户文档和开发者参考的稳定入口。
+            Sigil 保持 README 作为简洁入口，把操作细节拆到聚焦文档里。本页是用户文档的稳定入口。
           </p>
           <div class="docs-search-panel">
             <form class="site-search" role="search" data-locale="zh-CN" data-index="../../search.json">
@@ -73,26 +73,30 @@
           <p class="eyebrow">用户文档</p>
           <h2>先按任务选择路径，再用参考文档查细节。</h2>
         </div>
-        <div class="resource-grid">
-          <a class="resource-card" id="start" href="overview/">
-            <span class="resource-kicker">地图</span>
-            <h3>用户文档首页</h3>
-            <p>按首次使用、日常工作流、配置、排障、MCP 或参考查找对应指南。</p>
-          </a>
+        <h3 class="resource-group-heading">从这里开始</h3>
+        <div class="resource-grid resource-grid-featured">
           <a class="resource-card" id="quickstart" href="quickstart/">
             <span class="resource-kicker">从这里开始</span>
             <h3>快速上手</h3>
             <p>安装 preview release，在 workspace 启动，完成 Quick Setup，运行 doctor，并完成第一个安全编辑。</p>
           </a>
           <a class="resource-card" id="install" href="installation/">
-            <span class="resource-kicker">Binary</span>
+            <span class="resource-kicker">安装</span>
             <h3>安装与更新</h3>
-            <p>通过 npm、Homebrew、Cargo git tag、源码 checkout 或 release archive 安装，更新已有 binary，并在需要时清理本地状态。</p>
+            <p>通过 npm、Homebrew、Cargo git tag、源码 checkout 或 release archive 安装，并在需要时更新或卸载已有 binary。</p>
           </a>
           <a class="resource-card" id="visual-tour" href="visual-tour/">
             <span class="resource-kicker">预览</span>
             <h3>视觉导览</h3>
             <p>用 screenshot-style walkthrough 了解主界面、approval review 和 config panel。</p>
+          </a>
+        </div>
+        <h3 class="resource-group-heading">使用 Sigil</h3>
+        <div class="resource-grid">
+          <a class="resource-card" id="start" href="overview/">
+            <span class="resource-kicker">地图</span>
+            <h3>用户文档首页</h3>
+            <p>按首次使用、日常工作流、配置、排障、MCP 或参考查找对应指南。</p>
           </a>
           <a class="resource-card" id="workflows" href="workflows/">
             <span class="resource-kicker">例子</span>
@@ -100,7 +104,7 @@
             <p>探索仓库、做小改动、计划任务、调试失败、review diff 和恢复工作时可直接套用的提示词。</p>
           </a>
           <a class="resource-card" id="cookbook" href="cookbook/">
-            <span class="resource-kicker">Prompts</span>
+            <span class="resource-kicker">提示词</span>
             <h3>Cookbook</h3>
             <p>用于仓库探索、文档编辑、review、调试、planning、MCP 和终端问题的可复制 prompt。</p>
           </a>
@@ -124,6 +128,14 @@
             <h3>Provider 指南</h3>
             <p>选择并配置 DeepSeek、OpenAI-compatible、Anthropic 或 Gemini provider，包含 key 优先级和排障路径。</p>
           </a>
+          <a class="resource-card" id="mcp" href="mcp/">
+            <span class="resource-kicker">集成</span>
+            <h3>MCP 接入指南</h3>
+            <p>配置 stdio MCP server，理解 trust level，并用显式策略约束外部数据和 secret。</p>
+          </a>
+        </div>
+        <h3 class="resource-group-heading">参考与支持</h3>
+        <div class="resource-grid resource-grid-compact">
           <a class="resource-card" id="privacy" href="privacy/">
             <span class="resource-kicker">数据</span>
             <h3>隐私与数据</h3>
@@ -144,53 +156,15 @@
             <h3>Terminal 兼容性</h3>
             <p>渲染、鼠标、剪贴板、alternate screen 行为和本地 smoke test 检查清单。</p>
           </a>
-          <a class="resource-card" id="mcp" href="mcp/">
-            <span class="resource-kicker">集成</span>
-            <h3>MCP 接入指南</h3>
-            <p>配置 stdio MCP server，理解 trust level，并用显式策略约束外部数据和 secret。</p>
-          </a>
           <a class="resource-card" id="status" href="status/">
             <span class="resource-kicker">支持状态</span>
             <h3>当前支持</h3>
             <p>用户今天可以依赖什么、哪些属于有限或高级用法、哪些仍是未来 packaging work。</p>
           </a>
           <a class="resource-card" id="changelog" href="changelog/">
-            <span class="resource-kicker">Release notes</span>
+            <span class="resource-kicker">版本说明</span>
             <h3>用户 Changelog</h3>
             <p>面向用户的能力和文档变化，不混入只对实现有意义的细节。</p>
-          </a>
-        </div>
-      </section>
-
-      <section class="section contrast docs-section" id="developer-docs">
-        <div class="section-heading">
-          <p class="eyebrow">开发者参考</p>
-          <h2>修改核心行为前先读这些文档。</h2>
-        </div>
-        <div class="resource-list">
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/governance/code-standards.md">
-            <span>代码规范</span>
-            本仓库的直接编码约束。
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/governance/engineering-standards.md">
-            <span>工程规范</span>
-            Gate、评审期望和仓库维护规则。
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/sigil-rust-agent-core-technical-solution.md">
-            <span>核心技术方案</span>
-            Kernel、runtime、tools、TUI、session 和 provider 的架构方案。
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/sigil-capability-roadmap.md">
-            <span>能力路线图</span>
-            后续能力工作的产品和工程方向。
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/release-process.md">
-            <span>发布流程</span>
-            Archive 内容、本地验证和发布检查清单。
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/AGENTS.md">
-            <span>Agent 协作说明</span>
-            Coding agent 在本仓库工作前需要对齐的上下文。
           </a>
         </div>
       </section>

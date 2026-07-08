@@ -11,7 +11,7 @@
 
 Sigil 是一个 TUI-first 的 Rust coding agent，用来在真实仓库里协助开发。它把对话、工具调用、审批、diff、诊断、计划任务和 session 恢复放进同一个终端界面里；CLI 只保留为轻量自动化入口。
 
-[网站](https://jimmydaddy.github.io/sigil/) · [文档](docs/zh-CN/README.md) · [快速上手](docs/zh-CN/quickstart.md) · [视觉导览](docs/zh-CN/visual-tour.md) · [Provider 指南](docs/zh-CN/providers.md)
+[网站](https://jimmydaddy.github.io/sigil/zh-CN/) · [文档站](https://jimmydaddy.github.io/sigil/zh-CN/docs/) · [快速上手](https://jimmydaddy.github.io/sigil/zh-CN/docs/quickstart/) · [视觉导览](https://jimmydaddy.github.io/sigil/zh-CN/docs/visual-tour/) · [支持状态](https://jimmydaddy.github.io/sigil/zh-CN/docs/status/)
 
 Sigil 的首个 alpha release 已通过 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 发布。`v0.0.1-alpha.1` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
 
@@ -37,7 +37,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
 ```
 
-本地开发时，可以从 checkout 安装：
+如果你希望从源码安装，可以在 checkout 中运行：
 
 ```bash
 git clone https://github.com/JimmyDaddy/sigil.git
@@ -80,15 +80,21 @@ sigil doctor
 | 需求 | 使用 |
 | --- | --- |
 | 普通提问或编辑 | 直接在 composer 输入 |
+| 粘贴多行文本或代码 | 粘贴到 composer；大段粘贴会折叠展示，但会完整提交 |
+| 编辑较长 composer 草稿 | `Ctrl-A/E`、`Alt-B/F`、`Ctrl-K/Y`、`Ctrl-Z` |
 | 规划后执行 | `/plan` 后输入 prompt，或 `/plan <prompt>`；接受 plan card 后创建并运行 durable task |
 | 执行 durable 多步骤任务 | `/task <任务>`；未完成任务用 `/task continue` |
+| Sigil 忙碌时追加后续消息 | 在当前 run 进行中提交普通 chat；Sigil 会显示在 Follow-ups，并在下一次安全 turn 派发时追加用户消息 |
+| 查看待处理 follow-ups | `Tab` 聚焦 follow-up panel；`/queue show`、`/queue next`、`/queue interrupt`、`/queue edit` 和 `/queue delete` 是高级控制 |
 | 要求普通 chat 使用子 agent | 明确说明“使用子 agent ...” |
 | 直接调用受信任 agent profile | `@profile <prompt>` 或 `/review-agent <prompt>` 这类受信任 profile slash name |
+| 把前台子 agent 移到后台 | Sigil 等待该 agent 时按 `Ctrl-B` |
 | 切换或重命名主/子 agent transcript | composer 下方 agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A`、`/agent` 或 `/agent rename <child-id|current> <name>` |
 | 查看较长子 agent 结果 | 切到子 agent transcript，或让 `read_agent_result` 分页读取子 agent final answer |
 | 新建或切换 session | `/new`、`/resume`，或退出后用 `sigil resume <session-id>` |
 | 修改常用设置 | `/config` |
 | 诊断 setup/auth/MCP/LSP | `/doctor` |
+| 在紧凑和详细信息栏之间切换 | `F2` |
 | 切换默认权限模式 | `Shift-Tab` |
 | 取消当前运行或关闭浮层 | `Ctrl-C` 或 `Esc` |
 
@@ -126,24 +132,3 @@ Sigil 把工具执行视为可审计状态，而不是隐藏副作用。
 | 理解 approval、workspace、MCP 和数据边界 | [安全](docs/zh-CN/safety.md) 和 [隐私](docs/zh-CN/privacy.md) |
 | 修复 setup、认证、terminal、MCP 或 LSP 问题 | [排障](docs/zh-CN/troubleshooting.md) |
 | 查找所有命令、键位、路径和环境变量 | [参考](docs/zh-CN/reference.md) |
-| 开发 Sigil 本身 | [代码规范](dev/governance/code-standards.md)、[工程规范](dev/governance/engineering-standards.md) 和 [核心技术方案](dev/docs/sigil-rust-agent-core-technical-solution.md) |
-
-## 项目维护
-
-项目站点源码位于 [site](site)。生成后的 Pages 站点通过下面命令验证：
-
-```bash
-scripts/check-pages-site.sh
-```
-
-代码变更默认按仓库工程规范执行相关 gate：
-
-```bash
-cargo fmt --all --check
-cargo check
-cargo test
-cargo clippy --all-targets -- -D warnings
-./scripts/coverage.sh
-```
-
-只改文档时可以不跑全量 Rust gate，但需要确认链接、路径和示例命令仍然成立。Logo 文件位于 [assets/logo](assets/logo)。

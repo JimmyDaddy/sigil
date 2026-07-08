@@ -164,6 +164,24 @@ h1 {
   font-size: clamp(1.05rem, 2vw, 1.28rem);
 }
 
+.alpha-status {
+  display: grid;
+  gap: 5px;
+  max-width: 680px;
+  margin-top: 22px;
+  padding: 14px 16px;
+  border: 1px solid rgba(201, 138, 26, 0.34);
+  border-left: 4px solid var(--gold);
+  border-radius: 8px;
+  background: rgba(255, 250, 232, 0.82);
+  color: var(--muted);
+}
+
+.alpha-status strong {
+  color: var(--ink);
+  font-size: 0.92rem;
+}
+
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
@@ -292,7 +310,36 @@ h3 {
 }
 
 .steps {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.install-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.install-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 20px;
+}
+
+.install-card-primary {
+  border-color: rgba(30, 207, 197, 0.78);
+  background: #f7fffe;
+}
+
+.install-card pre {
+  margin-top: 12px;
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--code);
+  color: #d9f6f3;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .step,
@@ -372,6 +419,45 @@ h3 {
   font-weight: 900;
 }
 
+.visual-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.85fr);
+  gap: 16px;
+}
+
+.visual-card {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.visual-card-large {
+  grid-row: span 2;
+}
+
+.visual-card:hover,
+.visual-card:focus-visible {
+  border-color: var(--cyan);
+}
+
+.visual-card img {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.visual-card span {
+  font-weight: 900;
+}
+
 .docs-hero {
   display: grid;
   grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
@@ -398,7 +484,21 @@ h3 {
 }
 
 .resource-grid {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.resource-grid-featured {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.resource-grid-compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.resource-group-heading {
+  margin: 28px 0 14px;
+  color: var(--ink);
+  font-size: 1.12rem;
 }
 
 .resource-card,
@@ -411,8 +511,12 @@ h3 {
 }
 
 .resource-card {
-  min-height: 220px;
+  min-height: 190px;
   padding: 20px;
+}
+
+.resource-grid-featured .resource-card {
+  min-height: 210px;
 }
 
 .resource-card:hover,
@@ -761,10 +865,18 @@ footer a {
   }
 
   .steps,
+  .install-options,
   .feature-grid,
   .doc-grid,
-  .resource-grid {
+  .visual-grid,
+  .resource-grid,
+  .resource-grid-featured,
+  .resource-grid-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .visual-card-large {
+    grid-row: auto;
   }
 
   .doc-shell {
@@ -821,10 +933,14 @@ footer a {
   }
 
   .steps,
+  .install-options,
   .feature-grid,
   .doc-grid,
   .split-list,
+  .visual-grid,
   .resource-grid,
+  .resource-grid-featured,
+  .resource-grid-compact,
   .resource-list {
     grid-template-columns: 1fr;
   }

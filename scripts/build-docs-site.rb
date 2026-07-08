@@ -70,7 +70,6 @@ LOCALES = {
     safety_label: "Safety",
     github_label: "GitHub",
     language_label: "简体中文",
-    source_label: "Edit on GitHub",
     previous_label: "Previous",
     next_label: "Next",
     search_label: "Search docs",
@@ -86,7 +85,6 @@ LOCALES = {
     safety_label: "安全",
     github_label: "GitHub",
     language_label: "English",
-    source_label: "在 GitHub 查看",
     previous_label: "上一篇",
     next_label: "下一篇",
     search_label: "搜索文档",
@@ -368,7 +366,6 @@ def rendered_page(locale, slug, source_file, fallback_title)
   title = markdown[/^#\s+(.+)$/, 1] || fallback_title
   description = page_description(markdown, title)
   asset_prefix = relative_prefix(locale)
-  source_url = "https://github.com/JimmyDaddy/sigil/blob/main/#{locale_config.fetch(:source_dir)}/#{source_file}"
   language_href = locale == "en" ? "../../zh-CN/docs/#{slug}/" : "../../../docs/#{slug}/"
   home_href = locale == "en" ? "../../" : "../../../"
   docs_home = locale == "en" ? "../" : "../"
@@ -441,7 +438,6 @@ def rendered_page(locale, slug, source_file, fallback_title)
           </aside>
           <article class="doc-content">
             <div class="doc-meta">
-              <a href="#{source_url}">#{html_escape(locale_config.fetch(:source_label))}</a>
               <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
             </div>
             #{body}

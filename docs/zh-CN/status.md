@@ -31,9 +31,8 @@
 
 | 领域 | 当前预期 |
 | --- | --- |
-| Release archives | 可以本地构建，也可由 tag release workflow 构建；包管理器 artifacts 从这些 archives 派生。 |
-| Homebrew formula asset | 从 release archives 生成 `sigil-ai.rb`，并发布到 `JimmyDaddy/homebrew-sigil` tap。 |
-| npm package tarballs | 从 release archives 生成，用于 npm registry 发布和 release asset 检查。 |
+| Release archives | 已在 tagged GitHub releases 提供，用于手动安装；日常优先使用包管理器安装。 |
+| Homebrew tap | `sigil-ai` formula 已发布到 `JimmyDaddy/homebrew-sigil` tap。 |
 | OpenAI-compatible 差异 | 该 provider 有意不暴露 DeepSeek-only prefix/FIM/beta 行为。 |
 | Provider-specific 语义 | Anthropic 和 Gemini 的 request/event 细节留在 provider crate；`sigil-kernel` 只暴露 provider-neutral capabilities 和 chunks。 |
 | Code intelligence | 依赖本地 language servers 和环境；普通 chat 不依赖它。 |
@@ -64,4 +63,4 @@
 
 ## 如何理解文档
 
-用户文档描述当前行为，除非某节明确写了 "future work" 或 "advanced"。`dev/docs/*` 下的开发文档可以描述架构方向和 RFC 级实现细节，不总是稳定用户支持承诺。
+用户文档描述当前行为，除非某节明确写了 "future work"、"limited" 或 "advanced"。alpha 阶段适合试用，不代表稳定兼容承诺。

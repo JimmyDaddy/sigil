@@ -69,7 +69,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
 ```
 
-从 checkout 安装仍适合本地开发：
+偏好本地 checkout 的用户仍可从源码安装：
 
 ```bash
 cargo install --path crates/sigil --locked

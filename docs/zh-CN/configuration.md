@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [Provider 指南](providers.md) · [排障](troubleshooting.md) · [参考](reference.md) · [English](../en/configuration.md)
 
-本文说明 Sigil 的用户配置方式。大多数用户应该先使用 TUI 中的 Quick Setup；当你需要可重复配置文件、环境变量配置、自动化行为或高级工具策略时，再读这一页。开发者需要修改配置 schema 时，请同步阅读 `dev/governance/code-standards.md` 和 `dev/governance/engineering-standards.md`。
+本文说明 Sigil 的用户配置方式。大多数用户应该先使用 TUI 中的 Quick Setup；当你需要可重复配置文件、环境变量配置、自动化行为或高级工具策略时，再读这一页。
 
 ## 常见用户路径
 

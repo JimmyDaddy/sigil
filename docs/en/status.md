@@ -31,9 +31,8 @@ This page separates what users can rely on today from what is experimental, limi
 
 | Area | Current expectation |
 | --- | --- |
-| Release archives | Can be built locally and by tagged release workflows; package-manager artifacts are derived from them. |
-| Homebrew formula asset | `sigil-ai.rb` is generated from release archives and published in the `JimmyDaddy/homebrew-sigil` tap. |
-| npm package tarballs | Generated from release archives for npm registry publishing and release-asset inspection. |
+| Release archives | Available on tagged GitHub releases for manual installs; package-manager installs are preferred. |
+| Homebrew tap | The `sigil-ai` formula is published in the `JimmyDaddy/homebrew-sigil` tap. |
 | OpenAI-compatible differences | The provider intentionally omits DeepSeek-only prefix/FIM/beta behaviors. |
 | Provider-specific semantics | Anthropic and Gemini request/event details stay in provider crates; `sigil-kernel` only exposes provider-neutral capabilities and chunks. |
 | Code intelligence | Depends on installed language servers and local environment; normal chat does not require it. |
@@ -64,4 +63,4 @@ These are not the current supported path unless a later release says otherwise:
 
 ## How To Read The Docs
 
-User docs describe current behavior unless a section explicitly says "future work" or "advanced". Developer docs under `dev/docs/*` can describe architecture direction and RFC-level implementation detail; they are not always the same as stable user support commitments.
+User docs describe current behavior unless a section explicitly says "future work", "limited", or "advanced". Treat the alpha line as usable for trials, not as a stable compatibility promise.

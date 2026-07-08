@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/visual-tour.md)
 
-This page walks through the main Sigil surfaces with SVG captures generated from the TUI renderer. The captures are deterministic documentation assets, not hand-drawn mockups, so they stay close to the real terminal layout.
+This page walks through the main Sigil surfaces with SVG captures that stay close to the real terminal layout.
 
 ## Main TUI Session
 
@@ -33,20 +33,3 @@ If the diff does not match your intent, deny it and ask for a narrower change.
 ![Sigil config panel preview](../../site/assets/screenshots/config-panel.svg)
 
 Use `/config` for common provider, permission, memory, compaction, code intelligence, terminal, Agents, Skills, Plugins trust review, and MCP settings. Lower-frequency provider details remain in `sigil.toml` and environment variables.
-
-## Regenerating These Captures
-
-The checked-in SVGs are generated from `ratatui::TestBackend` fixtures. Regenerate them after meaningful TUI layout changes:
-
-```bash
-scripts/generate-tui-screenshots.sh
-scripts/check-pages-site.sh
-```
-
-For release-quality bitmap screenshots or GIFs, capture the running TUI in a controlled demo workspace:
-
-1. Use a test repository with no secrets.
-2. Run `sigil` in a terminal size close to `120x36`.
-3. Capture the main screen, approval modal, and config panel.
-4. Save images under `site/assets/screenshots/` with a new file name.
-5. Link them from this page and re-run `scripts/check-pages-site.sh`.

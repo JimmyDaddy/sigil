@@ -6,7 +6,7 @@
     <title>Sigil documentation</title>
     <meta
       name="description"
-      content="Sigil documentation hub for installation, TUI workflow, configuration, verification, terminal compatibility, MCP, agents, and developer reference."
+      content="Sigil documentation hub for installation, TUI workflow, configuration, verification, terminal compatibility, MCP, agents, and user support."
     >
     <link rel="canonical" href="https://jimmydaddy.github.io/sigil/docs/">
     <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/docs/">
@@ -19,7 +19,7 @@
     <meta property="og:title" content="Sigil documentation">
     <meta
       property="og:description"
-      content="Start with the right Sigil guide for install, TUI workflow, configuration, verification, MCP, agents, or project development."
+      content="Start with the right Sigil guide for install, TUI workflow, configuration, verification, MCP, agents, or support."
     >
     <meta property="og:url" content="https://jimmydaddy.github.io/sigil/docs/">
     <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
@@ -28,7 +28,7 @@
     <meta name="twitter:title" content="Sigil documentation">
     <meta
       name="twitter:description"
-      content="Start with the right Sigil guide for install, TUI workflow, configuration, verification, MCP, agents, or project development."
+      content="Start with the right Sigil guide for install, TUI workflow, configuration, verification, MCP, agents, or support."
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
     <link rel="stylesheet" href="../assets/site.css">
@@ -56,7 +56,7 @@
           <p class="eyebrow">Documentation</p>
           <h1>Choose the guide that matches the work.</h1>
           <p class="lede">
-            Sigil keeps the product entrypoint narrow and splits operational detail into focused guides. Use this page as the stable map for user-facing and developer-facing docs.
+            Sigil keeps the product entrypoint narrow and splits operational detail into focused guides. Use this page as the stable map for user-facing docs.
           </p>
           <div class="docs-search-panel">
             <form class="site-search" role="search" data-locale="en" data-index="../search.json">
@@ -73,26 +73,30 @@
           <p class="eyebrow">User guides</p>
           <h2>Start with a task path, then keep the reference nearby.</h2>
         </div>
-        <div class="resource-grid">
-          <a class="resource-card" id="start" href="overview/">
-            <span class="resource-kicker">Map</span>
-            <h3>User docs home</h3>
-            <p>Choose the right guide for first use, daily workflow, configuration, troubleshooting, MCP, or reference lookup.</p>
-          </a>
+        <h3 class="resource-group-heading">Start here</h3>
+        <div class="resource-grid resource-grid-featured">
           <a class="resource-card" id="quickstart" href="quickstart/">
             <span class="resource-kicker">Start here</span>
             <h3>Quickstart</h3>
             <p>Install the preview release, launch in a workspace, complete Quick Setup, run doctor, and make the first safe edit.</p>
           </a>
           <a class="resource-card" id="install" href="installation/">
-            <span class="resource-kicker">Binary</span>
+            <span class="resource-kicker">Install</span>
             <h3>Install and update</h3>
-            <p>Install with npm, Homebrew, Cargo git tags, source checkout, or release archives; update an existing binary and remove local state when needed.</p>
+            <p>Install with npm, Homebrew, Cargo git tags, source checkout, or release archives; update or uninstall an existing binary when needed.</p>
           </a>
           <a class="resource-card" id="visual-tour" href="visual-tour/">
             <span class="resource-kicker">Preview</span>
             <h3>Visual tour</h3>
             <p>Screenshot-style walkthrough of the main session, approval review, and config panel surfaces.</p>
+          </a>
+        </div>
+        <h3 class="resource-group-heading">Operate Sigil</h3>
+        <div class="resource-grid">
+          <a class="resource-card" id="start" href="overview/">
+            <span class="resource-kicker">Map</span>
+            <h3>User docs home</h3>
+            <p>Choose the right guide for first use, daily workflow, configuration, troubleshooting, MCP, or reference lookup.</p>
           </a>
           <a class="resource-card" id="workflows" href="workflows/">
             <span class="resource-kicker">Examples</span>
@@ -124,6 +128,14 @@
             <h3>Provider guide</h3>
             <p>Choose and configure DeepSeek, OpenAI-compatible, Anthropic, or Gemini providers with key priority and troubleshooting.</p>
           </a>
+          <a class="resource-card" id="mcp" href="mcp/">
+            <span class="resource-kicker">Integrations</span>
+            <h3>MCP guide</h3>
+            <p>Configure stdio MCP servers, understand trust levels, and keep external data and secrets under explicit policy.</p>
+          </a>
+        </div>
+        <h3 class="resource-group-heading">Reference and support</h3>
+        <div class="resource-grid resource-grid-compact">
           <a class="resource-card" id="privacy" href="privacy/">
             <span class="resource-kicker">Data</span>
             <h3>Privacy</h3>
@@ -144,11 +156,6 @@
             <h3>Terminal compatibility</h3>
             <p>Checklist for rendering, mouse behavior, clipboard support, alternate screen behavior, and local smoke testing.</p>
           </a>
-          <a class="resource-card" id="mcp" href="mcp/">
-            <span class="resource-kicker">Integrations</span>
-            <h3>MCP guide</h3>
-            <p>Configure stdio MCP servers, understand trust levels, and keep external data and secrets under explicit policy.</p>
-          </a>
           <a class="resource-card" id="status" href="status/">
             <span class="resource-kicker">Support</span>
             <h3>Supported today</h3>
@@ -158,39 +165,6 @@
             <span class="resource-kicker">Release notes</span>
             <h3>User changelog</h3>
             <p>User-facing capability and documentation changes without implementation-only detail.</p>
-          </a>
-        </div>
-      </section>
-
-      <section class="section contrast docs-section" id="developer-docs">
-        <div class="section-heading">
-          <p class="eyebrow">Developer reference</p>
-          <h2>Use these before changing core behavior.</h2>
-        </div>
-        <div class="resource-list">
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/governance/code-standards.md">
-            <span>Code standards</span>
-            Direct coding constraints for this repository.
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/governance/engineering-standards.md">
-            <span>Engineering standards</span>
-            Gates, review expectations, and repository maintenance rules.
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/sigil-rust-agent-core-technical-solution.md">
-            <span>Core technical solution</span>
-            Architecture for kernel, runtime, tools, TUI, sessions, and providers.
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/sigil-capability-roadmap.md">
-            <span>Capability roadmap</span>
-            Product and engineering direction for upcoming capability work.
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/release-process.md">
-            <span>Release process</span>
-            Archive contents, local validation, and release checklist.
-          </a>
-          <a href="https://github.com/JimmyDaddy/sigil/blob/main/AGENTS.md">
-            <span>Agent collaboration instructions</span>
-            Required context for coding agents working inside this repository.
           </a>
         </div>
       </section>

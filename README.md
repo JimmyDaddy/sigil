@@ -11,7 +11,7 @@ English | [简体中文](README.zh-CN.md)
 
 Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, tool calls, approvals, diffs, diagnostics, planning, and session recovery inside one terminal interface, while keeping the CLI as a thin automation surface.
 
-[Website](https://jimmydaddy.github.io/sigil/) · [Docs](docs/en/README.md) · [Quickstart](docs/en/quickstart.md) · [Visual tour](docs/en/visual-tour.md) · [Provider guide](docs/en/providers.md)
+[Website](https://jimmydaddy.github.io/sigil/) · [Docs site](https://jimmydaddy.github.io/sigil/docs/) · [Quickstart](https://jimmydaddy.github.io/sigil/docs/quickstart/) · [Visual tour](https://jimmydaddy.github.io/sigil/docs/visual-tour/) · [Status](https://jimmydaddy.github.io/sigil/docs/status/)
 
 Sigil's first alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha.1` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
 
@@ -37,7 +37,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
 ```
 
-During local development, install from a checkout:
+If you prefer a source install, run this from a checkout:
 
 ```bash
 git clone https://github.com/JimmyDaddy/sigil.git
@@ -132,24 +132,3 @@ Sigil treats tool execution as auditable state, not hidden side effects.
 | Understand approval, workspace, MCP, and data boundaries | [Safety](docs/en/safety.md) and [Privacy](docs/en/privacy.md) |
 | Fix setup, auth, terminal, MCP, or LSP issues | [Troubleshooting](docs/en/troubleshooting.md) |
 | Look up every command, key, path, and environment variable | [Reference](docs/en/reference.md) |
-| Work on Sigil itself | [Code standards](dev/governance/code-standards.md), [engineering standards](dev/governance/engineering-standards.md), and [core technical solution](dev/docs/sigil-rust-agent-core-technical-solution.md) |
-
-## Project Maintenance
-
-Project site source lives in [site](site). The generated Pages site is validated by:
-
-```bash
-scripts/check-pages-site.sh
-```
-
-Code changes should run the relevant repository gates:
-
-```bash
-cargo fmt --all --check
-cargo check
-cargo test
-cargo clippy --all-targets -- -D warnings
-./scripts/coverage.sh
-```
-
-Docs-only changes do not need the full Rust gate, but links, paths, and example commands should still be checked. Logo files live in [assets/logo](assets/logo).

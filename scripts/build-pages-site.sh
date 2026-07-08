@@ -22,6 +22,7 @@ esac
 rm -rf "${out_dir}"
 mkdir -p "${out_dir}/assets/logo"
 cp -R site/. "${out_dir}/"
+rm -f "${out_dir}/README.md"
 cp assets/logo/*.png "${out_dir}/assets/logo/"
 mkdir -p "${out_dir}/examples"
 cp -R docs/examples/. "${out_dir}/examples/"

@@ -10,6 +10,15 @@
 - 一种安装器：npm、Homebrew，或通过 `rustup` / 系统包安装的 Rust toolchain。
 - 一个模型 provider 凭据。首次启动时可以通过 Quick Setup 填写。
 
+## 当前安装渠道
+
+| 渠道 | 当前覆盖 | 适合场景 |
+| --- | --- | --- |
+| npm alpha | `@sigil-ai/sigil@alpha` 背后使用 platform-specific optional binary package。 | 想要最短的跨平台安装路径。 |
+| Homebrew tap | macOS formula 位于 `JimmyDaddy/homebrew-sigil`，安装名是 `sigil-ai`，命令仍是 `sigil`。 | 你习惯用 Homebrew 管理终端工具。 |
+| Cargo git tag | 使用本地 Rust toolchain 从 tagged Git release 构建。 | 你已有 Rust 工具链，或需要源码构建路径。 |
+| GitHub release archive | 提供可下载 release archive 和 checksum 文件。 | 需要手动或离线安装。 |
+
 ## 通过 npm 安装
 
 npm 包名使用 scoped package：`@sigil-ai/sigil`。它安装一个很小的 Node.js launcher，并通过 platform-specific optional package 携带实际 binary。最终命令仍然是 `sigil`。
@@ -56,9 +65,9 @@ cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --l
 
 crates.io 上 `sigil` 包名已被其他 crate 使用，因此 crates.io 分发需要后续再决定 package name；binary 仍然可以保持 `sigil`。
 
-## 从 checkout 安装
+## 从源码安装
 
-本地开发时，在仓库根目录运行：
+如果你希望从本地 checkout 构建，在仓库根目录运行：
 
 ```bash
 cargo install --path crates/sigil --locked
@@ -91,28 +100,11 @@ sigil run "总结一下当前仓库"
 
 在 TUI 内也可以用 `/doctor`，同一份诊断报告会渲染到 transcript。
 
-## 构建 Release Archive
+## 从 Release Archive 安装
 
-维护者可以从 checkout 构建本地 release archive：
+能使用包管理器时优先使用上面的安装路径。手动安装时，从 [GitHub releases 页面](https://github.com/JimmyDaddy/sigil/releases)下载匹配平台的 archive 和 checksum，校验 checksum，解压 archive，并把 `sigil` binary 放到 `PATH` 中。
 
-```bash
-scripts/build-release-archive.sh
-```
-
-脚本会用 release mode 构建 `sigil`、注入构建元数据、对构建出的 binary 运行 `sigil --version` 和 `sigil doctor`，然后写出：
-
-```text
-dist/sigil-<version>-<target>.tar.gz
-dist/sigil-<version>-<target>.tar.gz.sha256
-```
-
-需要指定 Rust target triple 时：
-
-```bash
-scripts/build-release-archive.sh --target aarch64-apple-darwin
-```
-
-archive 内包含 `sigil` binary、README、logo assets 和安装文档。tagged release 会由 release workflow 构建，并附带 checksum、GitHub artifact provenance attestation、生成的 release notes、供 tap 维护者使用的 `sigil-ai.rb` Homebrew formula asset，以及从 release archives 生成的 npm package tarballs。自更新仍是后续工作。
+archive 内包含 `sigil` binary、用户 README、logo assets 和安装文档。自更新仍属于后续 packaging 工作。
 
 ## 更新
 
@@ -134,14 +126,3 @@ npm uninstall -g @sigil-ai/sigil
 brew uninstall sigil-ai
 cargo uninstall sigil
 ```
-
-## 开发运行
-
-修改仓库代码时，如果不想重新安装，可以在 checkout 内直接运行：
-
-```bash
-cargo run -p sigil
-cargo run -p sigil -- doctor
-```
-
-这些命令是开发快捷路径。面向用户的文档应优先使用安装后的 `sigil` 命令。

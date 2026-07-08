@@ -69,7 +69,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
 ```
 
-Local checkout installs remain useful for development:
+Source installs remain available for users who prefer a local checkout:
 
 ```bash
 cargo install --path crates/sigil --locked

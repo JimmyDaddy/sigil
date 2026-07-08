@@ -10,6 +10,15 @@ This guide covers the first-release install paths. If you want a first-run walkt
 - One installer: npm, Homebrew, or a Rust toolchain installed through `rustup` or an equivalent system package.
 - A model provider credential. Quick Setup can collect it on first launch.
 
+## Supported Install Channels
+
+| Channel | Current coverage | Use when |
+| --- | --- | --- |
+| npm alpha | Platform-specific optional binary packages behind `@sigil-ai/sigil@alpha`. | You want the shortest cross-platform install path. |
+| Homebrew tap | macOS formula in `JimmyDaddy/homebrew-sigil`, installed as `sigil-ai` while exposing the `sigil` command. | You manage terminal tools with Homebrew. |
+| Cargo git tag | Builds from the tagged Git release with your local Rust toolchain. | You already use Rust tooling or need a source-based install. |
+| GitHub release archive | Downloadable release archives with checksum files. | You need a manual or offline install. |
+
 ## Install With npm
 
 The npm package is scoped as `@sigil-ai/sigil`. It installs a small Node.js launcher plus a platform-specific optional binary package. The installed command is still `sigil`.
@@ -56,9 +65,9 @@ This installs the `sigil` binary into Cargo's binary directory. The default is `
 
 The crates.io package name `sigil` is already used by another crate, so crates.io distribution needs a later package-name decision. The binary can still remain `sigil`.
 
-## Install From A Checkout
+## Install From Source
 
-For local development, run these commands from a repository checkout:
+If you prefer to build from a local checkout, run this from the repository root:
 
 ```bash
 cargo install --path crates/sigil --locked
@@ -91,29 +100,11 @@ sigil run "summarize this repository"
 
 Inside the TUI, `/doctor` renders the same diagnostics report in the transcript.
 
-## Build A Release Archive
+## Install From A Release Archive
 
-Maintainers can build a local release archive from the checkout:
+Use the package-manager paths above when possible. For a manual install, download the matching archive and checksum from the [GitHub releases page](https://github.com/JimmyDaddy/sigil/releases), verify the checksum, unpack the archive, and place the `sigil` binary on your `PATH`.
 
-```bash
-scripts/build-release-archive.sh
-```
-
-The script builds `sigil` in release mode, injects build metadata, runs `sigil --version` and `sigil doctor` against the built binary, then writes:
-
-```text
-dist/sigil-<version>-<target>.tar.gz
-dist/sigil-<version>-<target>.tar.gz.sha256
-```
-
-Build for an explicit Rust target triple when needed:
-
-```bash
-scripts/build-release-archive.sh --target aarch64-apple-darwin
-```
-
-The archive contains the `sigil` binary plus the README files, logo assets, and installation docs.
-Tagged releases are built by the release workflow and include checksums, GitHub artifact provenance attestations, generated release notes, a `sigil-ai.rb` Homebrew formula asset for tap maintainers, and npm package tarballs generated from the release archives. Self-update is still future work.
+The archive contains the `sigil` binary plus the user-facing README, logo assets, and installation docs. Self-update is still future packaging work.
 
 ## Update
 
@@ -135,14 +126,3 @@ npm uninstall -g @sigil-ai/sigil
 brew uninstall sigil-ai
 cargo uninstall sigil
 ```
-
-## Development Runs
-
-When you are changing the repository and do not want to reinstall, run directly from the checkout:
-
-```bash
-cargo run -p sigil
-cargo run -p sigil -- doctor
-```
-
-These commands are development shortcuts. User-facing docs should prefer the installed `sigil` command.

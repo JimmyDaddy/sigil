@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [Providers](providers.md) · [Troubleshooting](troubleshooting.md) · [Reference](reference.md) · [简体中文](../zh-CN/configuration.md)
 
-This guide covers user-facing Sigil configuration. Most users should start with Quick Setup in the TUI; use this page when you need a repeatable config file, environment-variable setup, automation behavior, or advanced tool policy. If you are changing the config schema, also read `dev/governance/code-standards.md` and `dev/governance/engineering-standards.md`.
+This guide covers user-facing Sigil configuration. Most users should start with Quick Setup in the TUI; use this page when you need a repeatable config file, environment-variable setup, automation behavior, or advanced tool policy.
 
 ## Common User Paths
 

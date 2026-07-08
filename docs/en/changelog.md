@@ -2,50 +2,42 @@
 
 [Docs home](README.md) · [Supported status](status.md) · [简体中文](../zh-CN/changelog.md)
 
-This page is a user-facing summary. Maintainer-facing implementation details still live under `dev/docs/*` and release automation scripts. The first public version is an early preview: expect the core TUI workflow to work, but do not treat config, plugin APIs, advanced sandbox behavior, or automation surfaces as stable compatibility contracts yet.
+This page lists user-facing release notes. For support boundaries and early-preview caveats, see [status.md](status.md).
 
-## Current Documentation Update
+## v0.0.1-alpha.1 - 2026-07-08
 
-The user documentation has been reorganized around task paths:
+### Added
 
-- Quickstart for first-run setup.
-- Workflows and Cookbook for practical prompts.
-- Safety and privacy pages for permissions, secrets, MCP, and session logs.
-- Troubleshooting with a decision-tree entrypoint.
-- Reference page for commands, keys, paths, and environment variables.
-- GitHub Pages site with a documentation hub and generated docs pages.
+- Published the scoped npm package as `@sigil-ai/sigil@alpha`.
+- Published the Homebrew tap formula as `JimmyDaddy/sigil/sigil-ai`.
+- Documented npm, Homebrew, Cargo git-tag, source, and manual release-archive install paths.
+- Added generated GitHub Pages documentation pages for installation, configuration, providers, safety, privacy, MCP, visual tour, troubleshooting, reference, and current status.
 
-## Current Capability Snapshot
+### Changed
 
-Sigil currently documents these user-facing capabilities:
+- Clarified that `v0.0.1-alpha.1` is an early preview: core TUI workflows are usable, while config, plugin APIs, advanced sandbox behavior, and automation surfaces may still change.
+- Made the documentation entrypoints more task-focused: quickstart first, then installation, visual tour, daily workflow, safety, troubleshooting, and reference.
+- Updated the user docs to describe the current provider set: DeepSeek, OpenAI-compatible, Anthropic, and Gemini.
 
-- TUI-first workflow through `sigil`.
-- npm, Homebrew tap, Cargo git-tag, GitHub release archive, and checkout install paths.
-- Quick Setup and `/config`.
-- `sigil doctor` and `/doctor`.
-- Durable multi-step tasks through `/task`, with `/plan` kept read-only until the user explicitly accepts a plan-to-task handoff.
-- Session restore from append-only logs.
-- Approval-backed file changes, shell execution, MCP, and LSP edits.
-- DeepSeek, OpenAI-compatible, Anthropic, and Gemini providers.
-- stdio MCP servers.
-- Optional code intelligence.
-- Terminal mouse capture and OSC52 clipboard support.
-- Verification status for task completion and explicit user-approved checks.
-- Core execution sandbox receipts for supported local backends, with platform-specific limitations documented separately.
+### Known Limitations
 
-## Release Archive Notes
+- Self-update is not available.
+- Stable plugin API compatibility is not promised for the alpha line.
+- Sandbox coverage and execution receipts vary by platform and backend.
+- Headless automation cannot show interactive approval modals.
 
-Release archive validation is available through:
+## v0.0.1-alpha - 2026-07-07
 
-```bash
-scripts/build-release-archive.sh
-```
+### Added
 
-Tagged releases build archives, checksums, GitHub provenance attestations, `sigil-ai.rb` for the Homebrew tap, and npm package tarballs derived from the archives. Self-update remains future packaging work unless a later release states otherwise.
+- First public alpha release for the Sigil TUI.
+- TUI entrypoint through the `sigil` command.
+- Quick Setup, `/config`, `sigil doctor`, and `/doctor`.
+- Durable task and planning flows through `/task` and `/plan`.
+- Approval-backed file changes, shell execution, MCP usage, and code-intelligence edits.
+- Session recovery from append-only local state.
 
-## Where To Find More Detail
+### Known Limitations
 
-- User support status: [status.md](status.md)
-- Install and update: [installation.md](installation.md)
-- Full configuration: [configuration.md](configuration.md)
-- Developer architecture and RFC details: `dev/docs/sigil-rust-agent-core-technical-solution.md` and `dev/docs/rfcs/`
+- This release was an initial preview and was superseded by `v0.0.1-alpha.1`.
+- Users should prefer the `alpha` install channel or the latest documented release tag.
