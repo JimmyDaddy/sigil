@@ -363,9 +363,9 @@ h1 {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-.hero {
-  animation: heroFloat 8s ease-in-out infinite;
-}
+  .hero {
+    animation: heroFloat 8s ease-in-out infinite;
+  }
 
   .hero::before {
     animation: heroWatermarkDrift 24s linear infinite;
