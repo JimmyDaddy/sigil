@@ -106,6 +106,25 @@ impl AppState {
         true
     }
 
+    pub fn restore_session_selector_from_disk(
+        &mut self,
+        selector: &str,
+        fallback_provider_name: &str,
+        fallback_model_name: &str,
+        notice: &str,
+    ) -> bool {
+        self.refresh_session_history();
+        let Some(session_log_path) = self.resolve_resume_target(selector) else {
+            return false;
+        };
+        self.restore_session_path_from_disk(
+            session_log_path,
+            fallback_provider_name,
+            fallback_model_name,
+            notice,
+        )
+    }
+
     pub(super) fn session_view_lines(&self) -> Vec<String> {
         let mut lines = vec![
             format!("{} view", self.session_browser.view_mode.label()),

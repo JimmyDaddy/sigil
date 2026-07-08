@@ -109,12 +109,15 @@ impl AppState {
         std::mem::take(&mut self.runtime.pending_worker_commands)
     }
 
-    pub(super) fn enqueue_worker_command(&mut self, command: WorkerCommand) {
+    pub(crate) fn enqueue_worker_command(&mut self, command: WorkerCommand) {
         self.runtime.pending_worker_commands.push(command);
     }
 
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
         match message {
+            WorkerMessage::WorkerReady => {
+                self.push_event("worker", "ready");
+            }
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
                 self.start_worker_run_phase(

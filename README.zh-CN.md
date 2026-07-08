@@ -86,7 +86,7 @@ sigil doctor
 | 直接调用受信任 agent profile | `@profile <prompt>` 或 `/review-agent <prompt>` 这类受信任 profile slash name |
 | 切换或重命名主/子 agent transcript | composer 下方 agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A`、`/agent` 或 `/agent rename <child-id|current> <name>` |
 | 查看较长子 agent 结果 | 切到子 agent transcript，或让 `read_agent_result` 分页读取子 agent final answer |
-| 新建或切换 session | `/new`、`/resume` |
+| 新建或切换 session | `/new`、`/resume`，或退出后用 `sigil resume <session-id>` |
 | 修改常用设置 | `/config` |
 | 诊断 setup/auth/MCP/LSP | `/doctor` |
 | 切换默认权限模式 | `Shift-Tab` |

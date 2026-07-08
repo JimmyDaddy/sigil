@@ -592,7 +592,20 @@ fn shell_segment_is_read_filter(tokens: &[String]) -> bool {
     let Some((command, _args)) = shell_segment_command_and_args(&words) else {
         return false;
     };
-    matches!(command, "head" | "tail" | "wc" | "cat")
+    if !shell_segment_redirections_are_readonly(&words) {
+        return false;
+    }
+    match command {
+        "head" | "tail" | "wc" | "cat" => true,
+        "sort" => words.iter().skip(1).all(|word| {
+            word.starts_with('-')
+                && !matches!(word.as_str(), "-o" | "--output")
+                && !word.starts_with("-o")
+                && !word.starts_with("--output=")
+        }),
+        "uniq" => words.iter().skip(1).all(|word| word.starts_with('-')),
+        _ => false,
+    }
 }
 
 fn search_segment_is_read_only(_command: &str, _args: &[String]) -> bool {
@@ -732,17 +745,22 @@ pub(crate) fn shell_segment_has_overwrite_redirection(words: &[String]) -> bool 
 }
 
 pub(crate) fn is_overwrite_redirection_operator(word: &str) -> bool {
-    matches!(word, ">" | "1>" | "2>" | "&>")
+    matches!(
+        word,
+        ">" | ">>" | "1>" | "1>>" | "2>" | "2>>" | "&>" | "&>>"
+    )
 }
 
 pub(crate) fn overwrite_redirection_target(word: &str) -> bool {
-    ["1>", "2>", "&>", ">"].iter().any(|prefix| {
-        word.strip_prefix(prefix).is_some_and(|target| {
-            !target.is_empty()
-                && !target.starts_with('&')
-                && !shell_requested_path_is_safe_device(target)
+    ["1>>", "1>", "2>>", "2>", "&>>", "&>", ">>", ">"]
+        .iter()
+        .any(|prefix| {
+            word.strip_prefix(prefix).is_some_and(|target| {
+                !target.is_empty()
+                    && !target.starts_with('&')
+                    && !shell_requested_path_is_safe_device(target)
+            })
         })
-    })
 }
 
 fn overwrite_redirection_operator_target_is_destructive(target: Option<&str>) -> bool {
@@ -785,7 +803,7 @@ pub(crate) fn shell_invocation_is_destructive(words: &[String]) -> bool {
 
 pub(crate) fn bash_command_is_safe_readonly(command: &str) -> bool {
     let trimmed = command.trim();
-    if trimmed.is_empty() || contains_unsupported_safe_shell_syntax(trimmed) {
+    if trimmed.is_empty() {
         return false;
     }
 
@@ -794,10 +812,35 @@ pub(crate) fn bash_command_is_safe_readonly(command: &str) -> bool {
         return false;
     }
 
+    if for_in_file_test_echo_loop_is_safe_readonly(&tokens) {
+        return true;
+    }
+
+    if tokens_contain_unsupported_readonly_expansion(&tokens) {
+        return false;
+    }
+
+    let mut segment_count = 0usize;
+    let mut segment = Vec::new();
+    for token in &tokens {
+        if matches!(token.as_str(), "&&" | "||" | ";") {
+            if !segment.is_empty() {
+                segment_count = segment_count.saturating_add(1);
+            }
+            segment.clear();
+        } else {
+            segment.push(token.clone());
+        }
+    }
+    if !segment.is_empty() {
+        segment_count = segment_count.saturating_add(1);
+    }
+    let allow_noop_segments = segment_count > 1;
+
     let mut segment = Vec::new();
     for token in tokens {
         if matches!(token.as_str(), "&&" | "||" | ";") {
-            if !bash_segment_is_safe_readonly(&segment) {
+            if !bash_segment_is_safe_readonly_with_context(&segment, allow_noop_segments) {
                 return false;
             }
             segment.clear();
@@ -805,9 +848,10 @@ pub(crate) fn bash_command_is_safe_readonly(command: &str) -> bool {
             segment.push(token);
         }
     }
-    bash_segment_is_safe_readonly(&segment)
+    bash_segment_is_safe_readonly_with_context(&segment, allow_noop_segments)
 }
 
+#[cfg(test)]
 pub(crate) fn contains_unsupported_safe_shell_syntax(command: &str) -> bool {
     command.chars().any(|ch| {
         matches!(
@@ -818,15 +862,29 @@ pub(crate) fn contains_unsupported_safe_shell_syntax(command: &str) -> bool {
 }
 
 pub(crate) fn bash_segment_is_safe_readonly(words: &[String]) -> bool {
+    let pipeline = split_shell_pipeline(words);
+    if pipeline.len() > 1 {
+        let Some((primary, filters)) = pipeline.split_first() else {
+            return false;
+        };
+        return bash_simple_segment_is_safe_readonly(primary)
+            && filters
+                .iter()
+                .all(|filter| shell_segment_is_read_filter(filter));
+    }
+    bash_simple_segment_is_safe_readonly(words)
+}
+
+fn bash_segment_is_safe_readonly_with_context(words: &[String], allow_noop: bool) -> bool {
+    bash_segment_is_safe_readonly(words) || allow_noop && shell_segment_is_safe_readonly_noop(words)
+}
+
+fn bash_simple_segment_is_safe_readonly(words: &[String]) -> bool {
     let Some(command) = words.first().map(String::as_str) else {
         return false;
     };
 
-    if words
-        .iter()
-        .skip(1)
-        .any(|word| is_redirection_operator(word) || redirection_target(word).is_some())
-    {
+    if !shell_segment_redirections_are_readonly(words) {
         return false;
     }
 
@@ -843,6 +901,190 @@ pub(crate) fn bash_segment_is_safe_readonly(words: &[String]) -> bool {
         "git" => git_segment_is_safe_readonly(words),
         _ => false,
     }
+}
+
+fn shell_segment_is_safe_readonly_noop(words: &[String]) -> bool {
+    let Some((command, _args)) = shell_segment_command_and_args(words) else {
+        return false;
+    };
+    if !shell_segment_redirections_are_readonly(words) {
+        return false;
+    }
+    matches!(command, "echo" | "printf" | "true" | ":")
+}
+
+fn shell_segment_redirections_are_readonly(words: &[String]) -> bool {
+    let mut index = 0usize;
+    while index < words.len() {
+        let word = &words[index];
+        if is_fd_duplication_token(word) {
+            index += 1;
+            continue;
+        }
+        if let Some(target) = output_redirection_target(word) {
+            if !shell_requested_path_is_safe_device(target) {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if is_output_redirection_operator(word) {
+            let Some(target) = words.get(index + 1).map(String::as_str) else {
+                return false;
+            };
+            if !target.starts_with('&') && !shell_requested_path_is_safe_device(target) {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        if matches!(word.as_str(), "<<" | "<<-") {
+            return false;
+        }
+        if let Some(target) = input_redirection_target(word)
+            && target.starts_with('(')
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn output_redirection_target(word: &str) -> Option<&str> {
+    [">>", ">", "1>>", "1>", "2>>", "2>", "&>>", "&>"]
+        .iter()
+        .find_map(|prefix| {
+            word.strip_prefix(prefix)
+                .filter(|target| !target.is_empty() && !target.starts_with('&'))
+        })
+}
+
+fn input_redirection_target(word: &str) -> Option<&str> {
+    word.strip_prefix('<')
+        .filter(|target| !target.is_empty() && !target.starts_with('<'))
+}
+
+fn is_output_redirection_operator(word: &str) -> bool {
+    matches!(
+        word,
+        ">" | ">>" | "1>" | "1>>" | "2>" | "2>>" | "&>" | "&>>"
+    )
+}
+
+fn tokens_contain_unsupported_readonly_expansion(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| {
+        token.contains('$')
+            || token.contains('`')
+            || token.contains('*')
+            || token.contains('?')
+            || token.contains('(')
+            || token.contains(')')
+            || token.contains('[')
+            || token.contains(']')
+    })
+}
+
+fn for_in_file_test_echo_loop_is_safe_readonly(tokens: &[String]) -> bool {
+    let Some(variable) = parse_for_in_file_test_echo_loop_variable(tokens) else {
+        return false;
+    };
+    tokens.iter().skip(3).any(|token| token.contains('/'))
+        && tokens.iter().all(|token| {
+            !token.contains('`')
+                && !token.contains('*')
+                && !token.contains('?')
+                && !token.contains('(')
+                && !token.contains(')')
+                && token_only_references_loop_variable(token, variable)
+        })
+}
+
+fn token_only_references_loop_variable(token: &str, variable: &str) -> bool {
+    let needle = format!("${variable}");
+    let mut rest = token;
+    while let Some(index) = rest.find('$') {
+        if !rest[index..].starts_with(&needle) {
+            return false;
+        }
+        rest = &rest[index + needle.len()..];
+    }
+    true
+}
+
+fn parse_for_in_file_test_echo_loop_variable(tokens: &[String]) -> Option<&str> {
+    if tokens.len() < 16
+        || tokens.first().map(String::as_str) != Some("for")
+        || tokens.get(2).map(String::as_str) != Some("in")
+    {
+        return None;
+    }
+    let variable = tokens.get(1)?.as_str();
+    if !is_shell_identifier(variable) {
+        return None;
+    }
+    let mut cursor = 3usize;
+    while tokens.get(cursor).is_some_and(|token| token != ";") {
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.starts_with('-'))
+        {
+            return None;
+        }
+        cursor += 1;
+    }
+    let variable_ref = format!("${variable}");
+    let expected = [
+        ";",
+        "do",
+        "if",
+        "[",
+        "-f",
+        variable_ref.as_str(),
+        "]",
+        ";",
+        "then",
+        "echo",
+    ];
+    for expected_token in expected {
+        if tokens.get(cursor).map(String::as_str) != Some(expected_token) {
+            return None;
+        }
+        cursor += 1;
+    }
+    while tokens.get(cursor).is_some_and(|token| token != ";") {
+        cursor += 1;
+    }
+    if tokens.get(cursor).map(String::as_str) != Some(";")
+        || tokens.get(cursor + 1).map(String::as_str) != Some("else")
+        || tokens.get(cursor + 2).map(String::as_str) != Some("echo")
+    {
+        return None;
+    }
+    cursor += 3;
+    while tokens.get(cursor).is_some_and(|token| token != ";") {
+        cursor += 1;
+    }
+    if tokens.get(cursor).map(String::as_str) != Some(";")
+        || tokens.get(cursor + 1).map(String::as_str) != Some("fi")
+        || tokens.get(cursor + 2).map(String::as_str) != Some(";")
+        || tokens.get(cursor + 3).map(String::as_str) != Some("done")
+        || cursor + 4 != tokens.len()
+    {
+        return None;
+    }
+    Some(variable)
+}
+
+fn is_shell_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && value
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 pub(crate) fn is_help_or_version_query(words: &[String]) -> bool {
@@ -909,6 +1151,12 @@ pub(crate) fn collect_bash_segment_subjects(
     subjects: &mut Vec<ToolSubject>,
 ) -> Result<()> {
     if words.is_empty() {
+        return Ok(());
+    }
+    if words.iter().any(|word| word == "|") {
+        for pipeline_segment in split_shell_pipeline(words) {
+            collect_bash_segment_subjects(workspace_root, cwd, pipeline_segment, subjects)?;
+        }
         return Ok(());
     }
 

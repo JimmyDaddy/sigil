@@ -1234,11 +1234,11 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
 }
 
 #[test]
-fn run_finished_does_not_duplicate_visible_final_answer() -> Result<()> {
+fn run_finished_does_not_duplicate_visible_final_answer_or_drop_thinking() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta(
-        "draft summary that should be hidden".to_owned(),
+        "draft summary that should stay visible".to_owned(),
     ))?;
     app.handle(RunEvent::AssistantMessage(
         ModelMessage::assistant_with_kind(
@@ -1263,11 +1263,19 @@ fn run_finished_does_not_duplicate_visible_final_answer() -> Result<()> {
             .count(),
         1
     );
-    assert!(
-        !app.timeline
+    assert_eq!(
+        app.timeline
             .iter()
-            .any(|entry| entry.role == TimelineRole::Thinking)
+            .filter(|entry| entry.role == TimelineRole::Thinking)
+            .count(),
+        1
     );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Thinking
+            && entry
+                .text
+                .contains("draft summary that should stay visible")
+    }));
     Ok(())
 }
 

@@ -370,6 +370,7 @@ fn cli_help_hides_provider_debug_commands() {
     let help = Cli::command().render_long_help().to_string();
 
     assert!(help.contains("run"));
+    assert!(help.contains("resume"));
     assert!(help.contains("doctor"));
     assert!(help.contains("serve"));
     assert!(!help.contains("prefix"));
@@ -387,6 +388,32 @@ fn cli_parses_run_command_with_explicit_config() -> Result<()> {
     assert!(matches!(
         cli.command,
         Some(Commands::Run { ref prompt }) if prompt == "hello"
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_resume_command_with_explicit_config_and_session_id() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "--config", "custom.toml", "resume", "session-123"])?;
+
+    assert_eq!(
+        cli.config.as_deref(),
+        Some(std::path::Path::new("custom.toml"))
+    );
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Resume { ref session }) if session.as_deref() == Some("session-123")
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_resume_command_without_selector_as_latest() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "resume"])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Resume { ref session }) if session.is_none()
     ));
     Ok(())
 }

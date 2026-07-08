@@ -205,6 +205,7 @@ pub enum WorkerCommand {
 
 #[derive(Debug)]
 pub enum WorkerMessage {
+    WorkerReady,
     Event(Box<RunEvent>),
     Notice(String),
     RunStarted {

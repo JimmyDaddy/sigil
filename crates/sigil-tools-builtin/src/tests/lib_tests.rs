@@ -3560,6 +3560,102 @@ fn path_and_shell_helpers_cover_workspace_external_and_unknown_cases() -> Result
 }
 
 #[test]
+fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::create_dir_all(workspace.path().join("_site/docs/providers"))?;
+    fs::create_dir_all(workspace.path().join("_site/zh-CN/docs/providers"))?;
+    fs::create_dir_all(workspace.path().join("_site/assets"))?;
+    fs::create_dir_all(workspace.path().join("site/assets"))?;
+    fs::write(workspace.path().join("_site/search.json"), "{}")?;
+    fs::write(workspace.path().join("_site/assets/search.js"), "search")?;
+    fs::write(workspace.path().join("site/assets/search.js"), "search")?;
+    fs::write(
+        workspace.path().join("_site/docs/providers/index.html"),
+        "html",
+    )?;
+
+    let long_ls = r#"ls -la _site/docs/providers/ 2>/dev/null || echo "NO PROVIDERS DIR"; ls -la _site/zh-CN/docs/providers/ 2>/dev/null || echo "NO ZH-CN PROVIDERS DIR"; ls -la site/assets/search.js 2>/dev/null || echo "NO search.js in site"; ls -la _site/assets/search.js 2>/dev/null || echo "NO search.js in _site""#;
+    let long_ls_analysis = super::analyze_shell_command(workspace.path(), long_ls)?;
+    assert_eq!(long_ls_analysis.access, ToolAccess::Read);
+    assert_eq!(
+        long_ls_analysis.operation,
+        ToolOperation::ExecuteReadOnlyCommand
+    );
+    assert_eq!(
+        long_ls_analysis.grant_scope,
+        Some(super::CommandGrantScope::ExactCommand)
+    );
+    assert!(long_ls_analysis.subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.normalized == "_site/docs/providers"
+    }));
+
+    let list_pipeline = "ls _site/docs/ | sort";
+    let list_pipeline_analysis = super::analyze_shell_command(workspace.path(), list_pipeline)?;
+    assert_eq!(list_pipeline_analysis.access, ToolAccess::Read);
+    assert_eq!(
+        list_pipeline_analysis.operation,
+        ToolOperation::ExecuteReadOnlyCommand
+    );
+    assert!(
+        list_pipeline_analysis
+            .subjects
+            .iter()
+            .any(|subject| subject.kind == ToolSubjectKind::Path
+                && subject.normalized == "_site/docs")
+    );
+    assert!(
+        !list_pipeline_analysis.subjects.iter().any(|subject| {
+            subject.kind == ToolSubjectKind::Path && subject.normalized == "sort"
+        })
+    );
+
+    let cat_head = r#"cat _site/docs/providers/index.html 2>/dev/null | head -30; echo "==="; ls -la _site/assets/search.js 2>/dev/null || echo "NO search.js""#;
+    let cat_head_analysis = super::analyze_shell_command(workspace.path(), cat_head)?;
+    assert_eq!(cat_head_analysis.access, ToolAccess::Read);
+    assert_eq!(
+        cat_head_analysis.operation,
+        ToolOperation::ExecuteReadOnlyCommand
+    );
+    Ok(())
+}
+
+#[test]
+fn bash_file_test_echo_loop_is_readonly_but_scripts_still_execute() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::create_dir_all(workspace.path().join("_site/assets"))?;
+    fs::write(workspace.path().join("_site/.nojekyll"), "")?;
+    fs::write(workspace.path().join("_site/assets/search.js"), "search")?;
+
+    let file_check_loop = r#"for f in _site/.nojekyll _site/search.json _site/assets/search.js; do if [ -f "$f" ]; then echo "OK: $f"; else echo "MISSING: $f"; fi; done"#;
+    let loop_analysis = super::analyze_shell_command(workspace.path(), file_check_loop)?;
+    assert_eq!(loop_analysis.access, ToolAccess::Read);
+    assert_eq!(
+        loop_analysis.operation,
+        ToolOperation::ExecuteReadOnlyCommand
+    );
+    assert_eq!(
+        loop_analysis.grant_scope,
+        Some(super::CommandGrantScope::ExactCommand)
+    );
+
+    let script_analysis =
+        super::analyze_shell_command(workspace.path(), "scripts/build-pages-site.sh")?;
+    assert_eq!(script_analysis.access, ToolAccess::Execute);
+    assert_eq!(
+        script_analysis.operation,
+        ToolOperation::ExecuteUnknownCommand
+    );
+
+    let append_analysis = super::analyze_shell_command(workspace.path(), "ls >> out.txt")?;
+    assert_eq!(append_analysis.access, ToolAccess::Execute);
+    assert_eq!(
+        append_analysis.operation,
+        ToolOperation::ExecuteDestructiveCommand
+    );
+    Ok(())
+}
+
+#[test]
 fn diff_and_text_limit_helpers_handle_noop_and_head_limits() {
     let diff = super::render_unified_diff("same\n", "same\n", "current", "proposed");
     assert_eq!(diff, "No textual changes detected.");
@@ -4533,6 +4629,10 @@ fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
     assert_eq!(
         super::shell_command_permission_operation("cat Cargo.toml"),
         ToolOperation::ExecuteReadOnlyCommand
+    );
+    assert_eq!(
+        super::shell_command_permission_operation("ls Cargo.toml | sort --output=out.txt"),
+        ToolOperation::ExecuteUnknownCommand
     );
     assert_eq!(
         super::shell_command_permission_operation("echo hello"),

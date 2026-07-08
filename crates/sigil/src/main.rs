@@ -59,6 +59,9 @@ enum Commands {
     Run {
         prompt: String,
     },
+    Resume {
+        session: Option<String>,
+    },
     Doctor,
     Serve {
         #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
@@ -112,6 +115,7 @@ async fn main() -> Result<()> {
     let config_path = preferred_config_path(cli.config.as_deref(), &cwd)?;
     match command {
         Commands::Run { prompt } => run_command(&config_path, &cwd, prompt).await,
+        Commands::Resume { session } => sigil_tui::launcher::run_tui_resume(cli.config, session),
         Commands::Doctor => doctor_command(&config_path, &cwd),
         Commands::Serve {
             host,

@@ -164,26 +164,10 @@ pub(super) fn suppressed_reasoning_trace_indices(entries: &[SessionLogEntry]) ->
         .filter_map(|(index, entry)| {
             restored_reasoning_note_entry(entry)
                 .then_some(())
-                .filter(|_| {
-                    reasoning_trace_is_in_turn_before_final(entries, index)
-                        || reasoning_trace_is_immediately_before_agent_poll(entries, index)
-                })
+                .filter(|_| reasoning_trace_is_immediately_before_agent_poll(entries, index))
                 .map(|_| index)
         })
         .collect()
-}
-
-fn reasoning_trace_is_in_turn_before_final(entries: &[SessionLogEntry], index: usize) -> bool {
-    entries
-        .iter()
-        .skip(index.saturating_add(1))
-        .take_while(|entry| !matches!(entry, SessionLogEntry::User(_)))
-        .any(|entry| {
-            matches!(
-                entry,
-                SessionLogEntry::Assistant(message) if assistant_message_is_final_answer(message)
-            )
-        })
 }
 
 fn reasoning_trace_is_immediately_before_agent_poll(

@@ -132,6 +132,7 @@ By default, session logs are written under Sigil's per-user state directory:
 Sigil stores session and control state as append-only JSONL. For users, this means:
 
 - Restarting the TUI restores the latest session by default.
+- Exiting the TUI prints the current session id and `sigil resume <session-id>` for command-line restore.
 - Cancelling a run does not discard messages and tool results already written to the log.
 - Tool executions that started but did not finish are shown as interrupted after restore.
 - File-change activities are restored with their captured diff summaries.

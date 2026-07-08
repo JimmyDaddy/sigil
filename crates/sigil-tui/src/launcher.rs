@@ -1,11 +1,14 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[cfg(not(test))]
 use std::{
     env, io,
     panic::{self, AssertUnwindSafe},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(not(test))]
@@ -51,6 +54,8 @@ const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
 #[cfg(not(test))]
+const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(test))]
 const EVENT_BATCH_LIMIT: usize = 64;
 // Keep restored scrollback seeding small enough that startup reaches the first
 // interactive frame quickly even when the previous session has a long timeline.
@@ -62,12 +67,30 @@ const SPINNER_FRAME_MILLIS: u128 = 120;
 
 #[cfg(not(test))]
 pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
+    run_tui_with_initial_session(config, InitialSessionTarget::Latest)
+}
+
+#[cfg(not(test))]
+pub fn run_tui_resume(config: Option<PathBuf>, session_selector: Option<String>) -> Result<()> {
+    let target = session_selector
+        .as_deref()
+        .map(InitialSessionTarget::Selector)
+        .unwrap_or(InitialSessionTarget::Latest);
+    run_tui_with_initial_session(config, target)
+}
+
+#[cfg(not(test))]
+fn run_tui_with_initial_session(
+    config: Option<PathBuf>,
+    initial_session: InitialSessionTarget<'_>,
+) -> Result<()> {
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(config.as_deref(), &cwd)?;
-    let (mut app, mut worker) = build_initial_app(
+    let (mut app, mut worker) = build_initial_app_with_session(
         cwd,
         config_path.clone(),
         RootConfig::load(&config_path),
+        initial_session,
         spawn_worker,
     )?;
 
@@ -108,7 +131,15 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
         Err(payload) => panic::resume_unwind(payload),
     };
     cleanup_result?;
-    result
+    result?;
+    print!("{}", render_tui_exit_resume_hint(&app, config.as_deref()));
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialSessionTarget<'a> {
+    Latest,
+    Selector(&'a str),
 }
 
 #[cfg(not(test))]
@@ -303,6 +334,7 @@ fn run_app(
         let mut dirty = needs_render;
         dirty |= drain_worker_messages(app, worker)?;
         dirty |= app.poll_background_tasks();
+        dirty |= expire_unready_worker(app, worker)?;
         dirty |= flush_pending_worker_commands(app, worker)?;
         if let Some(enable) =
             next_mouse_capture_action(*mouse_capture_active, app.terminal_mouse_capture_enabled())
@@ -419,10 +451,30 @@ fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) 
     LayoutSnapshot::from_app(screen, app)
 }
 
+#[cfg(test)]
 fn build_initial_app<F>(
     cwd: PathBuf,
     config_path: PathBuf,
     load_result: Result<RootConfig>,
+    spawn_worker_fn: F,
+) -> Result<(AppState, Option<WorkerRuntime>)>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    build_initial_app_with_session(
+        cwd,
+        config_path,
+        load_result,
+        InitialSessionTarget::Latest,
+        spawn_worker_fn,
+    )
+}
+
+fn build_initial_app_with_session<F>(
+    cwd: PathBuf,
+    config_path: PathBuf,
+    load_result: Result<RootConfig>,
+    initial_session: InitialSessionTarget<'_>,
     mut spawn_worker_fn: F,
 ) -> Result<(AppState, Option<WorkerRuntime>)>
 where
@@ -433,7 +485,7 @@ where
         Ok(root_config) => {
             let mut app = AppState::from_root_config(&config_path, &root_config);
             if app.workspace_is_trusted_from_history() {
-                app.restore_latest_session_from_disk(&root_config);
+                restore_initial_session_from_disk(&mut app, &root_config, initial_session)?;
                 app.ensure_current_workspace_trust_decision(
                     "trusted workspace carried into session",
                 )?;
@@ -447,6 +499,37 @@ where
         Err(error) => AppState::from_setup(config_path.clone(), cwd, Some(error.to_string())),
     };
     Ok((app, worker))
+}
+
+fn restore_initial_session_from_disk(
+    app: &mut AppState,
+    root_config: &RootConfig,
+    initial_session: InitialSessionTarget<'_>,
+) -> Result<()> {
+    match initial_session {
+        InitialSessionTarget::Latest => {
+            app.restore_latest_session_from_disk(root_config);
+            Ok(())
+        }
+        InitialSessionTarget::Selector(selector) => {
+            let selector = selector.trim();
+            let selector = if selector.is_empty() {
+                "latest"
+            } else {
+                selector
+            };
+            if app.restore_session_selector_from_disk(
+                selector,
+                &root_config.agent.provider,
+                &root_config.agent.model,
+                "restored requested session",
+            ) {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("no saved session matches {selector}"))
+            }
+        }
+    }
 }
 
 fn process_app_action_with_spawner<F>(
@@ -573,10 +656,29 @@ fn drain_worker_messages(app: &mut AppState, worker: &mut Option<WorkerRuntime>)
     let mut dirty = false;
     app.begin_timeline_render_batch();
     while let Ok(message) = runtime.worker_rx.try_recv() {
+        if matches!(message, WorkerMessage::WorkerReady) {
+            runtime.ready = true;
+        }
         app.handle_worker_message(message)?;
         dirty = true;
     }
     Ok(dirty | app.flush_timeline_render_batch())
+}
+
+#[cfg(not(test))]
+fn expire_unready_worker(app: &mut AppState, worker: &mut Option<WorkerRuntime>) -> Result<bool> {
+    let Some(runtime) = worker.as_ref() else {
+        return Ok(false);
+    };
+    if runtime.ready || runtime.spawned_at.elapsed() < WORKER_READY_TIMEOUT {
+        return Ok(false);
+    }
+    *worker = None;
+    let _ = app.drain_pending_worker_commands();
+    app.handle_worker_message(WorkerMessage::RunFailed(
+        "agent worker did not become ready; prompt was not sent".to_owned(),
+    ))?;
+    Ok(true)
 }
 
 fn flush_pending_worker_commands(
@@ -586,7 +688,10 @@ fn flush_pending_worker_commands(
     if !app.has_pending_worker_commands() {
         return Ok(false);
     }
-    if worker.is_none() {
+    let Some(runtime) = worker.as_ref() else {
+        return Ok(false);
+    };
+    if !runtime.ready {
         return Ok(false);
     }
     let commands = app.drain_pending_worker_commands();
@@ -628,6 +733,10 @@ where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
     let command = if let Some(runtime) = worker.as_ref() {
+        if !runtime.ready {
+            app.enqueue_worker_command(command);
+            return Ok(());
+        }
         match runtime.worker_tx.send(command) {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -654,10 +763,14 @@ where
         }
     }
 
-    if let Some(runtime) = worker.as_ref()
-        && runtime.worker_tx.send(command).is_ok()
-    {
-        return Ok(());
+    if let Some(runtime) = worker.as_ref() {
+        if !runtime.ready {
+            app.enqueue_worker_command(command);
+            return Ok(());
+        }
+        if runtime.worker_tx.send(command).is_ok() {
+            return Ok(());
+        }
     }
     *worker = None;
     report_worker_unavailable(app, "agent worker stopped before accepting command")
@@ -1032,9 +1145,41 @@ fn scrollback_separator(app: &AppState) -> Line<'static> {
     ])
 }
 
+fn render_tui_exit_resume_hint(app: &AppState, explicit_config: Option<&Path>) -> String {
+    if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {
+        return String::new();
+    }
+    let mut command = String::from("sigil");
+    if let Some(config) = explicit_config {
+        command.push_str(" --config ");
+        command.push_str(&shell_quote(&config.display().to_string()));
+    }
+    command.push_str(" resume ");
+    command.push_str(&shell_quote(&app.session_id));
+    format!(
+        "Sigil session: {}\nResume with: {command}\n",
+        app.session_id
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '+')
+    }) {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 struct WorkerRuntime {
     worker_tx: std::sync::mpsc::Sender<runner::WorkerCommand>,
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
+    ready: bool,
+    #[cfg(not(test))]
+    spawned_at: Instant,
 }
 
 #[cfg(not(test))]
@@ -1048,6 +1193,9 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
     Ok(WorkerRuntime {
         worker_tx,
         worker_rx,
+        ready: false,
+        #[cfg(not(test))]
+        spawned_at: Instant::now(),
     })
 }
 

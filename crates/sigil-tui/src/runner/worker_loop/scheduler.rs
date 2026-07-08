@@ -73,6 +73,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         sigil_runtime::AgentToolBackgroundRuns::with_event_sink(Arc::new(WorkerAgentEventSink {
             sender: message_tx.clone(),
         }));
+    let _ = message_tx.send(WorkerMessage::WorkerReady);
 
     loop {
         while let Ok(event) = mcp_event_rx.try_recv() {

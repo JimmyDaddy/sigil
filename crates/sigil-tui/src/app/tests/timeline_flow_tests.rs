@@ -861,11 +861,11 @@ fn assistant_message_before_tool_remains_visible() -> Result<()> {
 }
 
 #[test]
-fn live_reasoning_trace_before_final_answer_does_not_render_as_second_reply() -> Result<()> {
+fn live_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta(
-        "draft summary that should stay hidden".to_owned(),
+        "draft summary that should stay visible".to_owned(),
     ))?;
     app.handle(RunEvent::AssistantMessage(
         ModelMessage::assistant_with_kind(
@@ -877,7 +877,7 @@ fn live_reasoning_trace_before_final_answer_does_not_render_as_second_reply() ->
 
     let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
     assert!(rendered.contains("final answer"));
-    assert!(!rendered.contains("draft summary that should stay hidden"));
+    assert!(rendered.contains("draft summary that should stay visible"));
     assert_eq!(
         app.timeline
             .iter()
@@ -890,7 +890,7 @@ fn live_reasoning_trace_before_final_answer_does_not_render_as_second_reply() ->
             .iter()
             .filter(|entry| entry.role == TimelineRole::Thinking)
             .count(),
-        0
+        1
     );
     Ok(())
 }
@@ -927,12 +927,12 @@ fn live_rejected_final_candidate_is_removed_before_continuation() -> Result<()> 
 }
 
 #[test]
-fn live_reasoning_trace_between_tools_is_removed_when_final_answer_arrives() -> Result<()> {
+fn live_reasoning_trace_between_tools_stays_visible_when_final_answer_arrives() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.push_timeline(TimelineRole::User, "inspect and summarize");
     app.handle(RunEvent::ReasoningDelta(
-        "first draft summary that should not remain visible".to_owned(),
+        "first draft summary that should remain visible".to_owned(),
     ))?;
     app.handle(RunEvent::ToolCallStarted(ToolCall {
         id: "call-read".to_owned(),
@@ -946,7 +946,7 @@ fn live_reasoning_trace_between_tools_is_removed_when_final_answer_arrives() -> 
         ToolResultMeta::default(),
     )))?;
     app.handle(RunEvent::ReasoningDelta(
-        "second draft summary that should not remain visible".to_owned(),
+        "second draft summary that should remain visible".to_owned(),
     ))?;
     app.handle(RunEvent::AssistantMessage(
         ModelMessage::assistant_with_kind(
@@ -958,14 +958,14 @@ fn live_reasoning_trace_between_tools_is_removed_when_final_answer_arrives() -> 
 
     let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
     assert!(rendered.contains("final answer"));
-    assert!(!rendered.contains("first draft summary that should not remain visible"));
-    assert!(!rendered.contains("second draft summary that should not remain visible"));
+    assert!(rendered.contains("first draft summary that should remain visible"));
+    assert!(rendered.contains("second draft summary that should remain visible"));
     assert_eq!(
         app.timeline
             .iter()
             .filter(|entry| entry.role == TimelineRole::Thinking)
             .count(),
-        0
+        2
     );
     assert!(
         app.timeline

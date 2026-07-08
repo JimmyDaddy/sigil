@@ -14,20 +14,21 @@ use ratatui::{
 };
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, EventHandler, MemoryConfig, ModelMessage, PermissionConfig,
-    RootConfig, RunEvent, SessionConfig, SessionLogEntry, WorkspaceConfig,
+    AgentConfig, CompactionConfig, EventHandler, JsonlSessionStore, MemoryConfig, ModelMessage,
+    PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry, WorkspaceConfig,
 };
 
 use super::{
-    AppMouseOutcome, BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, SCROLLBACK_SEED_POLL_INTERVAL,
-    ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
-    apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app, drain_worker_messages,
-    flush_pending_worker_commands, mouse_layout_snapshot, next_mouse_capture_action,
-    next_poll_interval, osc52_clipboard_sequence, plan_scrollback_sync,
+    AppMouseOutcome, BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, InitialSessionTarget,
+    SCROLLBACK_SEED_POLL_INTERVAL, ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState,
+    WorkerRuntime, apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app,
+    drain_worker_messages, flush_pending_worker_commands, mouse_layout_snapshot,
+    next_mouse_capture_action, next_poll_interval, osc52_clipboard_sequence, plan_scrollback_sync,
     plan_scrollback_sync_with_chunk_size, poll_interval, prepare_scrollback_sync,
     prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
-    render_scrollback_rows, scrollback_plain_line, scrollback_row_style, scrollback_separator,
-    scrollback_wrapped_rows, should_sync_terminal_scrollback, wrap_scrollback_text,
+    render_scrollback_rows, render_tui_exit_resume_hint, restore_initial_session_from_disk,
+    scrollback_plain_line, scrollback_row_style, scrollback_separator, scrollback_wrapped_rows,
+    should_sync_terminal_scrollback, wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
@@ -75,6 +76,70 @@ fn osc52_clipboard_sequence_encodes_text() {
     assert_eq!(base64_encode(b"h"), "aA==");
     assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
     assert_eq!(osc52_clipboard_sequence("hi"), "\x1b]52;c;aGk=\x07");
+}
+
+#[test]
+fn tui_exit_resume_hint_includes_session_id_and_resume_command() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_id = "abc123".to_owned();
+
+    let hint = render_tui_exit_resume_hint(&app, None);
+
+    assert_eq!(
+        hint,
+        "Sigil session: abc123\nResume with: sigil resume abc123\n"
+    );
+}
+
+#[test]
+fn tui_exit_resume_hint_preserves_explicit_config_path() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_id = "abc123".to_owned();
+
+    let hint = render_tui_exit_resume_hint(&app, Some(Path::new("configs/my config.toml")));
+
+    assert_eq!(
+        hint,
+        "Sigil session: abc123\nResume with: sigil --config 'configs/my config.toml' resume abc123\n"
+    );
+}
+
+#[test]
+fn tui_exit_resume_hint_is_empty_before_session_mode() {
+    let app = AppState::from_setup(
+        PathBuf::from("sigil.toml"),
+        PathBuf::from("."),
+        Some("missing config".to_owned()),
+    );
+
+    assert_eq!(render_tui_exit_resume_hint(&app, None), "");
+}
+
+#[test]
+fn restore_initial_session_from_disk_uses_requested_selector() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config_path = workspace.path().join("sigil.toml");
+    let config = test_config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&config_path, &config);
+    let session_log_path = app.session_log_dir.join("session-target-123.jsonl");
+    JsonlSessionStore::new(&session_log_path)?.append(&SessionLogEntry::User(
+        ModelMessage::user("restore this session"),
+    ))?;
+
+    restore_initial_session_from_disk(
+        &mut app,
+        &config,
+        InitialSessionTarget::Selector("target-123"),
+    )?;
+
+    assert_eq!(app.session_id, "target-123");
+    assert_eq!(app.session_log_path, session_log_path);
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("restore this session"))
+    );
+    Ok(())
 }
 
 #[test]
@@ -429,6 +494,7 @@ fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::R
     let mut worker = Some(WorkerRuntime {
         worker_tx,
         worker_rx,
+        ready: true,
     });
 
     process_app_action(
@@ -449,6 +515,41 @@ fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::R
 }
 
 #[test]
+fn process_app_action_queues_worker_command_until_runtime_is_ready() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (worker_tx, command_rx) = mpsc::channel();
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+        ready: false,
+    });
+
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::SubmitPrompt("hello".to_owned()),
+    )?;
+
+    assert!(command_rx.recv_timeout(Duration::from_millis(10)).is_err());
+    assert!(app.has_pending_worker_commands());
+
+    worker.as_mut().expect("worker should exist").ready = true;
+    assert!(flush_pending_worker_commands(&mut app, &mut worker)?);
+
+    let command = command_rx.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(
+        command,
+        WorkerCommand::SubmitPrompt {
+            ref prompt,
+            reasoning_effort: sigil_kernel::ReasoningEffort::Max,
+        } if prompt == "hello"
+    ));
+    assert!(!app.has_pending_worker_commands());
+    Ok(())
+}
+
+#[test]
 fn process_app_action_restarts_closed_worker_and_retries_command() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (closed_tx, closed_rx) = mpsc::channel();
@@ -457,6 +558,7 @@ fn process_app_action_restarts_closed_worker_and_retries_command() -> Result<()>
     let mut worker = Some(WorkerRuntime {
         worker_tx: closed_tx,
         worker_rx,
+        ready: true,
     });
     let (next_runtime, commands) = fake_worker_runtime();
     let mut next_runtime = Some(next_runtime);
@@ -521,6 +623,7 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
     let mut worker = Some(WorkerRuntime {
         worker_tx: closed_tx,
         worker_rx,
+        ready: true,
     });
 
     process_app_action_with_spawner(
@@ -534,6 +637,7 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
             Ok(WorkerRuntime {
                 worker_tx: retry_tx,
                 worker_rx,
+                ready: true,
             })
         },
     )?;
@@ -613,6 +717,7 @@ fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
     let mut worker = Some(WorkerRuntime {
         worker_tx,
         worker_rx,
+        ready: true,
     });
 
     process_app_action(
@@ -638,6 +743,7 @@ fn process_app_action_reports_disabled_osc52_clipboard() -> anyhow::Result<()> {
     let mut worker = Some(WorkerRuntime {
         worker_tx,
         worker_rx,
+        ready: true,
     });
 
     process_app_action(
@@ -685,6 +791,7 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
     worker = Some(WorkerRuntime {
         worker_tx,
         worker_rx,
+        ready: true,
     });
     assert!(flush_pending_worker_commands(&mut app, &mut worker)?);
 
@@ -717,6 +824,7 @@ fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result
     let mut worker = Some(WorkerRuntime {
         worker_tx,
         worker_rx,
+        ready: true,
     });
 
     assert!(flush_pending_worker_commands(&mut app, &mut worker)?);
@@ -737,6 +845,7 @@ fn fake_worker_runtime() -> (WorkerRuntime, mpsc::Receiver<WorkerCommand>) {
         WorkerRuntime {
             worker_tx,
             worker_rx: message_rx,
+            ready: true,
         },
         worker_rx,
     )
@@ -1158,12 +1267,30 @@ fn drain_worker_messages_marks_dirty_when_messages_arrive() -> Result<()> {
     let mut worker = Some(WorkerRuntime {
         worker_tx,
         worker_rx,
+        ready: true,
     });
     message_tx.send(WorkerMessage::RunStarted {
         prompt: "hello".to_owned(),
     })?;
 
     assert!(drain_worker_messages(&mut app, &mut worker)?);
+    Ok(())
+}
+
+#[test]
+fn drain_worker_messages_marks_runtime_ready() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (worker_tx, _command_rx) = mpsc::channel();
+    let (message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+        ready: false,
+    });
+    message_tx.send(WorkerMessage::WorkerReady)?;
+
+    assert!(drain_worker_messages(&mut app, &mut worker)?);
+    assert!(worker.as_ref().expect("worker should exist").ready);
     Ok(())
 }
 

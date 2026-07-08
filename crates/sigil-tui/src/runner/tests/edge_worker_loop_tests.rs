@@ -1027,9 +1027,19 @@ impl ManualLoopWorker {
     }
 
     fn recv(&self, timeout: Duration) -> Result<WorkerMessage> {
-        self.message_rx
-            .recv_timeout(timeout)
-            .map_err(|error| anyhow::anyhow!("timed out waiting for worker message: {error}"))
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow::anyhow!("timed out waiting for worker message"));
+            }
+            let message = self.message_rx.recv_timeout(remaining).map_err(|error| {
+                anyhow::anyhow!("timed out waiting for worker message: {error}")
+            })?;
+            if !matches!(message, WorkerMessage::WorkerReady) {
+                return Ok(message);
+            }
+        }
     }
 
     fn recv_until_with_timeout<F>(&self, timeout: Duration, predicate: F) -> Result<WorkerMessage>

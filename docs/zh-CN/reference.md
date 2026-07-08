@@ -65,6 +65,7 @@ Workspace trust 由启动时的 workspace trust gate 处理，不是 slash comma
 | `sigil` | 在当前 workspace 打开 TUI |
 | `sigil doctor` | 运行本地诊断 |
 | `sigil run "<task>"` | 运行非交互自动化任务 |
+| `sigil resume [session-id]` | 打开 TUI 并恢复 latest 或指定 session；TUI 退出时会打印可复制的恢复命令 |
 | `sigil serve` | 校验 HTTP/SSE adapter 的 local bind/token 默认值；HTTP routing 尚未实现 |
 | `sigil --version` | 打印安装版本 |
 | `sigil --config <path> doctor` | 使用显式 config 文件运行诊断 |
@@ -172,4 +173,5 @@ Gemini:
 - 恢复不会静默重放未完成工具。
 - `/new` 会开始一条新的 append-only session log。
 - `/resume` 选择历史 session。
+- 退出 TUI 会打印当前 session id 和 `sigil resume <session-id>` 恢复命令。
 - 存在未完成 planned task 时，`/task continue` 会继续最新任务。

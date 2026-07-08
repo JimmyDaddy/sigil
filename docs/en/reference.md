@@ -65,6 +65,7 @@ Workspace trust is handled by the startup workspace trust gate, not a slash comm
 | `sigil` | Open the TUI in the current workspace |
 | `sigil doctor` | Run local diagnostics |
 | `sigil run "<task>"` | Run a non-interactive automation task |
+| `sigil resume [session-id]` | Open the TUI and restore the latest or requested session; TUI exit prints a copyable resume command |
 | `sigil serve` | Validate HTTP/SSE adapter local bind/token defaults; HTTP routing is not implemented yet |
 | `sigil --version` | Print the installed version |
 | `sigil --config <path> doctor` | Run diagnostics with an explicit config file |
@@ -172,4 +173,5 @@ See [configuration.md](configuration.md) for examples.
 - Restore does not silently replay unfinished tools.
 - `/new` starts a fresh append-only session log.
 - `/resume` selects older sessions.
+- Exiting the TUI prints the current session id and a `sigil resume <session-id>` command.
 - `/task continue` continues the latest unfinished planned task when one exists.

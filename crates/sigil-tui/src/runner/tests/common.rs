@@ -72,7 +72,7 @@ impl TestWorker {
     }
 
     pub(super) fn recv(&self) -> Result<WorkerMessage> {
-        self.recv_with_timeout(Duration::from_secs(3))
+        self.recv_until(|message| !matches!(message, WorkerMessage::WorkerReady))
     }
 
     pub(super) fn recv_with_timeout(&self, timeout: Duration) -> Result<WorkerMessage> {

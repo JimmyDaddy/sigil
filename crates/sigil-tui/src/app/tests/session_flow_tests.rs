@@ -1402,7 +1402,7 @@ fn restored_failed_tool_execution_and_reasoning_trace_render_in_session_view() -
 }
 
 #[test]
-fn restored_reasoning_trace_before_final_answer_does_not_render_as_second_reply() -> Result<()> {
+fn restored_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
     let entries = vec![
@@ -1412,7 +1412,7 @@ fn restored_reasoning_trace_before_final_answer_does_not_render_as_second_reply(
         }),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_trace".to_owned(),
-            data: json!({"text": "draft summary that should stay hidden"}),
+            data: json!({"text": "draft summary that should stay visible"}),
         }),
         SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
             Some("final answer".to_owned()),
@@ -1430,7 +1430,7 @@ fn restored_reasoning_trace_before_final_answer_does_not_render_as_second_reply(
 
     let rendered = plain_transcript(&app, 20);
     assert!(rendered.contains("final answer"));
-    assert!(!rendered.contains("draft summary that should stay hidden"));
+    assert!(rendered.contains("draft summary that should stay visible"));
     assert_eq!(
         app.timeline
             .iter()
@@ -1443,13 +1443,13 @@ fn restored_reasoning_trace_before_final_answer_does_not_render_as_second_reply(
             .iter()
             .filter(|entry| entry.role == TimelineRole::Thinking)
             .count(),
-        0
+        1
     );
     Ok(())
 }
 
 #[test]
-fn restored_reasoning_traces_between_tools_before_final_do_not_render() -> Result<()> {
+fn restored_reasoning_traces_between_tools_before_final_stay_visible() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
     let entries = vec![
@@ -1460,7 +1460,7 @@ fn restored_reasoning_traces_between_tools_before_final_do_not_render() -> Resul
         SessionLogEntry::User(ModelMessage::user("inspect and summarize")),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_trace".to_owned(),
-            data: json!({"text": "first draft summary that should stay hidden"}),
+            data: json!({"text": "first draft summary that should stay visible"}),
         }),
         SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
             None,
@@ -1474,7 +1474,7 @@ fn restored_reasoning_traces_between_tools_before_final_do_not_render() -> Resul
         SessionLogEntry::ToolResult(ModelMessage::tool("call-read", "file content")),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_delta".to_owned(),
-            data: json!({"delta": "second draft summary that should stay hidden"}),
+            data: json!({"delta": "second draft summary that should stay visible"}),
         }),
         SessionLogEntry::Assistant(ModelMessage::assistant_with_kind(
             Some("final answer".to_owned()),
@@ -1492,14 +1492,14 @@ fn restored_reasoning_traces_between_tools_before_final_do_not_render() -> Resul
 
     let rendered = plain_transcript(&app, 20);
     assert!(rendered.contains("final answer"));
-    assert!(!rendered.contains("first draft summary that should stay hidden"));
-    assert!(!rendered.contains("second draft summary that should stay hidden"));
+    assert!(rendered.contains("first draft summary that should stay visible"));
+    assert!(rendered.contains("second draft summary that should stay visible"));
     assert_eq!(
         app.timeline
             .iter()
             .filter(|entry| entry.role == TimelineRole::Thinking)
             .count(),
-        0
+        2
     );
     assert!(
         app.timeline

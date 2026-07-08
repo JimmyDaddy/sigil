@@ -158,9 +158,9 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
     )?;
+    let ready = recv_message(&message_rx)?;
+    assert!(matches!(ready, WorkerMessage::WorkerReady));
     command_tx.send(WorkerCommand::Shutdown)?;
-
-    assert!(message_rx.recv_timeout(Duration::from_millis(250)).is_err());
     Ok(())
 }
 

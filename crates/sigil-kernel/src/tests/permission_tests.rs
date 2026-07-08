@@ -112,7 +112,7 @@ fn read_only_mode_is_a_non_read_safety_cap() -> Result<()> {
 }
 
 #[test]
-fn auto_edit_allows_workspace_file_edits_but_not_shell_or_network() -> Result<()> {
+fn auto_edit_allows_file_edits_and_readonly_shell_only() -> Result<()> {
     let config = PermissionConfig {
         mode: PermissionMode::AutoEdit,
         ..PermissionConfig::default()
@@ -127,6 +127,17 @@ fn auto_edit_allows_workspace_file_edits_but_not_shell_or_network() -> Result<()
         "bash",
         vec![ToolSubject::command("cargo check", "cargo check")],
     )?;
+    let read_only_shell = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Read,
+        ToolOperation::ExecuteReadOnlyCommand,
+        vec![ToolSubject::command(
+            "ls -la _site 2>/dev/null",
+            "ls -la _site 2>/dev/null",
+        )],
+        None,
+    )?;
     let network = PermissionPolicy::new(&config).decide(
         &spec(ToolAccess::Network),
         "mcp__fake__echo",
@@ -134,6 +145,7 @@ fn auto_edit_allows_workspace_file_edits_but_not_shell_or_network() -> Result<()
     )?;
 
     assert_eq!(write.mode, ApprovalMode::Allow);
+    assert_eq!(read_only_shell.mode, ApprovalMode::Allow);
     assert_eq!(shell.mode, ApprovalMode::Ask);
     assert_eq!(network.mode, ApprovalMode::Ask);
     Ok(())

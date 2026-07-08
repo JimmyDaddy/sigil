@@ -182,7 +182,7 @@ impl AppState {
     }
 
     pub(super) fn push_final_assistant_message_once(&mut self, content: String) {
-        self.suppress_reasoning_since_last_user_before_final();
+        self.finish_streaming_reasoning_entry();
         self.push_assistant_message_once(content);
     }
 
@@ -230,28 +230,6 @@ impl AppState {
             return;
         }
         self.timeline.remove(index);
-        self.rebuild_timeline_projection_after_entry_removal();
-    }
-
-    fn suppress_reasoning_since_last_user_before_final(&mut self) {
-        self.finish_streaming_reasoning_entry();
-        let start = self
-            .timeline
-            .iter()
-            .rposition(|entry| entry.role == TimelineRole::User)
-            .map(|index| index.saturating_add(1))
-            .unwrap_or(0);
-        let before_len = self.timeline.len();
-        let mut index = 0usize;
-        self.timeline.retain(|entry| {
-            let keep = index < start || entry.role != TimelineRole::Thinking;
-            index = index.saturating_add(1);
-            keep
-        });
-        if self.timeline.len() == before_len {
-            return;
-        }
-
         self.rebuild_timeline_projection_after_entry_removal();
     }
 
