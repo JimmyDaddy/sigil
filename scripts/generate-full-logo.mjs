@@ -122,6 +122,102 @@ function readPng(filePath) {
   return { width, height, pixels };
 }
 
+function lightness(r, g, b) {
+  return (r + g + b) / 3;
+}
+
+function saturation(r, g, b) {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  return max === 0 ? 0 : (max - min) / max;
+}
+
+function cleanWhiteHalo(image, options = {}) {
+  const {
+    haloLumaThreshold = 210,
+    haloSaturationThreshold = 0.35,
+    neighborLumaThreshold = 225,
+    neighborSaturationThreshold = 0.45
+  } = options;
+
+  const { width, height, pixels } = image;
+  const out = Buffer.from(pixels);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4;
+      const alpha = pixels[idx + 3];
+      if (alpha === 0) {
+        continue;
+      }
+
+      const red = pixels[idx];
+      const green = pixels[idx + 1];
+      const blue = pixels[idx + 2];
+      const luma = lightness(red, green, blue);
+      const sat = saturation(red, green, blue);
+      if (luma <= haloLumaThreshold || sat >= haloSaturationThreshold) {
+        continue;
+      }
+
+      let hasTransparentOrSemiNeighbor = false;
+      let hasSemiNeighbor = false;
+      let weightedRed = 0;
+      let weightedGreen = 0;
+      let weightedBlue = 0;
+      let weightedTotal = 0;
+
+      for (let ny = Math.max(0, y - 1); ny <= Math.min(height - 1, y + 1); ny += 1) {
+        for (let nx = Math.max(0, x - 1); nx <= Math.min(width - 1, x + 1); nx += 1) {
+          if (nx === x && ny === y) {
+            continue;
+          }
+          const nIdx = (ny * width + nx) * 4;
+          const nAlpha = pixels[nIdx + 3];
+          if (nAlpha === 0) {
+            hasTransparentOrSemiNeighbor = true;
+            continue;
+          }
+
+          const nRed = pixels[nIdx];
+          const nGreen = pixels[nIdx + 1];
+          const nBlue = pixels[nIdx + 2];
+          const nLuma = lightness(nRed, nGreen, nBlue);
+          const nSat = saturation(nRed, nGreen, nBlue);
+          if (nLuma < neighborLumaThreshold || nSat < neighborSaturationThreshold || nAlpha < 255) {
+            weightedRed += nRed * nAlpha;
+            weightedGreen += nGreen * nAlpha;
+            weightedBlue += nBlue * nAlpha;
+            weightedTotal += nAlpha;
+            if (nAlpha < 255) {
+              hasSemiNeighbor = true;
+            }
+          }
+        }
+      }
+
+      if (!hasTransparentOrSemiNeighbor && !hasSemiNeighbor) {
+        continue;
+      }
+
+      if (weightedTotal === 0) {
+        out[idx + 3] = 0;
+        continue;
+      }
+
+      out[idx] = Math.round(weightedRed / weightedTotal);
+      out[idx + 1] = Math.round(weightedGreen / weightedTotal);
+      out[idx + 2] = Math.round(weightedBlue / weightedTotal);
+      out[idx + 3] = alpha === 255 ? 240 : Math.max(8, Math.round(alpha * 0.86));
+    }
+  }
+
+  return { width, height, pixels: out };
+}
+
 function alphaBounds(image) {
   let minX = image.width;
   let minY = image.height;
@@ -237,8 +333,11 @@ function writePng(filePath, width, height, pixels) {
   fs.writeFileSync(filePath, png);
 }
 
-const mark = readPng(markPath);
-const wordmark = readPng(wordmarkPath);
+const mark = cleanWhiteHalo(readPng(markPath));
+const wordmark = cleanWhiteHalo(readPng(wordmarkPath));
+
+writePng(markPath, mark.width, mark.height, mark.pixels);
+writePng(wordmarkPath, wordmark.width, wordmark.height, wordmark.pixels);
 
 if (process.argv.includes("--info")) {
   const headerWordmark = cropToAlpha(wordmark);
