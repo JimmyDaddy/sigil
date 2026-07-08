@@ -30,6 +30,8 @@ The release workflow is `.github/workflows/release.yml`.
    `sigil-ai.rb`, npm package tarballs, and generated notes. Tags with a
    prerelease suffix, such as `v0.0.1-alpha.1`, are published as GitHub
    prereleases.
+9. Update the `JimmyDaddy/homebrew-sigil` tap from the generated `sigil-ai.rb`
+   asset and verify the tap points at the same release tag.
 
 GitHub artifact attestations require `id-token: write`, `contents: read`, and
 `attestations: write` permissions on the build job. The publish job only needs
@@ -48,9 +50,39 @@ Each release should contain:
 
 Each tar archive should include the `sigil` binary, README files, `assets/logo/*`, and installation docs so repository-relative README image links keep working after extraction.
 
-The generated `sigil-ai.rb` is a release asset for the `JimmyDaddy/homebrew-sigil`
-tap update. Publishing or updating the tap repository is intentionally kept
-outside this repository.
+The generated `sigil-ai.rb` is the source of truth for the
+`JimmyDaddy/homebrew-sigil` tap update. After the GitHub release succeeds, copy
+that asset into `Formula/sigil-ai.rb` in the tap repository, run `ruby -c`, commit
+the update, and push it before announcing the Homebrew path as current.
+
+```bash
+tmp_formula_dir="$(mktemp -d)"
+gh release download v0.0.1-alpha.1 \
+  --repo JimmyDaddy/sigil \
+  --dir "${tmp_formula_dir}" \
+  --pattern sigil-ai.rb
+
+cd /path/to/homebrew-sigil
+cp "${tmp_formula_dir}/sigil-ai.rb" Formula/sigil-ai.rb
+ruby -c Formula/sigil-ai.rb
+git diff -- Formula/sigil-ai.rb
+git add Formula/sigil-ai.rb
+git commit -m "chore: update sigil-ai to 0.0.1-alpha.1"
+git push origin main
+```
+
+Verify the pushed tap formula references the same tag and version:
+
+```bash
+gh api repos/JimmyDaddy/homebrew-sigil/contents/Formula/sigil-ai.rb \
+  --jq .content | base64 --decode | grep -E '0\.0\.1-alpha\.1|v0\.0\.1-alpha\.1'
+```
+
+This cross-repository tap sync is currently a required maintainer step. To
+automate it inside `.github/workflows/release.yml`, use a fine-scoped GitHub App
+token or PAT secret with `contents:write` on `JimmyDaddy/homebrew-sigil`; the
+default `GITHUB_TOKEN` for this repository must not be assumed to have
+cross-repository write permission.
 
 The npm package tarballs are generated from the same release archives:
 
