@@ -3,7 +3,10 @@
 This directory contains the zero-dependency source assets for the static site
 published to GitHub Pages.
 
-The Pages workflow stages this directory, copies `assets/logo/*.png` and docs examples into the published artifact, generates HTML pages from `docs/en/*.md` and `docs/zh-CN/*.md`, checks the required files, and deploys it with GitHub's Pages actions.
+The Pages workflow stages this directory, copies `assets/logo/*.{png,svg}` and
+docs examples into the published artifact, generates HTML pages from
+`docs/en/*.md` and `docs/zh-CN/*.md`, checks the required files, and deploys it
+with GitHub's Pages actions.
 
 The site intentionally stays static and small. The homepage introduces Sigil,
 while `docs/` and `zh-CN/docs/` provide stable documentation hubs. Build output

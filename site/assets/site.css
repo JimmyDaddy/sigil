@@ -1303,9 +1303,12 @@ footer a {
 
 @media (prefers-color-scheme: dark) {
   .brand-mark,
-  .brand-wordmark,
+  .brand-wordmark {
+    filter: brightness(1.95) contrast(1.16) saturate(1.05) drop-shadow(0 0 1px rgba(255, 255, 255, 0.28));
+  }
+
   .docs-logo {
-    filter: brightness(1.9) contrast(1.12) saturate(1.05) drop-shadow(0 0 1px rgba(255, 255, 255, 0.28));
+    filter: brightness(1.2) contrast(1.06) saturate(1.03);
   }
 
   :root {

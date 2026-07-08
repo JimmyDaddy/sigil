@@ -449,7 +449,7 @@ def rendered_page(locale, slug, source_file, fallback_title)
         <header class="site-header">
           <a class="brand" href="#{home_href}" aria-label="Sigil home">
             <img class="brand-mark" src="#{asset_prefix}/assets/logo/sigil-mark-transparent.png" alt="" width="34" height="40">
-            <img class="brand-wordmark" src="#{asset_prefix}/assets/logo/sigil-wordmark-header.png" alt="" width="78" height="34">
+            <img class="brand-wordmark" src="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg" srcset="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg 1x, #{asset_prefix}/assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
           </a>
           <nav aria-label="Primary navigation">
             <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
@@ -562,7 +562,7 @@ def write_examples_index
         <header class="site-header">
           <a class="brand" href="../../" aria-label="Sigil home">
             <img class="brand-mark" src="../../assets/logo/sigil-mark-transparent.png" alt="" width="34" height="40">
-            <img class="brand-wordmark" src="../../assets/logo/sigil-wordmark-header.png" alt="" width="78" height="34">
+            <img class="brand-wordmark" src="../../assets/logo/sigil-wordmark-header.svg" srcset="../../assets/logo/sigil-wordmark-header.svg 1x, ../../assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
           </a>
           <nav aria-label="Primary navigation">
             <a href="../../docs/">Docs</a>
