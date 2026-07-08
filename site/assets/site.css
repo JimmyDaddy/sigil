@@ -91,6 +91,11 @@ a {
   text-decoration: none;
 }
 
+.brand img {
+  display: block;
+  background: transparent;
+}
+
 .brand-mark {
   border-radius: 6px;
 }
