@@ -158,7 +158,7 @@ scroll_sensitivity = 3
 
 `keyboard_enhancement` is resolved on the next launch. `mouse_capture` applies on the next launch. `osc52_clipboard` is checked for each copy action. `scroll_sensitivity` applies after the saved config is reloaded.
 
-See [terminal-compatibility.md](terminal-compatibility.md) for tmux, screen, SSH, WSL, and manual smoke checks.
+See [Terminal Compatibility Checklist](terminal-compatibility.md) for tmux, screen, SSH, WSL, and manual smoke checks.
 
 ## Session Restore Shows Interrupted Tools
 

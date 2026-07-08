@@ -140,7 +140,7 @@ sigil doctor
 
 ## 下一步
 
-- 学习日常操作：[user-guide.md](user-guide.md)。
-- 参考真实任务模式：[workflows.md](workflows.md)。
-- 调整 provider 和权限：[configuration.md](configuration.md)。
-- 处理常见问题：[troubleshooting.md](troubleshooting.md)。
+- 学习日常操作：[Sigil TUI 使用指南](user-guide.md)。
+- 参考真实任务模式：[常见工作流](workflows.md)。
+- 调整 provider 和权限：[Sigil 配置指南](configuration.md)。
+- 处理常见问题：[排障](troubleshooting.md)。

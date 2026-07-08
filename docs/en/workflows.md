@@ -134,7 +134,7 @@ Alt-D
 
 to run diagnostics over changed source files. Code intelligence can also provide symbols, definitions, references, code actions, and rename previews when an LSP server is available.
 
-If no LSP server is available, normal chat and file tools still work. See [configuration.md](configuration.md) and [troubleshooting.md](troubleshooting.md).
+If no LSP server is available, normal chat and file tools still work. See [Sigil Configuration Guide](configuration.md) and [Troubleshooting](troubleshooting.md).
 
 ## Connect External Tools With MCP
 
@@ -148,7 +148,7 @@ Typical pattern:
 4. Use `/doctor` to check command and trust configuration.
 5. Let Sigil list and call MCP tools only after you understand what the server can access.
 
-See [mcp.md](mcp.md).
+See [Sigil MCP Guide](mcp.md).
 
 ## Prompt Patterns That Work Well
 

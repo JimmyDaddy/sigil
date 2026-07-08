@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本文说明首个 release 的安装路径。如果你想按首次使用流程走一遍，先看 [quickstart.md](quickstart.md)。`v0.0.1-alpha.1` 是 early preview，不承诺配置、插件、高级 sandbox 行为或自动化入口的稳定兼容。
+本文说明首个 release 的安装路径。如果你想按首次使用流程走一遍，先看 [快速上手](quickstart.md)。`v0.0.1-alpha.1` 是 early preview，不承诺配置、插件、高级 sandbox 行为或自动化入口的稳定兼容。
 
 ## 前置条件
 

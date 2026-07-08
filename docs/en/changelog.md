@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Supported status](status.md) · [简体中文](../zh-CN/changelog.md)
 
-This page lists user-facing release notes. For support boundaries and early-preview caveats, see [status.md](status.md).
+This page lists user-facing release notes. For support boundaries and early-preview caveats, see [Supported Today And Future Work](status.md).
 
 ## v0.0.1-alpha.1 - 2026-07-08
 

@@ -59,6 +59,11 @@ ZH_PAGE_TITLES = {
   "changelog" => "用户变更记录"
 }.freeze
 
+README_PAGE_TITLE = {
+  "en" => "Docs home",
+  "zh-CN" => "文档首页"
+}.freeze
+
 LOCALES = {
   "en" => {
     source_dir: "docs/en",
@@ -96,6 +101,29 @@ def page_slug_for_file(file)
   basename = File.basename(file)
   page = PAGES.find { |(_, filename, _)| filename == basename }
   page&.first
+end
+
+def page_title_for_file(file, locale)
+  basename = File.basename(file)
+  return README_PAGE_TITLE.fetch(locale, "Docs home") if basename == "README.md"
+
+  slug, _filename, en_title = PAGES.find { |_, filename, _| filename == basename }
+  return nil unless slug
+
+  locale == "zh-CN" ? ZH_PAGE_TITLES.fetch(slug, en_title) : en_title
+end
+
+def normalize_link_label(label, href, locale)
+  return label if href.start_with?("http://", "https://", "mailto:", "#")
+
+  target, = href.split("#", 2)
+  target_file = File.basename(target)
+  return label unless target_file.end_with?(".md")
+
+  base_label = File.basename(label)
+  return label unless base_label == target_file || label.end_with?(".md")
+
+  page_title_for_file(target_file, locale) || target_file.sub(/\.md\z/, "")
 end
 
 def relative_prefix(locale)
@@ -143,7 +171,8 @@ def inline_markdown(text, locale)
   escaped.gsub(/\[([^\]]+)\]\(([^)]+)\)/) do
     label = Regexp.last_match(1)
     href = Regexp.last_match(2)
-    %(<a href="#{html_escape(rewrite_href(href, locale))}">#{label}</a>)
+    pretty_label = normalize_link_label(label, href, locale)
+    %(<a href="#{html_escape(rewrite_href(href, locale))}">#{pretty_label}</a>)
   end
 end
 

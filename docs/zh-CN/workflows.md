@@ -132,7 +132,7 @@ Alt-D
 
 对 git changed source files 运行 diagnostics。LSP server 可用时，code intelligence 还可以提供 symbols、definitions、references、code actions 和 rename previews。
 
-如果没有 LSP server，普通 chat 和文件工具仍可使用。见 [configuration.md](configuration.md) 和 [troubleshooting.md](troubleshooting.md)。
+如果没有 LSP server，普通 chat 和文件工具仍可使用。见 [Sigil 配置指南](configuration.md) 和 [排障](troubleshooting.md)。
 
 ## 用 MCP 连接外部工具
 
@@ -146,7 +146,7 @@ Alt-D
 4. 用 `/doctor` 检查 command 和 trust 配置。
 5. 只有在理解 server 能访问什么之后，再让 Sigil list 和 call MCP tools。
 
-见 [mcp.md](mcp.md)。
+见 [Sigil MCP 接入指南](mcp.md)。
 
 ## 更有效的 Prompt 模式
 

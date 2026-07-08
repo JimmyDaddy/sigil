@@ -508,7 +508,7 @@ scroll_sensitivity = 3
 
 The TUI `/config` panel includes a read-only `Terminal` section for these controls. Edit `sigil.toml` for compatibility overrides. `keyboard_enhancement` is resolved on the next launch; `mouse_capture` applies on the next launch; `osc52_clipboard` is checked for each copy action; `scroll_sensitivity` applies to the running config after it is saved and reloaded.
 
-`doctor` reports the configured switches, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk. For a repeatable manual checklist across iTerm2, Terminal.app, WezTerm, kitty, tmux, and SSH, see [terminal-compatibility.md](terminal-compatibility.md).
+`doctor` reports the configured switches, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk. For a repeatable manual checklist across iTerm2, Terminal.app, WezTerm, kitty, tmux, and SSH, see [Terminal Compatibility Checklist](terminal-compatibility.md).
 
 ## Provider Environment Overrides
 
@@ -566,4 +566,4 @@ Open `/config`, move to `Plugins`, and use `PgUp/PgDn` to select a discovered ma
 
 ## MCP
 
-MCP servers are configured with `[[mcp_servers]]`. See [mcp.md](mcp.md).
+MCP servers are configured with `[[mcp_servers]]`. See [Sigil MCP Guide](mcp.md).

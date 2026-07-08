@@ -91,7 +91,7 @@ cargo install --path crates/sigil --locked
 - 终端兼容性：调整 `[terminal].mouse_capture`、`[terminal].osc52_clipboard` 和 `[terminal].scroll_sensitivity`。
 - Code intelligence：需要 LSP-backed 符号、引用、诊断、code action 和 rename 工具时，启用 `[code_intelligence].enabled = true`。
 
-共享配置见 [configuration.md](configuration.md)，provider 专项设置和环境变量优先级见 [providers.md](providers.md)。
+共享配置见 [Sigil 配置指南](configuration.md)，provider 专项设置和环境变量优先级见 [Sigil Provider 指南](providers.md)。
 可复制配置模板位于 [docs/examples/config](../examples/config)。
 
 ## 遇到问题时

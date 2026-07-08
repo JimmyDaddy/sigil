@@ -4,7 +4,7 @@
 
 This guide is for day-to-day Sigil users. It focuses on what you see and control in the TUI.
 
-If you are using Sigil for the first time, read [quickstart.md](quickstart.md) first. If you already know the UI and want prompt patterns for real tasks, use [workflows.md](workflows.md).
+If you are using Sigil for the first time, read [Quickstart](quickstart.md) first. If you already know the UI and want prompt patterns for real tasks, use [Common Workflows](workflows.md).
 
 ## Start
 
@@ -16,9 +16,9 @@ sigil
 
 If no usable config exists, Sigil opens Quick Setup. You confirm the workspace, choose a model, and provide authentication. After setup, Sigil writes `workspace.root = "."`, so the directory where you started the TUI becomes the active workspace.
 
-If you have not installed Sigil yet, see [installation.md](installation.md). During development inside a checkout, `cargo run -p sigil` is equivalent.
+If you have not installed Sigil yet, see [Installation](installation.md). During development inside a checkout, `cargo run -p sigil` is equivalent.
 
-For authentication options, including environment variables, see [configuration.md](configuration.md).
+For authentication options, including environment variables, see [Sigil Configuration Guide](configuration.md).
 
 ## Main Screen
 
@@ -58,7 +58,7 @@ When `[terminal].mouse_capture = true`, mouse mode supports transcript scrolling
 
 Use the `Terminal` section in `/config` to review keyboard enhancement, mouse capture, OSC52 copy, and scroll sensitivity. Edit `sigil.toml` for compatibility overrides.
 
-For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatibility.md](terminal-compatibility.md).
+For terminal-specific smoke checks and tmux/SSH guidance, see [Terminal Compatibility Checklist](terminal-compatibility.md).
 
 ## Slash Commands
 
@@ -169,7 +169,7 @@ In the TUI, `Alt-D` can run diagnostics over git changed source files. Results a
 
 If no LSP server is available, Rust projects can fall back to Tree-sitter Rust outline / syntax diagnostics. Failure does not block normal chat or tool calls.
 
-See [configuration.md](configuration.md) for configuration.
+See [Sigil Configuration Guide](configuration.md) for configuration.
 
 ## FAQ
 

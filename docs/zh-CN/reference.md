@@ -154,7 +154,7 @@ Gemini:
 | `[appearance]` | TUI 主题、usage cost currency 和语义颜色覆盖 |
 | `[[mcp_servers]]` | stdio MCP server 配置 |
 
-示例见 [configuration.md](configuration.md)。
+示例见 [Sigil 配置指南](configuration.md)。
 
 ## Approval Outcomes
 

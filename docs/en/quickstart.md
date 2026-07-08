@@ -140,7 +140,7 @@ Run project-specific tests or formatters as appropriate. Sigil can run commands 
 
 ## Next
 
-- Learn daily controls in [user-guide.md](user-guide.md).
-- Browse practical task patterns in [workflows.md](workflows.md).
-- Tune provider and permission behavior in [configuration.md](configuration.md).
-- Fix common setup issues in [troubleshooting.md](troubleshooting.md).
+- Learn daily controls in [Sigil TUI User Guide](user-guide.md).
+- Browse practical task patterns in [Common Workflows](workflows.md).
+- Tune provider and permission behavior in [Sigil Configuration Guide](configuration.md).
+- Fix common setup issues in [Troubleshooting](troubleshooting.md).

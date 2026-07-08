@@ -158,7 +158,7 @@ scroll_sensitivity = 3
 
 `keyboard_enhancement` 在下次启动时解析。`mouse_capture` 下次启动生效。`osc52_clipboard` 每次复制时检查。`scroll_sensitivity` 在保存配置并重新加载后生效。
 
-tmux、screen、SSH、WSL 和手工 smoke check 见 [terminal-compatibility.md](terminal-compatibility.md)。
+tmux、screen、SSH、WSL 和手工 smoke check 见 [Terminal 兼容性检查清单](terminal-compatibility.md)。
 
 ## Session 恢复后显示 Interrupted Tools
 

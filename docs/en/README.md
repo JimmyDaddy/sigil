@@ -91,7 +91,7 @@ Common choices:
 - Terminal compatibility: tune `[terminal].mouse_capture`, `[terminal].osc52_clipboard`, and `[terminal].scroll_sensitivity`.
 - Code intelligence: enable `[code_intelligence].enabled = true` when you want LSP-backed symbol, reference, diagnostic, code action, and rename tools.
 
-See [configuration.md](configuration.md) for shared config and [providers.md](providers.md) for provider-specific setup and environment variable priority.
+See [Sigil Configuration Guide](configuration.md) for shared config and [Sigil Provider Guide](providers.md) for provider-specific setup and environment variable priority.
 Copyable config templates live in [docs/examples/config](../examples/config).
 
 ## Help Path

@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [当前支持状态](status.md) · [English](../en/changelog.md)
 
-这一页只列面向用户的 release notes。当前支持边界和 early-preview 说明见 [status.md](status.md)。
+这一页只列面向用户的 release notes。当前支持边界和 early-preview 说明见 [当前支持状态与未来工作](status.md)。
 
 ## v0.0.1-alpha.1 - 2026-07-08
 
