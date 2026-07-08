@@ -429,18 +429,18 @@ def rendered_page(locale, slug, source_file, fallback_title)
         <link rel="alternate" hreflang="en" href="#{alternate_en}">
         <link rel="alternate" hreflang="zh-CN" href="#{alternate_zh}">
         <link rel="alternate" hreflang="x-default" href="#{alternate_en}">
-        <link rel="icon" href="#{asset_prefix}/assets/logo/sigil-mark-square-1024.png">
+        <link rel="icon" href="#{asset_prefix}/assets/logo/sigil-mark-staff-glow.svg">
         <meta name="theme-color" content="#1ecfc5">
         <meta property="og:type" content="article">
         <meta property="og:site_name" content="Sigil">
         <meta property="og:title" content="#{html_escape(title)} - Sigil">
         <meta property="og:description" content="#{html_escape(description)}">
         <meta property="og:url" content="#{canonical}">
-        <meta property="og:image" content="#{SITE_URL}/assets/logo/sigil-full.png">
+        <meta property="og:image" content="#{SITE_URL}/assets/logo/sigil-full-staff-glow.png">
         <meta name="twitter:card" content="summary_large_image">
         <meta name="twitter:title" content="#{html_escape(title)} - Sigil">
         <meta name="twitter:description" content="#{html_escape(description)}">
-        <meta name="twitter:image" content="#{SITE_URL}/assets/logo/sigil-full.png">
+        <meta name="twitter:image" content="#{SITE_URL}/assets/logo/sigil-full-staff-glow.png">
         <script type="application/ld+json">#{JSON.generate(json_ld)}</script>
         <link rel="stylesheet" href="#{asset_prefix}/assets/site.css">
         <script defer src="#{asset_prefix}/assets/search.js"></script>
@@ -448,8 +448,8 @@ def rendered_page(locale, slug, source_file, fallback_title)
       <body class="doc-page">
         <header class="site-header">
           <a class="brand" href="#{home_href}" aria-label="Sigil home">
-            <img class="brand-mark" src="#{asset_prefix}/assets/logo/sigil-mark-transparent.png" alt="" width="34" height="40">
-            <img class="brand-wordmark" src="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg" srcset="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg 1x, #{asset_prefix}/assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
+            <img class="brand-mark" src="#{asset_prefix}/assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
+            <img class="brand-wordmark" src="#{asset_prefix}/assets/logo/sigil-full-staff-glow.svg" srcset="#{asset_prefix}/assets/logo/sigil-full-staff-glow.svg 1x, #{asset_prefix}/assets/logo/sigil-full-staff-glow-2x.png 2x" alt="" width="78" height="34">
           </a>
           <nav aria-label="Primary navigation">
             <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
@@ -561,8 +561,8 @@ def write_examples_index
       <body class="doc-page">
         <header class="site-header">
           <a class="brand" href="../../" aria-label="Sigil home">
-            <img class="brand-mark" src="../../assets/logo/sigil-mark-transparent.png" alt="" width="34" height="40">
-            <img class="brand-wordmark" src="../../assets/logo/sigil-wordmark-header.svg" srcset="../../assets/logo/sigil-wordmark-header.svg 1x, ../../assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
+            <img class="brand-mark" src="../../assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
+            <img class="brand-wordmark" src="../../assets/logo/sigil-full-staff-glow.svg" srcset="../../assets/logo/sigil-full-staff-glow.svg 1x, ../../assets/logo/sigil-full-staff-glow-2x.png 2x" alt="" width="78" height="34">
           </a>
           <nav aria-label="Primary navigation">
             <a href="../../docs/">Docs</a>

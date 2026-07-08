@@ -11,6 +11,8 @@ const headerWordmarkPath = path.join(logoDir, "sigil-wordmark-header.png");
 const outPath = path.join(logoDir, "sigil-full.png");
 const onWhitePath = path.join(logoDir, "sigil-full-on-white.png");
 
+const modernPrimaryFullPath = path.join(logoDir, "sigil-full-staff-glow.png");
+
 const layout = {
   width: 1094,
   height: 545,
@@ -19,6 +21,28 @@ const layout = {
 };
 
 const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+function validateLegacyInputsOrExplain() {
+  const legacyReady = fs.existsSync(markPath) && fs.existsSync(wordmarkPath) && fs.existsSync(headerWordmarkPath);
+  if (legacyReady) {
+    return;
+  }
+  const missingLegacyHint = [
+    "Legacy logo generator inputs are not present in assets/logo.",
+    "Expected sigil-mark-transparent.png, sigil-wordmark-transparent.png, and sigil-wordmark-header.png.",
+    `Current logo pack now uses staff-glow variants and this script has no wordmark source to rebuild.`,
+    `If you need legacy outputs, restore the legacy files in assets/logo.`,
+    `If you only need compat artifacts, run this script with --from-modern to derive`,
+    `${path.relative(repoRoot, outPath)} and ${path.relative(repoRoot, onWhitePath)} from`,
+    path.relative(repoRoot, modernPrimaryFullPath)
+  ].join(" ");
+
+  if (!fs.existsSync(modernPrimaryFullPath)) {
+    throw new Error(missingLegacyHint);
+  }
+
+  throw new Error(missingLegacyHint);
+}
 
 function crc32(buffer) {
   let crc = 0xffffffff;
@@ -386,36 +410,81 @@ function writePng(filePath, width, height, pixels) {
   fs.writeFileSync(filePath, png);
 }
 
-const mark = clearBrightEdgeHalos(cleanWhiteHalo(readPng(markPath)));
-const wordmark = clearBrightEdgeHalos(cleanWhiteHalo(readPng(wordmarkPath)));
+function runLegacyComposition() {
+  const mark = clearBrightEdgeHalos(cleanWhiteHalo(readPng(markPath)));
+  const wordmark = clearBrightEdgeHalos(cleanWhiteHalo(readPng(wordmarkPath)));
 
-writePng(markPath, mark.width, mark.height, mark.pixels);
-writePng(wordmarkPath, wordmark.width, wordmark.height, wordmark.pixels);
+  writePng(markPath, mark.width, mark.height, mark.pixels);
+  writePng(wordmarkPath, wordmark.width, wordmark.height, wordmark.pixels);
 
-if (process.argv.includes("--info")) {
+  if (process.argv.includes("--info")) {
+    const headerWordmark = cropToAlpha(wordmark);
+    console.log(JSON.stringify({
+      mode: "legacy",
+      mark: { width: mark.width, height: mark.height, bounds: alphaBounds(mark) },
+      wordmark: { width: wordmark.width, height: wordmark.height, bounds: alphaBounds(wordmark) },
+      headerWordmark: {
+        width: headerWordmark.width,
+        height: headerWordmark.height,
+        bounds: headerWordmark.bounds
+      },
+      layout
+    }, null, 2));
+    return;
+  }
+
+  const canvas = Buffer.alloc(layout.width * layout.height * 4);
+  alphaBlend(canvas, layout.width, mark, layout.mark.x, layout.mark.y);
+  alphaBlend(canvas, layout.width, wordmark, layout.wordmark.x, layout.wordmark.y);
+  writePng(outPath, layout.width, layout.height, canvas);
+  const whiteCanvas = Buffer.alloc(layout.width * layout.height * 4, 255);
+  alphaBlend(whiteCanvas, layout.width, { width: layout.width, height: layout.height, pixels: canvas }, 0, 0);
+  writePng(onWhitePath, layout.width, layout.height, whiteCanvas);
   const headerWordmark = cropToAlpha(wordmark);
-  console.log(JSON.stringify({
-    mark: { width: mark.width, height: mark.height, bounds: alphaBounds(mark) },
-    wordmark: { width: wordmark.width, height: wordmark.height, bounds: alphaBounds(wordmark) },
-    headerWordmark: {
-      width: headerWordmark.width,
-      height: headerWordmark.height,
-      bounds: headerWordmark.bounds
-    },
-    layout
-  }, null, 2));
-  process.exit(0);
+  writePng(headerWordmarkPath, headerWordmark.width, headerWordmark.height, headerWordmark.pixels);
+  console.log(`generated ${path.relative(repoRoot, outPath)}`);
+  console.log(`generated ${path.relative(repoRoot, onWhitePath)}`);
+  console.log(`generated ${path.relative(repoRoot, headerWordmarkPath)}`);
 }
 
-const canvas = Buffer.alloc(layout.width * layout.height * 4);
-alphaBlend(canvas, layout.width, mark, layout.mark.x, layout.mark.y);
-alphaBlend(canvas, layout.width, wordmark, layout.wordmark.x, layout.wordmark.y);
-writePng(outPath, layout.width, layout.height, canvas);
-const whiteCanvas = Buffer.alloc(layout.width * layout.height * 4, 255);
-alphaBlend(whiteCanvas, layout.width, { width: layout.width, height: layout.height, pixels: canvas }, 0, 0);
-writePng(onWhitePath, layout.width, layout.height, whiteCanvas);
-const headerWordmark = cropToAlpha(wordmark);
-writePng(headerWordmarkPath, headerWordmark.width, headerWordmark.height, headerWordmark.pixels);
-console.log(`generated ${path.relative(repoRoot, outPath)}`);
-console.log(`generated ${path.relative(repoRoot, onWhitePath)}`);
-console.log(`generated ${path.relative(repoRoot, headerWordmarkPath)}`);
+function runModernFallbackMode() {
+  if (!fs.existsSync(modernPrimaryFullPath)) {
+    throw new Error(
+      `Modern fallback requested, but ${path.relative(repoRoot, modernPrimaryFullPath)} is missing`
+    );
+  }
+
+  const full = readPng(modernPrimaryFullPath);
+
+  if (process.argv.includes("--info")) {
+    console.log(JSON.stringify({
+      mode: "modern-fallback",
+      source: {
+        path: path.relative(repoRoot, modernPrimaryFullPath),
+        width: full.width,
+        height: full.height,
+        bounds: alphaBounds(full)
+      },
+      generated: {
+        legacyFull: path.relative(repoRoot, outPath),
+        legacyOnWhite: path.relative(repoRoot, onWhitePath)
+      }
+    }, null, 2));
+    return;
+  }
+
+  writePng(outPath, full.width, full.height, full.pixels);
+  const whiteCanvas = Buffer.alloc(full.width * full.height * 4, 255);
+  alphaBlend(whiteCanvas, full.width, full, 0, 0);
+  writePng(onWhitePath, full.width, full.height, whiteCanvas);
+  console.log(`generated ${path.relative(repoRoot, outPath)} (compat mode from ${path.relative(repoRoot, modernPrimaryFullPath)})`);
+  console.log(`generated ${path.relative(repoRoot, onWhitePath)} (compat mode from ${path.relative(repoRoot, modernPrimaryFullPath)})`);
+}
+
+const useModernFallback = process.argv.includes("--from-modern");
+if (useModernFallback) {
+  runModernFallbackMode();
+} else {
+  validateLegacyInputsOrExplain();
+  runLegacyComposition();
+}

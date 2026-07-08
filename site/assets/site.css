@@ -223,7 +223,7 @@ nav a:focus-visible {
   inset: auto -8vw 4vh auto;
   width: min(60vw, 780px);
   aspect-ratio: 1;
-  background: url("logo/sigil-mark-transparent.png") center / contain no-repeat;
+  background: url("logo/sigil-mark-staff-glow.svg") center / contain no-repeat;
   opacity: 0.065;
   pointer-events: none;
 }
