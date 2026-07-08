@@ -1120,6 +1120,8 @@ footer a {
     --line: #2d3f53;
     --paper: #0d1117;
     --panel: #111a24;
+    --panel-soft: #0d1117;
+    --panel-strong: #0d1117;
     --teal: #8df0e0;
     --cyan: #34ddd0;
     --gold: #f1b95b;
@@ -1154,6 +1156,7 @@ footer a {
     --install-card-primary-border: rgba(52, 221, 208, 0.78);
     --code-block-collapsed-overlay: rgba(5, 13, 22, 0.72);
     --code-line-focus: rgba(44, 230, 218, 0.36);
+    --step-badge-fg: #052a2c;
     --primary-button-text: #f7fdff;
     --code-toolbar-border: #2f4a67;
     --hover-border: #3f607e;
