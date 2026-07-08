@@ -304,6 +304,7 @@ pub(crate) fn inject_write_file_approval(app: &mut AppState, preview: ToolPrevie
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(preview),
     })
 }

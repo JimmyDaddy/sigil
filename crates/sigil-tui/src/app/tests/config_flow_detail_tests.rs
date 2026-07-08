@@ -466,9 +466,9 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
     assert!(detail.contains("- Provider: session"));
     assert!(detail.contains("- Model name: session"));
     assert!(detail.contains("- Reasoning: session"));
-    assert!(
-        detail.contains("- Permission: mode=manual tools=0 rules=0 external=off external_rules=0")
-    );
+    assert!(detail.contains(
+        "- Permission: mode=manual commands=0 tools=0 rules=0 external=off external_rules=0"
+    ));
     assert!(detail.contains("- Skills: review,audit"));
     assert!(detail.contains("- MCP: filesystem"));
     assert!(detail.contains("- Nicknames: none"));
@@ -764,6 +764,11 @@ fn code_intelligence_detail_helpers_cover_status_edges_and_overflow() {
 #[test]
 fn detail_helpers_cover_permission_rule_and_mcp_summaries() {
     let mut root_config = test_config();
+    root_config.permission.commands = sigil_kernel::CommandPermissionConfig {
+        allow: vec!["git status*".to_owned(), "git diff*".to_owned()],
+        ask: vec!["cargo test -p sigil-tui*".to_owned()],
+        deny: vec!["git push*".to_owned(), "rm *".to_owned()],
+    };
     root_config.permission.rules = vec![
         sigil_kernel::PermissionRule {
             tool_name: Some("read_file".to_owned()),
@@ -811,6 +816,10 @@ fn detail_helpers_cover_permission_rule_and_mcp_summaries() {
     let state = ConfigState::from_root_config(&root_config);
 
     let rule_lines = render_permission_rule_summary(&state).join("\n");
+    assert!(rule_lines.contains("Command permissions"));
+    assert!(rule_lines.contains("5 patterns configured in config file"));
+    assert!(rule_lines.contains("- allow · git status*"));
+    assert!(rule_lines.contains("... 1 more command patterns in config file"));
     assert!(rule_lines.contains("Rule overrides"));
     assert!(rule_lines.contains("... 1 more rules in config file"));
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::CommandPermissionMatch;
 
 /// Append-only session log entry stored in the durable JSONL session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +258,8 @@ pub struct ToolApprovalEntry {
     pub confirmation: Option<PermissionConfirmation>,
     #[serde(default)]
     pub snapshot_required: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_permission_matches: Vec<CommandPermissionMatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_source: Option<ToolApprovalAllowSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

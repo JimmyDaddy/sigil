@@ -76,6 +76,7 @@ impl EventHandler for AppState {
                 subject_zones,
                 confirmation,
                 snapshot_required,
+                command_permission_matches,
                 preview,
             } => {
                 self.runtime.run_phase = RunPhase::Tool(call.name.clone());
@@ -114,6 +115,7 @@ impl EventHandler for AppState {
                     subject_zones,
                     confirmation,
                     snapshot_required,
+                    command_permission_matches,
                     preview,
                 });
                 self.active_pane = PaneFocus::Activity;
@@ -341,11 +343,12 @@ impl EventHandler for AppState {
                 }
             }
             RunEvent::Notice(note) => {
-                if notice_rejects_current_final_candidate(&note) {
+                let rejects_current_final_candidate = notice_rejects_current_final_candidate(&note);
+                if rejects_current_final_candidate {
                     self.discard_streaming_assistant_entry();
                 }
                 self.last_notice = Some(note.clone());
-                if notice_is_timeline_worthy(&note) {
+                if rejects_current_final_candidate || notice_is_timeline_worthy(&note) {
                     self.push_timeline(TimelineRole::Notice, note.clone());
                 }
                 self.push_event("notice", note);

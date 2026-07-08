@@ -526,26 +526,29 @@ fn collect_session_facts(
                         .map(str::to_owned);
                     let rerun_not_needed = execution.metadata.exit_code == Some(0)
                         && verdict.as_deref() == Some("passed");
-                    let command_fact = json!({
-                        "tool": execution.tool_name.as_str(),
-                        "status": tool_execution_status_label(execution.status),
-                        "command": command,
-                        "command_family": command_family,
-                        "exit_code": execution.metadata.exit_code,
-                        "verdict": verdict,
-                        "output_truncated": execution.metadata.truncated,
-                        "rerun_not_needed": rerun_not_needed,
-                        "changed_files": &execution.changed_files,
-                    });
-                    if let Some(family) = command_fact.get("command_family").and_then(Value::as_str)
-                        && matches!(
-                            family,
-                            "cargo_check" | "cargo_fmt_check" | "cargo_test" | "check_touched"
-                        )
-                    {
-                        gates.push(command_fact.clone());
+                    if command.is_some() {
+                        let command_fact = json!({
+                            "tool": execution.tool_name.as_str(),
+                            "status": tool_execution_status_label(execution.status),
+                            "command": command,
+                            "command_family": command_family,
+                            "exit_code": execution.metadata.exit_code,
+                            "verdict": verdict,
+                            "output_truncated": execution.metadata.truncated,
+                            "rerun_not_needed": rerun_not_needed,
+                            "changed_files": &execution.changed_files,
+                        });
+                        if let Some(family) =
+                            command_fact.get("command_family").and_then(Value::as_str)
+                            && matches!(
+                                family,
+                                "cargo_check" | "cargo_fmt_check" | "cargo_test" | "check_touched"
+                            )
+                        {
+                            gates.push(command_fact.clone());
+                        }
+                        commands.push(command_fact);
                     }
-                    commands.push(command_fact);
                 }
             }
             _ => {}
@@ -611,8 +614,7 @@ fn collect_session_facts(
         None
     };
 
-    let has_recorded_facts = approvals_policy_allow > 0
-        || approvals_policy_deny > 0
+    let has_recorded_facts = approvals_policy_deny > 0
         || approvals_requested > 0
         || approvals_resolved > 0
         || approval_session_grants > 0

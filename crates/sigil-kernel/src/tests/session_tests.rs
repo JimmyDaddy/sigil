@@ -142,6 +142,7 @@ fn test_tool_approval(action: ToolApprovalAuditAction) -> SessionLogEntry {
         external_directory_required: false,
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         allow_source: None,
         grant_call_id: None,
         user_decision: None,

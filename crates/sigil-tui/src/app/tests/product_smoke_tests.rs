@@ -36,6 +36,7 @@ fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -
         subject_zones: vec![sigil_kernel::PathTrustZone::Unknown],
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(ToolPreview {
             title: "Run workspace check".to_owned(),
             summary: "Runs a workspace build check through bash.".to_owned(),

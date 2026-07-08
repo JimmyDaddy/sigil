@@ -1262,6 +1262,7 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
 
@@ -1357,6 +1358,7 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
 

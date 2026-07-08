@@ -1753,6 +1753,7 @@ fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(ToolPreview {
             title: "Update note.txt".to_owned(),
             summary: "summary".to_owned(),

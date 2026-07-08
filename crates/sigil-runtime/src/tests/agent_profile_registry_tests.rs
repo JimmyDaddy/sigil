@@ -1534,6 +1534,125 @@ Review and edit docs.
 }
 
 #[test]
+fn registry_toml_agent_permission_commands_are_parsed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let agent_dir = workspace.join(".sigil").join("agents").join("shell-runner");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("agent.toml"),
+        r#"
+description = "Shell runner"
+trust = "trusted"
+
+[permission.commands]
+allow = ["git status*", "git diff*"]
+ask = ["cargo test -p sigil-runtime*"]
+deny = ["git push*"]
+"#,
+    )?;
+
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let runner = registry
+        .get(&AgentProfileId::new("shell-runner")?)
+        .expect("shell-runner profile is discovered");
+    let status = PermissionPolicy::new(&runner.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git status --short",
+            "family:git_read_only",
+        )],
+    )?;
+    let test = PermissionPolicy::new(&runner.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "cargo test -p sigil-runtime",
+            "family:cargo_test",
+        )],
+    )?;
+    let push = PermissionPolicy::new(&runner.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git push origin main",
+            "git push origin main",
+        )],
+    )?;
+
+    assert_eq!(runner.profile.permission_policy.commands.pattern_count(), 4);
+    assert_eq!(status.mode, ApprovalMode::Allow);
+    assert_eq!(test.mode, ApprovalMode::Ask);
+    assert_eq!(push.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn registry_markdown_agent_permission_commands_are_parsed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let agent_dir = workspace
+        .join(".sigil")
+        .join("agents")
+        .join("markdown-shell");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("AGENT.md"),
+        r#"---
+description: "Markdown shell"
+trust: trusted
+permission:
+  commands:
+    allow:
+      - "git status*"
+    ask: ["cargo test -p sigil-runtime*"]
+    deny:
+      - "git push*"
+---
+Run selected commands.
+"#,
+    )?;
+
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let runner = registry
+        .get(&AgentProfileId::new("markdown-shell")?)
+        .expect("markdown-shell profile is discovered");
+    let status = PermissionPolicy::new(&runner.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git status --short",
+            "family:git_read_only",
+        )],
+    )?;
+    let test = PermissionPolicy::new(&runner.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "cargo test -p sigil-runtime",
+            "family:cargo_test",
+        )],
+    )?;
+    let push = PermissionPolicy::new(&runner.profile.permission_policy).decide(
+        &permission_spec("bash", ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git push origin main",
+            "git push origin main",
+        )],
+    )?;
+
+    assert_eq!(runner.profile.permission_policy.commands.pattern_count(), 3);
+    assert_eq!(status.mode, ApprovalMode::Allow);
+    assert_eq!(test.mode, ApprovalMode::Ask);
+    assert_eq!(push.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
 fn registry_from_entries_and_child_skill_helpers_cover_projection_edges() -> Result<()> {
     let registry = AgentProfileRegistry::from_root_config_with_entries(&root_config(), &[])?;
     assert!(

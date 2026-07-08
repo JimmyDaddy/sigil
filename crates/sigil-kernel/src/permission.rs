@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use globset::{Glob, GlobMatcher};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 
 use crate::tool::{ToolAccess, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope};
 
@@ -158,6 +158,102 @@ pub struct PermissionRule {
     pub mode: ApprovalMode,
 }
 
+/// User-configured command permission patterns grouped by action.
+///
+/// Patterns are matched against the normalized command text using only `*` and `?` wildcards.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CommandPermissionConfig {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub ask: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl CommandPermissionConfig {
+    /// Returns the total number of configured command patterns.
+    pub fn pattern_count(&self) -> usize {
+        self.allow.len() + self.ask.len() + self.deny.len()
+    }
+
+    /// Appends command patterns from another config and validates exact cross-group duplicates.
+    pub fn extend_from(&mut self, other: &Self) -> Result<()> {
+        self.allow
+            .extend(normalize_command_permission_patterns(other.allow.clone()));
+        self.ask
+            .extend(normalize_command_permission_patterns(other.ask.clone()));
+        self.deny
+            .extend(normalize_command_permission_patterns(other.deny.clone()));
+        validate_command_permission_config(self).map_err(|message| anyhow!("{message}"))
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandPermissionConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", deny_unknown_fields)]
+        struct RawCommandPermissionConfig {
+            #[serde(default)]
+            allow: Vec<String>,
+            #[serde(default)]
+            ask: Vec<String>,
+            #[serde(default)]
+            deny: Vec<String>,
+        }
+
+        let raw = RawCommandPermissionConfig::deserialize(deserializer)?;
+        let config = Self {
+            allow: normalize_command_permission_patterns(raw.allow),
+            ask: normalize_command_permission_patterns(raw.ask),
+            deny: normalize_command_permission_patterns(raw.deny),
+        };
+        validate_command_permission_config(&config).map_err(de::Error::custom)?;
+        Ok(config)
+    }
+}
+
+/// Stable command permission groups for summaries and diagnostics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandPermissionGroup {
+    Allow,
+    Ask,
+    Deny,
+}
+
+impl CommandPermissionGroup {
+    /// Returns the stable config label for this group.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+        }
+    }
+
+    fn action(self) -> ApprovalMode {
+        match self {
+            Self::Allow => ApprovalMode::Allow,
+            Self::Ask => ApprovalMode::Ask,
+            Self::Deny => ApprovalMode::Deny,
+        }
+    }
+}
+
+/// One command permission pattern that matched a shell-like tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CommandPermissionMatch {
+    pub group: CommandPermissionGroup,
+    pub pattern: String,
+    pub command: String,
+}
+
 /// Advanced guard for explicitly approved paths outside the workspace root.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -195,6 +291,8 @@ pub struct ExternalDirectoryRule {
 pub struct PermissionConfig {
     #[serde(default)]
     pub mode: PermissionMode,
+    #[serde(default)]
+    pub commands: CommandPermissionConfig,
     #[serde(default)]
     pub tools: BTreeMap<String, ApprovalMode>,
     #[serde(default)]
@@ -314,6 +412,7 @@ pub struct PermissionDecision {
     pub external_directory_required: bool,
     pub confirmation: Option<PermissionConfirmation>,
     pub snapshot_required: bool,
+    pub command_permission_matches: Vec<CommandPermissionMatch>,
 }
 
 impl PermissionDecision {
@@ -440,6 +539,7 @@ impl PermissionDecision {
             external_directory_required,
             confirmation,
             snapshot_required,
+            command_permission_matches: Vec::new(),
         }
     }
 }
@@ -448,6 +548,7 @@ impl PermissionDecision {
 pub struct PermissionPolicy<'a> {
     config: &'a PermissionConfig,
     context: Option<&'a PermissionEvaluationContext>,
+    command_patterns: Vec<CompiledCommandPermissionPattern<'a>>,
     rules: Vec<CompiledPermissionRule<'a>>,
     external_rules: Vec<CompiledExternalDirectoryRule<'a>>,
 }
@@ -458,6 +559,7 @@ impl<'a> PermissionPolicy<'a> {
         Self {
             config,
             context: None,
+            command_patterns: compile_command_permission_patterns(&config.commands),
             rules: config
                 .rules
                 .iter()
@@ -480,6 +582,7 @@ impl<'a> PermissionPolicy<'a> {
         Self {
             config,
             context: Some(context),
+            command_patterns: compile_command_permission_patterns(&config.commands),
             rules: config
                 .rules
                 .iter()
@@ -570,12 +673,15 @@ impl<'a> PermissionPolicy<'a> {
             .iter()
             .any(|subject| subject.scope == ToolSubjectScope::External)
             && !self.config.external_directory.enabled;
+        let command_decision = self.decide_command_permissions(tool_name, &subjects);
+        let command_mode = command_decision.mode;
         let subject_modes = if subjects.is_empty() {
             vec![self.decide_one_subject(
                 tool_name,
                 access,
                 operation,
                 tool_default_mode,
+                command_mode,
                 None,
                 None,
             )?]
@@ -589,6 +695,7 @@ impl<'a> PermissionPolicy<'a> {
                         access,
                         operation,
                         tool_default_mode,
+                        command_mode,
                         Some(subject),
                         Some(zone),
                     )
@@ -605,18 +712,18 @@ impl<'a> PermissionPolicy<'a> {
             mode = combine_modes(vec![mode, cap_mode]);
         }
 
-        Ok(
-            PermissionDecision::new_with_policy_mode_operation_zones_and_overlays(
-                self.config.mode,
-                mode,
-                operation,
-                access,
-                subjects,
-                subject_zones,
-                subject_risk_overlays,
-                external_directory_required,
-            ),
-        )
+        let mut decision = PermissionDecision::new_with_policy_mode_operation_zones_and_overlays(
+            self.config.mode,
+            mode,
+            operation,
+            access,
+            subjects,
+            subject_zones,
+            subject_risk_overlays,
+            external_directory_required,
+        );
+        decision.command_permission_matches = command_decision.matches;
+        Ok(decision)
     }
 
     fn classify_subject_trust_analyses(&self, subjects: &[ToolSubject]) -> Vec<PathTrustAnalysis> {
@@ -637,6 +744,7 @@ impl<'a> PermissionPolicy<'a> {
         access: ToolAccess,
         operation: ToolOperation,
         tool_default_mode: Option<ApprovalMode>,
+        command_mode: Option<ApprovalMode>,
         subject: Option<&ToolSubject>,
         zone: Option<PathTrustZone>,
     ) -> Result<ApprovalMode> {
@@ -644,7 +752,9 @@ impl<'a> PermissionPolicy<'a> {
         if let Some(tool_default_mode) = tool_default_mode {
             mode = tool_default_mode;
         }
-        if let Some(tool_mode) = self.config.tools.get(tool_name).copied() {
+
+        let tool_mode = self.config.tools.get(tool_name).copied();
+        if let Some(tool_mode) = tool_mode {
             mode = tool_mode;
         }
 
@@ -658,7 +768,15 @@ impl<'a> PermissionPolicy<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let tool_policy_mode = matching_rule_modes.last().copied().unwrap_or(mode);
+        let explicit_tool_policy_mode = matching_rule_modes.last().copied().or(tool_mode);
+        let tool_policy_mode = explicit_tool_policy_mode.unwrap_or(mode);
+        let tool_policy_mode = match (command_mode, explicit_tool_policy_mode) {
+            (Some(command_mode), Some(explicit_mode)) => {
+                combine_modes(vec![explicit_mode, command_mode])
+            }
+            (Some(command_mode), None) => command_mode,
+            (None, _) => tool_policy_mode,
+        };
 
         let Some(subject) = subject else {
             return Ok(tool_policy_mode);
@@ -671,6 +789,51 @@ impl<'a> PermissionPolicy<'a> {
         } else {
             Ok(tool_policy_mode)
         }
+    }
+
+    fn decide_command_permissions(
+        &self,
+        tool_name: &str,
+        subjects: &[ToolSubject],
+    ) -> CommandPermissionDecision {
+        if !command_permission_tool_name_supported(tool_name) {
+            return CommandPermissionDecision::default();
+        }
+        let matches = subjects
+            .iter()
+            .filter(|subject| subject.kind == ToolSubjectKind::Command)
+            .flat_map(|subject| self.match_command_subject(subject))
+            .collect::<Vec<_>>();
+        let mode = if matches.is_empty() {
+            None
+        } else {
+            Some(combine_modes(
+                matches.iter().map(|item| item.group.action()).collect(),
+            ))
+        };
+        CommandPermissionDecision { mode, matches }
+    }
+
+    fn match_command_subject(&self, subject: &ToolSubject) -> Vec<CommandPermissionMatch> {
+        let original = normalize_command_pattern_subject(&subject.original);
+        let normalized = normalize_command_pattern_subject(&subject.normalized);
+        self.command_patterns
+            .iter()
+            .filter_map(|compiled| {
+                let command = if compiled.matches(&original) {
+                    Some(original.as_str())
+                } else if normalized != original && compiled.matches(&normalized) {
+                    Some(normalized.as_str())
+                } else {
+                    None
+                }?;
+                Some(CommandPermissionMatch {
+                    group: compiled.group,
+                    pattern: compiled.pattern.to_owned(),
+                    command: command.to_owned(),
+                })
+            })
+            .collect()
     }
 
     fn decide_external_subject(&self, subject: &ToolSubject) -> Result<ApprovalMode> {
@@ -1216,6 +1379,129 @@ fn workspace_config_secret_path(path: &str) -> bool {
             || name == "secrets"
             || name.starts_with("secrets.")
     })
+}
+
+#[derive(Debug, Clone, Default)]
+struct CommandPermissionDecision {
+    mode: Option<ApprovalMode>,
+    matches: Vec<CommandPermissionMatch>,
+}
+
+struct CompiledCommandPermissionPattern<'a> {
+    pattern: &'a str,
+    group: CommandPermissionGroup,
+}
+
+impl<'a> CompiledCommandPermissionPattern<'a> {
+    fn new(pattern: &'a str, group: CommandPermissionGroup) -> Self {
+        Self { pattern, group }
+    }
+
+    fn matches(&self, command: &str) -> bool {
+        command_pattern_matches(self.pattern, command)
+    }
+}
+
+fn compile_command_permission_patterns(
+    config: &CommandPermissionConfig,
+) -> Vec<CompiledCommandPermissionPattern<'_>> {
+    config
+        .deny
+        .iter()
+        .map(|pattern| CompiledCommandPermissionPattern::new(pattern, CommandPermissionGroup::Deny))
+        .chain(config.ask.iter().map(|pattern| {
+            CompiledCommandPermissionPattern::new(pattern, CommandPermissionGroup::Ask)
+        }))
+        .chain(config.allow.iter().map(|pattern| {
+            CompiledCommandPermissionPattern::new(pattern, CommandPermissionGroup::Allow)
+        }))
+        .collect()
+}
+
+fn command_permission_tool_name_supported(tool_name: &str) -> bool {
+    matches!(tool_name, "bash" | "terminal_start" | "terminal_input")
+}
+
+fn normalize_command_permission_patterns(patterns: Vec<String>) -> Vec<String> {
+    patterns
+        .into_iter()
+        .map(|pattern| normalize_command_pattern_subject(&pattern))
+        .collect()
+}
+
+fn normalize_command_pattern_subject(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn validate_command_permission_config(
+    config: &CommandPermissionConfig,
+) -> std::result::Result<(), String> {
+    let mut seen = BTreeMap::<String, CommandPermissionGroup>::new();
+    for (group, patterns) in [
+        (CommandPermissionGroup::Allow, &config.allow),
+        (CommandPermissionGroup::Ask, &config.ask),
+        (CommandPermissionGroup::Deny, &config.deny),
+    ] {
+        for pattern in patterns {
+            if pattern.is_empty() {
+                return Err(format!(
+                    "permission.commands.{} contains an empty pattern",
+                    group.as_str()
+                ));
+            }
+            if pattern.contains('\n') || pattern.contains('\r') {
+                return Err(format!(
+                    "permission.commands.{} pattern {pattern:?} must be one line",
+                    group.as_str()
+                ));
+            }
+            if let Some(previous) = seen.insert(pattern.clone(), group)
+                && previous != group
+            {
+                return Err(format!(
+                    "permission.commands pattern {pattern:?} appears in both {} and {}",
+                    previous.as_str(),
+                    group.as_str()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn command_pattern_matches(pattern: &str, command: &str) -> bool {
+    let pattern_chars = pattern.chars().collect::<Vec<_>>();
+    let command_chars = command.chars().collect::<Vec<_>>();
+    let mut pattern_index = 0usize;
+    let mut command_index = 0usize;
+    let mut star_pattern_index: Option<usize> = None;
+    let mut star_command_index = 0usize;
+
+    while command_index < command_chars.len() {
+        if pattern_index < pattern_chars.len()
+            && (pattern_chars[pattern_index] == '?'
+                || pattern_chars[pattern_index] == command_chars[command_index])
+        {
+            pattern_index += 1;
+            command_index += 1;
+        } else if pattern_index < pattern_chars.len() && pattern_chars[pattern_index] == '*' {
+            star_pattern_index = Some(pattern_index);
+            pattern_index += 1;
+            star_command_index = command_index;
+        } else if let Some(star_index) = star_pattern_index {
+            pattern_index = star_index + 1;
+            star_command_index += 1;
+            command_index = star_command_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern_chars.len() && pattern_chars[pattern_index] == '*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern_chars.len()
 }
 
 struct CompiledPermissionRule<'a> {

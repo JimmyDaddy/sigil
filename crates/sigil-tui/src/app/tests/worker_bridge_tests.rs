@@ -1152,6 +1152,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         session_grant_available: false,
         preview: None,
     });
@@ -1610,6 +1611,7 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
             subject_zones: Vec::new(),
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             preview: None,
         }),
     })?;
@@ -1767,6 +1769,7 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
     assert_eq!(app.run_phase(), RunPhase::Tool("spawn_agent".to_owned()));

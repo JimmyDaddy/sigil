@@ -8,12 +8,12 @@ use crate::{
 };
 
 use super::{
-    ApprovalMode, EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
-    PathRiskOverlay, PathTrustZone, PermissionConfig, PermissionConfirmation,
-    PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionRisk, PermissionRule,
-    ToolOperation, classify_path_trust_analysis, classify_path_trust_analysis_with_context,
-    classify_path_trust_zone, classify_path_trust_zone_with_context,
-    tool_approval_session_grant_available,
+    ApprovalMode, CommandPermissionConfig, EffectivePermissionPolicyCap, ExternalDirectoryConfig,
+    ExternalDirectoryRule, PathRiskOverlay, PathTrustZone, PermissionConfig,
+    PermissionConfirmation, PermissionEvaluationContext, PermissionMode, PermissionPolicy,
+    PermissionRisk, PermissionRule, ToolOperation, classify_path_trust_analysis,
+    classify_path_trust_analysis_with_context, classify_path_trust_zone,
+    classify_path_trust_zone_with_context, tool_approval_session_grant_available,
 };
 
 fn spec(access: ToolAccess) -> ToolSpec {
@@ -38,6 +38,10 @@ fn external_path_subject(path: PathBuf) -> ToolSubject {
         Some(path),
         ToolSubjectScope::External,
     )
+}
+
+fn command_subject(command: &str) -> ToolSubject {
+    ToolSubject::command(command.to_owned(), command.to_owned())
 }
 
 #[test]
@@ -79,6 +83,181 @@ fn permission_mode_defaults_to_manual_and_parses_all_user_modes() -> Result<()> 
         let config: PermissionConfig = toml::from_str(&format!(r#"mode = "{raw}""#))?;
         assert_eq!(config.mode, expected);
     }
+    Ok(())
+}
+
+#[test]
+fn command_permission_config_parses_grouped_patterns() -> Result<()> {
+    let config: PermissionConfig = toml::from_str(
+        r#"
+[commands]
+allow = ["git status*", "git diff*"]
+ask = ["cargo test -p sigil-kernel*"]
+deny = ["rm *"]
+"#,
+    )?;
+
+    assert_eq!(config.commands.allow, ["git status*", "git diff*"]);
+    assert_eq!(config.commands.ask, ["cargo test -p sigil-kernel*"]);
+    assert_eq!(config.commands.deny, ["rm *"]);
+    assert_eq!(config.commands.pattern_count(), 4);
+    Ok(())
+}
+
+#[test]
+fn command_permission_config_rejects_cross_group_duplicates() {
+    let error = toml::from_str::<PermissionConfig>(
+        r#"
+[commands]
+allow = ["git status*"]
+ask = ["git status*"]
+"#,
+    )
+    .expect_err("duplicate command pattern should fail config load");
+
+    assert!(error.to_string().contains("appears in both allow and ask"));
+}
+
+#[test]
+fn command_permission_config_rejects_empty_patterns() {
+    let error = toml::from_str::<PermissionConfig>(
+        r#"
+[commands]
+allow = ["   "]
+"#,
+    )
+    .expect_err("empty command pattern should fail config load");
+
+    assert!(error.to_string().contains("contains an empty pattern"));
+}
+
+#[test]
+fn command_permission_allow_can_widen_manual_shell_default() -> Result<()> {
+    let config = PermissionConfig {
+        commands: CommandPermissionConfig {
+            allow: vec!["git status*".to_owned()],
+            ..CommandPermissionConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+
+    let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteUnknownCommand,
+        vec![
+            command_subject("git status --short"),
+            path_subject("src/main.rs"),
+        ],
+        None,
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Allow);
+    Ok(())
+}
+
+#[test]
+fn command_permission_ask_and_deny_take_precedence_over_allow() -> Result<()> {
+    let config = PermissionConfig {
+        commands: CommandPermissionConfig {
+            allow: vec!["git *".to_owned(), "rm -i *".to_owned()],
+            ask: vec!["git status*".to_owned()],
+            deny: vec!["rm *".to_owned()],
+        },
+        ..PermissionConfig::default()
+    };
+
+    let ask = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteUnknownCommand,
+        vec![command_subject("git status --short")],
+        None,
+    )?;
+    let deny = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteUnknownCommand,
+        vec![command_subject("rm -i target")],
+        None,
+    )?;
+
+    assert_eq!(ask.mode, ApprovalMode::Ask);
+    assert_eq!(deny.mode, ApprovalMode::Deny);
+    assert_eq!(ask.command_permission_matches.len(), 2);
+    assert_eq!(
+        ask.command_permission_matches
+            .iter()
+            .map(|item| (
+                item.group.as_str(),
+                item.pattern.as_str(),
+                item.command.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("ask", "git status*", "git status --short"),
+            ("allow", "git *", "git status --short"),
+        ]
+    );
+    assert_eq!(
+        deny.command_permission_matches
+            .iter()
+            .map(|item| (
+                item.group.as_str(),
+                item.pattern.as_str(),
+                item.command.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("deny", "rm *", "rm -i target"),
+            ("allow", "rm -i *", "rm -i target"),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn command_permission_allow_does_not_override_read_only_or_external_caps() -> Result<()> {
+    let read_only = PermissionConfig {
+        mode: PermissionMode::ReadOnly,
+        commands: CommandPermissionConfig {
+            allow: vec!["git status*".to_owned()],
+            ..CommandPermissionConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let read_only_decision = PermissionPolicy::new(&read_only).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteUnknownCommand,
+        vec![command_subject("git status --short")],
+        None,
+    )?;
+    assert_eq!(read_only_decision.mode, ApprovalMode::Deny);
+
+    let external = PermissionConfig {
+        commands: CommandPermissionConfig {
+            allow: vec!["cat *".to_owned()],
+            ..CommandPermissionConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let external_decision = PermissionPolicy::new(&external).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteUnknownCommand,
+        vec![
+            command_subject("cat /tmp/sigil-outside.txt"),
+            external_path_subject(PathBuf::from("/tmp/sigil-outside.txt")),
+        ],
+        None,
+    )?;
+    assert_eq!(external_decision.mode, ApprovalMode::Deny);
     Ok(())
 }
 

@@ -1244,6 +1244,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                 subject_zones: Vec::new(),
                 confirmation: None,
                 snapshot_required: false,
+                command_permission_matches: Vec::new(),
                 policy_decision: ApprovalMode::Ask,
                 external_directory_required: false,
                 allow_source: None,

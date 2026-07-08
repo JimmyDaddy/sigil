@@ -158,6 +158,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         session_grant_available: false,
         preview: None,
     });
@@ -302,6 +303,7 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         session_grant_available: false,
         preview: Some(sigil_kernel::ToolPreview {
             title: "Update files".to_owned(),
@@ -578,6 +580,7 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         session_grant_available: false,
         preview: None,
     });

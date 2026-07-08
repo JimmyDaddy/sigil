@@ -348,6 +348,11 @@ Default shape:
 [permission]
 mode = "manual"
 
+[permission.commands]
+allow = []
+ask = []
+deny = []
+
 [permission.external_directory]
 enabled = false
 default_mode = "ask"
@@ -366,7 +371,9 @@ Modes:
 Meaning:
 
 - `mode = "manual"` is the default interactive safety posture.
-- `tools`, `rules`, and `external_directory` are advanced policy-file overrides for specific tools, subjects, or external paths. They are not a second default permission baseline.
+- `commands`, `tools`, `rules`, and `external_directory` are advanced policy-file overrides for specific commands, tools, subjects, or external paths. They are not a second default permission baseline.
+- `permission.commands` is the recommended advanced shell-command override. Patterns match normalized command text and only treat `*` and `?` as wildcards. Exact duplicate patterns across `allow`, `ask`, and `deny` are rejected.
+- When `permission.commands` matches, approval cards and session audit entries record `permission.commands.<allow|ask|deny>`, the pattern, and the command text so the decision remains explainable.
 - Paths outside the workspace are disabled by default; if external directories are enabled, they still go through the external-directory gate.
 - Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`. It is backed by Sigil's per-user cache root and shown to the model as `cache/tmp`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
 - In headless `run`, final `ask` decisions are returned to the model as structured `approval_required` tool errors instead of being executed silently.
@@ -378,9 +385,10 @@ Precedence:
 | 1 | `mode` baseline | The user-facing top-level mode sets the default posture; `read-only` is a hard non-read cap and `danger-full-access` is an explicit full-access override. |
 | 2 | Tool-provided default | Runtime/tool-specific default, such as a trusted read-only command downgrade. |
 | 3 | `tools.<tool_name>` | Tool-name override. |
-| 4 | `rules[]` | Matching tool/subject rules; multiple matches combine by the strictest mode: `deny > ask > allow`. |
-| 5 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
-| 6 | Effective policy cap | Runtime caps are combined by the same strictest-mode rule. |
+| 4 | `rules[]` | Matching tool/subject rules; the last matching rule wins, preserving file-order specificity. |
+| 5 | `commands.allow/ask/deny` | Matching command patterns for shell commands. Within command groups, `deny > ask > allow`; command `allow` can widen the default `manual` shell ask, but it cannot override explicit tool/rule ask or deny. |
+| 6 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
+| 7 | Effective policy cap and risk overlays | Runtime caps, `read-only`, protected paths, destructive operations, and external-directory denial remain hard safety boundaries. |
 
 ## Memory
 
@@ -427,13 +435,13 @@ glob = "allow"
 grep = "allow"
 edit = "ask"
 
-[permission.bash]
-"*" = "ask"
-"cargo test *" = "allow"
-"git push*" = "deny"
+[permission.commands]
+allow = ["cargo test *", "git status*", "git diff*"]
+ask = ["cargo clippy *"]
+deny = ["git push*", "rm *"]
 ```
 
-Agent permissions are merged after the global `[permission]` config, so an agent rule can override a global `allow`, `ask`, or `deny`. The global `read-only` mode remains a hard cap, and protected paths, destructive operations, external-directory gates, and write-subagent isolation still fail closed. Write-capable subagents still use foreground changeset-only merge review until a stronger write isolation mode is available.
+Agent permissions are merged after the global `[permission]` config. Agent command groups use the same `allow` / `ask` / `deny` semantics as the root config. The global `read-only` mode remains a hard cap, and protected paths, destructive operations, external-directory gates, and write-subagent isolation still fail closed. Write-capable subagents still use foreground changeset-only merge review until a stronger write isolation mode is available.
 
 ## Compaction
 

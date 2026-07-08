@@ -221,6 +221,7 @@ fn append_tool_approval_audit_with_source(
         external_directory_required: decision.external_directory_required,
         confirmation: decision.confirmation.clone(),
         snapshot_required: decision.snapshot_required,
+        command_permission_matches: decision.command_permission_matches.clone(),
         allow_source,
         grant_call_id,
         user_decision,

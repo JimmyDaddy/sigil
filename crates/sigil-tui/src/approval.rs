@@ -1,6 +1,6 @@
 use sigil_kernel::{
-    PathTrustZone, PermissionConfirmation, PermissionRisk, ToolCall, ToolOperation, ToolPreview,
-    ToolSpec, ToolSubject,
+    CommandPermissionMatch, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolCall,
+    ToolOperation, ToolPreview, ToolSpec, ToolSubject,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +148,7 @@ pub struct PendingApproval {
     pub subject_zones: Vec<PathTrustZone>,
     pub confirmation: Option<PermissionConfirmation>,
     pub snapshot_required: bool,
+    pub command_permission_matches: Vec<CommandPermissionMatch>,
     pub session_grant_available: bool,
     pub preview: Option<ToolPreview>,
 }

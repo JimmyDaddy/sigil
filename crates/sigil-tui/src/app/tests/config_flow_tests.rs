@@ -1743,9 +1743,9 @@ slash_names = ["review-agent"]
     assert!(detail.contains("- Source hash:"));
     assert!(detail.contains("- Invocation: model_allowed"));
     assert!(detail.contains("- Tools: names=grep,read_file"));
-    assert!(
-        detail.contains("- Permission: mode=manual tools=0 rules=0 external=off external_rules=0")
-    );
+    assert!(detail.contains(
+        "- Permission: mode=manual commands=0 tools=0 rules=0 external=off external_rules=0"
+    ));
     assert!(detail.contains("- Nicknames: Repo Review"));
     assert!(detail.contains("- Aliases: rr"));
     assert!(detail.contains("- Slash: /review-agent"));

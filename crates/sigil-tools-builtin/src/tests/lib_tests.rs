@@ -2550,6 +2550,9 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
         subject.kind == ToolSubjectKind::Command && subject.original == "terminal_input bytes=24"
     }));
     assert!(subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Command && subject.original == "cat input.txt > out.txt"
+    }));
+    assert!(subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path && subject.normalized == "logs/input.txt"
     }));
     assert!(subjects.iter().any(|subject| {
@@ -2563,6 +2566,18 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
         )?,
         ToolOperation::SendTerminalInput
     );
+    let read_args = json!({
+        "task_id": task_id.as_str(),
+        "input": "cat input.txt\n"
+    });
+    assert_eq!(
+        tool.permission_operation(&ctx, &read_args)?,
+        ToolOperation::ExecuteReadOnlyCommand
+    );
+    let read_subjects = tool.permission_subjects(&ctx, &read_args)?;
+    assert!(read_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Command && subject.original == "cat input.txt"
+    }));
     manager.cancel(&task_id).await?;
     Ok(())
 }
@@ -3116,7 +3131,9 @@ async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Res
 
     assert_eq!(first.len(), 1);
     assert_eq!(piped.len(), 1);
+    assert_eq!(first[0].original, "cargo check 2>&1");
     assert_eq!(first[0].normalized, "family:cargo_check");
+    assert_eq!(piped[0].original, "cd . && cargo check 2>&1 | tail -20");
     assert_eq!(piped[0].normalized, "family:cargo_check");
     assert_eq!(
         tool.permission_access(&ctx, &json!({ "command": "cargo check 2>&1 | tail -20" }))?,
@@ -3201,6 +3218,14 @@ async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
     assert_eq!(
         result.metadata.details["shell"]["command"],
         "./scripts/check-touched.sh --tier quick 2>&1"
+    );
+    assert_eq!(
+        result.metadata.details["shell"]["normalized_command"],
+        "./scripts/check-touched.sh --tier quick 2>&1"
+    );
+    assert_eq!(
+        result.metadata.details["shell"]["classification_source"],
+        "builtin_family"
     );
     assert_eq!(
         result.metadata.details["shell"]["grant_scope"],
@@ -3596,6 +3621,10 @@ fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
         list_pipeline_analysis.operation,
         ToolOperation::ExecuteReadOnlyCommand
     );
+    assert_eq!(
+        list_pipeline_analysis.classification_source,
+        super::ShellClassificationSource::BuiltinFamily
+    );
     assert!(
         list_pipeline_analysis
             .subjects
@@ -3615,6 +3644,10 @@ fn bash_readonly_composite_commands_downgrade_to_read_access() -> Result<()> {
     assert_eq!(
         cat_head_analysis.operation,
         ToolOperation::ExecuteReadOnlyCommand
+    );
+    assert_eq!(
+        cat_head_analysis.classification_source,
+        super::ShellClassificationSource::AstKnownReadonly
     );
     Ok(())
 }
@@ -4646,6 +4679,16 @@ fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
         super::terminal_input_permission_operation("echo hello"),
         ToolOperation::SendTerminalInput
     );
+    assert!(super::bash_command_is_ast_known_readonly(
+        "cat Cargo.toml | head -20"
+    ));
+    assert!(!super::bash_command_is_ast_known_readonly(
+        "sort --output out.txt Cargo.toml"
+    ));
+    assert!(!super::bash_command_is_ast_known_readonly(
+        "cat <<EOF\nsecret\nEOF"
+    ));
+    assert!(!super::bash_command_is_ast_known_readonly("(pwd)"));
     assert_eq!(
         super::shell_segment_command_and_args(&["FOO=bar".to_owned(), "rm".to_owned()])
             .map(|(command, args)| (command.to_owned(), args.len())),

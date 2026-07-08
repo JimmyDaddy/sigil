@@ -861,6 +861,9 @@ where
                                     subject_zones: decision.subject_zones.clone(),
                                     confirmation: decision.confirmation.clone(),
                                     snapshot_required: decision.snapshot_required,
+                                    command_permission_matches: decision
+                                        .command_permission_matches
+                                        .clone(),
                                     preview,
                                 })?;
                                 let approval = approval_handler.approve_tool_call(&call, spec)?;

@@ -35,6 +35,7 @@ impl EventHandler for ChatChildEventHandler<'_> {
                 subject_zones,
                 confirmation,
                 snapshot_required,
+                command_permission_matches,
                 preview,
             } => self.inner.handle(RunEvent::ToolApprovalRequested {
                 call,
@@ -45,6 +46,7 @@ impl EventHandler for ChatChildEventHandler<'_> {
                 subject_zones,
                 confirmation,
                 snapshot_required,
+                command_permission_matches,
                 preview,
             }),
             RunEvent::ToolApprovalResolved {

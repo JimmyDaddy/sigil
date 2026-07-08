@@ -12,6 +12,7 @@ use sigil_kernel::{
     ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolResult, ToolResultMeta,
     ToolSpec, ToolSubject, ToolSubjectScope,
 };
+use tree_sitter::{Node, Parser};
 
 use crate::{
     constants::{DEFAULT_TEXT_LIMIT_BYTES, HARD_TEXT_LIMIT_BYTES, SIGIL_SCRATCH_DIR_ENV},
@@ -91,7 +92,9 @@ impl Tool for BashTool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShellCommandAnalysis {
     pub(crate) command: String,
+    pub(crate) normalized_command: String,
     pub(crate) command_family: CommandFamily,
+    pub(crate) classification_source: ShellClassificationSource,
     pub(crate) access: ToolAccess,
     pub(crate) operation: ToolOperation,
     pub(crate) subjects: Vec<ToolSubject>,
@@ -148,6 +151,27 @@ impl CommandFamily {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShellClassificationSource {
+    BuiltinFamily,
+    KnownReadonlyFastPath,
+    AstKnownReadonly,
+    DestructivePattern,
+    Unknown,
+}
+
+impl ShellClassificationSource {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::BuiltinFamily => "builtin_family",
+            Self::KnownReadonlyFastPath => "known_readonly_fast_path",
+            Self::AstKnownReadonly => "ast_known_readonly",
+            Self::DestructivePattern => "destructive_pattern",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandGrantScope {
     ExactCommand,
     WorkspaceCheckFamily,
@@ -193,20 +217,26 @@ pub(crate) fn analyze_shell_command(
     command: &str,
 ) -> Result<ShellCommandAnalysis> {
     let family = classify_shell_command_family(workspace_root, command)?;
+    let normalized_command = normalize_shell_command_for_permission(command);
     let destructive = shell_command_is_destructive(command);
+    let ast_known_readonly = !destructive
+        && family == CommandFamily::Unknown
+        && bash_command_is_ast_known_readonly(command);
     let mut subjects = Vec::new();
     let access;
     let operation;
     let grant_scope;
     let explanation;
+    let classification_source;
 
     if destructive {
         access = ToolAccess::Execute;
         operation = ToolOperation::ExecuteDestructiveCommand;
         grant_scope = None;
         explanation = ShellApprovalReason::DestructiveCommand;
+        classification_source = ShellClassificationSource::DestructivePattern;
         subjects.push(ToolSubject::command(
-            command.to_owned(),
+            normalized_command.clone(),
             command_permission_subject(command),
         ));
         subjects.extend(bash_path_subjects(workspace_root, command)?);
@@ -215,10 +245,17 @@ pub(crate) fn analyze_shell_command(
         operation = ToolOperation::ExecuteWorkspaceCheckCommand;
         grant_scope = workspace_check_grant_scope(&family);
         explanation = ShellApprovalReason::WorkspaceCheck;
+        classification_source = ShellClassificationSource::BuiltinFamily;
         let stable_subject = family.stable_subject();
-        subjects.push(ToolSubject::command(stable_subject.clone(), stable_subject));
+        subjects.push(ToolSubject::command(
+            normalized_command.clone(),
+            stable_subject,
+        ));
         subjects.extend(external_shell_path_subjects(workspace_root, command)?);
-    } else if family.is_workspace_read_only() || bash_command_is_safe_readonly(command) {
+    } else if family.is_workspace_read_only()
+        || ast_known_readonly
+        || bash_command_is_safe_readonly(command)
+    {
         access = ToolAccess::Read;
         operation = ToolOperation::ExecuteReadOnlyCommand;
         grant_scope = if family == CommandFamily::Unknown {
@@ -227,20 +264,31 @@ pub(crate) fn analyze_shell_command(
             Some(CommandGrantScope::WorkspaceReadOnlyShell)
         };
         explanation = ShellApprovalReason::WorkspaceReadOnly;
+        classification_source = if ast_known_readonly {
+            ShellClassificationSource::AstKnownReadonly
+        } else if family == CommandFamily::Unknown {
+            ShellClassificationSource::KnownReadonlyFastPath
+        } else {
+            ShellClassificationSource::BuiltinFamily
+        };
         let stable_subject = if family == CommandFamily::Unknown {
             command_permission_subject(command)
         } else {
             family.stable_subject()
         };
-        subjects.push(ToolSubject::command(stable_subject.clone(), stable_subject));
+        subjects.push(ToolSubject::command(
+            normalized_command.clone(),
+            stable_subject,
+        ));
         subjects.extend(bash_path_subjects(workspace_root, command)?);
     } else {
         access = ToolAccess::Execute;
         operation = ToolOperation::ExecuteUnknownCommand;
         grant_scope = None;
         explanation = ShellApprovalReason::UnknownCommand;
+        classification_source = ShellClassificationSource::Unknown;
         subjects.push(ToolSubject::command(
-            command.to_owned(),
+            normalized_command.clone(),
             command_permission_subject(command),
         ));
         subjects.extend(bash_path_subjects(workspace_root, command)?);
@@ -248,7 +296,9 @@ pub(crate) fn analyze_shell_command(
 
     Ok(ShellCommandAnalysis {
         command: command.to_owned(),
+        normalized_command,
         command_family: family,
+        classification_source,
         access,
         operation,
         subjects,
@@ -396,7 +446,9 @@ pub(crate) fn execution_receipt_details(
     if let Some(analysis) = analysis {
         details["shell"] = json!({
             "command": analysis.command.as_str(),
+            "normalized_command": analysis.normalized_command.as_str(),
             "command_family": analysis.command_family.as_str(),
+            "classification_source": analysis.classification_source.as_str(),
             "grant_scope": analysis.grant_scope.as_ref().map(CommandGrantScope::as_str),
             "grant_scope_detail": shell_grant_scope_detail(analysis.grant_scope.as_ref()),
             "approval_reason": analysis.explanation.as_str(),
@@ -437,13 +489,17 @@ fn shell_rerun_not_needed(analysis: &ShellCommandAnalysis, receipt: &ExecutionRe
 
 pub(crate) fn command_permission_subject(command: &str) -> String {
     const MAX_CHARS: usize = 120;
-    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalize_shell_command_for_permission(command);
     let char_count = normalized.chars().count();
     if char_count <= MAX_CHARS {
         return normalized;
     }
     let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
     format!("{truncated}...")
+}
+
+pub(crate) fn normalize_shell_command_for_permission(command: &str) -> String {
+    command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn classify_shell_command_family(workspace_root: &Path, command: &str) -> Result<CommandFamily> {
@@ -650,6 +706,19 @@ pub(crate) fn terminal_input_permission_operation(input: &str) -> ToolOperation 
     }
 }
 
+pub(crate) fn terminal_input_permission_operation_from_analysis(
+    workspace_root: &Path,
+    input: &str,
+) -> Result<ToolOperation> {
+    let analysis = analyze_shell_command(workspace_root, input)?;
+    Ok(match analysis.operation {
+        ToolOperation::ExecuteDestructiveCommand => ToolOperation::ExecuteDestructiveCommand,
+        ToolOperation::ExecuteReadOnlyCommand => ToolOperation::ExecuteReadOnlyCommand,
+        ToolOperation::ExecuteWorkspaceCheckCommand => ToolOperation::ExecuteWorkspaceCheckCommand,
+        _ => terminal_input_permission_operation(input),
+    })
+}
+
 pub(crate) fn shell_command_is_destructive(command: &str) -> bool {
     let tokens = tokenize_shell_subject_words(command);
     let mut segment = Vec::new();
@@ -799,6 +868,70 @@ pub(crate) fn shell_invocation_is_destructive(words: &[String]) -> bool {
     words.windows(2).any(|pair| {
         matches!(pair[0].as_str(), "-c" | "-lc") && shell_command_is_destructive(&pair[1])
     })
+}
+
+pub(crate) fn bash_command_is_ast_known_readonly(command: &str) -> bool {
+    let trimmed = command.trim();
+    !trimmed.is_empty()
+        && bash_ast_has_supported_readonly_structure(trimmed)
+        && bash_command_is_safe_readonly(trimmed)
+}
+
+fn bash_ast_has_supported_readonly_structure(command: &str) -> bool {
+    let mut parser = Parser::new();
+    let language = tree_sitter_bash::LANGUAGE;
+    if parser.set_language(&language.into()).is_err() {
+        return false;
+    }
+    let Some(tree) = parser.parse(command, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return false;
+    }
+    let mut saw_readonly_structure = false;
+    bash_ast_node_is_supported_readonly_candidate(root, &mut saw_readonly_structure)
+        && saw_readonly_structure
+}
+
+fn bash_ast_node_is_supported_readonly_candidate(
+    node: Node<'_>,
+    saw_readonly_structure: &mut bool,
+) -> bool {
+    let kind = node.kind();
+    if bash_ast_node_kind_is_unsupported_for_readonly(kind) {
+        return false;
+    }
+    if matches!(
+        kind,
+        "pipeline" | "list" | "redirected_statement" | "binary_expression"
+    ) {
+        *saw_readonly_structure = true;
+    }
+
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .all(|child| bash_ast_node_is_supported_readonly_candidate(child, saw_readonly_structure))
+}
+
+fn bash_ast_node_kind_is_unsupported_for_readonly(kind: &str) -> bool {
+    matches!(
+        kind,
+        "if_statement"
+            | "for_statement"
+            | "while_statement"
+            | "case_statement"
+            | "function_definition"
+            | "subshell"
+            | "command_substitution"
+            | "process_substitution"
+            | "heredoc_redirect"
+            | "heredoc_body"
+            | "variable_assignment"
+            | "expansion"
+            | "arithmetic_expansion"
+    )
 }
 
 pub(crate) fn bash_command_is_safe_readonly(command: &str) -> bool {

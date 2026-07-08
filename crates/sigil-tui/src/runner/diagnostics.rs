@@ -414,6 +414,7 @@ fn append_policy_audit(
         subject_zones: decision.subject_zones.clone(),
         confirmation: decision.confirmation.clone(),
         snapshot_required: decision.snapshot_required,
+        command_permission_matches: decision.command_permission_matches.clone(),
         policy_decision: decision.mode,
         external_directory_required: decision.external_directory_required,
         allow_source: None,

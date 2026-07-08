@@ -167,8 +167,9 @@ fn permission_policy_summary(policy: &sigil_kernel::PermissionConfig) -> String 
         "external=off external_rules=0".to_owned()
     };
     format!(
-        "mode={} tools={} rules={} {external}",
+        "mode={} commands={} tools={} rules={} {external}",
         policy.mode.as_str(),
+        policy.commands.pattern_count(),
         policy.tools.len(),
         policy.rules.len()
     )

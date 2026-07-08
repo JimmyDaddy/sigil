@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use sigil_kernel::{
     TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCategory,
     ToolContext, ToolErrorKind, ToolExecutionId, ToolOperation, ToolPreviewCapability,
-    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
 };
 use tokio::time::sleep;
 
@@ -25,7 +25,8 @@ use crate::{
     },
     shell::{
         ShellCommandAnalysis, analyze_shell_command, bash_path_subjects_from_cwd,
-        command_permission_subject, shell_grant_scope_detail, terminal_input_permission_operation,
+        command_permission_subject, shell_grant_scope_detail,
+        terminal_input_permission_operation_from_analysis,
     },
     support::{optional_string, optional_usize, required_string},
     terminal_process::{
@@ -333,10 +334,17 @@ impl Tool for TerminalInputTool {
         validate_terminal_input_len(input)?;
         let context = self.terminal_input_permission_context(ctx, &task_id)?;
         let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
+        let analysis = analyze_shell_command(&workspace_root, input)?;
         let mut subjects = vec![
             terminal_task_subject(&task_id),
             terminal_input_subject(input.len()),
         ];
+        subjects.extend(
+            analysis
+                .subjects
+                .into_iter()
+                .filter(|subject| subject.kind == ToolSubjectKind::Command),
+        );
         subjects.extend(bash_path_subjects_from_cwd(
             &workspace_root,
             &context.cwd,
@@ -350,7 +358,7 @@ impl Tool for TerminalInputTool {
         let input = required_string(args, "input")?;
         validate_terminal_input_len(input)?;
         let _context = self.terminal_input_permission_context(ctx, &task_id)?;
-        Ok(terminal_input_permission_operation(input))
+        terminal_input_permission_operation_from_analysis(&ctx.workspace_root, input)
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {

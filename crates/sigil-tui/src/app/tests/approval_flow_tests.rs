@@ -90,6 +90,7 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
 
@@ -141,6 +142,7 @@ fn terminal_input_approval_modal_explains_task_without_echoing_input() -> Result
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
 
@@ -273,6 +275,7 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
             subject_zones: Vec::new(),
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             preview: None,
         })?;
         assert!(app.approval_preview_lines().join("\n").contains(expected));
@@ -313,6 +316,11 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
             phrase: "DELETE".to_owned(),
         }),
         snapshot_required: true,
+        command_permission_matches: vec![sigil_kernel::CommandPermissionMatch {
+            group: sigil_kernel::CommandPermissionGroup::Ask,
+            pattern: "cargo test*".to_owned(),
+            command: "cargo test -p sigil-kernel".to_owned(),
+        }],
         preview: None,
     })?;
     let lines = app.approval_preview_lines().join("\n");
@@ -330,6 +338,9 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
     assert!(lines.contains("unknown"));
     assert!(lines.contains("confirmation=type the requested phrase before approval"));
     assert!(lines.contains("recovery=pre-change snapshot required"));
+    assert!(lines.contains(
+        "command_rule=permission.commands.ask pattern=\"cargo test*\" command=\"cargo test -p sigil-kernel\""
+    ));
 
     for (confirmation, expected) in [
         (
@@ -363,6 +374,7 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
             subject_zones: Vec::new(),
             confirmation,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             preview: None,
         })?;
         assert!(app.approval_preview_lines().join("\n").contains(expected));
@@ -448,6 +460,7 @@ fn approval_modal_view_projects_apply_changeset_metadata() -> Result<()> {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: true,
+        command_permission_matches: Vec::new(),
         preview: Some(ToolPreview {
             title: "Apply change set change-123".to_owned(),
             summary: "2 files, risk=high".to_owned(),
@@ -528,6 +541,7 @@ fn approval_request_shows_external_subjects_without_preview() -> Result<()> {
         subject_zones: vec![sigil_kernel::PathTrustZone::External],
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
 
@@ -591,6 +605,7 @@ fn spawn_agent_approval_key_can_switch_call_to_background() -> Result<()> {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
 
@@ -850,6 +865,7 @@ fn approval_preview_lines_cover_changed_files_scroll_keys_and_escape() -> Result
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(ToolPreview {
             title: "Plain preview".to_owned(),
             summary: String::new(),

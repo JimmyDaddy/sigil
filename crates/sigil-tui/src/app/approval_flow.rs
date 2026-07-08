@@ -35,6 +35,9 @@ impl AppState {
                     pending.confirmation.as_ref(),
                     pending.snapshot_required,
                 ));
+                lines.extend(approval_command_permission_lines(
+                    &pending.command_permission_matches,
+                ));
                 lines.extend(approval_subject_lines(&pending.subjects));
                 lines.push(format!("preview={}", preview.title));
                 if !preview.summary.trim().is_empty() {
@@ -117,6 +120,9 @@ impl AppState {
                 &pending.subject_zones,
                 pending.confirmation.as_ref(),
                 pending.snapshot_required,
+            ));
+            lines.extend(approval_command_permission_lines(
+                &pending.command_permission_matches,
             ));
             lines.extend(approval_subject_lines(&pending.subjects));
             if let Some(preview) =
@@ -710,21 +716,26 @@ fn approval_shell_preview(pending: &PendingApproval) -> Option<ShellApprovalPrev
         ),
     };
     let access = approval_shell_access_summary(pending);
+    let command_rule = approval_command_permission_summary(&pending.command_permission_matches);
     let grant_line = if pending.session_grant_available {
         format!("Session grant: {grant}")
     } else {
         "Session grant: not available for this call.".to_owned()
     };
+    let mut summary = vec![command.to_owned(), format!("Access: {access}")];
+    if let Some(command_rule) = command_rule {
+        summary.push(format!("Rule: {command_rule}"));
+    }
+    summary.push(format!("Reason: {reason}"));
+    summary.push(grant_line);
     Some(ShellApprovalPreview {
         title: title.to_owned(),
-        summary: format!("{command}\nReason: {reason}\nAccess: {access}\n{grant_line}"),
+        summary: summary.join("\n"),
     })
 }
 
 fn approval_terminal_input_preview(pending: &PendingApproval) -> Option<ShellApprovalPreview> {
-    if pending.operation != ToolOperation::SendTerminalInput
-        || pending.call.name != "terminal_input"
-    {
+    if pending.call.name != "terminal_input" {
         return None;
     }
     let args: Value = serde_json::from_str(&pending.call.args_json).ok()?;
@@ -743,16 +754,25 @@ fn approval_terminal_input_preview(pending: &PendingApproval) -> Option<ShellApp
         })
         .unwrap_or(0);
     let access = approval_shell_access_summary(pending);
+    let command_rule = approval_command_permission_summary(&pending.command_permission_matches);
     let grant_line = if pending.session_grant_available {
         "Session grant: allow input to this terminal task for this session."
     } else {
         "Session grant: not available for this call."
     };
+    let mut summary = vec![
+        format!("Terminal task: {task_id}"),
+        format!("Input: {input_bytes} bytes"),
+        format!("Access: {access}"),
+    ];
+    if let Some(command_rule) = command_rule {
+        summary.push(format!("Rule: {command_rule}"));
+    }
+    summary.push("Reason: Sends stdin to a running terminal task.".to_owned());
+    summary.push(grant_line.to_owned());
     Some(ShellApprovalPreview {
         title: "Send terminal input".to_owned(),
-        summary: format!(
-            "Terminal task: {task_id}\nInput: {input_bytes} bytes\nReason: Sends stdin to a running terminal task.\nAccess: {access}\n{grant_line}"
-        ),
+        summary: summary.join("\n"),
     })
 }
 
@@ -801,6 +821,36 @@ fn approval_permission_lines(
         lines.push("recovery=pre-change snapshot required".to_owned());
     }
     lines
+}
+
+fn approval_command_permission_lines(
+    matches: &[sigil_kernel::CommandPermissionMatch],
+) -> Vec<String> {
+    matches
+        .iter()
+        .take(6)
+        .map(|item| format!("command_rule={}", approval_command_permission_label(item)))
+        .collect()
+}
+
+fn approval_command_permission_summary(
+    matches: &[sigil_kernel::CommandPermissionMatch],
+) -> Option<String> {
+    let first = matches.first()?;
+    let mut summary = approval_command_permission_label(first);
+    if matches.len() > 1 {
+        summary.push_str(&format!(" (+{} more)", matches.len() - 1));
+    }
+    Some(summary)
+}
+
+fn approval_command_permission_label(item: &sigil_kernel::CommandPermissionMatch) -> String {
+    format!(
+        "permission.commands.{} pattern=\"{}\" command=\"{}\"",
+        item.group.as_str(),
+        item.pattern,
+        item.command
+    )
 }
 
 fn approval_operation_label(operation: ToolOperation) -> &'static str {

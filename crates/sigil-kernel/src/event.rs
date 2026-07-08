@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ChangeSet, ChangeSetResult, ControlEntry, JobIntentEntry, ModelMessage, MutationCommitted,
-    MutationPrepared, PathTrustZone, PermissionConfirmation, PermissionRisk,
+    ChangeSet, ChangeSetResult, CommandPermissionMatch, ControlEntry, JobIntentEntry, ModelMessage,
+    MutationCommitted, MutationPrepared, PathTrustZone, PermissionConfirmation, PermissionRisk,
     ProviderContinuationState, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
     TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview, ToolProgressEvent, ToolResult,
     ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationRecordedEntry,
@@ -837,6 +837,7 @@ pub enum RunEvent {
         subject_zones: Vec<PathTrustZone>,
         confirmation: Option<PermissionConfirmation>,
         snapshot_required: bool,
+        command_permission_matches: Vec<CommandPermissionMatch>,
         preview: Option<ToolPreview>,
     },
     ToolApprovalResolved {
@@ -947,6 +948,8 @@ pub enum PublicRunEventKind {
         confirmation: Option<PermissionConfirmation>,
         #[serde(default)]
         snapshot_required: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        command_permission_matches: Vec<CommandPermissionMatch>,
         preview: Option<ToolPreview>,
     },
     ApprovalResolved {
@@ -1037,6 +1040,7 @@ impl From<RunEvent> for PublicRunEventKind {
                 subject_zones,
                 confirmation,
                 snapshot_required,
+                command_permission_matches,
                 preview,
             } => Self::ApprovalRequested {
                 call,
@@ -1047,6 +1051,7 @@ impl From<RunEvent> for PublicRunEventKind {
                 subject_zones,
                 confirmation,
                 snapshot_required,
+                command_permission_matches,
                 preview,
             },
             RunEvent::ToolApprovalResolved {

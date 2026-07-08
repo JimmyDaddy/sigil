@@ -1825,6 +1825,7 @@ fn render_session_control_entries_cover_remaining_labels() {
             subject_zones: Vec::new(),
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             policy_decision: ApprovalMode::Deny,
             external_directory_required: false,
             allow_source: None,

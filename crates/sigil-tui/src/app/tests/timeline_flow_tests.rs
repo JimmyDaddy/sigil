@@ -916,10 +916,47 @@ fn live_rejected_final_candidate_is_removed_before_continuation() -> Result<()> 
     let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
     assert!(!rendered.contains("candidate summary before facts"));
     assert!(rendered.contains("accepted final summary"));
+    assert!(rendered.contains("recorded run facts added before final answer"));
     assert_eq!(
         app.timeline
             .iter()
             .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn rejected_final_candidate_notice_keeps_finished_thinking_visible() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(
+        "reasoning that should stay visible".to_owned(),
+    ))?;
+    app.handle(RunEvent::TextDelta(
+        "candidate summary before facts".to_owned(),
+    ))?;
+    app.handle(RunEvent::Notice(
+        "recorded run facts added before final answer; continuing".to_owned(),
+    ))?;
+    app.handle(RunEvent::AssistantMessage(
+        ModelMessage::assistant_with_kind(
+            Some("accepted final summary".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ),
+    ))?;
+
+    let rendered = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(rendered.contains("reasoning that should stay visible"));
+    assert!(!rendered.contains("candidate summary before facts"));
+    assert!(rendered.contains("recorded run facts added before final answer"));
+    assert!(rendered.contains("accepted final summary"));
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Thinking)
             .count(),
         1
     );

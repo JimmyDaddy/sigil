@@ -4,8 +4,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, de};
 use sigil_kernel::{
     AgentInvocationPolicy, AgentProfileKind, AgentResultPolicy, AgentTrustState, ApprovalMode,
-    ExternalDirectoryConfig, ExternalDirectoryRule, PermissionConfig, PermissionRule,
-    ReasoningEffort, ToolRegistryScope,
+    CommandPermissionConfig, ExternalDirectoryConfig, ExternalDirectoryRule, PermissionConfig,
+    PermissionRule, ReasoningEffort, ToolRegistryScope,
 };
 
 use crate::{LOAD_SKILL_TOOL_NAME, SPAWN_AGENT_TOOL_NAME};
@@ -77,6 +77,7 @@ pub(super) struct AgentPermissionRuleWire {
 enum AgentPermissionValueWire {
     Action(ApprovalMode),
     Patterns(Vec<(String, ApprovalMode)>),
+    CommandGroups(CommandPermissionConfig),
 }
 
 impl<'de> Deserialize<'de> for AgentPermissionWire {
@@ -271,6 +272,10 @@ fn apply_agent_permission_rule(
         apply_external_directory_permission(config, &rule.value);
         return Ok(());
     }
+    if key == "commands" {
+        apply_command_permission(config, &rule.value)?;
+        return Ok(());
+    }
     let tools = permission_key_tools(&key);
     match &rule.value {
         AgentPermissionValueWire::Action(mode) => {
@@ -292,6 +297,9 @@ fn apply_agent_permission_rule(
                     });
                 }
             }
+        }
+        AgentPermissionValueWire::CommandGroups(_) => {
+            bail!("permission.commands must use allow/ask/deny groups");
         }
     }
     Ok(())
@@ -323,7 +331,23 @@ fn apply_external_directory_permission(
                         }),
                 );
         }
+        AgentPermissionValueWire::CommandGroups(_) => {}
     }
+}
+
+fn apply_command_permission(
+    config: &mut PermissionConfig,
+    value: &AgentPermissionValueWire,
+) -> Result<()> {
+    let AgentPermissionValueWire::CommandGroups(command_config) = value else {
+        bail!("permission.commands must use allow/ask/deny groups");
+    };
+    let mut merged = config.commands.clone();
+    merged
+        .extend_from(command_config)
+        .context("invalid permission.commands")?;
+    config.commands = merged;
+    Ok(())
 }
 
 fn permission_subject_glob(pattern: &str) -> Option<String> {
@@ -391,6 +415,10 @@ fn agent_permission_value_from_toml_value(
     key: &str,
     value: &toml::Value,
 ) -> Result<AgentPermissionValueWire> {
+    if normalized_permission_key(key) == "commands" {
+        return parse_toml_command_permission_config(value)
+            .map(AgentPermissionValueWire::CommandGroups);
+    }
     match value {
         toml::Value::String(action) => Ok(AgentPermissionValueWire::Action(parse_approval_mode(
             action,
@@ -407,6 +435,13 @@ fn agent_permission_value_from_toml_value(
             .map(AgentPermissionValueWire::Patterns),
         other => bail!("invalid agent permission value for {key}: {other:?}"),
     }
+}
+
+fn parse_toml_command_permission_config(value: &toml::Value) -> Result<CommandPermissionConfig> {
+    value
+        .clone()
+        .try_into::<CommandPermissionConfig>()
+        .context("invalid permission.commands")
 }
 
 fn parse_markdown_permission_wire(lines: &[String]) -> Result<Option<AgentPermissionWire>> {
@@ -442,6 +477,19 @@ fn parse_markdown_permission_wire(lines: &[String]) -> Result<Option<AgentPermis
         };
         let key = strip_scalar_quotes(raw_key.trim()).to_owned();
         let raw_value = raw_value.trim();
+        if normalized_permission_key(&key) == "commands" {
+            if !raw_value.is_empty() {
+                bail!("permission.commands must use allow/ask/deny groups");
+            }
+            let (commands, next_cursor) =
+                parse_markdown_permission_commands_block(lines, cursor + 1, indent)?;
+            rules.push(AgentPermissionRuleWire {
+                key,
+                value: AgentPermissionValueWire::CommandGroups(commands),
+            });
+            cursor = next_cursor;
+            continue;
+        }
         if !raw_value.is_empty() {
             rules.push(AgentPermissionRuleWire {
                 key,
@@ -492,6 +540,74 @@ fn parse_markdown_permission_pattern_block(
                 format!("invalid permission action for pattern {raw_pattern:?}")
             })?,
         ));
+        cursor += 1;
+    }
+    Ok((patterns, cursor))
+}
+
+fn parse_markdown_permission_commands_block(
+    lines: &[String],
+    mut cursor: usize,
+    parent_indent: usize,
+) -> Result<(CommandPermissionConfig, usize)> {
+    let mut config = CommandPermissionConfig::default();
+    while cursor < lines.len() {
+        let line = &lines[cursor];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            cursor += 1;
+            continue;
+        }
+        let indent = leading_space_count(line);
+        if indent <= parent_indent {
+            break;
+        }
+        let trimmed = line.trim();
+        let Some((raw_group, raw_value)) = trimmed.split_once(':') else {
+            bail!("invalid permission.commands line {trimmed:?}");
+        };
+        let group = normalized_permission_key(strip_scalar_quotes(raw_group.trim()));
+        let raw_value = raw_value.trim();
+        let (patterns, next_cursor) = if raw_value.is_empty() {
+            parse_markdown_command_pattern_list(lines, cursor + 1, indent)?
+        } else {
+            (parse_inline_values(raw_value), cursor + 1)
+        };
+        match group.as_str() {
+            "allow" => config.allow.extend(patterns),
+            "ask" => config.ask.extend(patterns),
+            "deny" => config.deny.extend(patterns),
+            other => bail!("unknown permission.commands group {other:?}"),
+        }
+        cursor = next_cursor;
+    }
+    let mut validated = CommandPermissionConfig::default();
+    validated
+        .extend_from(&config)
+        .context("invalid permission.commands")?;
+    Ok((validated, cursor))
+}
+
+fn parse_markdown_command_pattern_list(
+    lines: &[String],
+    mut cursor: usize,
+    parent_indent: usize,
+) -> Result<(Vec<String>, usize)> {
+    let mut patterns = Vec::new();
+    while cursor < lines.len() {
+        let line = &lines[cursor];
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            cursor += 1;
+            continue;
+        }
+        let indent = leading_space_count(line);
+        if indent <= parent_indent {
+            break;
+        }
+        let trimmed = line.trim();
+        let Some(item) = trimmed.strip_prefix("- ") else {
+            bail!("permission.commands patterns must be a list");
+        };
+        patterns.push(strip_scalar_quotes(item.trim()).to_owned());
         cursor += 1;
     }
     Ok((patterns, cursor))

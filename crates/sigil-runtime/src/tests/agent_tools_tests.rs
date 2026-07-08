@@ -14,15 +14,15 @@ use serde_json::json;
 use sigil_kernel::{
     Agent, AgentConfig, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
     AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentThreadStatus,
-    AgentToolDelegate, AgentTrustState, ApprovalMode, AutoApproveHandler, CompactionConfig,
-    CompletionRequest, ControlEntry, EventHandler, InteractionMode, JsonlSessionStore,
-    MemoryConfig, MessageRole, MultiAgentMode, PermissionConfig, PermissionMode, PermissionPolicy,
-    PermissionRisk, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
-    ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry,
-    ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision,
-    ToolCall, ToolCategory, ToolExecutionEntry, ToolExecutionStatus, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
-    WorkspaceConfig,
+    AgentToolDelegate, AgentTrustState, ApprovalMode, AutoApproveHandler, CommandPermissionConfig,
+    CompactionConfig, CompletionRequest, ControlEntry, EventHandler, InteractionMode,
+    JsonlSessionStore, MemoryConfig, MessageRole, MultiAgentMode, PermissionConfig, PermissionMode,
+    PermissionPolicy, PermissionRisk, Provider, ProviderCapabilities, ProviderChunk,
+    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig,
+    SessionLogEntry, ToolAccess, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolExecutionEntry, ToolExecutionStatus,
+    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResultMeta, ToolSpec, ToolSubject,
+    UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -117,6 +117,62 @@ fn child_permission_config_read_only_parent_remains_hard_cap() -> Result<()> {
     )?;
 
     assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_profile_command_allow_remains_capped_by_parent_read_only() -> Result<()>
+{
+    let parent = PermissionConfig {
+        mode: PermissionMode::ReadOnly,
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig::default();
+    let profile = PermissionConfig {
+        commands: CommandPermissionConfig {
+            allow: vec!["git status*".to_owned()],
+            ..CommandPermissionConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git status --short",
+            "family:git_read_only",
+        )],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_profile_command_allow_can_widen_manual_shell_default() -> Result<()> {
+    let parent = PermissionConfig::default();
+    let role = PermissionConfig::default();
+    let profile = PermissionConfig {
+        commands: CommandPermissionConfig {
+            allow: vec!["git status*".to_owned()],
+            ..CommandPermissionConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command(
+            "git status --short",
+            "family:git_read_only",
+        )],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Allow);
     Ok(())
 }
 
@@ -2509,6 +2565,91 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
 }
 
 #[test]
+fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    session.append_control(ControlEntry::ToolApproval(
+        sigil_kernel::ToolApprovalEntry {
+            action: ToolApprovalAuditAction::PolicyEvaluated,
+            call_id: "call-read".to_owned(),
+            tool_name: "read_file".to_owned(),
+            access: ToolAccess::Read,
+            operation: Some(ToolOperation::Read),
+            risk: Some(PermissionRisk::Low),
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            policy_decision: ApprovalMode::Allow,
+            external_directory_required: false,
+            confirmation: None,
+            snapshot_required: false,
+            command_permission_matches: Vec::new(),
+            allow_source: None,
+            grant_call_id: None,
+            user_decision: None,
+            reason: None,
+            preview_hash: None,
+        },
+    ))?;
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-read".to_owned(),
+        tool_name: "read_file".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(2),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta {
+            truncated: true,
+            details: json!({
+                "call": {
+                    "path": "README.md",
+                    "summary": "path=README.md"
+                },
+                "returned_lines": 20,
+                "total_lines": 100
+            }),
+            ..ToolResultMeta::default()
+        },
+        error: None,
+        model_content_hash: None,
+    })))?;
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-glob".to_owned(),
+        tool_name: "glob".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(1),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta {
+            details: json!({
+                "call": {
+                    "pattern": "src/**/*.rs",
+                    "summary": "pattern=src/**/*.rs"
+                },
+                "returned_paths": 3,
+                "total_paths": 3
+            }),
+            ..ToolResultMeta::default()
+        },
+        error: None,
+        model_content_hash: None,
+    })))?;
+
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome::default();
+
+    assert!(
+        runtime
+            .final_answer_context(&session, &options, &outcome)?
+            .is_none(),
+        "read-only tool executions and ordinary policy allow should not force a final-answer rerun"
+    );
+    Ok(())
+}
+
+#[test]
 fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_grant() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
@@ -2528,6 +2669,7 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             external_directory_required: false,
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             allow_source: None,
             grant_call_id: None,
             user_decision: None,
@@ -2549,6 +2691,7 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             external_directory_required: false,
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             allow_source: None,
             grant_call_id: None,
             user_decision: None,
@@ -2570,6 +2713,7 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             external_directory_required: false,
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             allow_source: None,
             grant_call_id: None,
             user_decision: Some(ToolApprovalUserDecision::ApprovedForSession),
@@ -2604,6 +2748,7 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             external_directory_required: false,
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             allow_source: Some(ToolApprovalAllowSource::SessionGrant),
             grant_call_id: Some("call-user".to_owned()),
             user_decision: None,

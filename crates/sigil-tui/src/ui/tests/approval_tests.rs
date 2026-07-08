@@ -591,6 +591,7 @@ fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(multi_file_preview()),
     })?;
     app.runtime.code_intelligence_diagnostics_by_path.insert(
@@ -647,6 +648,7 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: Some(ToolPreview {
             title: "Edit src/lib.rs".to_owned(),
             summary: "`approval-code` summary".to_owned(),
@@ -701,6 +703,7 @@ fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::
         subject_zones: Vec::new(),
         confirmation: None,
         snapshot_required: false,
+        command_permission_matches: Vec::new(),
         preview: None,
     })?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;

@@ -1123,6 +1123,7 @@ fn public_run_event_projects_approval_requested_details() {
             subject_zones: vec![crate::PathTrustZone::WorkspaceSource],
             confirmation: None,
             snapshot_required: false,
+            command_permission_matches: Vec::new(),
             preview: None,
         },
     );
@@ -1345,6 +1346,7 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 subject_zones: Vec::new(),
                 confirmation: None,
                 snapshot_required: false,
+                command_permission_matches: Vec::new(),
                 policy_decision: ApprovalMode::Ask,
                 external_directory_required: false,
                 allow_source: None,

@@ -348,6 +348,11 @@ Provider 专项行为保留在 provider 配置和 provider crate 内。共享的
 [permission]
 mode = "manual"
 
+[permission.commands]
+allow = []
+ask = []
+deny = []
+
 [permission.external_directory]
 enabled = false
 default_mode = "ask"
@@ -366,7 +371,9 @@ rules = []
 含义：
 
 - `mode = "manual"` 是默认交互安全姿态。
-- `tools`、`rules` 和 `external_directory` 是高级配置文件覆盖项，只用于特定工具、subject 或外部路径，不再承担第二套默认权限 baseline。
+- `commands`、`tools`、`rules` 和 `external_directory` 是高级配置文件覆盖项，只用于特定命令、工具、subject 或外部路径，不再承担第二套默认权限 baseline。
+- `permission.commands` 是推荐的高级 shell command 覆盖方式。Pattern 匹配归一化后的命令文本，并且只把 `*` 和 `?` 当作通配符。完全相同的 pattern 不能同时出现在 `allow`、`ask`、`deny` 多个分组中。
+- 命中 `permission.commands` 时，审批卡片和 session audit 会记录 `permission.commands.<allow|ask|deny>`、pattern 与命令文本，方便解释为什么被放行、询问或拒绝。
 - workspace 外路径默认不可执行；开启 external directory 后仍会先经过 external-directory gate。
 - 临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`。它由 Sigil 用户态 cache root 承载，对模型显示为 `cache/tmp`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
 - headless `run` 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误。
@@ -378,9 +385,10 @@ rules = []
 | 1 | `mode` baseline | 用户可理解的顶层模式设置默认姿态；`read-only` 是非读硬上限，`danger-full-access` 是显式全放开。 |
 | 2 | 工具自身 default | runtime/tool 提供的默认值，例如可信只读命令降级。 |
 | 3 | `tools.<tool_name>` | 工具名覆盖。 |
-| 4 | `rules[]` | 命中的 tool/subject 规则；多条命中按最严格模式合并：`deny > ask > allow`。 |
-| 5 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
-| 6 | Effective policy cap | runtime cap 继续按同一个最严格模式合并。 |
+| 4 | `rules[]` | 命中的 tool/subject 规则；最后一条匹配规则生效，用文件顺序表达更具体的覆盖。 |
+| 5 | `commands.allow/ask/deny` | shell command 的匹配 pattern。command 分组内部按 `deny > ask > allow` 合并；command `allow` 可以放宽 `manual` 默认 shell ask，但不能覆盖显式 tool/rule ask 或 deny。 |
+| 6 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
+| 7 | Effective policy cap 和风险覆盖 | runtime cap、`read-only`、protected path、destructive operation 和 external-directory deny 仍是硬安全边界。 |
 
 ## Memory
 
@@ -427,13 +435,13 @@ glob = "allow"
 grep = "allow"
 edit = "ask"
 
-[permission.bash]
-"*" = "ask"
-"cargo test *" = "allow"
-"git push*" = "deny"
+[permission.commands]
+allow = ["cargo test *", "git status*", "git diff*"]
+ask = ["cargo clippy *"]
+deny = ["git push*", "rm *"]
 ```
 
-Agent permission 会在全局 `[permission]` 之后合并，因此 agent rule 可以覆盖 global `allow`、`ask` 或 `deny`。全局 `read-only` mode 仍是硬上限；protected path、destructive operation、external-directory gate 和写型 subagent 隔离仍然 fail-closed。可写 subagent 在更强隔离模式可用前，仍只能走 foreground changeset-only merge review。
+Agent permission 会在全局 `[permission]` 之后合并。Agent command 分组使用和 root config 相同的 `allow` / `ask` / `deny` 语义。全局 `read-only` mode 仍是硬上限；protected path、destructive operation、external-directory gate 和写型 subagent 隔离仍然 fail-closed。可写 subagent 在更强隔离模式可用前，仍只能走 foreground changeset-only merge review。
 
 ## Compaction
 
