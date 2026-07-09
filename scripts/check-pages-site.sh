@@ -51,8 +51,9 @@ required_files=(
   "assets/logo/sigil-mark-staff-glow.svg"
   "assets/logo/sigil-mark-staff-glow.png"
   "assets/logo/sigil-mark-staff-glow-2x.png"
+  "assets/logo/sigil-mark-staff-glow-watermark.svg"
+  "assets/logo/sigil-mark-staff-glow-watermark-4x.png"
   "assets/logo/sigil-wordmark-header.svg"
-  "assets/logo/sigil-wordmark-header-dark-mode.svg"
   "assets/logo/sigil-wordmark-header-2x.png"
   "assets/screenshots/tui-session.svg"
   "assets/screenshots/approval-review.svg"
@@ -152,14 +153,10 @@ grep -q 'Sitemap: https://jimmydaddy.github.io/sigil/sitemap.xml' "${stage_dir}/
 grep -q 'property="og:image"' "${stage_dir}/index.html"
 grep -q 'property="og:image"' "${stage_dir}/docs/index.html"
 grep -q 'property="og:image"' "${stage_dir}/zh-CN/docs/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-light" src="assets/logo/sigil-wordmark-header.svg"' "${stage_dir}/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-dark" src="assets/logo/sigil-wordmark-header-dark-mode.svg"' "${stage_dir}/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-light" src="../assets/logo/sigil-wordmark-header.svg"' "${stage_dir}/docs/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-dark" src="../assets/logo/sigil-wordmark-header-dark-mode.svg"' "${stage_dir}/docs/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-light" src="../../assets/logo/sigil-wordmark-header.svg"' "${stage_dir}/zh-CN/docs/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-dark" src="../../assets/logo/sigil-wordmark-header-dark-mode.svg"' "${stage_dir}/zh-CN/docs/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-light" src="../../assets/logo/sigil-wordmark-header.svg"' "${stage_dir}/docs/quickstart/index.html"
-grep -q 'class="brand-wordmark brand-wordmark-on-dark" src="../../assets/logo/sigil-wordmark-header-dark-mode.svg"' "${stage_dir}/docs/quickstart/index.html"
+grep -q '<span class="brand-wordmark" aria-hidden="true"></span>' "${stage_dir}/index.html"
+grep -q '<span class="brand-wordmark" aria-hidden="true"></span>' "${stage_dir}/docs/index.html"
+grep -q '<span class="brand-wordmark" aria-hidden="true"></span>' "${stage_dir}/zh-CN/docs/index.html"
+grep -q '<span class="brand-wordmark" aria-hidden="true"></span>' "${stage_dir}/docs/quickstart/index.html"
 grep -q 'class="brand-mark" src="assets/logo/sigil-mark-staff-glow.svg"' "${stage_dir}/index.html"
 grep -q 'class="brand-mark" src="../assets/logo/sigil-mark-staff-glow.svg"' "${stage_dir}/docs/index.html"
 grep -q 'class="brand-mark" src="../../assets/logo/sigil-mark-staff-glow.svg"' "${stage_dir}/zh-CN/docs/index.html"
@@ -174,6 +171,10 @@ grep -q 'src="../../assets/site.js"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'src="../../assets/site.js"' "${stage_dir}/docs/quickstart/index.html"
 if grep -R -n 'class="brand-mark" src="[^"]*sigil-mark-square-1024.png"' "${stage_dir}/index.html" "${stage_dir}/docs" "${stage_dir}/zh-CN"; then
   echo "square package icon leaked into Pages header brand mark" >&2
+  exit 1
+fi
+if grep -R -n 'brand-wordmark-on-' "${stage_dir}/index.html" "${stage_dir}/docs" "${stage_dir}/zh-CN"; then
+  echo "image-swapped wordmark leaked into Pages header" >&2
   exit 1
 fi
 if grep -R -n '<span>Sigil</span>' "${stage_dir}/index.html" "${stage_dir}/docs" "${stage_dir}/zh-CN"; then

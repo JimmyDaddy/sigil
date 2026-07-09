@@ -166,10 +166,7 @@ def brand_html(asset_prefix, home_href)
   <<~HTML
     <a class="brand" href="#{home_href}" aria-label="Sigil home">
       <img class="brand-mark" src="#{asset_prefix}/assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
-      <span class="brand-wordmark-stack" aria-hidden="true">
-        <img class="brand-wordmark brand-wordmark-on-light" src="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg" srcset="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg 1x, #{asset_prefix}/assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
-        <img class="brand-wordmark brand-wordmark-on-dark" src="#{asset_prefix}/assets/logo/sigil-wordmark-header-dark-mode.svg" alt="" width="78" height="34">
-      </span>
+      <span class="brand-wordmark" aria-hidden="true"></span>
     </a>
   HTML
 end
