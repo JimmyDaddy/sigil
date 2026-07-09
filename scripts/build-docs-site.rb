@@ -142,6 +142,38 @@ def search_form_html(locale, asset_prefix, id_suffix)
   HTML
 end
 
+def theme_boot_script
+  <<~HTML
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem("sigil.theme");
+          if (theme === "dark" || theme === "light") {
+            document.documentElement.dataset.theme = theme;
+          }
+        } catch (_error) {}
+      })();
+    </script>
+  HTML
+end
+
+def theme_toggle_html(locale)
+  label = locale == "zh-CN" ? "切换到深色主题" : "Switch to dark theme"
+  %(<button class="theme-toggle" type="button" data-theme-toggle aria-label="#{html_escape(label)}" aria-pressed="false" title="#{html_escape(label)}">☾</button>)
+end
+
+def brand_html(asset_prefix, home_href)
+  <<~HTML
+    <a class="brand" href="#{home_href}" aria-label="Sigil home">
+      <img class="brand-mark" src="#{asset_prefix}/assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
+      <span class="brand-wordmark-stack" aria-hidden="true">
+        <img class="brand-wordmark brand-wordmark-on-light" src="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg" srcset="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg 1x, #{asset_prefix}/assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
+        <img class="brand-wordmark brand-wordmark-on-dark" src="#{asset_prefix}/assets/logo/sigil-wordmark-header-dark-mode.svg" alt="" width="78" height="34">
+      </span>
+    </a>
+  HTML
+end
+
 def page_url(locale, slug)
   locale_config = LOCALES.fetch(locale)
   "#{locale_config.fetch(:site_prefix)}/#{slug}/"
@@ -442,22 +474,24 @@ def rendered_page(locale, slug, source_file, fallback_title)
         <meta name="twitter:description" content="#{html_escape(description)}">
         <meta name="twitter:image" content="#{SITE_URL}/assets/logo/sigil-full-staff-glow.png">
         <script type="application/ld+json">#{JSON.generate(json_ld)}</script>
+        #{theme_boot_script}
         <link rel="stylesheet" href="#{asset_prefix}/assets/site.css">
+        <script defer src="#{asset_prefix}/assets/site.js"></script>
         <script defer src="#{asset_prefix}/assets/search.js"></script>
       </head>
       <body class="doc-page">
         <header class="site-header">
-          <a class="brand" href="#{home_href}" aria-label="Sigil home">
-            <img class="brand-mark" src="#{asset_prefix}/assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
-            <img class="brand-wordmark" src="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg" srcset="#{asset_prefix}/assets/logo/sigil-wordmark-header.svg 1x, #{asset_prefix}/assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
-          </a>
-          <nav aria-label="Primary navigation">
-            <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
-            <a href="#{home_href}#safety">#{html_escape(locale_config.fetch(:safety_label))}</a>
-            <a href="#{docs_home}">#{html_escape(locale_config.fetch(:docs_label))}</a>
-            <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
-            <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">#{html_escape(locale_config.fetch(:github_label))}</a>
-          </nav>
+          #{brand_html(asset_prefix, home_href)}
+          <div class="header-actions">
+            <nav aria-label="Primary navigation">
+              <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
+              <a href="#{home_href}#safety">#{html_escape(locale_config.fetch(:safety_label))}</a>
+              <a href="#{docs_home}">#{html_escape(locale_config.fetch(:docs_label))}</a>
+              <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
+              <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">#{html_escape(locale_config.fetch(:github_label))}</a>
+            </nav>
+            #{theme_toggle_html(locale)}
+          </div>
         </header>
         <main class="doc-shell">
           <aside class="doc-sidebar" aria-label="Documentation navigation">
@@ -556,18 +590,21 @@ def write_examples_index
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Sigil config examples</title>
         <meta name="description" content="Copyable Sigil configuration examples for providers, MCP, and code intelligence.">
+        <meta name="theme-color" content="#1ecfc5">
+        #{theme_boot_script}
         <link rel="stylesheet" href="../../assets/site.css">
+        <script defer src="../../assets/site.js"></script>
       </head>
       <body class="doc-page">
         <header class="site-header">
-          <a class="brand" href="../../" aria-label="Sigil home">
-            <img class="brand-mark" src="../../assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
-            <img class="brand-wordmark" src="../../assets/logo/sigil-wordmark-header.svg" srcset="../../assets/logo/sigil-wordmark-header.svg 1x, ../../assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
-          </a>
-          <nav aria-label="Primary navigation">
-            <a href="../../docs/">Docs</a>
-            <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-          </nav>
+          #{brand_html("../..", "../../")}
+          <div class="header-actions">
+            <nav aria-label="Primary navigation">
+              <a href="../../docs/">Docs</a>
+              <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+            </nav>
+            #{theme_toggle_html("en")}
+          </div>
         </header>
         <main class="doc-shell examples-shell">
           <article class="doc-content">

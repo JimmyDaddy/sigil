@@ -5,7 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Page not found - Sigil</title>
     <link rel="icon" href="assets/logo/sigil-mark-staff-glow.svg">
+    <meta name="theme-color" content="#1ecfc5">
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem("sigil.theme");
+          if (theme === "dark" || theme === "light") {
+            document.documentElement.dataset.theme = theme;
+          }
+        } catch (_error) {}
+      })();
+    </script>
     <link rel="stylesheet" href="assets/site.css">
+    <script defer src="assets/site.js"></script>
   </head>
   <body class="not-found">
     <main class="not-found-panel">

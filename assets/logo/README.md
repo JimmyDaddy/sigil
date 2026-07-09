@@ -9,12 +9,14 @@ These logo files are source-controlled for repository documentation, release met
 | `sigil-full-staff-glow.png` | 1094 x 545 | Staff-glow variant for dark-mode-friendly homepage and docs hero placement. |
 | `sigil-full-staff-glow-2x.png` | 2188 x 1090 | 2x raster fallback for `sigil-full-staff-glow.png`. |
 | `sigil-full-staff-glow.svg` | 1094 x 545 | Vector staff-glow full logo for responsive or small renders. |
+| `sigil-full-staff-glow-dark-mode.svg` | 1094 x 545 | Full logo with light wordmark/outline for dark website surfaces. |
 | `sigil-full-strong.png` | 1094 x 545 | High-contrast full-logo fallback for media or promotional surfaces. |
 | `sigil-full-strong-2x.png` | 2188 x 1090 | 2x raster fallback for `sigil-full-strong.png`. |
 | `sigil-mark-staff-glow.png` | 445 x 495 | Standalone mark for favicons, profile badges, and compact brand mark use. |
 | `sigil-mark-staff-glow-2x.png` | 890 x 990 | 2x raster fallback for `sigil-mark-staff-glow.png`. |
 | `sigil-mark-staff-glow.svg` | 445 x 495 | Vector standalone mark. |
 | `sigil-wordmark-header.svg` | 527 x 226 | Wordmark-only vector for header and docs logos on light surfaces. |
+| `sigil-wordmark-header-dark-mode.svg` | 527 x 226 | Wordmark-only vector with light fill for dark headers. |
 | `sigil-wordmark-header-2x.png` | 1054 x 452 | 2x raster fallback for `sigil-wordmark-header.svg`. |
 | `preview-full-soft-black.png` | 1094 x 545 | Preview for soft full logo treatment (black text/wordmark). |
 | `preview-full-staff-glow-black.png` | 1094 x 545 | Preview for staff-glow full logo treatment (black background context). |

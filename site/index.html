@@ -31,33 +31,56 @@
       content="Repository work, durable tasks, child agents, approvals, verification, MCP tools, and session recovery inside one terminal interface."
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full-staff-glow.png">
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem("sigil.theme");
+          if (theme === "dark" || theme === "light") {
+            document.documentElement.dataset.theme = theme;
+          }
+        } catch (_error) {}
+      })();
+    </script>
     <link rel="stylesheet" href="assets/site.css">
+    <script defer src="assets/site.js"></script>
   </head>
   <body>
     <header class="site-header">
       <a class="brand" href="./" aria-label="Sigil home">
         <img class="brand-mark" src="assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
-        <img class="brand-wordmark" src="assets/logo/sigil-wordmark-header.svg" srcset="assets/logo/sigil-wordmark-header.svg 1x, assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
+        <span class="brand-wordmark-stack" aria-hidden="true">
+          <img class="brand-wordmark brand-wordmark-on-light" src="assets/logo/sigil-wordmark-header.svg" srcset="assets/logo/sigil-wordmark-header.svg 1x, assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
+          <img class="brand-wordmark brand-wordmark-on-dark" src="assets/logo/sigil-wordmark-header-dark-mode.svg" alt="" width="78" height="34">
+        </span>
       </a>
-      <nav aria-label="Primary navigation">
-        <a href="#quickstart">Install</a>
-        <a href="#workflow">Workflow</a>
-        <a href="#safety">Safety</a>
-        <a href="docs/visual-tour/">Tour</a>
-        <a href="docs/">Docs</a>
-        <a href="docs/status/">Status</a>
-        <a href="zh-CN/">简体中文</a>
-        <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-      </nav>
+      <div class="header-actions">
+        <nav aria-label="Primary navigation">
+          <a href="#quickstart">Install</a>
+          <a href="#workflow">Workflow</a>
+          <a href="#safety">Safety</a>
+          <a href="docs/visual-tour/">Tour</a>
+          <a href="docs/">Docs</a>
+          <a href="docs/status/">Status</a>
+          <a href="zh-CN/">简体中文</a>
+          <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+        </nav>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme" aria-pressed="false" title="Switch to dark theme">☾</button>
+      </div>
     </header>
 
     <main>
       <section class="hero">
         <img
-          class="hero-logo"
+          class="hero-logo hero-logo-on-light"
           src="assets/logo/sigil-full-staff-glow.svg"
           srcset="assets/logo/sigil-full-staff-glow.svg 1x, assets/logo/sigil-full-staff-glow-2x.png 2x"
           alt="Sigil"
+        >
+        <img
+          class="hero-logo hero-logo-on-dark"
+          src="assets/logo/sigil-full-staff-glow-dark-mode.svg"
+          alt=""
+          aria-hidden="true"
         >
         <div class="hero-copy">
           <p class="eyebrow">TUI-first Rust coding agent</p>

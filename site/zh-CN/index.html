@@ -31,33 +31,56 @@
       content="把仓库开发、durable task、child agent、审批、verification、MCP 工具和 session 恢复放进一个终端界面。"
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full-staff-glow.png">
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem("sigil.theme");
+          if (theme === "dark" || theme === "light") {
+            document.documentElement.dataset.theme = theme;
+          }
+        } catch (_error) {}
+      })();
+    </script>
     <link rel="stylesheet" href="../assets/site.css">
+    <script defer src="../assets/site.js"></script>
   </head>
   <body>
     <header class="site-header">
       <a class="brand" href="../" aria-label="Sigil home">
         <img class="brand-mark" src="../assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
-        <img class="brand-wordmark" src="../assets/logo/sigil-wordmark-header.svg" srcset="../assets/logo/sigil-wordmark-header.svg 1x, ../assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
+        <span class="brand-wordmark-stack" aria-hidden="true">
+          <img class="brand-wordmark brand-wordmark-on-light" src="../assets/logo/sigil-wordmark-header.svg" srcset="../assets/logo/sigil-wordmark-header.svg 1x, ../assets/logo/sigil-wordmark-header-2x.png 2x" alt="" width="78" height="34">
+          <img class="brand-wordmark brand-wordmark-on-dark" src="../assets/logo/sigil-wordmark-header-dark-mode.svg" alt="" width="78" height="34">
+        </span>
       </a>
-      <nav aria-label="Primary navigation">
-        <a href="#quickstart">安装</a>
-        <a href="#workflow">工作流</a>
-        <a href="#safety">安全</a>
-        <a href="docs/visual-tour/">视觉导览</a>
-        <a href="docs/">文档</a>
-        <a href="docs/status/">支持状态</a>
-        <a href="../">English</a>
-        <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-      </nav>
+      <div class="header-actions">
+        <nav aria-label="Primary navigation">
+          <a href="#quickstart">安装</a>
+          <a href="#workflow">工作流</a>
+          <a href="#safety">安全</a>
+          <a href="docs/visual-tour/">视觉导览</a>
+          <a href="docs/">文档</a>
+          <a href="docs/status/">支持状态</a>
+          <a href="../">English</a>
+          <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+        </nav>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换到深色主题" aria-pressed="false" title="切换到深色主题">☾</button>
+      </div>
     </header>
 
     <main>
       <section class="hero">
         <img
-          class="hero-logo"
+          class="hero-logo hero-logo-on-light"
           src="../assets/logo/sigil-full-staff-glow.svg"
           srcset="../assets/logo/sigil-full-staff-glow.svg 1x, ../assets/logo/sigil-full-staff-glow-2x.png 2x"
           alt="Sigil"
+        >
+        <img
+          class="hero-logo hero-logo-on-dark"
+          src="../assets/logo/sigil-full-staff-glow-dark-mode.svg"
+          alt=""
+          aria-hidden="true"
         >
         <div class="hero-copy">
           <p class="eyebrow">TUI-first Rust coding agent</p>
