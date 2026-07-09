@@ -54,6 +54,7 @@ jobs:
         run: cargo fmt --all --check
 
   check:
+    needs: fmt
     runs-on: ubuntu-latest
 
     steps:
@@ -72,6 +73,7 @@ jobs:
         run: cargo check --locked
 
   test:
+    needs: check
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -102,6 +104,7 @@ jobs:
         run: cargo test --locked ${{ matrix.packages }}
 
   clippy:
+    needs: check
     runs-on: ubuntu-latest
 
     steps:
@@ -121,6 +124,9 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
   coverage:
+    needs:
+      - test
+      - clippy
     runs-on: ubuntu-latest
 
     steps:
