@@ -80,13 +80,13 @@ jobs:
       matrix:
         include:
           - name: core-runtime-tools
-            packages: "-p sigil-kernel -p sigil-tools-builtin -p sigil-mcp -p sigil-runtime"
+            packages: "sigil-kernel sigil-tools-builtin sigil-mcp sigil-runtime"
           - name: providers
-            packages: "-p sigil-provider-deepseek -p sigil-provider-openai-compat -p sigil-provider-anthropic -p sigil-provider-gemini"
+            packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-anthropic sigil-provider-gemini"
           - name: automation-surfaces
-            packages: "-p sigil-code-intel -p sigil-http -p sigil"
+            packages: "sigil-code-intel sigil-http sigil"
           - name: tui
-            packages: "-p sigil-tui"
+            packages: "sigil-tui"
 
     steps:
       - name: Checkout
@@ -96,12 +96,33 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: llvm-tools-preview
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test --locked (${{ matrix.name }})
-        run: cargo test --locked ${{ matrix.packages }}
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! cargo llvm-cov --version 2>/dev/null | grep -q "$CARGO_LLVM_COV_VERSION"; then
+            cargo install cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION" --locked
+          fi
+
+      - name: Clean coverage artifacts
+        run: cargo llvm-cov clean --workspace
+
+      - name: cargo llvm-cov --no-report (${{ matrix.name }})
+        run: COVERAGE_NO_REPORT=1 COVERAGE_PACKAGES="${{ matrix.packages }}" ./scripts/coverage.sh
+
+      - name: Archive coverage profiles
+        run: tar -C target -czf coverage-${{ matrix.name }}.tar.gz llvm-cov-target
+
+      - name: Upload coverage profiles
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.name }}
+          path: coverage-${{ matrix.name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
   clippy:
     needs: check
@@ -142,11 +163,22 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Download coverage profiles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage-artifacts
+
       - name: Install cargo-llvm-cov
         run: |
           if ! cargo llvm-cov --version 2>/dev/null | grep -q "$CARGO_LLVM_COV_VERSION"; then
             cargo install cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION" --locked
           fi
 
+      - name: Restore coverage profiles
+        run: |
+          mkdir -p target
+          find coverage-artifacts -name "coverage-*.tar.gz" -print -exec tar -xzf {} -C target \;
+
       - name: coverage report
-        run: ./scripts/coverage.sh
+        run: COVERAGE_REPORT_ONLY=1 ./scripts/coverage.sh
