@@ -4,12 +4,30 @@ on:
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "scripts/coverage.sh"
   pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "scripts/coverage.sh"
 
 permissions:
   contents: read
 
 concurrency:
+  # Supersede stale CI attempts during rapid push batches. Older attempts may
+  # show GitHub's "operation was canceled" even when tests were still passing.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -55,6 +73,18 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: core-runtime-tools
+            packages: "-p sigil-kernel -p sigil-tools-builtin -p sigil-mcp -p sigil-runtime"
+          - name: providers
+            packages: "-p sigil-provider-deepseek -p sigil-provider-openai-compat -p sigil-provider-anthropic -p sigil-provider-gemini"
+          - name: automation-surfaces
+            packages: "-p sigil-code-intel -p sigil-http -p sigil"
+          - name: tui
+            packages: "-p sigil-tui"
 
     steps:
       - name: Checkout
@@ -68,8 +98,8 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test --locked
-        run: cargo test --locked
+      - name: cargo test --locked (${{ matrix.name }})
+        run: cargo test --locked ${{ matrix.packages }}
 
   clippy:
     runs-on: ubuntu-latest
