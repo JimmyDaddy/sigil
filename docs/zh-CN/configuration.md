@@ -9,7 +9,7 @@
 | 目标 | 推荐路径 |
 | --- | --- |
 | 第一次本地 setup | 运行 `sigil` 并完成 Quick Setup |
-| 临时本地认证 | 启动前设置 `SIGIL_API_KEY` |
+| 临时本地认证 | 先选 provider，再使用对应的[环境变量](providers.md#认证优先级) |
 | CI 或脚本认证 | 使用环境变量，不把 key 写进 plaintext config |
 | 从 TUI 切换 model/provider | 使用 `/config` |
 | 一份配置跟随启动目录 | 使用 `workspace.root = "."` |
@@ -36,12 +36,7 @@ Quick Setup 写入用户配置路径。启动时如果 `~/.sigil/sigil.toml` 不
 sigil
 ```
 
-临时使用或 CI 场景，可以在启动前通过环境变量提供认证：
-
-```bash
-export SIGIL_API_KEY="sk-..."
-sigil
-```
+临时使用或 CI 场景，先选择 provider，再按 [provider 认证映射](providers.md#认证优先级)设置对应环境变量，然后启动 Sigil。各 provider 专页提供可复制的 shell 命令；不存在对所有 provider 通用的 API key 环境变量。
 
 如果没有配置文件，TUI 会进入 Quick Setup，并在保存后生成可用配置。后续可以用 `/config` 调整常用项。
 

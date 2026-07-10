@@ -119,6 +119,7 @@ for archive in "${archives[@]}"; do
 
   mkdir -p "${package_dir}/bin"
   cp "${binary_path}" "${package_dir}/bin/${binary_name}"
+  cp "${payload_dir}/LICENSE" "${package_dir}/LICENSE"
   if [[ "${os}" != "win32" ]]; then
     chmod 0755 "${package_dir}/bin/${binary_name}"
   fi
@@ -136,7 +137,7 @@ for archive in "${archives[@]}"; do
   "homepage": "https://jimmydaddy.github.io/sigil/",
   "os": ["${os}"],
   "cpu": ["${cpu}"],
-  "files": ["bin"]
+  "files": ["bin", "LICENSE"]
 }
 JSON
 
@@ -155,6 +156,7 @@ root_package_dir="${out_dir}/sigil"
 mkdir -p "${root_package_dir}/bin"
 cp npm/sigil/bin/sigil.js "${root_package_dir}/bin/sigil.js"
 cp npm/sigil/README.md "${root_package_dir}/README.md"
+cp LICENSE "${root_package_dir}/LICENSE"
 chmod 0755 "${root_package_dir}/bin/sigil.js"
 
 optional_dependencies=""
@@ -179,7 +181,7 @@ cat >"${root_package_dir}/package.json" <<JSON
   "bin": {
     "sigil": "bin/sigil.js"
   },
-  "files": ["bin", "README.md"],
+  "files": ["bin", "README.md", "LICENSE"],
   "engines": {
     "node": ">=18"
   },

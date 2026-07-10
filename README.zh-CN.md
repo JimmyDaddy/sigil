@@ -132,3 +132,10 @@ Sigil 把工具执行视为可审计状态，而不是隐藏副作用。
 | 理解 approval、workspace、MCP 和数据边界 | [安全](docs/zh-CN/safety.md) 和 [隐私](docs/zh-CN/privacy.md) |
 | 修复 setup、认证、terminal、MCP 或 LSP 问题 | [排障](docs/zh-CN/troubleshooting.md) |
 | 查找所有命令、键位、路径和环境变量 | [参考](docs/zh-CN/reference.md) |
+
+## 项目
+
+欢迎贡献。开始前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和
+[开发者文档索引](dev/docs/index.md)。安全漏洞请按
+[SECURITY.md](SECURITY.md) 中的说明私下报告。Sigil 使用
+[MIT License](LICENSE) 发布。

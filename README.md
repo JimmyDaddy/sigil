@@ -132,3 +132,10 @@ Sigil treats tool execution as auditable state, not hidden side effects.
 | Understand approval, workspace, MCP, and data boundaries | [Safety](docs/en/safety.md) and [Privacy](docs/en/privacy.md) |
 | Fix setup, auth, terminal, MCP, or LSP issues | [Troubleshooting](docs/en/troubleshooting.md) |
 | Look up every command, key, path, and environment variable | [Reference](docs/en/reference.md) |
+
+## Project
+
+Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[developer documentation index](dev/docs/index.md). Report vulnerabilities
+privately as described in [SECURITY.md](SECURITY.md). Sigil is distributed
+under the [MIT License](LICENSE).

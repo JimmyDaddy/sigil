@@ -48,7 +48,9 @@ Each release should contain:
 - `sigil-ai-sigil-<version>.tgz`
 - `sigil-ai-sigil-<platform>-<version>.tgz` for each supported npm platform package
 
-Each tar archive should include the `sigil` binary, README files, `assets/logo/*`, and installation docs so repository-relative README image links keep working after extraction.
+Each tar archive should include the `sigil` binary, `LICENSE`, README files,
+`assets/logo/*`, and installation docs so the license and repository-relative
+README image links remain available after extraction.
 
 The generated `sigil-ai.rb` is the source of truth for the
 `JimmyDaddy/homebrew-sigil` tap update. After the GitHub release succeeds, copy

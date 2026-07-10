@@ -28,6 +28,22 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
+      - name: Locate browser for responsive layout checks
+        run: |
+          browser=""
+          for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "${candidate}" >/dev/null 2>&1; then
+              browser="$(command -v "${candidate}")"
+              break
+            fi
+          done
+          if [[ -z "${browser}" ]]; then
+            echo "Chrome or Chromium is required for responsive layout checks" >&2
+            exit 1
+          fi
+          "${browser}" --version
+          echo "SIGIL_SITE_BROWSER=${browser}" >> "${GITHUB_ENV}"
+
       - name: Check static site
         run: scripts/check-pages-site.sh
 

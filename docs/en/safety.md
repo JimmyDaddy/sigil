@@ -151,11 +151,7 @@ Start with `approval_default = "ask"` and `allow_secrets = false`. Only loosen t
 
 ## Secrets
 
-Prefer environment variables for provider credentials:
-
-```bash
-export SIGIL_API_KEY="sk-..."
-```
+Prefer environment variables for provider credentials. Choose the provider first, then use its exact variable from the [provider authentication map](providers.md#authentication-priority); there is no provider-neutral API key variable.
 
 Saving an API key through Quick Setup or `/config` writes plaintext to `sigil.toml`. That may be acceptable for a private local config, but never commit real secrets.
 

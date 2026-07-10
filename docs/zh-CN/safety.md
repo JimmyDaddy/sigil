@@ -151,11 +151,7 @@ pin_version = false
 
 ## Secrets
 
-Provider 凭据优先使用环境变量：
-
-```bash
-export SIGIL_API_KEY="sk-..."
-```
+Provider 凭据优先使用环境变量。先选择 provider，再使用 [provider 认证映射](providers.md#认证优先级)中的准确变量；不存在对所有 provider 通用的 API key 环境变量。
 
 通过 Quick Setup 或 `/config` 保存 API key 会把它以明文写入 `sigil.toml`。私有本地配置可以这样做，但不要提交真实 secret。
 

@@ -203,6 +203,7 @@ a {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 12px;
+  min-width: 0;
 }
 
 nav {
@@ -211,6 +212,7 @@ nav {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 18px;
+  min-width: 0;
   font-size: 0.94rem;
 }
 
@@ -322,6 +324,7 @@ nav a:focus-visible {
 
 .hero-copy {
   position: relative;
+  min-width: 0;
   max-width: 780px;
   padding-top: 132px;
   opacity: 1;
@@ -421,6 +424,8 @@ h1 {
   position: relative;
   z-index: 1;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin-bottom: 16px;
   border: 1px solid var(--terminal-preview-border);
   border-radius: 8px;
@@ -544,6 +549,7 @@ h1 {
 
 pre {
   margin: 0;
+  max-width: 100%;
   overflow-x: auto;
   position: relative;
   white-space: pre;
@@ -766,6 +772,7 @@ h3 {
 }
 
 .docs-hero-copy {
+  min-width: 0;
   max-width: 820px;
 }
 
@@ -1418,6 +1425,7 @@ footer a {
   }
 
   .header-actions {
+    width: 100%;
     justify-content: flex-start;
   }
 
@@ -1425,8 +1433,12 @@ footer a {
     justify-content: flex-start;
   }
 
+  .site-header nav {
+    flex: 1 1 240px;
+  }
+
   .hero {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     align-items: start;
     min-height: auto;
   }
@@ -1437,7 +1449,7 @@ footer a {
   }
 
   .docs-hero {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     align-items: start;
   }
 
@@ -1482,6 +1494,8 @@ footer a {
 @media (max-width: 640px) {
   .site-header {
     position: static;
+    padding-right: 20px;
+    padding-left: 20px;
   }
 
   nav {

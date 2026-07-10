@@ -30,11 +30,7 @@ These are local by default:
 
 ## API Keys
 
-Prefer environment variables:
-
-```bash
-export SIGIL_API_KEY="sk-..."
-```
+Prefer environment variables. Choose the provider first, then use the exact variable in the [provider authentication map](providers.md#authentication-priority); Sigil does not share one API key variable across providers.
 
 If you save an API key through Quick Setup or `/config`, it is stored as plaintext in the per-user `sigil.toml`. Do not copy real config files containing secrets into a repository.
 

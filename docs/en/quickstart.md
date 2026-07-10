@@ -57,12 +57,7 @@ If no usable config exists, Sigil opens Quick Setup. Confirm:
 2. Provider/model: the backend model Sigil should use.
 3. Authentication: the API key or equivalent credential.
 
-For temporary local use, you can provide the key before launch:
-
-```bash
-export SIGIL_API_KEY="sk-..."
-sigil
-```
+For temporary local use, choose the provider first, then export the provider-specific variable listed in the [authentication map](providers.md#authentication-priority) before launching `sigil`. Each provider page includes its exact shell command; Sigil does not use one provider-neutral API key variable.
 
 If you save an API key through Quick Setup or `/config`, it is written as plaintext to the local config file. Do not commit a real `sigil.toml`.
 

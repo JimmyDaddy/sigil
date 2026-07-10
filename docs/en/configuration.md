@@ -9,7 +9,7 @@ This guide covers user-facing Sigil configuration. Most users should start with 
 | Goal | Recommended path |
 | --- | --- |
 | First local setup | Run `sigil` and complete Quick Setup |
-| Temporary local auth | Set `SIGIL_API_KEY` before launch |
+| Temporary local auth | Choose a provider, then use its [environment key](providers.md#authentication-priority) |
 | CI or script auth | Use environment variables, not plaintext config |
 | Change model/provider from the TUI | Use `/config` |
 | Keep one config that follows the launch directory | Use `workspace.root = "."` |
@@ -36,12 +36,7 @@ For normal use, start the TUI and complete Quick Setup:
 sigil
 ```
 
-For temporary use or CI, provide authentication through an environment variable before launch:
-
-```bash
-export SIGIL_API_KEY="sk-..."
-sigil
-```
+For temporary use or CI, choose a provider and export its variable from the [provider authentication map](providers.md#authentication-priority) before launch. Provider pages contain copyable shell commands; there is no provider-neutral API key variable.
 
 Quick Setup creates a usable config when no config file exists. Later, use `/config` for common settings.
 

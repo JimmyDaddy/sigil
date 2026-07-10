@@ -57,12 +57,7 @@ sigil
 2. Provider/model：Sigil 使用的后端模型。
 3. Authentication：API key 或等价凭据。
 
-临时本地使用可以在启动前提供 key：
-
-```bash
-export SIGIL_API_KEY="sk-..."
-sigil
-```
+临时本地使用时，先选择 provider，再按[认证映射](providers.md#认证优先级)设置对应环境变量，然后启动 `sigil`。每个 provider 专页都有准确的 shell 命令；Sigil 不使用一个对所有 provider 通用的 API key 环境变量。
 
 如果通过 Quick Setup 或 `/config` 保存 API key，它会以明文写入本地配置文件。不要提交真实 `sigil.toml`。
 

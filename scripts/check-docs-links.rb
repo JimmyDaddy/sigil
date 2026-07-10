@@ -2,9 +2,12 @@
 # frozen_string_literal: true
 
 REPO_ROOT = File.expand_path("..", __dir__)
-paths = Dir[File.join(REPO_ROOT, "README*.md")] +
+paths = %w[README.md README.zh-CN.md AGENTS.md CONTRIBUTING.md SECURITY.md]
+        .map { |path| File.join(REPO_ROOT, path) }
+        .select { |path| File.file?(path) } +
         Dir[File.join(REPO_ROOT, "docs", "{en,zh-CN}", "*.md")] +
-        Dir[File.join(REPO_ROOT, "docs", "examples", "config", "*.md")]
+        Dir[File.join(REPO_ROOT, "docs", "examples", "config", "*.md")] +
+        Dir[File.join(REPO_ROOT, "dev", "{docs,governance}", "**", "*.md")]
 
 missing = []
 paths.each do |path|

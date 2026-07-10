@@ -10,6 +10,8 @@ stage_dir="${stage_root}/public"
 
 scripts/check-docs.sh >/dev/null
 scripts/build-pages-site.sh "${stage_dir}" >/dev/null
+scripts/test-docs-table-render.rb >/dev/null
+scripts/check-site-viewport.rb "${stage_dir}" >/dev/null
 scripts/check-site-artifact-links.rb "${stage_dir}" >/dev/null
 scripts/check-site-repo-links.rb "${stage_dir}" >/dev/null
 

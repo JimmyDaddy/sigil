@@ -7,7 +7,7 @@ require "fileutils"
 require "json"
 
 REPO_ROOT = File.expand_path("..", __dir__)
-OUT_DIR = File.expand_path(ARGV.fetch(0), REPO_ROOT)
+OUT_DIR = File.expand_path(ARGV.fetch(0), REPO_ROOT) if $PROGRAM_NAME == __FILE__
 SITE_URL = "https://jimmydaddy.github.io/sigil"
 LASTMOD = Date.today.iso8601
 
@@ -205,6 +205,52 @@ def inline_markdown(text, locale)
   end
 end
 
+def table_cells(line)
+  content = line.strip
+  content = content[1..] if content.start_with?("|")
+
+  cells = []
+  cell = +""
+  code_delimiter = nil
+  index = 0
+
+  while index < content.length
+    character = content[index]
+
+    if character == "\\" && content[index + 1] == "|"
+      cell << "|"
+      index += 2
+      next
+    end
+
+    if character == "`"
+      run_end = index
+      run_end += 1 while content[run_end] == "`"
+      delimiter = content[index...run_end]
+      if code_delimiter.nil?
+        code_delimiter = delimiter
+      elsif code_delimiter == delimiter
+        code_delimiter = nil
+      end
+      cell << delimiter
+      index = run_end
+      next
+    end
+
+    if character == "|" && code_delimiter.nil?
+      cells << cell.strip
+      cell = +""
+    else
+      cell << character
+    end
+    index += 1
+  end
+
+  cells << cell.strip
+  cells.pop if cell.empty? && content.end_with?("|") && code_delimiter.nil?
+  cells
+end
+
 def rewrite_href(href, locale)
   return href if href.start_with?("http://", "https://", "mailto:", "#")
 
@@ -319,7 +365,7 @@ def render_markdown(markdown, locale)
     if line.include?("|") && line.strip.start_with?("|")
       flush_paragraph.call
       close_lists(html, state)
-      cells = line.strip.split("|")[1..-2].map(&:strip)
+      cells = table_cells(line)
       next if cells.all? { |cell| cell.match?(/\A:?-{3,}:?\z/) }
 
       unless state[:table]
@@ -617,8 +663,10 @@ def write_examples_index
   HTML
 end
 
-write_pages
-write_examples_index
-write_search_index
-write_sitemap
-puts "generated docs pages in #{OUT_DIR}"
+if $PROGRAM_NAME == __FILE__
+  write_pages
+  write_examples_index
+  write_search_index
+  write_sitemap
+  puts "generated docs pages in #{OUT_DIR}"
+end
