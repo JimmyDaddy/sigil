@@ -24,8 +24,8 @@ use crate::{
     },
     task::{TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanUpdateContext, task_plan_update_tool_spec},
     tool::{
-        ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent, ToolProgressSink,
-        ToolRegistry, ToolResult, execution_mutation_profile_for_tool,
+        PreparedToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
+        ToolProgressSink, ToolRegistry, ToolResult,
     },
 };
 
@@ -41,11 +41,16 @@ mod tool_results;
 #[cfg(test)]
 use approval_policy::active_plan_approval;
 use approval_policy::{
-    interactive_external_directory_approval_override, plan_approval_decision_override,
-    tool_session_grant_decision_override,
+    active_plan_approval_authority, interactive_external_directory_approval_override,
+    plan_approval_decision_override, tool_session_grant_decision_override,
 };
 use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
-use preview::capture_tool_preview_for_decision;
+use preview::{
+    capture_tool_preview_for_decision, pending_interactive_approval_identity,
+    preparation_plan_approval_identity, preparation_policy_approval_identity,
+    preparation_policy_fingerprint, preparation_session_grant_identity,
+    resolved_interactive_approval_identity,
+};
 use provider_stream::collect_provider_turn;
 use readiness::append_agent_run_readiness;
 pub use readiness::projected_agent_run_readiness;
@@ -58,8 +63,9 @@ use tool_audit::{
     append_terminal_task_control_from_result, append_tool_approval_audit,
     append_tool_approval_policy_audit, append_tool_approval_session_grant,
     append_tool_control_entries_from_result, append_tool_execution_audit,
-    append_tool_execution_started_audit, attach_tool_call_context, duration_ms,
-    reconcile_terminal_task_mutation_from_start, tool_egress_control_entry,
+    append_tool_execution_started_audit, attach_prepared_tool_audit_binding,
+    attach_tool_call_context, duration_ms, reconcile_terminal_task_mutation_from_start,
+    tool_egress_control_entry,
 };
 #[cfg(test)]
 use tool_audit::{
@@ -697,24 +703,44 @@ where
                         continue;
                     }
                     let mut execution_subjects = Vec::new();
+                    let mut prepared_tool_call = None;
                     let mut tool_registered = false;
                     let mut tool_is_agent_category = false;
                     let execution_spec = tools.spec_for(&call.name);
                     if let Some(spec) = execution_spec.as_ref() {
                         tool_registered = true;
                         tool_is_agent_category = spec.category == ToolCategory::Agent;
-                        let subjects = match tools.permission_subjects(&tool_ctx, &call) {
-                            Ok(subjects) => subjects,
-                            Err(error) => {
-                                append_invalid_tool_input_result(
-                                    session,
-                                    handler,
-                                    &mut outcome,
-                                    &call,
-                                    &[],
-                                    error,
-                                )?;
-                                continue;
+                        let preparation_draft =
+                            match tools.prepare(tool_ctx.clone(), call.clone()).await {
+                                Ok(preparation) => preparation,
+                                Err(error) => {
+                                    append_invalid_tool_input_result(
+                                        session,
+                                        handler,
+                                        &mut outcome,
+                                        &call,
+                                        &[],
+                                        error,
+                                    )?;
+                                    continue;
+                                }
+                            };
+                        let subjects = if let Some(draft) = preparation_draft.as_ref() {
+                            draft.subjects().to_vec()
+                        } else {
+                            match tools.permission_subjects(&tool_ctx, &call) {
+                                Ok(subjects) => subjects,
+                                Err(error) => {
+                                    append_invalid_tool_input_result(
+                                        session,
+                                        handler,
+                                        &mut outcome,
+                                        &call,
+                                        &[],
+                                        error,
+                                    )?;
+                                    continue;
+                                }
                             }
                         };
                         let access = match tools.permission_access(&tool_ctx, &call) {
@@ -768,11 +794,38 @@ where
                             subjects.clone(),
                             tool_default_mode,
                         )?;
-                        let decision =
+                        let pre_plan_decision =
                             interactive_external_directory_approval_override(&options, decision);
-                        let decision = plan_approval_decision_override(session, spec, decision);
-                        let (decision, session_grant_source) =
-                            tool_session_grant_decision_override(session, &call.name, decision);
+                        let plan_authority =
+                            active_plan_approval_authority(session, spec, &pre_plan_decision);
+                        let binding_decision =
+                            plan_approval_decision_override(session, spec, pre_plan_decision);
+                        let (decision, session_grant_source) = tool_session_grant_decision_override(
+                            session,
+                            &call.name,
+                            binding_decision.clone(),
+                        );
+                        prepared_tool_call = match preparation_draft {
+                            Some(draft) => {
+                                let policy_fingerprint =
+                                    preparation_policy_fingerprint(&binding_decision)?;
+                                let approval_identity =
+                                    if let Some(grant) = session_grant_source.as_ref() {
+                                        preparation_session_grant_identity(grant)?
+                                    } else if let Some(authority) = plan_authority.as_ref() {
+                                        preparation_plan_approval_identity(authority)?
+                                    } else if binding_decision.mode == ApprovalMode::Ask {
+                                        pending_interactive_approval_identity(&call.id)
+                                    } else {
+                                        preparation_policy_approval_identity(&policy_fingerprint)
+                                    };
+                                Some(draft.bind_with_approval_identity(
+                                    policy_fingerprint,
+                                    approval_identity,
+                                )?)
+                            }
+                            None => None,
+                        };
                         let subject_label = if decision.subjects.is_empty() {
                             "-".to_owned()
                         } else {
@@ -794,6 +847,9 @@ where
                             &call,
                             &decision,
                             session_grant_source.as_ref(),
+                            prepared_tool_call
+                                .as_ref()
+                                .map(|prepared| prepared.prepared_digest().to_owned()),
                         )?;
                         let preview_capture = capture_tool_preview_for_decision(
                             session,
@@ -803,8 +859,10 @@ where
                             &call,
                             spec,
                             &decision,
+                            prepared_tool_call.take(),
                         )
                         .await?;
+                        prepared_tool_call = preview_capture.prepared;
                         execution_subjects = decision.subjects.clone();
 
                         match decision.mode {
@@ -878,6 +936,11 @@ where
                                             None,
                                             preview_hash,
                                         )?;
+                                        authorize_prepared_tool_from_resolved_approval(
+                                            session,
+                                            &call,
+                                            &mut prepared_tool_call,
+                                        )?;
                                         handler.handle(RunEvent::ToolApprovalResolved {
                                             call_id: call.id.clone(),
                                             approved: true,
@@ -931,6 +994,11 @@ where
                                             None,
                                             preview_hash,
                                         )?;
+                                        authorize_prepared_tool_from_resolved_approval(
+                                            session,
+                                            &call,
+                                            &mut prepared_tool_call,
+                                        )?;
                                         append_tool_approval_session_grant(
                                             session, handler, &call, &decision,
                                         )?;
@@ -941,6 +1009,42 @@ where
                                         })?;
                                     }
                                     ToolApproval::ApproveWithArgs { args_json } => {
+                                        if prepared_tool_call.is_some() {
+                                            let reason = "prepared mutations do not allow approval-time argument changes; preview and approval must be repeated"
+                                                .to_owned();
+                                            append_tool_approval_audit(
+                                                session,
+                                                &call,
+                                                &decision,
+                                                ToolApprovalAuditAction::Resolved,
+                                                Some(ToolApprovalUserDecision::Denied),
+                                                Some(reason.clone()),
+                                                preview_hash,
+                                            )?;
+                                            handler.handle(RunEvent::ToolApprovalResolved {
+                                                call_id: call.id.clone(),
+                                                approved: false,
+                                                reason: Some(reason.clone()),
+                                            })?;
+                                            let mut result = ToolResult::error(
+                                                call.id.clone(),
+                                                call.name.clone(),
+                                                ToolErrorKind::StalePreparedMutation,
+                                                reason,
+                                            );
+                                            attach_tool_call_context(
+                                                &mut result,
+                                                &call,
+                                                &decision.subjects,
+                                            );
+                                            record_and_emit_tool_result(
+                                                session,
+                                                handler,
+                                                &mut outcome,
+                                                result,
+                                            )?;
+                                            continue;
+                                        }
                                         call.args_json = args_json;
                                         append_tool_approval_audit(
                                             session,
@@ -1073,37 +1177,155 @@ where
 
                     let execution_mutation_profile = execution_spec
                         .as_ref()
-                        .map(|spec| execution_mutation_profile_for_tool(&tool_ctx, spec, &call.id))
+                        .map(|_| tools.execution_mutation_profile(&tool_ctx, &call))
                         .transpose()?
                         .flatten();
+                    let prepared_current_authority = if let Some(prepared) =
+                        prepared_tool_call.as_ref()
+                    {
+                        let spec = execution_spec
+                            .as_ref()
+                            .expect("prepared tools must retain their execution spec");
+                        let access = tools.permission_access(&tool_ctx, &call)?;
+                        let operation = tools.permission_operation(&tool_ctx, &call)?;
+                        let tool_default_mode = tools.permission_default_mode(&tool_ctx, &call)?;
+                        let current_decision = permission_policy
+                            .decide_with_operation_and_default(
+                                spec,
+                                &call.name,
+                                access,
+                                operation,
+                                execution_subjects.clone(),
+                                tool_default_mode,
+                            )?;
+                        let current_pre_plan_decision =
+                            interactive_external_directory_approval_override(
+                                &options,
+                                current_decision,
+                            );
+                        let current_plan_authority = active_plan_approval_authority(
+                            session,
+                            spec,
+                            &current_pre_plan_decision,
+                        );
+                        let current_decision = plan_approval_decision_override(
+                            session,
+                            spec,
+                            current_pre_plan_decision,
+                        );
+                        let current_policy_fingerprint =
+                            preparation_policy_fingerprint(&current_decision)?;
+                        let bound_identity = &prepared.binding().approval_identity;
+                        let current_approval_identity = if bound_identity
+                            .starts_with("session-grant:")
+                        {
+                            let (_, current_grant) = tool_session_grant_decision_override(
+                                session,
+                                &call.name,
+                                current_decision.clone(),
+                            );
+                            match current_grant.as_ref() {
+                                Some(grant) => preparation_session_grant_identity(grant)?,
+                                None => "session-grant:missing".to_owned(),
+                            }
+                        } else if bound_identity.starts_with("plan:") {
+                            match current_plan_authority.as_ref() {
+                                Some(authority) => preparation_plan_approval_identity(authority)?,
+                                None => "plan:missing".to_owned(),
+                            }
+                        } else if bound_identity.starts_with("interactive:") {
+                            resolved_interactive_approval_identity(
+                                session,
+                                &call.id,
+                                prepared.prepared_digest(),
+                            )?
+                            .unwrap_or_else(|| "interactive:missing".to_owned())
+                        } else {
+                            preparation_policy_approval_identity(&current_policy_fingerprint)
+                        };
+                        Some((current_policy_fingerprint, current_approval_identity))
+                    } else {
+                        None
+                    };
+                    let prepared_audit_binding = prepared_tool_call
+                        .as_ref()
+                        .map(|prepared| prepared.audit_binding());
                     append_tool_execution_started_audit(
                         session,
                         &call,
                         &execution_subjects,
                         execution_mutation_profile.as_ref(),
+                        prepared_audit_binding.as_ref(),
                     )?;
                     let execution_started = Instant::now();
                     let execution_tool_ctx = tool_ctx
                         .clone()
                         .with_approved_subjects(execution_subjects.clone());
-                    let mut result = match agent_delegate
-                        .as_deref_mut()
-                        .filter(|_| tool_registered && tool_is_agent_category)
-                    {
-                        Some(delegate) => match delegate
-                            .handle_agent_tool_call(
-                                session,
-                                &call,
-                                &options,
-                                handler,
-                                approval_handler,
+                    let mut result = if let Some(prepared) = prepared_tool_call {
+                        let (current_policy_fingerprint, current_approval_identity) =
+                            prepared_current_authority
+                                .as_ref()
+                                .expect("prepared tools must retain their approval authority");
+                        match tools
+                            .execute_prepared_after_started_audit(
+                                execution_tool_ctx,
+                                call.clone(),
+                                prepared,
+                                current_policy_fingerprint,
+                                current_approval_identity,
                             )
                             .await
                         {
-                            Ok(Some(result)) => result,
-                            Ok(None) => match execute_after_started_audit_with_progress(
+                            Ok(result) => result,
+                            Err(error) => ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Internal,
+                                error.to_string(),
+                            ),
+                        }
+                    } else {
+                        match agent_delegate
+                            .as_deref_mut()
+                            .filter(|_| tool_registered && tool_is_agent_category)
+                        {
+                            Some(delegate) => match delegate
+                                .handle_agent_tool_call(
+                                    session,
+                                    &call,
+                                    &options,
+                                    handler,
+                                    approval_handler,
+                                )
+                                .await
+                            {
+                                Ok(Some(result)) => result,
+                                Ok(None) => match execute_after_started_audit_with_progress(
+                                    tools,
+                                    execution_tool_ctx.clone(),
+                                    call.clone(),
+                                    handler,
+                                )
+                                .await
+                                {
+                                    Ok(result) => result,
+                                    Err(error) => ToolResult::error(
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                        ToolErrorKind::Internal,
+                                        error.to_string(),
+                                    ),
+                                },
+                                Err(error) => ToolResult::error(
+                                    call.id.clone(),
+                                    call.name.clone(),
+                                    ToolErrorKind::Internal,
+                                    error.to_string(),
+                                ),
+                            },
+                            None => match execute_after_started_audit_with_progress(
                                 tools,
-                                execution_tool_ctx.clone(),
+                                execution_tool_ctx,
                                 call.clone(),
                                 handler,
                             )
@@ -1117,30 +1339,11 @@ where
                                     error.to_string(),
                                 ),
                             },
-                            Err(error) => ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Internal,
-                                error.to_string(),
-                            ),
-                        },
-                        None => match execute_after_started_audit_with_progress(
-                            tools,
-                            execution_tool_ctx,
-                            call.clone(),
-                            handler,
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Internal,
-                                error.to_string(),
-                            ),
-                        },
+                        }
                     };
+                    if let Some(binding) = prepared_audit_binding.as_ref() {
+                        attach_prepared_tool_audit_binding(&mut result, binding)?;
+                    }
                     attach_tool_call_context(&mut result, &call, &execution_subjects);
                     let duration_ms = Some(duration_ms(execution_started));
                     let status = if result.is_error() {
@@ -1280,6 +1483,23 @@ where
             });
         }
     }
+}
+
+fn authorize_prepared_tool_from_resolved_approval(
+    session: &Session,
+    call: &ToolCall,
+    prepared: &mut Option<PreparedToolCall>,
+) -> Result<()> {
+    let Some(pending) = prepared.take() else {
+        return Ok(());
+    };
+    let identity =
+        resolved_interactive_approval_identity(session, &call.id, pending.prepared_digest())?
+            .ok_or_else(|| {
+                anyhow!("approved prepared tool is missing its durable approval receipt")
+            })?;
+    *prepared = Some(pending.authorize(identity)?);
+    Ok(())
 }
 
 fn tool_registry_has_agent_tools(tools: &ToolRegistry) -> bool {

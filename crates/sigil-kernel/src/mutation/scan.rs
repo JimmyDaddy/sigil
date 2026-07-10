@@ -16,11 +16,71 @@ use crate::{
 use super::{
     ExecutionMutationProfile, MutationCommitted, MutationEventRecorder, MutationObservedState,
     MutationPrepared, MutationReconciled, MutationResolution, MutationSubject, OperationId,
-    ToolCallId, WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceMutationScan,
-    directory_state_hash, file_content_hash,
+    PreparedFileMutation, ToolCallId, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
+    WorkspaceMutationScan, directory_state_hash, file_content_hash,
 };
 
 impl MutationEventRecorder {
+    /// Reconciles one live prepared file mutation against its current on-disk state.
+    ///
+    /// Applied or conflicting states advance the workspace revision and carry a content-bound
+    /// snapshot. An unreadable state is closed as unknown dirty without claiming a snapshot.
+    pub(super) fn reconcile_prepared_file_from_disk_under_lease(
+        &self,
+        prepared: &PreparedFileMutation,
+    ) -> Result<StoredEvent> {
+        let observed_hash = file_content_hash(&prepared.absolute_path).ok();
+        let (observed_state, resolution, workspace_revision, workspace_snapshot_id) =
+            match observed_hash {
+                Some(observed_hash) if observed_hash == prepared.before_hash => (
+                    MutationObservedState::NotApplied,
+                    MutationResolution::MarkNotApplied,
+                    None,
+                    None,
+                ),
+                Some(observed_hash) => {
+                    let revision = latest_workspace_revision(&self.store, &prepared.workspace_id)?
+                        .max(prepared.base_workspace_revision)
+                        .saturating_add(1);
+                    let snapshot_id = single_subject_snapshot_id(
+                        &prepared.workspace_id,
+                        &prepared.relative_path,
+                        FileType::File,
+                        observed_hash.clone(),
+                    )?;
+                    if observed_hash == prepared.intended_after_hash {
+                        (
+                            MutationObservedState::AppliedAsIntended,
+                            MutationResolution::MarkCommitted,
+                            Some(revision),
+                            Some(snapshot_id),
+                        )
+                    } else {
+                        (
+                            MutationObservedState::AppliedDifferently,
+                            MutationResolution::MarkConflict,
+                            Some(revision),
+                            Some(snapshot_id),
+                        )
+                    }
+                }
+                None => (
+                    MutationObservedState::Unknown,
+                    MutationResolution::MarkUnknownDirty,
+                    None,
+                    None,
+                ),
+            };
+        self.append_reconciled(&MutationReconciled {
+            operation_id: prepared.operation_id.clone(),
+            batch_id: prepared.batch_id.clone(),
+            observed_state,
+            resolution,
+            workspace_revision,
+            workspace_snapshot_id,
+        })
+    }
+
     /// Reconciles prepared mutations that were persisted without a terminal commit.
     ///
     /// This is intentionally conservative: it never replays a mutation. It only records what the
@@ -36,9 +96,11 @@ impl MutationEventRecorder {
                 workspace_root.as_ref().display()
             )
         })?;
+        let _workspace_lease = self.acquire_workspace_mutation_lease(&workspace_root)?;
+        let workspace_id = stable_workspace_id(&workspace_root)?;
         let mut prepared = Vec::new();
-        let mut terminal_operation_ids = std::collections::BTreeSet::new();
-        let mut latest_revision = 0;
+        let mut committed = Vec::new();
+        let mut reconciled = Vec::new();
 
         for record in JsonlSessionStore::read_event_records(self.store.path())? {
             let crate::SessionStreamRecord::Stored(event) = record else {
@@ -53,8 +115,9 @@ impl MutationEventRecorder {
                                 DurableEventType::MutationPrepared.as_str()
                             )
                         })?;
-                    latest_revision = latest_revision.max(payload.base_workspace_revision);
-                    prepared.push(payload);
+                    if payload.workspace_id == workspace_id {
+                        prepared.push(payload);
+                    }
                 }
                 Some(DurableEventType::MutationCommitted) => {
                     let payload =
@@ -65,8 +128,7 @@ impl MutationEventRecorder {
                                     DurableEventType::MutationCommitted.as_str()
                                 )
                             })?;
-                    latest_revision = latest_revision.max(payload.workspace_revision);
-                    terminal_operation_ids.insert(payload.operation_id);
+                    committed.push(payload);
                 }
                 Some(DurableEventType::MutationReconciled) => {
                     let payload =
@@ -77,12 +139,37 @@ impl MutationEventRecorder {
                                     DurableEventType::MutationReconciled.as_str()
                                 )
                             })?;
-                    if let Some(revision) = payload.workspace_revision {
-                        latest_revision = latest_revision.max(revision);
-                    }
-                    terminal_operation_ids.insert(payload.operation_id);
+                    reconciled.push(payload);
                 }
                 _ => {}
+            }
+        }
+
+        let target_operation_ids = prepared
+            .iter()
+            .map(|payload| payload.operation_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut terminal_operation_ids = std::collections::BTreeSet::new();
+        let mut latest_revision = prepared
+            .iter()
+            .map(|payload| payload.base_workspace_revision)
+            .max()
+            .unwrap_or_default();
+        for payload in committed {
+            if payload.workspace_id.as_deref() == Some(workspace_id.as_str())
+                || (payload.workspace_id.is_none()
+                    && target_operation_ids.contains(payload.operation_id.as_str()))
+            {
+                latest_revision = latest_revision.max(payload.workspace_revision);
+                terminal_operation_ids.insert(payload.operation_id);
+            }
+        }
+        for payload in reconciled {
+            if target_operation_ids.contains(payload.operation_id.as_str()) {
+                if let Some(revision) = payload.workspace_revision {
+                    latest_revision = latest_revision.max(revision);
+                }
+                terminal_operation_ids.insert(payload.operation_id);
             }
         }
 

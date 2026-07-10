@@ -139,6 +139,9 @@ struct MutationBatchStarted {
     batch_id: MutationBatchId,
     operation_id: OperationId,
     expected_subjects: Vec<MutationSubject>,
+    prepared_digest: Option<String>,
+    approval_identity: Option<String>,
+    policy_fingerprint: Option<String>,
 }
 
 struct MutationBatchFinished {
@@ -146,6 +149,11 @@ struct MutationBatchFinished {
     status: MutationBatchStatus,
     committed_operations: Vec<OperationId>,
     failed_operations: Vec<OperationId>,
+    rollback_operations: Vec<OperationId>,
+    rollback_failed_operations: Vec<OperationId>,
+    prepared_digest: Option<String>,
+    approval_identity: Option<String>,
+    policy_fingerprint: Option<String>,
 }
 ```
 
@@ -156,6 +164,45 @@ Rules:
 - Recovery reconciles each prepared operation independently.
 - Batch finished status is derived from per-file outcomes.
 - Verification sees the resulting parent workspace snapshot, not the intended batch.
+
+### 7.1 Approval-bound prepared mutations
+
+External planners such as an LSP may propose a multi-file edit before the local tool owns the
+write. These tools use a provider-neutral, process-local prepared envelope in addition to the
+durable per-file `MutationPrepared` records:
+
+1. Query the planner once and materialize the complete edit set, exact target subjects, source
+   version/hash, target before/after hashes, workspace revision and human preview.
+2. Evaluate permission against those exact subjects, then bind the draft to the call arguments,
+   policy fingerprint and approval identity. The approved envelope is not cloneable or
+   serializable and is consumed by value.
+3. Persist tool approval and execution-start audit with the same prepared digest.
+4. Re-evaluate the approval-bound policy fingerprint and approval authority immediately before
+   execution. A policy, plan approval, or pre-existing session-grant change invalidates the
+   prepared call.
+5. Acquire the cross-process workspace mutation lease from the stable per-user Sigil state
+   namespace, compare its monotonic mutation epoch,
+   workspace revision, source identity, and every source/target hash before
+   `MutationBatchStarted`. Every RFC-0002 commit uses the same lease and advances the epoch, so a
+   concurrent controlled write cannot enter between validation and commit. A mismatch returns
+   `stale_prepared_mutation` and performs zero writes.
+6. Persist the bound batch start, prepare every changed file through this RFC, and only then begin
+   commits. Execution must not query the external planner again.
+
+This remains a non-atomic file protocol. Approval-bound batches add best-effort compensating
+rollback for failures observed by the live process:
+
+- `RolledBack` means every file that may have been changed was restored with a reverse CAS and the
+  rollback operations were durably recorded. Atomic replacement preserves the existing target
+  permissions, so apply and compensation do not silently remove executable/read-only mode bits.
+- `RollbackFailed` means at least one reverse CAS or restore failed; residual files are reported
+  explicitly and verification remains dirty/inconclusive. Any residual applied/conflicting
+  operation is reconciled with a new workspace revision and content-bound snapshot.
+- A crash can interrupt apply or rollback. Recovery reconciles each durable per-file prepare and
+  never replays the external planner request or claims transaction-level atomicity.
+- A live-process failure appends `MutationReconciled` for each prepared operation that did not
+  reach `MutationCommitted`; batch operation lists contain only real RFC-0002 operation ids.
+- Tools that cannot capture restorable pre-mutation content fail before the first write.
 
 ## 8. Restore Flow
 
@@ -393,6 +440,21 @@ Required deterministic tests:
 - permission denied entry prevents clean snapshot
 - workspace revision is not compared across worktrees
 - verification stale reason references invalidating event id
+- LSP returns plan A for preview and plan B later, while prepared execution performs one planner
+  request and applies only A
+- source/target, workspace revision/epoch, policy fingerprint, plan authority, session grant, or
+  interactive approval receipt drift invalidates the prepared artifact before mutation
+- approval request/resolution carry the same prepared digest; execution started/result and batch
+  start/finish carry that digest plus the exact identity derived from the durable interactive,
+  plan, session-grant, or policy authority
+- approval-time argument replacement for a prepared mutation fails closed and executes zero writes
+- ordinary RFC-0002 writers in a second process cannot enter a prepared mutation lease, even when
+  the processes use different temporary directories
+- multi-file prepared apply failure records only real operation ids and either fully rolls back or
+  reports `RollbackFailed` with residual files
+- rollback failure reconciles every nonterminal prepare; residual applied/conflicting state advances
+  workspace revision and carries a content-bound snapshot
+- prepared batch crash recovery reconciles per-file state without re-querying the external planner
 
 ## 16. Implementation Progress
 

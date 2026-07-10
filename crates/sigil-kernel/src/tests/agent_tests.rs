@@ -20,16 +20,17 @@ use crate::{
     EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
     JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
     PermissionConfig, PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission,
-    PlanApprovalScope, PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ReasoningArtifact,
-    ReasoningEffort, ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
-    SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
-    TaskRunEntry, TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
-    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected, plan_text_hash,
+    PlanApprovalScope, PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry,
+    PreparedToolExecution, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
+    ResponseHandle, RunEvent, Session, SessionLogEntry, SessionStreamRecord,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext, TaskRunEntry,
+    TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, VerificationVerdict,
+    VisibleCompletionState, WorkspaceMutationDetected, plan_text_hash,
 };
 
 use super::{
@@ -1126,6 +1127,42 @@ impl Tool for WriteTool {
         }))
     }
 
+    async fn prepare(
+        &self,
+        ctx: ToolContext,
+        _call_id: String,
+        args: serde_json::Value,
+    ) -> Result<Option<ToolPreparation>> {
+        let preview = self
+            .preview(ctx.clone(), args.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("write preview is required"))?;
+        let subjects = self.permission_subjects(&ctx, &args)?;
+        Ok(Some(ToolPreparation::new(
+            preview,
+            subjects,
+            "sha256:test-write-artifact",
+            (),
+        )?))
+    }
+
+    async fn execute_prepared(
+        &self,
+        _ctx: ToolContext,
+        _args: serde_json::Value,
+        prepared: PreparedToolExecution,
+    ) -> Result<ToolResult> {
+        let call_id = prepared.binding().call_id.clone();
+        prepared.into_artifact::<()>()?;
+        self.executed.store(true, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "write_file",
+            "wrote prepared file",
+            ToolResultMeta::default(),
+        ))
+    }
+
     async fn execute(
         &self,
         _ctx: ToolContext,
@@ -1266,6 +1303,8 @@ struct ApproveForSessionHandler {
     approvals: Arc<AtomicUsize>,
 }
 
+struct ApproveWithArgsHandler;
+
 struct PanicApprovalHandler;
 
 impl ApprovalHandler for DenyWritesHandler {
@@ -1288,6 +1327,18 @@ impl ApprovalHandler for ApproveForSessionHandler {
     ) -> Result<ToolApproval> {
         self.approvals.fetch_add(1, Ordering::SeqCst);
         Ok(ToolApproval::ApproveForSession)
+    }
+}
+
+impl ApprovalHandler for ApproveWithArgsHandler {
+    fn approve_tool_call(
+        &mut self,
+        _call: &ToolCall,
+        _spec: &crate::ToolSpec,
+    ) -> Result<ToolApproval> {
+        Ok(ToolApproval::ApproveWithArgs {
+            args_json: r#"{"path":"changed-after-preview.txt"}"#.to_owned(),
+        })
     }
 }
 
@@ -4091,6 +4142,103 @@ fn plan_approval_override_still_allows_ordinary_file_edits() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn prepared_authority_identities_track_durable_source_entries() -> Result<()> {
+    let spec = required_preview_file_spec("write_file");
+    let decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("file.txt", "file.txt")],
+        false,
+    );
+    let mut plan_session = Session::new("mock-write", "mock-model");
+    let first_plan = session_scoped_approved_workspace_plan(vec!["file.txt"]);
+    plan_session.append_control(ControlEntry::PlanApproved(first_plan.clone()))?;
+    let first_authority = super::active_plan_approval_authority(&plan_session, &spec, &decision)
+        .expect("first plan should authorize");
+    let first_plan_identity = super::preparation_plan_approval_identity(&first_authority)?;
+    let mut replacement_plan = first_plan;
+    replacement_plan.approved_at_ms = replacement_plan.approved_at_ms.saturating_add(1);
+    plan_session.append_control(ControlEntry::PlanApproved(replacement_plan))?;
+    let replacement_authority =
+        super::active_plan_approval_authority(&plan_session, &spec, &decision)
+            .expect("replacement plan should authorize");
+    let replacement_plan_identity =
+        super::preparation_plan_approval_identity(&replacement_authority)?;
+    assert_ne!(first_plan_identity, replacement_plan_identity);
+
+    let call = ToolCall {
+        id: "authority-call".to_owned(),
+        name: "write_file".to_owned(),
+        args_json: r#"{"path":"file.txt"}"#.to_owned(),
+    };
+    let prepared_digest = "sha256:interactive-authority";
+    let mut interactive_session = Session::new("mock-write", "mock-model");
+    assert!(
+        super::resolved_interactive_approval_identity(
+            &interactive_session,
+            &call.id,
+            prepared_digest,
+        )?
+        .is_none()
+    );
+    super::append_tool_approval_audit(
+        &mut interactive_session,
+        &call,
+        &decision,
+        ToolApprovalAuditAction::Resolved,
+        Some(ToolApprovalUserDecision::Approved),
+        None,
+        Some(prepared_digest.to_owned()),
+    )?;
+    assert!(
+        super::resolved_interactive_approval_identity(
+            &interactive_session,
+            &call.id,
+            prepared_digest,
+        )?
+        .is_some_and(|identity| identity.starts_with("interactive:"))
+    );
+
+    let read_decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "read_path",
+        ToolAccess::Read,
+        vec![ToolSubject::path("file.txt", "file.txt")],
+        false,
+    );
+    let read_call = ToolCall {
+        id: "grant-call".to_owned(),
+        name: "read_path".to_owned(),
+        args_json: r#"{"path":"file.txt"}"#.to_owned(),
+    };
+    let mut grant_session = Session::new("mock-read", "mock-model");
+    let mut events = RecordingEventHandler::default();
+    super::append_tool_approval_session_grant(
+        &mut grant_session,
+        &mut events,
+        &read_call,
+        &read_decision,
+    )?;
+    let (_, first_grant) = super::tool_session_grant_decision_override(
+        &grant_session,
+        &read_call.name,
+        read_decision.clone(),
+    );
+    let first_grant = first_grant.expect("first session grant should match");
+    let first_grant_identity = super::preparation_session_grant_identity(&first_grant)?;
+    let mut replacement_grant = first_grant;
+    replacement_grant.granted_at_ms = replacement_grant.granted_at_ms.saturating_add(1);
+    grant_session.append_control(ControlEntry::ToolApprovalSessionGrant(replacement_grant))?;
+    let (_, replacement_grant) =
+        super::tool_session_grant_decision_override(&grant_session, &read_call.name, read_decision);
+    let replacement_grant = replacement_grant.expect("replacement session grant should match");
+    let replacement_grant_identity = super::preparation_session_grant_identity(&replacement_grant)?;
+    assert_ne!(first_grant_identity, replacement_grant_identity);
+    Ok(())
+}
+
 #[tokio::test]
 async fn agent_respects_denied_write_approval() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
@@ -4442,6 +4590,17 @@ async fn approved_plan_workspace_edits_allows_required_preview_write_without_pro
                     && snapshot.file_diffs.len() == 1
         )
     }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Started
+                    && execution.metadata.details["prepared_mutation"]["approval_identity"]
+                        .as_str()
+                        .is_some_and(|identity| identity.starts_with("plan:"))
+        )
+    }));
     Ok(())
 }
 
@@ -4659,6 +4818,39 @@ async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Resul
         _ => None,
     });
     assert_eq!(snapshot_hash, approval_hash);
+    let prepared_digest = snapshot_hash.expect("prepared digest should be captured");
+    assert!(prepared_digest.starts_with("sha256:"));
+    for approval in entries.iter().filter_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+            if approval.call_id == "call-write-1" =>
+        {
+            Some(approval)
+        }
+        _ => None,
+    }) {
+        assert_eq!(
+            approval.preview_hash.as_deref(),
+            Some(prepared_digest.as_str())
+        );
+    }
+    for execution in entries.iter().filter_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.call_id == "call-write-1" =>
+        {
+            Some(execution)
+        }
+        _ => None,
+    }) {
+        assert_eq!(
+            execution.metadata.details["prepared_mutation"]["prepared_digest"],
+            prepared_digest
+        );
+        assert!(
+            execution.metadata.details["prepared_mutation"]["approval_identity"]
+                .as_str()
+                .is_some_and(|identity| identity.starts_with("interactive:"))
+        );
+    }
     let messages = session.messages();
     let tool_message_content = messages
         .iter()
@@ -4689,6 +4881,123 @@ async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Resul
         .position(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
         .expect("approval request event should be emitted");
     assert!(event_snapshot_index < event_approval_index);
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_execution_rejects_policy_change_after_approval() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let call = ToolCall {
+        id: "call-policy-change".to_owned(),
+        name: "write_file".to_owned(),
+        args_json: r#"{"path":"file.txt"}"#.to_owned(),
+    };
+    let ctx = ToolContext::new(std::env::temp_dir(), 5);
+    let draft = registry
+        .prepare(ctx.clone(), call.clone())
+        .await?
+        .expect("write tool should prepare");
+    let subjects = draft.subjects().to_vec();
+    let prepared = draft.bind_with_approval_identity(
+        "sha256:approved-policy",
+        "tool-approval:call-policy-change",
+    )?;
+    let result = registry
+        .execute_prepared_after_started_audit(
+            ctx.clone().with_approved_subjects(subjects),
+            call.clone(),
+            prepared,
+            "sha256:changed-policy",
+            "tool-approval:call-policy-change",
+        )
+        .await?;
+
+    assert_eq!(
+        result.summary().error_kind,
+        Some(ToolErrorKind::StalePreparedMutation)
+    );
+    let draft = registry
+        .prepare(ctx.clone(), call.clone())
+        .await?
+        .expect("write tool should prepare again");
+    let subjects = draft.subjects().to_vec();
+    let prepared =
+        draft.bind_with_approval_identity("sha256:approved-policy", "plan:approved-authority")?;
+    let result = registry
+        .execute_prepared_after_started_audit(
+            ctx.with_approved_subjects(subjects),
+            call,
+            prepared,
+            "sha256:approved-policy",
+            "plan:replacement-authority",
+        )
+        .await?;
+    assert_eq!(
+        result.summary().error_kind,
+        Some(ToolErrorKind::StalePreparedMutation)
+    );
+    assert!(!executed.load(Ordering::SeqCst));
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepared_execution_rejects_approval_time_argument_changes() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = ApproveWithArgsHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Resolved
+                    && approval.user_decision == Some(ToolApprovalUserDecision::Denied)
+                    && approval.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("approval-time argument changes")
+                    })
+        )
+    }));
+    assert!(session.messages().iter().any(|message| {
+        message.tool_call_id.as_deref() == Some("call-write-1")
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("stale_prepared_mutation"))
+    }));
     Ok(())
 }
 

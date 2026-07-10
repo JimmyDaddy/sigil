@@ -80,6 +80,9 @@ pub(super) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("target path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let existing_permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
     let temp_path = temp_path_for(path);
     {
         let mut temp_file = File::create(&temp_path)
@@ -87,6 +90,11 @@ pub(super) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
         temp_file
             .write_all(content)
             .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        if let Some(permissions) = existing_permissions {
+            fs::set_permissions(&temp_path, permissions).with_context(|| {
+                format!("failed to preserve permissions for {}", path.display())
+            })?;
+        }
         temp_file
             .sync_all()
             .with_context(|| format!("failed to sync {}", temp_path.display()))?;

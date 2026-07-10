@@ -13,6 +13,12 @@ use crate::{
 
 use super::AgentRunOptions;
 
+#[derive(Debug, Clone)]
+pub(super) enum PlanApprovalAuthority {
+    PermissionGrant(PlanPermissionGrantedEntry),
+    ApprovedPlan(crate::PlanApprovedEntry),
+}
+
 pub(super) fn plan_approval_decision_override(
     session: &Session,
     spec: &ToolSpec,
@@ -24,15 +30,37 @@ pub(super) fn plan_approval_decision_override(
     {
         return decision;
     }
-    let Some((permission, workspace_paths)) = active_plan_permission_scope(session) else {
-        return decision;
-    };
-    if permission.covers_tool(spec)
-        && plan_approval_covers_subjects(&workspace_paths, &decision.subjects)
-    {
+    if active_plan_approval_authority(session, spec, &decision).is_some() {
         decision.mode = ApprovalMode::Allow;
     }
     decision
+}
+
+pub(super) fn active_plan_approval_authority(
+    session: &Session,
+    spec: &ToolSpec,
+    decision: &PermissionDecision,
+) -> Option<PlanApprovalAuthority> {
+    if decision.mode != ApprovalMode::Ask
+        || decision.external_directory_required
+        || !plan_approval_can_auto_allow_decision(decision)
+    {
+        return None;
+    }
+    if let Some(grant) = active_plan_permission_grant(session)
+        && grant.permission.covers_tool(spec)
+        && plan_approval_covers_subjects(&grant.scope.workspace_paths, &decision.subjects)
+    {
+        return Some(PlanApprovalAuthority::PermissionGrant(grant));
+    }
+    let approval = active_plan_approval(session)?;
+    if approval.permission.covers_tool(spec)
+        && plan_approval_covers_subjects(&approval.scope.workspace_paths, &decision.subjects)
+    {
+        Some(PlanApprovalAuthority::ApprovedPlan(approval))
+    } else {
+        None
+    }
 }
 
 pub(super) fn interactive_external_directory_approval_override(
@@ -142,17 +170,6 @@ fn decision_subject_key(subject: &ToolSubject) -> Option<(String, String, String
 
 fn plan_approval_can_auto_allow_decision(decision: &PermissionDecision) -> bool {
     matches!(decision.risk, PermissionRisk::Low | PermissionRisk::Medium)
-}
-
-fn active_plan_permission_scope(
-    session: &Session,
-) -> Option<(crate::PlanApprovalPermission, Vec<String>)> {
-    active_plan_permission_grant(session)
-        .map(|grant| (grant.permission, grant.scope.workspace_paths))
-        .or_else(|| {
-            active_plan_approval(session)
-                .map(|approval| (approval.permission, approval.scope.workspace_paths))
-        })
 }
 
 fn active_plan_permission_grant(session: &Session) -> Option<PlanPermissionGrantedEntry> {

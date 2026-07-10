@@ -5,11 +5,12 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ControlEntry, ExecutionMutationProfile, RunEvent, Session, SessionLogEntry, TerminalTaskEntry,
-    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
-    ToolEgressAudit, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
-    ToolResult, ToolResultMeta, ToolResultStatus, ToolSubjectAudit,
+    ControlEntry, ExecutionMutationProfile, PreparedToolAuditBinding, RunEvent, Session,
+    SessionLogEntry, TerminalTaskEntry, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry,
+    ToolApprovalUserDecision, ToolEgressAudit, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolResult, ToolResultMeta, ToolResultStatus,
+    ToolSubjectAudit,
     event::EventHandler,
     permission::PermissionDecision,
     provider::ToolCall,
@@ -48,6 +49,32 @@ pub(super) fn attach_tool_call_context(
             *existing = Value::Object(details);
         }
     }
+}
+
+pub(super) fn attach_prepared_tool_audit_binding(
+    result: &mut ToolResult,
+    binding: &PreparedToolAuditBinding,
+) -> Result<()> {
+    let value = serde_json::to_value(binding)
+        .context("failed to encode prepared mutation audit binding")?;
+    match &mut result.metadata.details {
+        Value::Object(details) => {
+            details.insert("prepared_mutation".to_owned(), value);
+        }
+        Value::Null => {
+            let mut details = Map::new();
+            details.insert("prepared_mutation".to_owned(), value);
+            result.metadata.details = Value::Object(details);
+        }
+        existing => {
+            let previous = std::mem::replace(existing, Value::Null);
+            let mut details = Map::new();
+            details.insert("prepared_mutation".to_owned(), value);
+            details.insert("tool".to_owned(), previous);
+            *existing = Value::Object(details);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn tool_call_context(call: &ToolCall, subjects: &[ToolSubject]) -> Option<Value> {
@@ -183,6 +210,7 @@ pub(super) fn append_tool_approval_policy_audit(
     call: &ToolCall,
     decision: &PermissionDecision,
     session_grant_source: Option<&ToolApprovalSessionGrantEntry>,
+    prepared_digest: Option<String>,
 ) -> Result<()> {
     append_tool_approval_audit_with_source(
         session,
@@ -193,7 +221,7 @@ pub(super) fn append_tool_approval_policy_audit(
         session_grant_source.map(|grant| grant.call_id.clone()),
         None,
         None,
-        None,
+        prepared_digest,
     )
 }
 
@@ -298,6 +326,7 @@ pub(super) fn append_tool_execution_started_audit(
     call: &ToolCall,
     subjects: &[ToolSubject],
     execution_mutation_profile: Option<&ExecutionMutationProfile>,
+    prepared_binding: Option<&PreparedToolAuditBinding>,
 ) -> Result<()> {
     let mut metadata = ToolResultMeta::default();
     let mut details = Map::new();
@@ -308,6 +337,13 @@ pub(super) fn append_tool_execution_started_audit(
         details.insert(
             "execution_mutation_profile".to_owned(),
             serde_json::to_value(profile).context("failed to encode execution mutation profile")?,
+        );
+    }
+    if let Some(binding) = prepared_binding {
+        details.insert(
+            "prepared_mutation".to_owned(),
+            serde_json::to_value(binding)
+                .context("failed to encode prepared mutation audit binding")?,
         );
     }
     if !details.is_empty() {

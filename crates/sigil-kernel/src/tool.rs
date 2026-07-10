@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -188,6 +189,16 @@ pub enum ToolPreviewCapability {
     None,
     Optional,
     Required,
+}
+
+/// Mutation evidence strategy owned by one tool implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMutationTracking {
+    None,
+    /// Every workspace write uses the RFC-0002 coordinator and its exact per-file evidence.
+    Controlled,
+    /// Effects are not fully mediated, so the registry must scan the workspace around execution.
+    Unknown,
 }
 
 /// One resource or capability subject touched by a tool call.
@@ -828,6 +839,10 @@ pub enum ToolErrorKind {
     Network,
     Protocol,
     Unsupported,
+    /// A recovery-critical effect cannot proceed without its configured durable audit sink.
+    DurabilityRequired,
+    /// An approval-bound immutable mutation no longer matches its call or workspace revision.
+    StalePreparedMutation,
     Internal,
 }
 
@@ -850,6 +865,8 @@ impl ToolErrorKind {
             Self::Network => "network",
             Self::Protocol => "protocol",
             Self::Unsupported => "unsupported",
+            Self::DurabilityRequired => "durability_required",
+            Self::StalePreparedMutation => "stale_prepared_mutation",
             Self::Internal => "internal",
         }
     }
@@ -890,6 +907,285 @@ pub struct ToolPreview {
 pub struct ToolPreviewFile {
     pub path: String,
     pub diff: String,
+}
+
+/// Tool-owned immutable artifact materialized before permission approval.
+///
+/// The kernel keeps the artifact opaque while binding its content digest and exact subjects to
+/// the permission decision. A prepared artifact is moved into execution exactly once; tools must
+/// not place a second-query token or mutable cache handle in this value.
+pub struct ToolPreparation {
+    preview: ToolPreview,
+    subjects: Vec<ToolSubject>,
+    content_digest: String,
+    artifact: Box<dyn Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for ToolPreparation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolPreparation")
+            .field("preview", &self.preview)
+            .field("subjects", &self.subjects)
+            .field("content_digest", &self.content_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolPreparation {
+    /// Creates a tool preparation from one immutable artifact and its content-bound digest.
+    pub fn new<T>(
+        preview: ToolPreview,
+        subjects: Vec<ToolSubject>,
+        content_digest: impl Into<String>,
+        artifact: T,
+    ) -> Result<Self>
+    where
+        T: Any + Send + Sync,
+    {
+        let content_digest = content_digest.into();
+        if !content_digest.starts_with("sha256:") {
+            bail!("tool preparation content digest must use sha256");
+        }
+        if subjects.is_empty() {
+            bail!("tool preparation must bind at least one permission subject");
+        }
+        Ok(Self {
+            preview,
+            subjects,
+            content_digest,
+            artifact: Box::new(artifact),
+        })
+    }
+}
+
+/// Permission binding attached to one prepared tool artifact.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolPreparationBinding {
+    pub call_id: String,
+    pub tool_name: String,
+    pub args_digest: String,
+    pub approval_identity: String,
+    pub policy_fingerprint: String,
+    pub subjects: Vec<ToolSubject>,
+}
+
+/// Safe durable projection linking approval, execution, and mutation batch audit records.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PreparedToolAuditBinding {
+    pub schema_version: u32,
+    pub approval_identity: String,
+    pub prepared_digest: String,
+    pub content_digest: String,
+    pub args_digest: String,
+    pub policy_fingerprint: String,
+}
+
+/// Registry-owned draft whose exact subjects must participate in permission evaluation.
+pub struct ToolPreparationDraft {
+    tool: Arc<dyn Tool>,
+    args: Value,
+    preparation: ToolPreparation,
+    call_id: String,
+    tool_name: String,
+    args_digest: String,
+}
+
+impl std::fmt::Debug for ToolPreparationDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolPreparationDraft")
+            .field("call_id", &self.call_id)
+            .field("tool_name", &self.tool_name)
+            .field("args_digest", &self.args_digest)
+            .field("preparation", &self.preparation)
+            .finish()
+    }
+}
+
+impl ToolPreparationDraft {
+    #[must_use]
+    pub fn preview(&self) -> &ToolPreview {
+        &self.preparation.preview
+    }
+
+    #[must_use]
+    pub fn subjects(&self) -> &[ToolSubject] {
+        &self.preparation.subjects
+    }
+
+    /// Binds this one-shot draft to the exact permission and approval authority.
+    pub(crate) fn bind_with_approval_identity(
+        self,
+        policy_fingerprint: impl Into<String>,
+        approval_identity: impl Into<String>,
+    ) -> Result<PreparedToolCall> {
+        let policy_fingerprint = policy_fingerprint.into();
+        if !policy_fingerprint.starts_with("sha256:") {
+            bail!("prepared tool policy fingerprint must use sha256");
+        }
+        let approval_identity = approval_identity.into();
+        if approval_identity.trim().is_empty() {
+            bail!("prepared tool approval identity must not be empty");
+        }
+        let binding = ToolPreparationBinding {
+            call_id: self.call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            args_digest: self.args_digest,
+            approval_identity,
+            policy_fingerprint,
+            subjects: self.preparation.subjects.clone(),
+        };
+        let digest_material = serde_json::json!({
+            "schema_version": 2,
+            "binding": {
+                "call_id": &binding.call_id,
+                "tool_name": &binding.tool_name,
+                "args_digest": &binding.args_digest,
+                "policy_fingerprint": &binding.policy_fingerprint,
+                "subjects": &binding.subjects,
+            },
+            "content_digest": self.preparation.content_digest,
+        });
+        let encoded = serde_json::to_vec(&digest_material)
+            .map_err(|error| anyhow!("failed to encode prepared tool binding: {error}"))?;
+        let prepared_digest = crate::stable_event_hash(encoded);
+        Ok(PreparedToolCall {
+            tool: self.tool,
+            args: self.args,
+            artifact: self.preparation.artifact,
+            preview: self.preparation.preview,
+            binding,
+            content_digest: self.preparation.content_digest,
+            prepared_digest,
+        })
+    }
+}
+
+/// One approval-bound prepared tool call consumed by execution exactly once.
+pub struct PreparedToolCall {
+    tool: Arc<dyn Tool>,
+    args: Value,
+    artifact: Box<dyn Any + Send + Sync>,
+    preview: ToolPreview,
+    binding: ToolPreparationBinding,
+    content_digest: String,
+    prepared_digest: String,
+}
+
+impl std::fmt::Debug for PreparedToolCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedToolCall")
+            .field("binding", &self.binding)
+            .field("content_digest", &self.content_digest)
+            .field("prepared_digest", &self.prepared_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedToolCall {
+    pub(crate) fn authorize(mut self, approval_identity: impl Into<String>) -> Result<Self> {
+        let approval_identity = approval_identity.into();
+        if approval_identity.trim().is_empty() {
+            bail!("prepared tool approval identity must not be empty");
+        }
+        self.binding.approval_identity = approval_identity;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn preview(&self) -> &ToolPreview {
+        &self.preview
+    }
+
+    #[must_use]
+    pub fn prepared_digest(&self) -> &str {
+        &self.prepared_digest
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &ToolPreparationBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn audit_binding(&self) -> PreparedToolAuditBinding {
+        PreparedToolAuditBinding {
+            schema_version: 1,
+            approval_identity: self.binding.approval_identity.clone(),
+            prepared_digest: self.prepared_digest.clone(),
+            content_digest: self.content_digest.clone(),
+            args_digest: self.binding.args_digest.clone(),
+            policy_fingerprint: self.binding.policy_fingerprint.clone(),
+        }
+    }
+
+    fn into_execution(self) -> PreparedToolExecution {
+        PreparedToolExecution {
+            artifact: self.artifact,
+            binding: self.binding,
+            content_digest: self.content_digest,
+            prepared_digest: self.prepared_digest,
+        }
+    }
+}
+
+/// Tool-facing approval-bound artifact passed only through the prepared execution path.
+pub struct PreparedToolExecution {
+    artifact: Box<dyn Any + Send + Sync>,
+    binding: ToolPreparationBinding,
+    content_digest: String,
+    prepared_digest: String,
+}
+
+impl std::fmt::Debug for PreparedToolExecution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedToolExecution")
+            .field("binding", &self.binding)
+            .field("content_digest", &self.content_digest)
+            .field("prepared_digest", &self.prepared_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedToolExecution {
+    #[must_use]
+    pub fn prepared_digest(&self) -> &str {
+        &self.prepared_digest
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &ToolPreparationBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn content_digest(&self) -> &str {
+        &self.content_digest
+    }
+
+    #[must_use]
+    pub fn audit_binding(&self) -> PreparedToolAuditBinding {
+        PreparedToolAuditBinding {
+            schema_version: 1,
+            approval_identity: self.binding.approval_identity.clone(),
+            prepared_digest: self.prepared_digest.clone(),
+            content_digest: self.content_digest.clone(),
+            args_digest: self.binding.args_digest.clone(),
+            policy_fingerprint: self.binding.policy_fingerprint.clone(),
+        }
+    }
+
+    /// Consumes and downcasts the opaque tool-owned artifact.
+    pub fn into_artifact<T>(self) -> Result<T>
+    where
+        T: Any + Send + Sync,
+    {
+        self.artifact
+            .downcast::<T>()
+            .map(|artifact| *artifact)
+            .map_err(|_| anyhow!("prepared tool artifact type does not match the registered tool"))
+    }
 }
 
 /// Bounded, persisted projection of one tool preview for user-facing UI replay.
@@ -1380,6 +1676,11 @@ pub trait Tool: Send + Sync {
     /// Returns the tool's stable contract and JSON Schema surface.
     fn spec(&self) -> ToolSpec;
 
+    /// Declares how this tool records workspace mutation evidence.
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        default_tool_mutation_tracking(&self.spec())
+    }
+
     /// Shuts down lifecycle resources owned by this registered tool generation.
     ///
     /// Stateless tools use the default no-op. Long-lived process or transport tools override this
@@ -1475,6 +1776,35 @@ pub trait Tool: Send + Sync {
     /// that failure instead of silently fabricating a preview.
     async fn preview(&self, _ctx: ToolContext, _args: Value) -> Result<Option<ToolPreview>> {
         Ok(None)
+    }
+
+    /// Materializes an immutable, one-shot artifact before permission evaluation.
+    ///
+    /// Tools whose exact mutation subjects are known only after an external planner response use
+    /// this hook. The returned subjects replace the coarse pre-plan permission subjects. The
+    /// default keeps existing tools on the ordinary preview/execute path.
+    async fn prepare(
+        &self,
+        _ctx: ToolContext,
+        _call_id: String,
+        _args: Value,
+    ) -> Result<Option<ToolPreparation>> {
+        Ok(None)
+    }
+
+    /// Executes one approval-bound artifact without replanning or re-querying its source.
+    ///
+    /// # Errors
+    ///
+    /// The default fails closed because a tool that returns [`ToolPreparation`] must explicitly
+    /// implement the matching one-shot execution path.
+    async fn execute_prepared(
+        &self,
+        _ctx: ToolContext,
+        _args: Value,
+        _prepared: PreparedToolExecution,
+    ) -> Result<ToolResult> {
+        bail!("tool does not implement prepared execution")
     }
 
     /// Executes the tool call within the provided workspace context.
@@ -1664,24 +1994,26 @@ impl ToolRegistry {
         ctx: ToolContext,
         call: crate::provider::ToolCall,
     ) -> Result<ToolResult> {
-        let (tool, spec) = {
+        let (tool, spec, mutation_tracking) = {
             let tools = match self.tools.read() {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
             let tool = self.allowed_tool(&tools, &call.name)?;
             let spec = tool.spec();
-            (tool, spec)
+            let mutation_tracking = tool.mutation_tracking();
+            (tool, spec, mutation_tracking)
         };
-        ensure_execution_mutation_profile_recorded(&ctx, &spec, &call.id)?;
+        ensure_execution_mutation_profile_recorded(&ctx, &spec, mutation_tracking, &call.id)?;
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        let mutation_scan = begin_unknown_mutation_scan(&ctx, &spec).map_err(|error| {
-            anyhow!(
-                "failed to start workspace mutation detection for {}: {error:#}",
-                spec.name
-            )
-        })?;
+        let mutation_scan =
+            begin_unknown_mutation_scan(&ctx, mutation_tracking).map_err(|error| {
+                anyhow!(
+                    "failed to start workspace mutation detection for {}: {error:#}",
+                    spec.name
+                )
+            })?;
         let call_id = call.id;
         let result = tool.execute(ctx.clone(), call_id.clone(), args).await;
         finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
@@ -1707,6 +2039,93 @@ impl ToolRegistry {
         self.execute(ctx, call).await
     }
 
+    /// Executes an approval-bound prepared artifact after the caller persists started audit.
+    ///
+    /// The prepared call is consumed by value. Any registry generation, call identity, argument,
+    /// subject, or approval binding mismatch fails with `stale_prepared_mutation` before mutation.
+    pub(crate) async fn execute_prepared_after_started_audit(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+        prepared: PreparedToolCall,
+        current_policy_fingerprint: &str,
+        current_approval_identity: &str,
+    ) -> Result<ToolResult> {
+        let ctx = ctx.with_execution_mutation_profile_recorded(call.id.clone());
+        let mismatch = if prepared.binding.policy_fingerprint != current_policy_fingerprint {
+            Some("policy_changed_after_approval")
+        } else if prepared.binding.approval_identity != current_approval_identity {
+            Some("approval_authority_changed")
+        } else {
+            None
+        };
+        if let Some(reason) = mismatch {
+            return Ok(stale_prepared_tool_result(
+                &call,
+                prepared.prepared_digest(),
+                reason,
+            ));
+        }
+        self.execute_prepared(ctx, call, prepared).await
+    }
+
+    /// Executes one prepared tool call by consuming its immutable approval-bound artifact.
+    async fn execute_prepared(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+        prepared: PreparedToolCall,
+    ) -> Result<ToolResult> {
+        let current_tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            self.allowed_tool(&tools, &call.name)?
+        };
+        let spec = current_tool.spec();
+        let mutation_tracking = current_tool.mutation_tracking();
+        ensure_execution_mutation_profile_recorded(&ctx, &spec, mutation_tracking, &call.id)?;
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        let observed_args_digest = prepared_args_digest(&args)?;
+        let mismatch = if call.id != prepared.binding.call_id {
+            Some("call_id_changed")
+        } else if call.name != prepared.binding.tool_name {
+            Some("tool_name_changed")
+        } else if observed_args_digest != prepared.binding.args_digest || args != prepared.args {
+            Some("args_changed_after_preview")
+        } else if ctx.approved_subjects() != prepared.binding.subjects.as_slice() {
+            Some("approved_subjects_changed")
+        } else if !Arc::ptr_eq(&current_tool, &prepared.tool) {
+            Some("registered_tool_generation_changed")
+        } else {
+            None
+        };
+        if let Some(reason) = mismatch {
+            return Ok(stale_prepared_tool_result(
+                &call,
+                prepared.prepared_digest(),
+                reason,
+            ));
+        }
+
+        let mutation_scan =
+            begin_unknown_mutation_scan(&ctx, mutation_tracking).map_err(|error| {
+                anyhow!(
+                    "failed to start workspace mutation detection for {}: {error:#}",
+                    spec.name
+                )
+            })?;
+        let call_id = call.id;
+        let result = current_tool
+            .execute_prepared(ctx.clone(), args, prepared.into_execution())
+            .await;
+        finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
+            .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
+        result
+    }
+
     /// Returns the mutation profile that must be persisted before executing this tool call.
     ///
     /// # Errors
@@ -1717,15 +2136,15 @@ impl ToolRegistry {
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
     ) -> Result<Option<ExecutionMutationProfile>> {
-        let spec = {
+        let (spec, mutation_tracking) = {
             let tools = match self.tools.read() {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
             let tool = self.allowed_tool(&tools, &call.name)?;
-            tool.spec()
+            (tool.spec(), tool.mutation_tracking())
         };
-        execution_mutation_profile_for_tool(ctx, &spec, &call.id)
+        execution_mutation_profile_for_tool(ctx, &spec, mutation_tracking, &call.id)
     }
 
     /// Builds a preview for a tool call by name.
@@ -1749,6 +2168,38 @@ impl ToolRegistry {
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.preview(ctx, args).await
+    }
+
+    /// Materializes a one-shot tool artifact before permission evaluation.
+    ///
+    /// The draft's exact subjects must replace any coarse pre-plan subjects when constructing the
+    /// permission decision. Returning `None` leaves the tool on the ordinary preview path.
+    pub async fn prepare(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<Option<ToolPreparationDraft>> {
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            self.allowed_tool(&tools, &call.name)?
+        };
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        let args_digest = prepared_args_digest(&args)?;
+        let Some(preparation) = tool.prepare(ctx, call.id.clone(), args.clone()).await? else {
+            return Ok(None);
+        };
+        Ok(Some(ToolPreparationDraft {
+            tool,
+            args,
+            preparation,
+            call_id: call.id,
+            tool_name: call.name,
+            args_digest,
+        }))
     }
 
     /// Returns stable permission subjects for a tool call by name.
@@ -1926,6 +2377,14 @@ impl ScopedToolRegistry {
         self.inner.preview(ctx, call).await
     }
 
+    pub async fn prepare(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<Option<ToolPreparationDraft>> {
+        self.inner.prepare(ctx, call).await
+    }
+
     pub fn permission_subjects(
         &self,
         ctx: &ToolContext,
@@ -1967,11 +2426,42 @@ impl ScopedToolRegistry {
     }
 }
 
+fn prepared_args_digest(args: &Value) -> Result<String> {
+    let encoded = serde_json::to_vec(args)
+        .map_err(|error| anyhow!("failed to encode prepared tool arguments: {error}"))?;
+    Ok(crate::stable_event_hash(encoded))
+}
+
+fn stale_prepared_tool_result(
+    call: &crate::provider::ToolCall,
+    prepared_digest: &str,
+    reason: &str,
+) -> ToolResult {
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::StalePreparedMutation,
+        format!("prepared mutation is stale: {reason}"),
+    )
+    .with_error_details(
+        false,
+        serde_json::json!({
+            "reason": reason,
+            "prepared_mutation_digest": prepared_digest,
+        }),
+    );
+    result.metadata.details = serde_json::json!({
+        "prepared_mutation_digest": prepared_digest,
+        "stale_reason": reason,
+    });
+    result
+}
+
 fn begin_unknown_mutation_scan(
     ctx: &ToolContext,
-    spec: &ToolSpec,
+    mutation_tracking: ToolMutationTracking,
 ) -> Result<Option<WorkspaceMutationScan>> {
-    if !tool_requires_unknown_mutation_scan(spec) {
+    if mutation_tracking != ToolMutationTracking::Unknown {
         return Ok(None);
     }
     let Some(recorder) = &ctx.mutation_recorder else {
@@ -1986,9 +2476,10 @@ fn begin_unknown_mutation_scan(
 fn ensure_execution_mutation_profile_recorded(
     ctx: &ToolContext,
     spec: &ToolSpec,
+    mutation_tracking: ToolMutationTracking,
     call_id: &str,
 ) -> Result<()> {
-    if !tool_requires_unknown_mutation_scan(spec) || ctx.mutation_recorder.is_none() {
+    if mutation_tracking != ToolMutationTracking::Unknown || ctx.mutation_recorder.is_none() {
         return Ok(());
     }
     if ctx.execution_mutation_profile_recorded_for(call_id) {
@@ -2003,9 +2494,10 @@ fn ensure_execution_mutation_profile_recorded(
 pub(crate) fn execution_mutation_profile_for_tool(
     ctx: &ToolContext,
     spec: &ToolSpec,
+    mutation_tracking: ToolMutationTracking,
     call_id: &str,
 ) -> Result<Option<ExecutionMutationProfile>> {
-    if !tool_requires_unknown_mutation_scan(spec) {
+    if mutation_tracking != ToolMutationTracking::Unknown {
         return Ok(None);
     }
     let Some(recorder) = &ctx.mutation_recorder else {
@@ -2063,12 +2555,17 @@ fn unknown_mutation_scan_finish_error(spec: &ToolSpec, error: anyhow::Error) -> 
     anyhow!(message)
 }
 
-fn tool_requires_unknown_mutation_scan(spec: &ToolSpec) -> bool {
-    spec.access != ToolAccess::Read
-        && matches!(
-            spec.category,
-            ToolCategory::Shell | ToolCategory::Mcp | ToolCategory::Custom
-        )
+fn default_tool_mutation_tracking(spec: &ToolSpec) -> ToolMutationTracking {
+    if spec.access == ToolAccess::Read {
+        ToolMutationTracking::None
+    } else if matches!(
+        spec.category,
+        ToolCategory::Shell | ToolCategory::Mcp | ToolCategory::Custom
+    ) {
+        ToolMutationTracking::Unknown
+    } else {
+        ToolMutationTracking::None
+    }
 }
 
 fn unknown_mutation_tool_effect(_spec: &ToolSpec) -> ToolEffect {

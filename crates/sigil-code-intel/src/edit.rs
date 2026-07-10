@@ -39,12 +39,6 @@ pub struct CodeEditPreviewFile {
     pub diff: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodeEditApplyOutcome {
-    pub changed_files: Vec<String>,
-    pub applied_edits: usize,
-}
-
 impl CodeWorkspaceEdit {
     pub fn changed_files(&self) -> Vec<String> {
         self.files.iter().map(|file| file.path.clone()).collect()
@@ -73,28 +67,6 @@ impl CodeWorkspaceEdit {
             });
         }
         Ok(previews)
-    }
-
-    pub fn apply(&self, workspace_root: &Path) -> Result<CodeEditApplyOutcome> {
-        let mut changed_files = Vec::new();
-        let mut applied_edits = 0usize;
-        for file in &self.files {
-            let resolved = resolve_workspace_file(workspace_root, &file.path)?;
-            let current = fs::read_to_string(&resolved)
-                .with_context(|| format!("failed to read {}", resolved.display()))?;
-            let proposed = apply_text_edits(&current, &file.edits)
-                .with_context(|| format!("failed to apply edits for {}", file.path))?;
-            if proposed != current {
-                fs::write(&resolved, proposed.as_bytes())
-                    .with_context(|| format!("failed to write {}", resolved.display()))?;
-                changed_files.push(file.path.clone());
-            }
-            applied_edits = applied_edits.saturating_add(file.edits.len());
-        }
-        Ok(CodeEditApplyOutcome {
-            changed_files,
-            applied_edits,
-        })
     }
 }
 
@@ -262,7 +234,7 @@ fn line_start_offsets(text: &str) -> Vec<usize> {
     starts
 }
 
-fn render_unified_diff(
+pub(crate) fn render_unified_diff(
     current: &str,
     proposed: &str,
     current_label: &str,

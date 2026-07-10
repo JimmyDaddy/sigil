@@ -5,6 +5,7 @@ pub mod edit;
 pub mod error;
 pub mod language;
 pub mod lsp;
+mod prepared_mutation;
 pub mod service;
 pub mod tools;
 pub mod workspace;

@@ -3,8 +3,9 @@ use std::{collections::BTreeMap, fs};
 use anyhow::anyhow;
 use serde_json::json;
 use sigil_kernel::{
-    CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig, ToolCall, ToolContext,
-    ToolRegistry,
+    CodeIntelStartup, CodeIntelligenceConfig, JsonlSessionStore, LanguageServerConfig,
+    MutationEventRecorder, ToolCall, ToolContext, ToolErrorKind, ToolRegistry,
+    write_file_with_mutation,
 };
 
 use super::*;
@@ -12,6 +13,53 @@ use crate::tests::common::{
     fake_server, python3_available, write_fake_lsp_scenario, write_fake_lsp_server,
 };
 use crate::workspace::file_uri_from_path;
+
+async fn prepare_mutation_for_test(
+    service: &CodeIntelligenceService,
+    ctx: ToolContext,
+    call: &ToolCall,
+) -> anyhow::Result<(
+    crate::prepared_mutation::PreparedMutation,
+    Vec<sigil_kernel::ToolSubject>,
+)> {
+    let args: serde_json::Value = serde_json::from_str(&call.args_json)?;
+    let (plan, label) = match call.name.as_str() {
+        "code_rename" => {
+            let tool = CodeRenameTool {
+                service: std::sync::Arc::new(service.clone()),
+            };
+            (tool.rename_plan(&args).await?, "Rename symbol")
+        }
+        "code_action" => {
+            let tool = CodeActionTool {
+                service: std::sync::Arc::new(service.clone()),
+            };
+            (tool.code_action_plan(&args).await?, "Apply code action")
+        }
+        name => anyhow::bail!("unsupported prepared mutation test tool {name}"),
+    };
+    materialize_prepared_mutation(ctx, plan, label).await
+}
+
+async fn execute_mutation_for_test(
+    ctx: ToolContext,
+    call: &ToolCall,
+    policy_fingerprint: &str,
+    prepared: crate::prepared_mutation::PreparedMutation,
+) -> anyhow::Result<ToolResult> {
+    execute_prepared_mutation_for_test(
+        ctx,
+        match call.name.as_str() {
+            "code_rename" => "code_rename",
+            "code_action" => "code_action",
+            name => anyhow::bail!("unsupported prepared mutation test tool {name}"),
+        },
+        call.id.clone(),
+        policy_fingerprint,
+        prepared,
+    )
+    .await
+}
 
 fn enabled_config() -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
@@ -64,6 +112,14 @@ fn fake_tool_lsp_config(
         )],
         ..enabled_config()
     }
+}
+
+fn mutation_context(workspace_root: &std::path::Path, state_root: &std::path::Path) -> ToolContext {
+    let recorder = MutationEventRecorder::new(
+        JsonlSessionStore::new(state_root.join("session.jsonl"))
+            .expect("session store should build"),
+    );
+    ToolContext::new(workspace_root.to_path_buf(), 1).with_mutation_recorder(recorder)
 }
 
 fn write_tooling_lsp_server(
@@ -326,7 +382,8 @@ async fn code_symbols_tool_enforces_payload_byte_limit() {
         &mut registry,
         &bounded_payload_config(),
         temp.path().to_path_buf(),
-    );
+    )
+    .expect("code intelligence should register");
 
     let result = registry
         .execute(
@@ -857,12 +914,14 @@ async fn code_rename_tool_previews_and_applies_workspace_edit() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(
+    let service = register_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),
-    );
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
+    )
+    .expect("code intelligence should register");
+    let state = tempfile::tempdir().expect("state tempdir should build");
+    let ctx = mutation_context(temp.path(), state.path());
     let call = ToolCall {
         id: "rename".to_owned(),
         name: "code_rename".to_owned(),
@@ -875,16 +934,14 @@ async fn code_rename_tool_previews_and_applies_workspace_edit() {
         .to_string(),
     };
 
-    let preview = registry
-        .preview(ctx.clone(), call.clone())
+    let (prepared, subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
         .await
-        .expect("preview should build")
-        .expect("rename should have preview");
+        .expect("prepared mutation should build");
+    let preview = prepared.preview("Rename symbol");
     assert_eq!(preview.changed_files, vec!["src/lib.rs"]);
     assert!(preview.file_diffs[0].diff.contains("+pub fn greet()"));
-
-    let result = registry
-        .execute(ctx, call)
+    assert_eq!(subjects[0].normalized, "src/lib.rs");
+    let result = execute_mutation_for_test(ctx.clone(), &call, "sha256:test-policy", prepared)
         .await
         .expect("rename should execute");
 
@@ -943,12 +1000,14 @@ async fn code_action_tool_previews_and_applies_selected_edit() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(
+    let service = register_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),
-    );
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
+    )
+    .expect("code intelligence should register");
+    let state = tempfile::tempdir().expect("state tempdir should build");
+    let ctx = mutation_context(temp.path(), state.path());
     let call = ToolCall {
         id: "action".to_owned(),
         name: "code_action".to_owned(),
@@ -961,15 +1020,12 @@ async fn code_action_tool_previews_and_applies_selected_edit() {
         .to_string(),
     };
 
-    let preview = registry
-        .preview(ctx.clone(), call.clone())
+    let (prepared, _subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
         .await
-        .expect("preview should build")
-        .expect("action should have preview");
+        .expect("prepared mutation should build");
+    let preview = prepared.preview("Apply code action");
     assert!(preview.file_diffs[0].diff.contains("+pub fn greet()"));
-
-    let result = registry
-        .execute(ctx, call)
+    let result = execute_mutation_for_test(ctx, &call, "sha256:test-policy", prepared)
         .await
         .expect("action should execute");
 
@@ -978,6 +1034,635 @@ async fn code_action_tool_previews_and_applies_selected_edit() {
         fs::read_to_string(&source_path).expect("source should read"),
         "pub fn greet() {}\n"
     );
+}
+
+#[tokio::test]
+async fn approved_mutation_consumes_first_lsp_plan_without_second_request() {
+    if !python3_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("workspace tempdir should build");
+    let state = tempfile::tempdir().expect("state tempdir should build");
+    fs::create_dir(workspace.path().join("src")).expect("src dir should build");
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='x'\n")
+        .expect("cargo file should write");
+    let source_path = workspace.path().join("src/lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let source_uri = file_uri_from_path(&source_path);
+    let server_script = workspace.path().join("fake_lsp.py");
+    let scenario_path = workspace.path().join("scenario.json");
+    let record_path = state.path().join("lsp-record.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &json!({
+            "record_file": record_path,
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "renameProvider": true } }
+                },
+                "textDocument/rename": {
+                    "result_sequence": [
+                        { "changes": { source_uri.clone(): [{
+                            "range": {
+                                "start": { "line": 0, "character": 7 },
+                                "end": { "line": 0, "character": 12 }
+                            },
+                            "newText": "approved"
+                        }] } },
+                        { "changes": { source_uri: [{
+                            "range": {
+                                "start": { "line": 0, "character": 7 },
+                                "end": { "line": 0, "character": 12 }
+                            },
+                            "newText": "unapproved"
+                        }] } }
+                    ]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    let service = register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        workspace.path().to_path_buf(),
+    )
+    .expect("code intelligence should register");
+    let ctx = mutation_context(workspace.path(), state.path());
+    let call = ToolCall {
+        id: "approved-once".to_owned(),
+        name: "code_rename".to_owned(),
+        args_json: json!({
+            "path": "src/lib.rs",
+            "line": 1,
+            "character": 7,
+            "new_name": "approved"
+        })
+        .to_string(),
+    };
+
+    let (prepared, subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
+        .await
+        .expect("prepare should succeed");
+    assert_eq!(subjects[0].normalized, "src/lib.rs");
+    let result = execute_mutation_for_test(ctx, &call, "sha256:policy-once", prepared)
+        .await
+        .expect("prepared execute should return");
+    assert!(!result.is_error());
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("source should read"),
+        "pub fn approved() {}\n"
+    );
+
+    service.shutdown().await.expect("service should shut down");
+    let record: serde_json::Value = serde_json::from_slice(
+        &fs::read(&record_path).expect("LSP record should exist after shutdown"),
+    )
+    .expect("LSP record should decode");
+    let rename_requests = record["messages"]
+        .as_array()
+        .expect("messages should be an array")
+        .iter()
+        .filter(|message| message["method"] == "textDocument/rename")
+        .count();
+    assert_eq!(rename_requests, 1);
+}
+
+#[tokio::test]
+async fn approved_mutation_rejects_source_drift_with_zero_mutation() {
+    if !python3_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("workspace tempdir should build");
+    let state = tempfile::tempdir().expect("state tempdir should build");
+    fs::create_dir(workspace.path().join("src")).expect("src dir should build");
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='x'\n")
+        .expect("cargo file should write");
+    let source_path = workspace.path().join("src/lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let source_uri = file_uri_from_path(&source_path);
+    let server_script = workspace.path().join("fake_lsp.py");
+    let scenario_path = workspace.path().join("scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &json!({
+            "methods": {
+                "initialize": { "result": { "capabilities": { "renameProvider": true } } },
+                "textDocument/rename": { "result": { "changes": { source_uri: [{
+                    "range": {
+                        "start": { "line": 0, "character": 7 },
+                        "end": { "line": 0, "character": 12 }
+                    },
+                    "newText": "greet"
+                }] } } },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    let service = register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        workspace.path().to_path_buf(),
+    )
+    .expect("code intelligence should register");
+    let ctx = mutation_context(workspace.path(), state.path());
+    let call = ToolCall {
+        id: "stale-source".to_owned(),
+        name: "code_rename".to_owned(),
+        args_json: json!({
+            "path": "src/lib.rs",
+            "line": 1,
+            "character": 7,
+            "new_name": "greet"
+        })
+        .to_string(),
+    };
+    let (prepared, _subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
+        .await
+        .expect("prepare should succeed");
+    fs::write(&source_path, "pub fn externally_changed() {}\n")
+        .expect("external change should write");
+
+    let result = execute_mutation_for_test(ctx.clone(), &call, "sha256:policy-stale", prepared)
+        .await
+        .expect("stale execute should return");
+    assert_eq!(
+        result.summary().error_kind,
+        Some(ToolErrorKind::StalePreparedMutation)
+    );
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("source should read"),
+        "pub fn externally_changed() {}\n"
+    );
+    let durable = fs::read_to_string(state.path().join("session.jsonl")).unwrap_or_default();
+    assert!(!durable.contains("mutation_batch_started"));
+
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should restore");
+    let (prepared, _subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
+        .await
+        .expect("second prepare should succeed");
+    let recorder = ctx
+        .mutation_recorder
+        .clone()
+        .expect("test context should have recorder");
+    write_file_with_mutation(
+        Some(&recorder),
+        workspace.path(),
+        "other-controlled-write",
+        "other.rs",
+        workspace.path().join("other.rs"),
+        b"pub fn other() {}\n",
+    )
+    .expect("other controlled write should succeed");
+    let result =
+        execute_mutation_for_test(ctx, &call, "sha256:policy-workspace-revision", prepared)
+            .await
+            .expect("revision-stale execute should return");
+    assert_eq!(
+        result.summary().error_kind,
+        Some(ToolErrorKind::StalePreparedMutation)
+    );
+    assert_eq!(
+        result.metadata.details["prepared_mutation_result"]["reason"],
+        "workspace_mutation_epoch_changed"
+    );
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("source should read"),
+        "pub fn hello() {}\n"
+    );
+}
+
+#[tokio::test]
+async fn approved_mutation_requires_durable_recorder_before_write() {
+    if !python3_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("workspace tempdir should build");
+    fs::create_dir(workspace.path().join("src")).expect("src dir should build");
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='x'\n")
+        .expect("cargo file should write");
+    let source_path = workspace.path().join("src/lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let source_uri = file_uri_from_path(&source_path);
+    let server_script = workspace.path().join("fake_lsp.py");
+    let scenario_path = workspace.path().join("scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &json!({
+            "methods": {
+                "initialize": { "result": { "capabilities": { "renameProvider": true } } },
+                "textDocument/rename": { "result": { "changes": { source_uri: [{
+                    "range": {
+                        "start": { "line": 0, "character": 7 },
+                        "end": { "line": 0, "character": 12 }
+                    },
+                    "newText": "greet"
+                }] } } },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    let service = register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        workspace.path().to_path_buf(),
+    )
+    .expect("code intelligence should register");
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 1);
+    let call = ToolCall {
+        id: "no-recorder".to_owned(),
+        name: "code_rename".to_owned(),
+        args_json: json!({
+            "path": "src/lib.rs",
+            "line": 1,
+            "character": 7,
+            "new_name": "greet"
+        })
+        .to_string(),
+    };
+    let (prepared, _subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
+        .await
+        .expect("prepare should succeed");
+    let result = execute_mutation_for_test(ctx, &call, "sha256:no-recorder-policy", prepared)
+        .await
+        .expect("execute should return typed failure");
+    assert_eq!(
+        result.summary().error_kind,
+        Some(ToolErrorKind::DurabilityRequired)
+    );
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("source should read"),
+        "pub fn hello() {}\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn approved_mutation_rolls_back_first_file_when_second_apply_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !python3_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("workspace tempdir should build");
+    let state = tempfile::tempdir().expect("state tempdir should build");
+    fs::create_dir(workspace.path().join("src")).expect("src dir should build");
+    fs::create_dir(workspace.path().join("zzz_locked")).expect("locked dir should build");
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='x'\n")
+        .expect("cargo file should write");
+    let first_path = workspace.path().join("src/a.rs");
+    let second_path = workspace.path().join("zzz_locked/b.rs");
+    fs::write(&first_path, "pub fn hello() {}\n").expect("first source should write");
+    fs::write(&second_path, "pub fn call() { hello(); }\n").expect("second source should write");
+    let mut executable_permissions = fs::metadata(&first_path)
+        .expect("first source metadata should read")
+        .permissions();
+    executable_permissions.set_mode(0o755);
+    fs::set_permissions(&first_path, executable_permissions)
+        .expect("first source should become executable");
+    let first_uri = file_uri_from_path(&first_path);
+    let second_uri = file_uri_from_path(&second_path);
+    let server_script = workspace.path().join("fake_lsp.py");
+    let scenario_path = workspace.path().join("scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &json!({
+            "methods": {
+                "initialize": { "result": { "capabilities": { "renameProvider": true } } },
+                "textDocument/rename": { "result": { "changes": {
+                    first_uri: [{
+                        "range": {
+                            "start": { "line": 0, "character": 7 },
+                            "end": { "line": 0, "character": 12 }
+                        },
+                        "newText": "greet"
+                    }],
+                    second_uri: [{
+                        "range": {
+                            "start": { "line": 0, "character": 16 },
+                            "end": { "line": 0, "character": 21 }
+                        },
+                        "newText": "greet"
+                    }]
+                } } },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    let service = register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        workspace.path().to_path_buf(),
+    )
+    .expect("code intelligence should register");
+    let ctx = mutation_context(workspace.path(), state.path());
+    let call = ToolCall {
+        id: "rollback-second-file".to_owned(),
+        name: "code_rename".to_owned(),
+        args_json: json!({
+            "path": "src/a.rs",
+            "line": 1,
+            "character": 7,
+            "new_name": "greet"
+        })
+        .to_string(),
+    };
+    let (prepared, _subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
+        .await
+        .expect("prepare should succeed");
+    let mut locked_permissions = fs::metadata(workspace.path().join("zzz_locked"))
+        .expect("locked dir metadata should read")
+        .permissions();
+    locked_permissions.set_mode(0o555);
+    fs::set_permissions(workspace.path().join("zzz_locked"), locked_permissions)
+        .expect("locked dir should become read-only");
+
+    let result = execute_mutation_for_test(ctx, &call, "sha256:rollback-policy", prepared)
+        .await
+        .expect("execute should return rollback result");
+    let mut restored_permissions = fs::metadata(workspace.path().join("zzz_locked"))
+        .expect("locked dir metadata should read")
+        .permissions();
+    restored_permissions.set_mode(0o755);
+    fs::set_permissions(workspace.path().join("zzz_locked"), restored_permissions)
+        .expect("locked dir permissions should restore");
+
+    assert_eq!(result.summary().error_kind, Some(ToolErrorKind::Io));
+    assert_eq!(
+        result.metadata.details["prepared_mutation_result"]["status"],
+        "rolled_back"
+    );
+    assert_eq!(
+        fs::read_to_string(&first_path).expect("first source should read"),
+        "pub fn hello() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&second_path).expect("second source should read"),
+        "pub fn call() { hello(); }\n"
+    );
+    assert_eq!(
+        fs::metadata(&first_path)
+            .expect("first source metadata should read")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    let durable =
+        fs::read_to_string(state.path().join("session.jsonl")).expect("session log should read");
+    assert!(durable.contains("\"status\":\"rolled_back\""));
+    assert!(durable.contains("sha256:rollback-policy"));
+    let records = JsonlSessionStore::read_event_records(state.path().join("session.jsonl"))
+        .expect("durable records should decode");
+    let prepared_ids = records
+        .iter()
+        .filter_map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event)
+                if event.event_type == "mutation_prepared" =>
+            {
+                event.payload["operation_id"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let terminal_ids = records
+        .iter()
+        .filter_map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event)
+                if matches!(
+                    event.event_type.as_str(),
+                    "mutation_committed" | "mutation_reconciled"
+                ) =>
+            {
+                event.payload["operation_id"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(prepared_ids.is_subset(&terminal_ids));
+}
+
+#[tokio::test]
+async fn approved_mutation_records_residual_revision_when_rollback_fails() {
+    if !python3_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("workspace tempdir should build");
+    let state = tempfile::tempdir().expect("state tempdir should build");
+    fs::create_dir(workspace.path().join("src")).expect("src dir should build");
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='x'\n")
+        .expect("cargo file should write");
+    let first_path = workspace.path().join("src/a.rs");
+    let second_path = workspace.path().join("src/b.rs");
+    fs::write(&first_path, "pub fn hello() {}\n").expect("first source should write");
+    fs::write(&second_path, "pub fn call() { hello(); }\n").expect("second source should write");
+    let first_uri = file_uri_from_path(&first_path);
+    let second_uri = file_uri_from_path(&second_path);
+    let server_script = workspace.path().join("fake_lsp.py");
+    let scenario_path = workspace.path().join("scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &json!({
+            "methods": {
+                "initialize": { "result": { "capabilities": { "renameProvider": true } } },
+                "textDocument/rename": { "result": { "changes": {
+                    first_uri: [{
+                        "range": {
+                            "start": { "line": 0, "character": 7 },
+                            "end": { "line": 0, "character": 12 }
+                        },
+                        "newText": "greet"
+                    }],
+                    second_uri: [{
+                        "range": {
+                            "start": { "line": 0, "character": 16 },
+                            "end": { "line": 0, "character": 21 }
+                        },
+                        "newText": "greet"
+                    }]
+                } } },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    let service = register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        workspace.path().to_path_buf(),
+    )
+    .expect("code intelligence should register");
+    let ctx = mutation_context(workspace.path(), state.path());
+    let recorder = ctx
+        .mutation_recorder
+        .clone()
+        .expect("test context should have recorder");
+    recorder.inject_commit_write_fault_for_test(2, true);
+    recorder.inject_commit_write_fault_for_test(3, false);
+    let call = ToolCall {
+        id: "rollback-failure".to_owned(),
+        name: "code_rename".to_owned(),
+        args_json: json!({
+            "path": "src/a.rs",
+            "line": 1,
+            "character": 7,
+            "new_name": "greet"
+        })
+        .to_string(),
+    };
+    let (prepared, _subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
+        .await
+        .expect("prepare should succeed");
+    let result = execute_mutation_for_test(ctx, &call, "sha256:rollback-failure-policy", prepared)
+        .await
+        .expect("execute should return rollback failure");
+
+    assert_eq!(result.summary().error_kind, Some(ToolErrorKind::Io));
+    assert_eq!(
+        result.metadata.details["prepared_mutation_result"]["status"],
+        "rollback_failed"
+    );
+    assert_eq!(
+        fs::read_to_string(&first_path).expect("first source should read"),
+        "pub fn hello() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&second_path).expect("second source should read"),
+        "pub fn call() { greet(); }\n"
+    );
+    let records = JsonlSessionStore::read_event_records(state.path().join("session.jsonl"))
+        .expect("durable records should decode");
+    let residual_reconcile = records.iter().find_map(|record| match record {
+        sigil_kernel::SessionStreamRecord::Stored(event)
+            if event.event_type == "mutation_reconciled"
+                && event.payload["resolution"] == "mark_committed" =>
+        {
+            Some(&event.payload)
+        }
+        _ => None,
+    });
+    let residual_reconcile = residual_reconcile.expect("residual write should be reconciled");
+    assert!(residual_reconcile["workspace_revision"].as_u64().is_some());
+    assert!(
+        residual_reconcile["workspace_snapshot_id"]
+            .as_str()
+            .is_some_and(|snapshot| !snapshot.is_empty())
+    );
+    assert!(records.iter().any(|record| matches!(
+        record,
+        sigil_kernel::SessionStreamRecord::Stored(event)
+            if event.event_type == "mutation_batch_finished"
+                && event.payload["status"] == "rollback_failed"
+                && event.payload["rollback_failed_operations"]
+                    .as_array()
+                    .is_some_and(|operations| !operations.is_empty())
+    )));
+    assert!(
+        recorder
+            .current_workspace_revision(workspace.path())
+            .expect("workspace revision should read")
+            >= 2
+    );
+}
+
+#[tokio::test]
+async fn approved_mutation_treats_reconciled_reverse_write_as_rolled_back() {
+    if !python3_available() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("workspace tempdir should build");
+    let state = tempfile::tempdir().expect("state tempdir should build");
+    fs::create_dir(workspace.path().join("src")).expect("src dir should build");
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='x'\n")
+        .expect("cargo file should write");
+    let source_path = workspace.path().join("src/lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let source_uri = file_uri_from_path(&source_path);
+    let server_script = workspace.path().join("fake_lsp.py");
+    let scenario_path = workspace.path().join("scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &json!({
+            "methods": {
+                "initialize": { "result": { "capabilities": { "renameProvider": true } } },
+                "textDocument/rename": { "result": { "changes": { source_uri: [{
+                    "range": {
+                        "start": { "line": 0, "character": 7 },
+                        "end": { "line": 0, "character": 12 }
+                    },
+                    "newText": "greet"
+                }] } } },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    let service = register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        workspace.path().to_path_buf(),
+    )
+    .expect("code intelligence should register");
+    let ctx = mutation_context(workspace.path(), state.path());
+    let recorder = ctx
+        .mutation_recorder
+        .clone()
+        .expect("test context should have recorder");
+    recorder.inject_commit_write_fault_for_test(1, true);
+    recorder.inject_commit_write_fault_for_test(2, true);
+    let call = ToolCall {
+        id: "rollback-reconciled".to_owned(),
+        name: "code_rename".to_owned(),
+        args_json: json!({
+            "path": "src/lib.rs",
+            "line": 1,
+            "character": 7,
+            "new_name": "greet"
+        })
+        .to_string(),
+    };
+    let (prepared, _subjects) = prepare_mutation_for_test(&service, ctx.clone(), &call)
+        .await
+        .expect("prepare should succeed");
+    let result =
+        execute_mutation_for_test(ctx, &call, "sha256:rollback-reconciled-policy", prepared)
+            .await
+            .expect("execute should return reconciled rollback");
+
+    assert_eq!(result.summary().error_kind, Some(ToolErrorKind::Io));
+    assert_eq!(
+        result.metadata.details["prepared_mutation_result"]["status"],
+        "rolled_back"
+    );
+    assert_eq!(
+        result.metadata.details["prepared_mutation_result"]["residual_files"],
+        json!([])
+    );
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("source should read"),
+        "pub fn hello() {}\n"
+    );
+    let records = JsonlSessionStore::read_event_records(state.path().join("session.jsonl"))
+        .expect("durable records should decode");
+    assert!(records.iter().any(|record| matches!(
+        record,
+        sigil_kernel::SessionStreamRecord::Stored(event)
+            if event.event_type == "mutation_batch_finished"
+                && event.payload["status"] == "rolled_back"
+                && event.payload
+                    .get("rollback_failed_operations")
+                    .is_none_or(|operations| operations.as_array().is_some_and(Vec::is_empty))
+    )));
 }
 
 #[tokio::test]

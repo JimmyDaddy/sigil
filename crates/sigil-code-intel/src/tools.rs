@@ -5,13 +5,14 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    CodeIntelStartup, CodeIntelligenceConfig, Tool, ToolAccess, ToolCategory, ToolContext,
-    ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
+    CodeIntelStartup, CodeIntelligenceConfig, PreparedToolExecution, Tool, ToolAccess,
+    ToolCategory, ToolContext, ToolErrorKind, ToolMutationTracking, ToolPreparation, ToolPreview,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolSubjectScope,
 };
 
 use crate::{
-    edit::CodeEditApplyOutcome,
+    prepared_mutation::{PreparedMutation, PreparedMutationOutcome, PreparedMutationStatus},
     service::{CodeEditPlan, CodeIntelResponse, CodeIntelligenceService},
     workspace::{canonical_workspace_root, workspace_relative_path},
 };
@@ -370,28 +371,56 @@ impl Tool for CodeActionTool {
         }
     }
 
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::Controlled
+    }
+
     fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
         Ok(vec![workspace_subject(self.service.workspace_root())?])
     }
 
     async fn preview(&self, ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
-        Ok(Some(preview_for_plan(
-            self.code_action_plan(&args).await?,
-            &ctx.workspace_root,
-            "Apply code action",
+        let plan = self.code_action_plan(&args).await?;
+        Ok(Some(
+            materialize_prepared_mutation(ctx, plan, "Apply code action")
+                .await?
+                .0
+                .preview("Apply code action"),
+        ))
+    }
+
+    async fn prepare(
+        &self,
+        ctx: ToolContext,
+        _call_id: String,
+        args: Value,
+    ) -> Result<Option<ToolPreparation>> {
+        let plan = self.code_action_plan(&args).await?;
+        let (prepared, subjects) =
+            materialize_prepared_mutation(ctx, plan, "Apply code action").await?;
+        let preview = prepared.preview("Apply code action");
+        let digest = prepared.content_digest().to_owned();
+        Ok(Some(ToolPreparation::new(
+            preview, subjects, digest, prepared,
         )?))
     }
 
-    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
-        let plan = self.code_action_plan(&args).await?;
-        let outcome = plan.edit.apply(&ctx.workspace_root)?;
-        Ok(edit_result(
-            call_id,
-            "code_action",
-            "applied code action",
-            plan,
-            outcome,
-        )?)
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        Ok(prepared_execution_required(call_id, "code_action"))
+    }
+
+    async fn execute_prepared(
+        &self,
+        ctx: ToolContext,
+        _args: Value,
+        prepared: PreparedToolExecution,
+    ) -> Result<ToolResult> {
+        execute_prepared_mutation(ctx, "code_action", prepared).await
     }
 }
 
@@ -413,28 +442,56 @@ impl Tool for CodeRenameTool {
         }
     }
 
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::Controlled
+    }
+
     fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
         Ok(vec![workspace_subject(self.service.workspace_root())?])
     }
 
     async fn preview(&self, ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
-        Ok(Some(preview_for_plan(
-            self.rename_plan(&args).await?,
-            &ctx.workspace_root,
-            "Rename symbol",
+        let plan = self.rename_plan(&args).await?;
+        Ok(Some(
+            materialize_prepared_mutation(ctx, plan, "Rename symbol")
+                .await?
+                .0
+                .preview("Rename symbol"),
+        ))
+    }
+
+    async fn prepare(
+        &self,
+        ctx: ToolContext,
+        _call_id: String,
+        args: Value,
+    ) -> Result<Option<ToolPreparation>> {
+        let plan = self.rename_plan(&args).await?;
+        let (prepared, subjects) =
+            materialize_prepared_mutation(ctx, plan, "Rename symbol").await?;
+        let preview = prepared.preview("Rename symbol");
+        let digest = prepared.content_digest().to_owned();
+        Ok(Some(ToolPreparation::new(
+            preview, subjects, digest, prepared,
         )?))
     }
 
-    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
-        let plan = self.rename_plan(&args).await?;
-        let outcome = plan.edit.apply(&ctx.workspace_root)?;
-        Ok(edit_result(
-            call_id,
-            "code_rename",
-            "applied symbol rename",
-            plan,
-            outcome,
-        )?)
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        Ok(prepared_execution_required(call_id, "code_rename"))
+    }
+
+    async fn execute_prepared(
+        &self,
+        ctx: ToolContext,
+        _args: Value,
+        prepared: PreparedToolExecution,
+    ) -> Result<ToolResult> {
+        execute_prepared_mutation(ctx, "code_rename", prepared).await
     }
 }
 
@@ -557,78 +614,188 @@ impl CodeDiagnosticsTool {
     }
 }
 
-fn preview_for_plan(
+async fn materialize_prepared_mutation(
+    ctx: ToolContext,
     plan: CodeEditPlan,
-    workspace_root: &std::path::Path,
-    title: &str,
-) -> Result<ToolPreview> {
-    let previews = plan.edit.previews(workspace_root)?;
-    let changed_files = plan.edit.changed_files();
-    let summary = format!(
-        "{} edits across {} file(s) via {}",
-        plan.edit.total_edits(),
-        changed_files.len(),
-        plan.capability
-    );
-    let file_diffs = previews
-        .iter()
-        .map(|file| ToolPreviewFile {
-            path: file.path.clone(),
-            diff: file.diff.clone(),
-        })
-        .collect::<Vec<_>>();
-    let body = file_diffs
-        .iter()
-        .map(|file| file.diff.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(ToolPreview {
-        title: format!("{title} ({})", plan.server),
-        summary,
-        body,
-        changed_files,
-        file_diffs,
+    label: &'static str,
+) -> Result<(PreparedMutation, Vec<ToolSubject>)> {
+    let workspace_root = ctx.workspace_root;
+    let recorder = ctx.mutation_recorder;
+    run_blocking_io(label, move || {
+        let prepared = PreparedMutation::materialize(&workspace_root, recorder.as_ref(), plan)?;
+        let subjects = prepared
+            .target_paths()
+            .map(|path| exact_target_subject(&workspace_root, path))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((prepared, subjects))
     })
+    .await?
 }
 
-fn edit_result(
-    call_id: String,
-    tool_name: &str,
-    message: &str,
-    plan: CodeEditPlan,
-    outcome: CodeEditApplyOutcome,
-) -> Result<ToolResult> {
-    let content = json!({
-        "tool": tool_name,
-        "status": "ok",
-        "message": message,
-        "server": plan.server,
-        "capability": plan.capability,
-        "changed_files": outcome.changed_files,
-        "applied_edits": outcome.applied_edits,
-        "external_changes_filtered": plan.edit.external_changes_filtered,
-        "unsupported_changes_filtered": plan.edit.unsupported_changes_filtered
-    });
-    Ok(ToolResult::ok(
+fn exact_target_subject(workspace_root: &std::path::Path, requested: &str) -> Result<ToolSubject> {
+    let path = crate::workspace::resolve_workspace_file(workspace_root, requested)?;
+    let root = canonical_workspace_root(workspace_root)?;
+    Ok(ToolSubject::path_with_scope(
+        requested.to_owned(),
+        workspace_relative_path(&root, &path),
+        Some(path),
+        ToolSubjectScope::Workspace,
+    ))
+}
+
+fn prepared_execution_required(call_id: String, tool_name: &str) -> ToolResult {
+    ToolResult::error(
         call_id,
         tool_name,
-        serde_json::to_string(&content)?,
-        ToolResultMeta {
-            duration_ms: Some(plan.metadata.elapsed_ms),
-            returned_entries: Some(outcome.applied_edits as u64),
-            total_entries: Some(plan.edit.total_edits() as u64),
-            changed_files: outcome.changed_files,
-            details: json!({
-                "code_intelligence": {
-                    "server": plan.server,
-                    "capability": plan.capability,
-                    "external_results_filtered": plan.edit.external_changes_filtered,
-                    "unsupported_changes_filtered": plan.edit.unsupported_changes_filtered
-                }
-            }),
-            ..ToolResultMeta::default()
+        ToolErrorKind::StalePreparedMutation,
+        "this tool requires an approval-bound prepared mutation",
+    )
+    .with_error_details(false, json!({ "reason": "prepared_mutation_required" }))
+}
+
+async fn execute_prepared_mutation(
+    ctx: ToolContext,
+    tool_name: &'static str,
+    prepared: PreparedToolExecution,
+) -> Result<ToolResult> {
+    let call_id = prepared.binding().call_id.clone();
+    let audit_binding = prepared.audit_binding();
+    let artifact = prepared.into_artifact::<PreparedMutation>()?;
+    execute_prepared_mutation_artifact(ctx, tool_name, call_id, audit_binding, artifact).await
+}
+
+async fn execute_prepared_mutation_artifact(
+    ctx: ToolContext,
+    tool_name: &'static str,
+    call_id: String,
+    audit_binding: sigil_kernel::PreparedToolAuditBinding,
+    artifact: PreparedMutation,
+) -> Result<ToolResult> {
+    let Some(recorder) = ctx.mutation_recorder else {
+        let details = json!({
+            "reason": "mutation_recorder_required",
+            "prepared_mutation": audit_binding,
+        });
+        let mut result = ToolResult::error(
+            call_id,
+            tool_name,
+            ToolErrorKind::DurabilityRequired,
+            "durable mutation recorder is required for prepared code edits",
+        )
+        .with_error_details(false, details.clone());
+        result.metadata.details = details;
+        return Ok(result);
+    };
+    let workspace_root = ctx.workspace_root;
+    let binding_for_execution = audit_binding.clone();
+    let call_id_for_execution = call_id.clone();
+    let outcome = run_blocking_io("execute prepared code mutation", move || {
+        artifact.execute(
+            &workspace_root,
+            &recorder,
+            &binding_for_execution,
+            &call_id_for_execution,
+        )
+    })
+    .await??;
+    prepared_mutation_result(tool_name, call_id, audit_binding, outcome)
+}
+
+#[cfg(test)]
+async fn execute_prepared_mutation_for_test(
+    ctx: ToolContext,
+    tool_name: &'static str,
+    call_id: String,
+    policy_fingerprint: &str,
+    artifact: PreparedMutation,
+) -> Result<ToolResult> {
+    let content_digest = artifact.content_digest().to_owned();
+    let prepared_digest = sigil_kernel::stable_event_hash(
+        format!("{call_id}:{tool_name}:{policy_fingerprint}:{content_digest}").as_bytes(),
+    );
+    let audit_binding = sigil_kernel::PreparedToolAuditBinding {
+        schema_version: 1,
+        approval_identity: format!("test-approval:{call_id}"),
+        prepared_digest,
+        content_digest,
+        args_digest: sigil_kernel::stable_event_hash(call_id.as_bytes()),
+        policy_fingerprint: policy_fingerprint.to_owned(),
+    };
+    execute_prepared_mutation_artifact(ctx, tool_name, call_id, audit_binding, artifact).await
+}
+
+fn prepared_mutation_result(
+    tool_name: &str,
+    call_id: String,
+    binding: sigil_kernel::PreparedToolAuditBinding,
+    outcome: PreparedMutationOutcome,
+) -> Result<ToolResult> {
+    let status = match outcome.status {
+        PreparedMutationStatus::Applied => "applied",
+        PreparedMutationStatus::RolledBack => "rolled_back",
+        PreparedMutationStatus::RollbackFailed => "rollback_failed",
+        PreparedMutationStatus::Failed => "failed",
+        PreparedMutationStatus::Stale => "stale",
+    };
+    let details = json!({
+        "prepared_mutation": binding,
+        "prepared_mutation_result": {
+            "status": status,
+            "batch_id": outcome.batch_id,
+            "base_workspace_revision": outcome.base_workspace_revision,
+            "committed_operations": outcome.committed_operations,
+            "failed_operations": outcome.failed_operations,
+            "rollback_operations": outcome.rollback_operations,
+            "rollback_failed_operations": outcome.rollback_failed_operations,
+            "residual_files": outcome.residual_files,
+            "reason": outcome.reason,
         },
-    ))
+        "code_intelligence": {
+            "server": outcome.server,
+            "capability": outcome.capability,
+        }
+    });
+    let content = serde_json::to_string(&json!({
+        "tool": tool_name,
+        "status": status,
+        "changed_files": outcome.changed_files,
+        "applied_edits": outcome.applied_edits,
+    }))?;
+    let metadata = ToolResultMeta {
+        duration_ms: Some(outcome.query_elapsed_ms),
+        returned_entries: Some(outcome.applied_edits as u64),
+        total_entries: Some(outcome.applied_edits as u64),
+        changed_files: outcome.changed_files,
+        details: details.clone(),
+        ..ToolResultMeta::default()
+    };
+    if outcome.status == PreparedMutationStatus::Applied {
+        return Ok(ToolResult::ok(call_id, tool_name, content, metadata));
+    }
+    let kind = if outcome.status == PreparedMutationStatus::Stale {
+        ToolErrorKind::StalePreparedMutation
+    } else {
+        ToolErrorKind::Io
+    };
+    let mut result = ToolResult::error(
+        call_id,
+        tool_name,
+        kind,
+        format!("prepared mutation {status}"),
+    )
+    .with_error_details(false, details);
+    result.metadata = metadata;
+    Ok(result)
+}
+
+async fn run_blocking_io<T, F>(label: &'static str, job: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(job)
+        .await
+        .map_err(|error| anyhow!("{label} blocking task failed: {error}"))
 }
 
 fn result_from_response<T>(

@@ -6,6 +6,9 @@ use crate::context::LspContextSnapshot;
 pub struct CodeEditPlan {
     pub server: String,
     pub capability: String,
+    pub source_path: String,
+    pub source_version: i32,
+    pub source_hash: String,
     pub edit: CodeWorkspaceEdit,
     pub metadata: QueryMetadata,
 }
@@ -540,7 +543,7 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let response = self
+        let mut response = self
             .synced_lsp_request(
                 &path,
                 "textDocument/codeAction",
@@ -548,22 +551,24 @@ impl CodeIntelligenceService {
                 code_action_params(&path, line, character, end_line, end_character, kind),
             )
             .await?;
-        let actions = response_array(response.value);
+        let actions = response_array(response.value.clone());
         let mut selected = select_code_action(actions, title, kind)?;
         if selected.get("edit").is_none()
             && self
                 .lsp_capability_supported(&path, code_action_resolve_supported)
                 .await?
         {
-            selected = self
+            let resolved = self
                 .synced_lsp_request(
                     &path,
                     "codeAction/resolve",
                     code_action_resolve_supported,
                     selected.clone(),
                 )
-                .await?
-                .value;
+                .await?;
+            selected = resolved.value;
+            response.source_version = resolved.source_version;
+            response.source_hash = resolved.source_hash;
         }
         let edit_value =
             selected
@@ -579,6 +584,9 @@ impl CodeIntelligenceService {
         Ok(CodeEditPlan {
             server: response.server_name,
             capability: "textDocument/codeAction".to_owned(),
+            source_path: workspace_relative_path(&self.inner.workspace_root, &response.source_path),
+            source_version: response.source_version,
+            source_hash: response.source_hash,
             metadata: QueryMetadata {
                 returned: edit.files.len(),
                 total: edit.files.len(),
@@ -612,6 +620,9 @@ impl CodeIntelligenceService {
         Ok(CodeEditPlan {
             server: response.server_name,
             capability: "textDocument/rename".to_owned(),
+            source_path: workspace_relative_path(&self.inner.workspace_root, &response.source_path),
+            source_version: response.source_version,
+            source_hash: response.source_hash,
             metadata: QueryMetadata {
                 returned: edit.files.len(),
                 total: edit.files.len(),
@@ -929,7 +940,7 @@ impl CodeIntelligenceService {
             }
             .into());
         }
-        server.sync_document(path).await?;
+        let (source_version, source_hash) = server.sync_document(path).await?;
         let value = server
             .client
             .request(capability, params, self.request_timeout())
@@ -937,6 +948,9 @@ impl CodeIntelligenceService {
         Ok(LspRequestOutput {
             server_name: server.config.name.clone(),
             languages: server.config.languages.clone(),
+            source_path: path.to_path_buf(),
+            source_version,
+            source_hash,
             value,
         })
     }

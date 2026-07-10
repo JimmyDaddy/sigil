@@ -183,6 +183,45 @@ pub enum MutationBatchStatus {
     Applied,
     PartiallyApplied,
     Failed,
+    /// In-process apply failed and every already-attempted file was restored by CAS.
+    RolledBack,
+    /// At least one compensating restore failed; residual workspace changes may remain.
+    RollbackFailed,
+}
+
+/// Durable start payload for one multi-subject mutation batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MutationBatchStarted {
+    pub batch_id: MutationBatchId,
+    pub operation_id: OperationId,
+    pub expected_subjects: Vec<MutationSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_fingerprint: Option<String>,
+}
+
+/// Durable terminal payload for one multi-subject mutation batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MutationBatchFinished {
+    pub batch_id: MutationBatchId,
+    pub status: MutationBatchStatus,
+    pub committed_operations: Vec<OperationId>,
+    pub failed_operations: Vec<OperationId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollback_operations: Vec<OperationId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollback_failed_operations: Vec<OperationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_fingerprint: Option<String>,
 }
 
 /// One prepared controlled file mutation.
@@ -199,6 +238,7 @@ pub struct PreparedFileMutation {
     pub absolute_path: PathBuf,
     pub before_hash: Option<String>,
     pub intended_after_hash: Option<String>,
+    pub snapshot_coverage: SnapshotCoverage,
     pub base_workspace_revision: WorkspaceRevision,
 }
 

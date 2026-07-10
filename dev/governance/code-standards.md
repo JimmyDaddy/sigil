@@ -94,6 +94,8 @@
 - 工具必须有稳定 `ToolSpec`
 - `ToolSpec` 必须表达 provider-neutral 的 `category / access / preview`，不要退回 read/write 二分
 - 写文件类工具默认提供 `preview`，尤其是 `write_file`、`edit_file`
+- 由 LSP、远端服务或其他外部 planner 生成的写入不得在 `execute` 阶段重新规划；必须先 materialize 不可变 prepared artifact，让完整目标 subjects 参与 permission/approval，再由一次性 envelope 按值消费执行
+- prepared mutation 的 source/target hash、workspace revision、args、policy 与 approval 任一漂移都必须在首个写入前 fail closed；多文件补偿回滚仍须走 RFC-0002 CAS/审计，不能宣称为 crash-atomic transaction
 - `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
 - `bash` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
 - 所有 model-visible 工具输出必须有默认上限和截断 metadata；大输出不能直接灌满 timeline 或 provider context

@@ -1,12 +1,18 @@
 use std::{
+    cell::Cell,
     fs,
+    marker::PhantomData,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 
-use crate::verification::{FileType, WorkspaceId};
+use crate::{
+    StoredEvent,
+    verification::{FileType, WorkspaceId},
+};
 
+use super::recorder::WorkspaceMutationLease;
 use super::{
     CommittedDirectoryMutation, CommittedFileMutation, MutationBatchId, MutationCommitted,
     MutationEventRecorder, MutationPrepared, MutationSubject, MutationSyncClass,
@@ -19,16 +25,32 @@ use super::{
 };
 
 /// Controlled mutation coordinator for one tool call.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MutationCoordinator {
     pub(super) recorder: MutationEventRecorder,
     pub(super) workspace_root: PathBuf,
     pub(super) workspace_id: WorkspaceId,
     pub(super) tool_call_id: ToolCallId,
     pub(super) batch_id: Option<MutationBatchId>,
+    pub(super) workspace_lease: Option<WorkspaceMutationLease>,
+    pub(super) not_sync: PhantomData<Cell<()>>,
 }
 
 impl MutationCoordinator {
+    /// Reconciles one prepared file from its current disk state while this coordinator owns the
+    /// workspace mutation lease.
+    pub fn reconcile_prepared_file_from_disk(
+        &self,
+        prepared: &PreparedFileMutation,
+    ) -> Result<StoredEvent> {
+        if self.workspace_lease.is_none() {
+            bail!("prepared file reconciliation requires the workspace mutation lease");
+        }
+        self.ensure_prepared_file_workspace(prepared)?;
+        self.recorder
+            .reconcile_prepared_file_from_disk_under_lease(prepared)
+    }
+
     pub fn prepare_directory(
         &self,
         relative_path: impl Into<PathBuf>,
@@ -91,10 +113,50 @@ impl MutationCoordinator {
         absolute_path: impl Into<PathBuf>,
         intended_after_hash: Option<String>,
     ) -> Result<PreparedFileMutation> {
-        let relative_path = normalize_relative_path(relative_path.into())?;
-        let absolute_path = absolute_path.into();
+        self.prepare_file_inner(
+            relative_path.into(),
+            absolute_path.into(),
+            None,
+            intended_after_hash,
+        )
+    }
+
+    /// Prepares a file mutation only if the current source hash still equals a caller-approved
+    /// hash. This prevents preparation from silently absorbing drift that occurred after preview.
+    pub fn prepare_file_expected(
+        &self,
+        relative_path: impl Into<PathBuf>,
+        absolute_path: impl Into<PathBuf>,
+        expected_before_hash: Option<String>,
+        intended_after_hash: Option<String>,
+    ) -> Result<PreparedFileMutation> {
+        self.prepare_file_inner(
+            relative_path.into(),
+            absolute_path.into(),
+            Some(expected_before_hash),
+            intended_after_hash,
+        )
+    }
+
+    fn prepare_file_inner(
+        &self,
+        relative_path: PathBuf,
+        absolute_path: PathBuf,
+        expected_before_hash: Option<Option<String>>,
+        intended_after_hash: Option<String>,
+    ) -> Result<PreparedFileMutation> {
+        let relative_path = normalize_relative_path(relative_path)?;
         ensure_absolute_path_matches_subject(&self.workspace_root, &relative_path, &absolute_path)?;
         let before_hash = file_content_hash(&absolute_path)?;
+        if expected_before_hash
+            .as_ref()
+            .is_some_and(|expected| expected != &before_hash)
+        {
+            bail!(
+                "prepared mutation source hash changed before durable prepare: {}",
+                absolute_path.display()
+            );
+        }
         let base_workspace_revision =
             latest_workspace_revision(&self.recorder.store, &self.workspace_id)?;
         let operation_id = operation_id_for(
@@ -124,7 +186,7 @@ impl MutationCoordinator {
             },
             before_hash: before_hash.clone(),
             intended_after_hash: intended_after_hash.clone(),
-            snapshot_coverage,
+            snapshot_coverage: snapshot_coverage.clone(),
             workspace_id: self.workspace_id.clone(),
             base_workspace_revision,
             sync_class: MutationSyncClass::RecoveryCritical,
@@ -142,6 +204,7 @@ impl MutationCoordinator {
             absolute_path,
             before_hash,
             intended_after_hash,
+            snapshot_coverage,
             base_workspace_revision,
         })
     }
@@ -199,6 +262,19 @@ impl MutationCoordinator {
         prepared: &PreparedFileMutation,
         content: &[u8],
     ) -> Result<CommittedFileMutation> {
+        self.ensure_prepared_file_workspace(prepared)?;
+        let _lease = self.acquire_commit_lease()?;
+        self.active_workspace_lease(_lease.as_ref())?
+            .advance_epoch()?;
+        #[cfg(feature = "test-support")]
+        let test_commit_call = self.recorder.begin_commit_write_for_test();
+        #[cfg(feature = "test-support")]
+        if self
+            .recorder
+            .take_commit_write_fault_for_test(test_commit_call, false)
+        {
+            bail!("injected commit_write failure before target replacement");
+        }
         let intended_hash = bytes_hash(content);
         if prepared.intended_after_hash.as_deref() != Some(intended_hash.as_str()) {
             bail!("prepared mutation intended hash does not match write content");
@@ -209,6 +285,13 @@ impl MutationCoordinator {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         atomic_replace(&prepared.absolute_path, content)?;
+        #[cfg(feature = "test-support")]
+        if self
+            .recorder
+            .take_commit_write_fault_for_test(test_commit_call, true)
+        {
+            bail!("injected commit_write failure after target replacement");
+        }
         let observed_after_hash = file_content_hash(&prepared.absolute_path)?;
         ensure_observed_after_hash_matches_intent(&observed_after_hash, &intended_hash)?;
         self.record_commit(prepared, observed_after_hash)
@@ -218,6 +301,10 @@ impl MutationCoordinator {
         &self,
         prepared: &PreparedDirectoryMutation,
     ) -> Result<CommittedDirectoryMutation> {
+        self.ensure_prepared_directory_workspace(prepared)?;
+        let _lease = self.acquire_commit_lease()?;
+        self.active_workspace_lease(_lease.as_ref())?
+            .advance_epoch()?;
         if prepared.intended_after_hash.as_deref() != Some(directory_present_hash().as_str()) {
             bail!("directory create mutation must intend a present directory");
         }
@@ -236,6 +323,10 @@ impl MutationCoordinator {
         &self,
         prepared: &PreparedDirectoryMutation,
     ) -> Result<CommittedDirectoryMutation> {
+        self.ensure_prepared_directory_workspace(prepared)?;
+        let _lease = self.acquire_commit_lease()?;
+        self.active_workspace_lease(_lease.as_ref())?
+            .advance_epoch()?;
         if prepared.intended_after_hash.is_some() {
             bail!("directory delete mutation must not have an intended after hash");
         }
@@ -251,6 +342,10 @@ impl MutationCoordinator {
     }
 
     pub fn commit_delete(&self, prepared: &PreparedFileMutation) -> Result<CommittedFileMutation> {
+        self.ensure_prepared_file_workspace(prepared)?;
+        let _lease = self.acquire_commit_lease()?;
+        self.active_workspace_lease(_lease.as_ref())?
+            .advance_epoch()?;
         if prepared.intended_after_hash.is_some() {
             bail!("delete mutation must not have an intended after hash");
         }
@@ -303,6 +398,64 @@ impl MutationCoordinator {
             .append_write_committed(&committed, &committed_event.event_id)?;
         committed.write_event = write_event;
         Ok(committed)
+    }
+
+    fn acquire_commit_lease(&self) -> Result<Option<WorkspaceMutationLease>> {
+        if self.workspace_lease.is_some() {
+            Ok(None)
+        } else {
+            self.recorder
+                .acquire_workspace_mutation_lease(&self.workspace_root)
+                .map(Some)
+        }
+    }
+
+    fn ensure_prepared_file_workspace(&self, prepared: &PreparedFileMutation) -> Result<()> {
+        if prepared.workspace_id != self.workspace_id
+            || prepared.workspace_root != self.workspace_root
+        {
+            bail!("prepared file mutation belongs to a different workspace");
+        }
+        ensure_absolute_path_matches_subject(
+            &self.workspace_root,
+            &prepared.relative_path,
+            &prepared.absolute_path,
+        )
+    }
+
+    fn ensure_prepared_directory_workspace(
+        &self,
+        prepared: &PreparedDirectoryMutation,
+    ) -> Result<()> {
+        if prepared.workspace_id != self.workspace_id
+            || prepared.workspace_root != self.workspace_root
+        {
+            bail!("prepared directory mutation belongs to a different workspace");
+        }
+        ensure_absolute_path_matches_subject(
+            &self.workspace_root,
+            &prepared.relative_path,
+            &prepared.absolute_path,
+        )
+    }
+
+    /// Returns the current cross-session controlled-mutation epoch while holding this
+    /// coordinator's exclusive workspace lease.
+    pub fn workspace_mutation_epoch(&self) -> Result<u64> {
+        self.workspace_lease
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("coordinator does not hold a workspace mutation lease"))?
+            .epoch()
+    }
+
+    fn active_workspace_lease<'a>(
+        &'a self,
+        local: Option<&'a WorkspaceMutationLease>,
+    ) -> Result<&'a WorkspaceMutationLease> {
+        self.workspace_lease
+            .as_ref()
+            .or(local)
+            .ok_or_else(|| anyhow::anyhow!("workspace mutation lease is unavailable"))
     }
 
     fn record_directory_commit(

@@ -52,6 +52,266 @@ fn artifact_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+#[test]
+fn workspace_mutation_lease_serializes_regular_controlled_writes() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(state.path().join("session.jsonl"))?;
+    let recorder =
+        MutationEventRecorder::with_artifact_root(store, state.path().join("mutation-artifacts"));
+    let target = workspace.path().join("target.txt");
+    fs::write(&target, b"before")?;
+    let leased = recorder.coordinator_with_workspace_lease(
+        workspace.path(),
+        "prepared-call",
+        Some("prepared-batch".to_owned()),
+    )?;
+    assert_eq!(leased.workspace_mutation_epoch()?, 0);
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker_recorder = recorder.clone();
+    let workspace_root = workspace.path().to_path_buf();
+    let worker_target = target.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).expect("worker start should signal");
+        let result = write_file_with_mutation(
+            Some(&worker_recorder),
+            &workspace_root,
+            "concurrent-call",
+            "target.txt",
+            &worker_target,
+            b"after",
+        );
+        done_tx.send(result).expect("worker result should signal");
+    });
+    started_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+    assert!(
+        matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "ordinary controlled write must wait for the prepared mutation lease"
+    );
+    assert_eq!(fs::read(&target)?, b"before");
+
+    drop(leased);
+    done_rx.recv_timeout(std::time::Duration::from_secs(5))??;
+    worker.join().expect("worker should not panic");
+    assert_eq!(fs::read(&target)?, b"after");
+    assert_eq!(
+        recorder.current_workspace_mutation_epoch(workspace.path())?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_lease_cross_process_child() -> Result<()> {
+    let Ok(workspace_root) = std::env::var("SIGIL_MUTATION_LEASE_CHILD_WORKSPACE") else {
+        return Ok(());
+    };
+    let state_root = PathBuf::from(std::env::var("SIGIL_MUTATION_LEASE_CHILD_STATE")?);
+    let workspace_root = PathBuf::from(workspace_root);
+    let recorder = MutationEventRecorder::new(JsonlSessionStore::new(
+        state_root.join("sessions/child.jsonl"),
+    )?);
+    let result = write_file_with_mutation(
+        Some(&recorder),
+        &workspace_root,
+        "child-call",
+        "target.txt",
+        workspace_root.join("target.txt"),
+        b"child",
+    );
+    assert!(
+        result
+            .expect_err("child must not acquire the parent workspace lease")
+            .to_string()
+            .contains("timed out acquiring workspace mutation lease")
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_lease_is_cross_process_and_independent_of_temp_dir() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let alternate_temp = tempfile::tempdir()?;
+    fs::create_dir_all(state.path().join("sessions"))?;
+    let target = workspace.path().join("target.txt");
+    fs::write(&target, b"parent")?;
+    let recorder = MutationEventRecorder::new(JsonlSessionStore::new(
+        state.path().join("sessions/parent.jsonl"),
+    )?);
+    let leased = recorder.coordinator_with_workspace_lease(
+        workspace.path(),
+        "parent-call",
+        Some("parent-batch".to_owned()),
+    )?;
+
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("mutation::tests::workspace_mutation_lease_cross_process_child")
+        .arg("--nocapture")
+        .env("SIGIL_MUTATION_LEASE_CHILD_WORKSPACE", workspace.path())
+        .env("SIGIL_MUTATION_LEASE_CHILD_STATE", state.path())
+        .env("TMPDIR", alternate_temp.path())
+        .output()?;
+    drop(leased);
+
+    assert!(
+        output.status.success(),
+        "child mutation lease fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&target)?, b"parent");
+    Ok(())
+}
+
+#[test]
+fn mutation_recovery_lease_cross_process_child() -> Result<()> {
+    let Ok(workspace_root) = std::env::var("SIGIL_MUTATION_RECOVERY_CHILD_WORKSPACE") else {
+        return Ok(());
+    };
+    let session_path = PathBuf::from(std::env::var("SIGIL_MUTATION_RECOVERY_CHILD_SESSION")?);
+    let recorder = MutationEventRecorder::new(JsonlSessionStore::new(session_path)?);
+    let result = recorder.reconcile_prepared_mutations(workspace_root);
+    assert!(
+        result
+            .expect_err("recovery must not bypass the parent workspace lease")
+            .to_string()
+            .contains("timed out acquiring workspace mutation lease")
+    );
+    Ok(())
+}
+
+#[test]
+fn prepared_recovery_is_serialized_with_cross_process_commits() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let alternate_temp = tempfile::tempdir()?;
+    fs::create_dir_all(state.path().join("sessions"))?;
+    let target = workspace.path().join("target.txt");
+    fs::write(&target, b"before")?;
+    let recovery_session = state.path().join("sessions/recovery.jsonl");
+    {
+        let recovery_recorder =
+            MutationEventRecorder::new(JsonlSessionStore::new(&recovery_session)?);
+        recovery_recorder
+            .coordinator(workspace.path(), "pending-call", None)?
+            .prepare_file_expected(
+                "target.txt",
+                &target,
+                Some(bytes_hash(b"before")),
+                Some(bytes_hash(b"after")),
+            )?;
+    }
+    let parent_recorder = MutationEventRecorder::new(JsonlSessionStore::new(
+        state.path().join("sessions/parent-recovery-lock.jsonl"),
+    )?);
+    let leased = parent_recorder.coordinator_with_workspace_lease(
+        workspace.path(),
+        "parent-call",
+        Some("parent-batch".to_owned()),
+    )?;
+
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("mutation::tests::mutation_recovery_lease_cross_process_child")
+        .arg("--nocapture")
+        .env("SIGIL_MUTATION_RECOVERY_CHILD_WORKSPACE", workspace.path())
+        .env("SIGIL_MUTATION_RECOVERY_CHILD_SESSION", &recovery_session)
+        .env("TMPDIR", alternate_temp.path())
+        .output()?;
+    drop(leased);
+
+    assert!(
+        output.status.success(),
+        "child recovery lease fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&target)?, b"before");
+    Ok(())
+}
+
+#[test]
+fn leased_coordinator_rejects_prepared_mutation_from_another_workspace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_a = temp.path().join("workspace-a");
+    let workspace_b = temp.path().join("workspace-b");
+    fs::create_dir(&workspace_a)?;
+    fs::create_dir(&workspace_b)?;
+    let target_b = workspace_b.join("target.txt");
+    fs::write(&target_b, b"before")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let prepared_b = recorder
+        .coordinator(&workspace_b, "workspace-b-call", None)?
+        .prepare_file("target.txt", &target_b, Some(bytes_hash(b"after")))?;
+    let leased_a = recorder.coordinator_with_workspace_lease(
+        &workspace_a,
+        "workspace-a-call",
+        Some("workspace-a-batch".to_owned()),
+    )?;
+
+    let reconcile_error = leased_a
+        .reconcile_prepared_file_from_disk(&prepared_b)
+        .expect_err("workspace A lease must not reconcile workspace B");
+    assert!(
+        reconcile_error
+            .to_string()
+            .contains("belongs to a different workspace")
+    );
+    let commit_error = leased_a
+        .commit_write(&prepared_b, b"after")
+        .expect_err("workspace A lease must not commit workspace B");
+    assert!(
+        commit_error
+            .to_string()
+            .contains("belongs to a different workspace")
+    );
+    assert_eq!(fs::read(&target_b)?, b"before");
+    assert_eq!(leased_a.workspace_mutation_epoch()?, 0);
+    assert_eq!(
+        stored_event_types(&store)?,
+        vec![DurableEventType::MutationPrepared.as_str()]
+    );
+    Ok(())
+}
+
+#[test]
+fn prepared_recovery_only_reconciles_the_leased_workspace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_a = temp.path().join("workspace-a");
+    let workspace_b = temp.path().join("workspace-b");
+    fs::create_dir(&workspace_a)?;
+    fs::create_dir(&workspace_b)?;
+    let target_a = workspace_a.join("target.txt");
+    let target_b = workspace_b.join("target.txt");
+    fs::write(&target_a, b"before-a")?;
+    fs::write(&target_b, b"before-b")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let prepared_a = recorder
+        .coordinator(&workspace_a, "workspace-a-call", None)?
+        .prepare_file("target.txt", &target_a, Some(bytes_hash(b"after-a")))?;
+    let prepared_b = recorder
+        .coordinator(&workspace_b, "workspace-b-call", None)?
+        .prepare_file("target.txt", &target_b, Some(bytes_hash(b"after-b")))?;
+
+    let reconciled_a = recorder.reconcile_prepared_mutations(&workspace_a)?;
+    assert_eq!(reconciled_a.len(), 1);
+    let payload_a: MutationReconciled = serde_json::from_value(reconciled_a[0].payload.clone())?;
+    assert_eq!(payload_a.operation_id, prepared_a.operation_id);
+
+    let reconciled_b = recorder.reconcile_prepared_mutations(&workspace_b)?;
+    assert_eq!(reconciled_b.len(), 1);
+    let payload_b: MutationReconciled = serde_json::from_value(reconciled_b[0].payload.clone())?;
+    assert_eq!(payload_b.operation_id, prepared_b.operation_id);
+    Ok(())
+}
+
 fn first_prepared_payload(store: &JsonlSessionStore) -> Result<MutationPrepared> {
     for record in JsonlSessionStore::read_event_records(store.path())? {
         let SessionStreamRecord::Stored(event) = record else {
@@ -1585,7 +1845,7 @@ fn reconciliation_marks_workspace_subject_unknown_without_prior_workspace_snapsh
         before_hash: None,
         intended_after_hash: None,
         snapshot_coverage: crate::SnapshotCoverage::Unsupported,
-        workspace_id: "workspace".to_owned(),
+        workspace_id: stable_workspace_id(&workspace)?,
         base_workspace_revision: 0,
         sync_class: crate::MutationSyncClass::RecoveryCritical,
     })?;

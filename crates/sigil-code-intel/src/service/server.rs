@@ -20,6 +20,9 @@ pub(super) struct ProcessLanguageServer {
 pub(super) struct LspRequestOutput {
     pub(super) server_name: String,
     pub(super) languages: Vec<String>,
+    pub(super) source_path: PathBuf,
+    pub(super) source_version: i32,
+    pub(super) source_hash: String,
     pub(super) value: Value,
 }
 
@@ -79,19 +82,20 @@ impl ProcessLanguageServer {
         let _ = self.child.kill().await;
     }
 
-    pub(super) async fn sync_document(&mut self, path: &Path) -> Result<()> {
+    pub(super) async fn sync_document(&mut self, path: &Path) -> Result<(i32, String)> {
         let text = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("failed to read {}", path.display()))?;
         let language = language_for_path(&self.config, path);
         let version = self.versions.get(path).copied().unwrap_or(0) + 1;
+        let content_hash = sigil_kernel::bytes_hash(text.as_bytes());
         if self.versions.contains_key(path) {
             self.client.did_change(path, version, text).await?;
         } else {
             self.client.did_open(path, &language, version, text).await?;
         }
         self.versions.insert(path.to_path_buf(), version);
-        Ok(())
+        Ok((version, content_hash))
     }
 }
 

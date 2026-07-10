@@ -91,6 +91,7 @@ def run_scenario_mode(scenario_path):
                     "params": message.get("params"),
                 }
             )
+            maybe_record(record_file, record_env, messages)
 
             notification_behavior = notifications.get(method, {})
             publish = notification_behavior.get("publish_diagnostics")

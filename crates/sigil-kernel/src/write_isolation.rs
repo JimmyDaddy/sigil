@@ -865,8 +865,12 @@ fn mutation_batch_status(
 fn changeset_result_status(status: MutationBatchStatus) -> ChangeSetResultStatus {
     match status {
         MutationBatchStatus::Applied => ChangeSetResultStatus::Applied,
-        MutationBatchStatus::PartiallyApplied => ChangeSetResultStatus::PartiallyApplied,
-        MutationBatchStatus::Failed => ChangeSetResultStatus::Failed,
+        MutationBatchStatus::PartiallyApplied | MutationBatchStatus::RollbackFailed => {
+            ChangeSetResultStatus::PartiallyApplied
+        }
+        MutationBatchStatus::Failed | MutationBatchStatus::RolledBack => {
+            ChangeSetResultStatus::Failed
+        }
     }
 }
 

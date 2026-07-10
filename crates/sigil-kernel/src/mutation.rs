@@ -38,11 +38,12 @@ pub use artifacts::{MutationArtifactLifecycleRecorded, MutationArtifactLifecycle
 pub use coordinator::MutationCoordinator;
 pub use events::{
     CheckpointRestored, CommittedDirectoryMutation, CommittedFileMutation,
-    ExecutionMutationProfile, MutationArtifactId, MutationBatchId, MutationBatchStatus,
-    MutationCommitted, MutationObservedState, MutationPrepared, MutationReconciled,
-    MutationResolution, MutationSubject, MutationSyncClass, OperationId, PreparedDirectoryMutation,
-    PreparedFileMutation, RestoredFileMutation, SnapshotCoverage, ToolCallId,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceMutationScan,
+    ExecutionMutationProfile, MutationArtifactId, MutationBatchFinished, MutationBatchId,
+    MutationBatchStarted, MutationBatchStatus, MutationCommitted, MutationObservedState,
+    MutationPrepared, MutationReconciled, MutationResolution, MutationSubject, MutationSyncClass,
+    OperationId, PreparedDirectoryMutation, PreparedFileMutation, RestoredFileMutation,
+    SnapshotCoverage, ToolCallId, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
+    WorkspaceMutationScan,
 };
 pub use hash::{bytes_hash, file_content_hash};
 pub use ops::{

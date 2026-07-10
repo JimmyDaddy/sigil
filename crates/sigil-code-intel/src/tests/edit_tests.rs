@@ -124,7 +124,7 @@ fn workspace_edit_from_lsp_accepts_document_changes_edits() {
 }
 
 #[test]
-fn workspace_edit_apply_reports_noop_and_changed_files() {
+fn workspace_edit_preview_matches_materialized_text_edits() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("lib.rs");
     fs::write(&path, "fn hello() {}\n").expect("source should write");
@@ -146,22 +146,14 @@ fn workspace_edit_apply_reports_noop_and_changed_files() {
     };
 
     let preview = edit.previews(temp.path()).expect("preview should build");
-    let outcome = edit.apply(temp.path()).expect("edit should apply");
-    let noop = CodeWorkspaceEdit {
-        files: vec![CodeEditFile {
-            path: "lib.rs".to_owned(),
-            edits: Vec::new(),
-        }],
-        external_changes_filtered: 0,
-        unsupported_changes_filtered: 0,
-    }
-    .apply(temp.path())
-    .expect("noop edit should apply");
+    let current = fs::read_to_string(&path).expect("source should read");
+    let proposed =
+        apply_text_edits(&current, &edit.files[0].edits).expect("text edits should materialize");
+    let noop = apply_text_edits(&current, &[]).expect("noop edits should materialize");
 
     assert!(preview[0].diff.contains("+fn greet()"));
-    assert_eq!(outcome.changed_files, vec!["lib.rs"]);
-    assert_eq!(outcome.applied_edits, 1);
-    assert!(noop.changed_files.is_empty());
+    assert_eq!(proposed, "fn greet() {}\n");
+    assert_eq!(noop, current);
 }
 
 #[test]
