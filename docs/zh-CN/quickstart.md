@@ -2,33 +2,27 @@
 
 [文档首页](README.md) · [English](../en/quickstart.md)
 
-这份指南帮助你从首发安装路径安装 Sigil，并完成一次真实有用的 TUI session。它面向想试用 Sigil 的用户，而不是修改 Sigil 本身的维护者。`v0.0.1-alpha.1` 是 early preview。
+这份指南使用推荐的 npm alpha 路径，帮助你在真实仓库中完成一次有用的 Sigil TUI 会话。其他安装渠道以及全部更新、卸载说明统一见[安装](installation.md)。
 
 ## 开始前
 
 你需要：
 
 - 一个现代终端模拟器。
-- 一种安装器：npm、Homebrew，或带 `cargo` 的 Rust toolchain。
+- 推荐安装路径所需的 Node.js 和 npm。
 - 一个模型 provider 凭据。
 
 为了更容易确认效果，第一次建议在一个可以随时查看 `git diff` 的仓库中使用。
 
 ## 1. 安装 Sigil
 
-使用首发安装路径之一：
+通过 scoped npm package 安装当前 alpha：
 
 ```bash
 npm install -g @sigil-ai/sigil@alpha
 ```
 
-```bash
-brew install JimmyDaddy/sigil/sigil-ai
-```
-
-```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
-```
+Homebrew、Cargo、源码构建、release archive、更新和卸载命令只在[安装](installation.md)中维护，避免多处副本失同步。
 
 确认 binary 可用：
 
@@ -136,6 +130,8 @@ sigil doctor
 ## 下一步
 
 - 学习日常操作：[Sigil TUI 使用指南](user-guide.md)。
+- 选择其他安装渠道或管理已有安装：[安装](installation.md)。
 - 参考真实任务模式：[常见工作流](workflows.md)。
-- 调整 provider 和权限：[Sigil 配置指南](configuration.md)。
+- 选择模型后端和认证方式：[Sigil Provider 指南](providers.md)。
+- 调整共享的 workspace、权限和工具行为：[Sigil 配置指南](configuration.md)。
 - 处理常见问题：[排障](troubleshooting.md)。

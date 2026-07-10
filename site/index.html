@@ -43,34 +43,38 @@
     </script>
     <link rel="stylesheet" href="assets/site.css">
     <script defer src="assets/site.js"></script>
+    <script defer src="assets/code.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
     <header class="site-header">
       <a class="brand" href="./" aria-label="Sigil home">
         <img class="brand-mark" src="assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
         <span class="brand-wordmark" aria-hidden="true"></span>
       </a>
       <div class="header-actions">
-        <nav aria-label="Primary navigation">
-          <a href="#quickstart">Install</a>
-          <a href="#workflow">Workflow</a>
-          <a href="#safety">Safety</a>
-          <a href="docs/visual-tour/">Tour</a>
-          <a href="docs/">Docs</a>
-          <a href="docs/status/">Status</a>
-          <a href="zh-CN/">简体中文</a>
-          <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-        </nav>
+        <details class="nav-menu" open>
+          <summary aria-controls="home-primary-navigation">Menu</summary>
+          <nav id="home-primary-navigation" aria-label="Primary navigation">
+            <a href="#quickstart">Install</a>
+            <a href="#workflow">Workflow</a>
+            <a href="#safety">Safety</a>
+            <a href="docs/visual-tour/">Tour</a>
+            <a href="docs/">Docs</a>
+            <a href="docs/status/">Status</a>
+            <a href="zh-CN/">简体中文</a>
+            <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+          </nav>
+        </details>
         <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme" aria-pressed="false" title="Switch to dark theme">☾</button>
       </div>
     </header>
 
-    <main>
+    <main id="main-content">
       <section class="hero">
         <img
           class="hero-logo hero-logo-on-light"
           src="assets/logo/sigil-full-staff-glow.svg"
-          srcset="assets/logo/sigil-full-staff-glow.svg 1x, assets/logo/sigil-full-staff-glow-2x.png 2x"
           alt="Sigil"
         >
         <img
@@ -81,7 +85,7 @@
         >
         <div class="hero-copy">
           <p class="eyebrow">TUI-first Rust coding agent</p>
-          <h1>Repository work, kept inside one terminal interface.</h1>
+          <h1>Repository work, inside one terminal.</h1>
           <p class="lede">
             Sigil brings chat, durable tasks, child agents, approvals, diffs, diagnostics, verification, and session recovery into a terminal product built for real coding sessions.
           </p>
@@ -153,15 +157,15 @@ sigil</code></pre>
         </div>
         <div class="visual-grid">
           <a class="visual-card visual-card-large" href="docs/visual-tour/">
-            <img src="assets/screenshots/tui-session.svg" alt="Sigil main TUI session screenshot">
+            <img src="assets/screenshots/tui-session.svg" alt="Sigil main TUI session screenshot" loading="lazy" decoding="async">
             <span>Main TUI session</span>
           </a>
           <a class="visual-card" href="docs/visual-tour/#approval-review">
-            <img src="assets/screenshots/approval-review.svg" alt="Sigil approval review screenshot">
+            <img src="assets/screenshots/approval-review.svg" alt="Sigil approval review screenshot" loading="lazy" decoding="async">
             <span>Approval review</span>
           </a>
           <a class="visual-card" href="docs/visual-tour/#configuration-panel">
-            <img src="assets/screenshots/config-panel.svg" alt="Sigil configuration panel screenshot">
+            <img src="assets/screenshots/config-panel.svg" alt="Sigil configuration panel screenshot" loading="lazy" decoding="async">
             <span>Config panel</span>
           </a>
         </div>

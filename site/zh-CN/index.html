@@ -43,34 +43,38 @@
     </script>
     <link rel="stylesheet" href="../assets/site.css">
     <script defer src="../assets/site.js"></script>
+    <script defer src="../assets/code.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
     <header class="site-header">
-      <a class="brand" href="../" aria-label="Sigil home">
+      <a class="brand" href="./" aria-label="Sigil 首页">
         <img class="brand-mark" src="../assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
         <span class="brand-wordmark" aria-hidden="true"></span>
       </a>
       <div class="header-actions">
-        <nav aria-label="Primary navigation">
-          <a href="#quickstart">安装</a>
-          <a href="#workflow">工作流</a>
-          <a href="#safety">安全</a>
-          <a href="docs/visual-tour/">视觉导览</a>
-          <a href="docs/">文档</a>
-          <a href="docs/status/">支持状态</a>
-          <a href="../">English</a>
-          <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-        </nav>
+        <details class="nav-menu" open>
+          <summary aria-controls="zh-home-primary-navigation">菜单</summary>
+          <nav id="zh-home-primary-navigation" aria-label="主要导航">
+            <a href="#quickstart">安装</a>
+            <a href="#workflow">工作流</a>
+            <a href="#safety">安全</a>
+            <a href="docs/visual-tour/">视觉导览</a>
+            <a href="docs/">文档</a>
+            <a href="docs/status/">支持状态</a>
+            <a href="../">English</a>
+            <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+          </nav>
+        </details>
         <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换到深色主题" aria-pressed="false" title="切换到深色主题">☾</button>
       </div>
     </header>
 
-    <main>
+    <main id="main-content">
       <section class="hero">
         <img
           class="hero-logo hero-logo-on-light"
           src="../assets/logo/sigil-full-staff-glow.svg"
-          srcset="../assets/logo/sigil-full-staff-glow.svg 1x, ../assets/logo/sigil-full-staff-glow-2x.png 2x"
           alt="Sigil"
         >
         <img
@@ -81,21 +85,21 @@
         >
         <div class="hero-copy">
           <p class="eyebrow">TUI-first Rust coding agent</p>
-          <h1>把真实仓库开发收进一个终端界面。</h1>
+          <h1>在一个终端里完成仓库工作。</h1>
           <p class="lede">
             Sigil 把对话、durable task、child agent、审批、diff、诊断、verification 和 session 恢复放进面向 coding session 的终端产品里。
           </p>
-          <div class="alpha-status" aria-label="Release status">
+          <div class="alpha-status" aria-label="发布状态">
             <strong>v0.0.1-alpha.1 preview</strong>
             <span>核心 TUI 工作流今天已经可用。配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。</span>
           </div>
-          <div class="hero-actions" aria-label="Primary actions">
+          <div class="hero-actions" aria-label="主要操作">
             <a class="button primary" href="#quickstart">安装</a>
             <a class="button secondary" href="docs/visual-tour/">视觉导览</a>
             <a class="button secondary" href="docs/status/">支持状态</a>
           </div>
         </div>
-        <div class="terminal-preview" aria-label="Sigil terminal workflow preview">
+        <div class="terminal-preview" aria-label="Sigil 终端工作流预览">
           <div class="terminal-bar">
             <span></span><span></span><span></span>
             <strong>sigil</strong>
@@ -114,7 +118,7 @@ status   alpha release published</code></pre>
           <p class="eyebrow">快速开始</p>
           <h2>安装 preview release，并在工作区里启动。</h2>
         </div>
-        <div class="install-options" aria-label="Install options">
+        <div class="install-options" aria-label="安装方式">
           <article class="install-card install-card-primary">
             <span class="resource-kicker">推荐</span>
             <h3>npm alpha</h3>
@@ -153,15 +157,15 @@ sigil</code></pre>
         </div>
         <div class="visual-grid">
           <a class="visual-card visual-card-large" href="docs/visual-tour/">
-            <img src="../assets/screenshots/tui-session.svg" alt="Sigil 主 TUI 会话截图">
+            <img src="../assets/screenshots/tui-session.svg" alt="Sigil 主 TUI 会话截图" loading="lazy" decoding="async">
             <span>主 TUI 会话</span>
           </a>
           <a class="visual-card" href="docs/visual-tour/">
-            <img src="../assets/screenshots/approval-review.svg" alt="Sigil 审批检查截图">
+            <img src="../assets/screenshots/approval-review.svg" alt="Sigil 审批检查截图" loading="lazy" decoding="async">
             <span>审批检查</span>
           </a>
           <a class="visual-card" href="docs/visual-tour/">
-            <img src="../assets/screenshots/config-panel.svg" alt="Sigil 配置面板截图">
+            <img src="../assets/screenshots/config-panel.svg" alt="Sigil 配置面板截图" loading="lazy" decoding="async">
             <span>配置面板</span>
           </a>
         </div>

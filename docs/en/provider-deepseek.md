@@ -60,6 +60,19 @@ Prefer `SIGIL_API_KEY` for local shells and CI. If you save `api_key` through `/
 
 The TUI `/config` surface focuses on high-frequency fields such as `model`, `api_key`, `base_url`, and `fim_model`. Lower-frequency DeepSeek fields remain file or environment configuration.
 
+## Environment Overrides
+
+| Variable | Overrides |
+| --- | --- |
+| `SIGIL_BASE_URL` | `[providers.deepseek].base_url` |
+| `SIGIL_BETA_BASE_URL` | `[providers.deepseek].beta_base_url` |
+| `SIGIL_ANTHROPIC_BASE_URL` | `[providers.deepseek].anthropic_base_url` |
+| `SIGIL_FIM_MODEL` | `[providers.deepseek].fim_model` |
+| `SIGIL_USER_ID_STRATEGY` | `[providers.deepseek].user_id_strategy` |
+| `SIGIL_STRICT_TOOLS_MODE` | `[providers.deepseek].strict_tools_mode` |
+
+The authentication variable `SIGIL_API_KEY` is documented in [Authentication](#authentication) above.
+
 ## Verify
 
 Run:

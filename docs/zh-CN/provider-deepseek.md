@@ -60,6 +60,19 @@ Sigil 按这个顺序解析 DeepSeek 认证：
 
 TUI `/config` 只暴露高频字段，例如 `model`、`api_key`、`base_url` 和 `fim_model`。低频 DeepSeek 字段保留给配置文件或环境变量。
 
+## 环境变量覆盖
+
+| 变量 | 覆盖配置 |
+| --- | --- |
+| `SIGIL_BASE_URL` | `[providers.deepseek].base_url` |
+| `SIGIL_BETA_BASE_URL` | `[providers.deepseek].beta_base_url` |
+| `SIGIL_ANTHROPIC_BASE_URL` | `[providers.deepseek].anthropic_base_url` |
+| `SIGIL_FIM_MODEL` | `[providers.deepseek].fim_model` |
+| `SIGIL_USER_ID_STRATEGY` | `[providers.deepseek].user_id_strategy` |
+| `SIGIL_STRICT_TOOLS_MODE` | `[providers.deepseek].strict_tools_mode` |
+
+认证环境变量 `SIGIL_API_KEY` 见上方的[认证](#认证)章节。
+
 ## 验证
 
 运行：

@@ -2,33 +2,27 @@
 
 [Docs home](README.md) · [简体中文](../zh-CN/quickstart.md)
 
-This guide gets you from a first-release install to a useful Sigil session in a real repository. `v0.0.1-alpha.1` is an early preview.
+This guide uses the recommended npm alpha path to get you into a useful Sigil session in a real repository. For every other install channel and all update or uninstall instructions, use [Installation](installation.md).
 
 ## Before You Begin
 
 You need:
 
 - A modern terminal emulator.
-- One installer: npm, Homebrew, or a Rust toolchain with `cargo`.
+- Node.js and npm for the recommended install path.
 - A model provider credential.
 
 For the smoothest first run, start in a repository where you can inspect `git diff` before and after the session.
 
 ## 1. Install Sigil
 
-Use one of the first-release install paths:
+Install the current alpha from the scoped npm package:
 
 ```bash
 npm install -g @sigil-ai/sigil@alpha
 ```
 
-```bash
-brew install JimmyDaddy/sigil/sigil-ai
-```
-
-```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil
-```
+Homebrew, Cargo, source builds, release archives, updates, and uninstall commands are documented only in [Installation](installation.md), so those instructions stay current in one place.
 
 Confirm the binary is on `PATH`:
 
@@ -136,6 +130,8 @@ Run project-specific tests or formatters as appropriate. Sigil can run commands 
 ## Next
 
 - Learn daily controls in [Sigil TUI User Guide](user-guide.md).
+- Choose another install channel or manage an existing install in [Installation](installation.md).
 - Browse practical task patterns in [Common Workflows](workflows.md).
-- Tune provider and permission behavior in [Sigil Configuration Guide](configuration.md).
+- Choose a model backend and authentication method in [Sigil Provider Guide](providers.md).
+- Tune shared workspace, permission, and tool behavior in [Sigil Configuration Guide](configuration.md).
 - Fix common setup issues in [Troubleshooting](troubleshooting.md).

@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [Provider 指南](providers.md) · [排障](troubleshooting.md) · [参考](reference.md) · [English](../en/configuration.md)
 
-本文说明 Sigil 的用户配置方式。大多数用户应该先使用 TUI 中的 Quick Setup；当你需要可重复配置文件、环境变量配置、自动化行为或高级工具策略时，再读这一页。
+本文负责 Sigil 的共享配置：配置解析、workspace、权限、任务、工具、外观、终端行为、插件和 MCP。Provider 选择、provider 配置区块和认证环境变量统一由 [Provider 指南](providers.md)及其链接的 provider 专页维护。
 
 ## 常见用户路径
 
@@ -10,8 +10,8 @@
 | --- | --- |
 | 第一次本地 setup | 运行 `sigil` 并完成 Quick Setup |
 | 临时本地认证 | 先选 provider，再使用对应的[环境变量](providers.md#认证优先级) |
-| CI 或脚本认证 | 使用环境变量，不把 key 写进 plaintext config |
-| 从 TUI 切换 model/provider | 使用 `/config` |
+| CI 或脚本认证 | 进入所选的 [provider 页面](providers.md)，使用其中的环境变量 |
+| 从 TUI 切换 model/provider | 先读 [provider 选择方式](providers.md#provider-选择方式)，再使用 `/config` |
 | 一份配置跟随启动目录 | 使用 `workspace.root = "."` |
 | 调试 config/auth/provider 状态 | 运行 `sigil doctor` 或 `/doctor` |
 
@@ -58,17 +58,15 @@ sigil --config ./sigil.toml doctor
 
 报告会检查配置加载、workspace 解析、session log 位置、provider 设置、API key 来源、MCP command 与 trust 设置、code intelligence language server 可用性，以及当前 `TERM`。它只展示 API key 的来源，不会打印密钥值。warning 和 error 会附带 `fix:` 修复建议；如果 key 只来自明文配置，doctor 会给出 warning，提示你改用环境变量或确认本地配置不会被提交。
 
-## 最小配置示例
+## 共享配置片段
 
-如果需要手写配置，可以从这个结构开始：
+如果需要手写配置，可以从这段 provider-neutral 配置开始：
 
 ```toml
 [workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [terminal]
@@ -81,34 +79,16 @@ scroll_sensitivity = 3
 theme = "sigil_dark"
 syntax_theme = "auto"
 usage_cost_currency = "auto"
-
-[providers.deepseek]
-fim_model = "deepseek-v4-pro"
-# 推荐优先使用 SIGIL_API_KEY；如果写在这里，会以 plaintext 保存。
-# api_key = "sk-..."
 ```
 
-`SIGIL_API_KEY` 优先级高于配置文件里的 `api_key`。`doctor` 会对仅来自明文配置的认证给 warning，但不会阻止运行。
+请把这些共享设置与 [Provider 指南](providers.md)中的 provider 选择和认证设置组合使用。各 provider 专页提供可复制的 provider block 和环境变量命令。
 
 可复制模板位于 [docs/examples/config](../examples/config)：
 
-- [deepseek-basic.toml](../examples/config/deepseek-basic.toml)
-- [openai-compatible.toml](../examples/config/openai-compatible.toml)
-- [anthropic.toml](../examples/config/anthropic.toml)
-- [gemini.toml](../examples/config/gemini.toml)
 - [mcp-safe-defaults.toml](../examples/config/mcp-safe-defaults.toml)
 - [code-intelligence-rust.toml](../examples/config/code-intelligence-rust.toml)
 
-Provider 细节已经拆到独立页面：
-
-| Provider | 适合场景 | 详情 |
-| --- | --- | --- |
-| DeepSeek | 使用默认 Quick Setup 路径、DeepSeek chat 和 FIM 相关设置。 | [DeepSeek provider](provider-deepseek.md) |
-| OpenAI-compatible | 使用 Chat Completions-compatible `/v1` endpoint，例如 OpenAI 或兼容网关。 | [OpenAI-compatible provider](provider-openai-compatible.md) |
-| Anthropic | 使用 Anthropic Messages streaming 和 Claude model 设置。 | [Anthropic provider](provider-anthropic.md) |
-| Gemini | 使用 Gemini `streamGenerateContent` 和 function calling 支持。 | [Gemini provider](provider-gemini.md) |
-
-对比和可复制 provider block 见 [Provider 指南](providers.md)。
+Provider 专项模板统一从 [Provider 指南](providers.md)进入，和对应的选择、认证规则放在一起维护。
 
 ## Workspace
 
@@ -325,17 +305,7 @@ allow_all = false
 
 ## Providers
 
-`[agent].provider` 选择 runtime provider，`[agent].model` 选择聊天模型。对应的 `[providers.*]` 区块控制 endpoint、认证和 provider 专项选项。
-只支持下表中的 provider 值；其他值会在配置校验时报错。
-
-| Provider value | Config block | 主要 API key 环境变量 | 指南 |
-| --- | --- | --- | --- |
-| `deepseek` | `[providers.deepseek]` | `SIGIL_API_KEY` | [DeepSeek provider](provider-deepseek.md) |
-| `openai_compat` | `[providers.openai_compat]` | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | [OpenAI-compatible provider](provider-openai-compatible.md) |
-| `anthropic` | `[providers.anthropic]` | `SIGIL_ANTHROPIC_API_KEY` | [Anthropic provider](provider-anthropic.md) |
-| `gemini` | `[providers.gemini]` | `SIGIL_GEMINI_API_KEY` | [Gemini provider](provider-gemini.md) |
-
-Provider 专项行为保留在 provider 配置和 provider crate 内。共享的 `sigil-kernel` 契约保持 provider-neutral：messages、tools、usage、approvals 和 session state 不应包含 provider-only 术语。
+请通过 [Provider 指南](providers.md)选择 provider，设置 `[agent].provider` 与 `[agent].model`，配置对应的 `[providers.*]` block，并选择正确的认证环境变量。本页只说明所有 provider 共享的配置。
 
 ## Permission
 
@@ -507,53 +477,13 @@ TUI `/config` 面板有只读 `Terminal` 区块用于查看这些控制项。兼
 
 `doctor` 会报告配置开关、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。跨 iTerm2、Terminal.app、WezTerm、kitty、tmux 和 SSH 的可重复人工 checklist 见 [Terminal 兼容性检查清单](terminal-compatibility.md)。
 
-## Provider 环境变量 Override
-
-当前支持：
-
-Model request：
+## 模型请求环境变量覆盖
 
 - `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
 - `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
 
-这些变量覆盖所有 provider 共用的 `[model_request]`。当某个 shell 或 CI job
-需要不同的模型请求传输超时时，可以用环境变量覆盖，而不必修改 `sigil.toml`。
-
-DeepSeek：
-
-- `SIGIL_API_KEY`
-- `SIGIL_BASE_URL`
-- `SIGIL_BETA_BASE_URL`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_FIM_MODEL`
-- `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_STRICT_TOOLS_MODE`
-
-`SIGIL_API_KEY` 优先级最高。如果只配置了 `[providers.deepseek].api_key`，Sigil 会把它视为明文配置认证，`doctor` 会输出 warning 和修复建议。
-
-OpenAI-compatible：
-
-- `SIGIL_OPENAI_COMPATIBLE_API_KEY`
-- `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-
-OpenAI-compatible provider 认证使用 `SIGIL_OPENAI_COMPATIBLE_API_KEY`。通用 OpenAI 环境变量会被忽略，避免 Sigil 凭据和其他工具共享状态。
-
-Anthropic：
-
-- `SIGIL_ANTHROPIC_API_KEY`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_ANTHROPIC_VERSION`
-- `SIGIL_ANTHROPIC_MAX_TOKENS`
-
-Anthropic 认证使用 `SIGIL_ANTHROPIC_API_KEY`。通用 Anthropic 环境变量会被忽略。
-
-Gemini：
-
-- `SIGIL_GEMINI_API_KEY`
-- `SIGIL_GEMINI_BASE_URL`
-
-Gemini 认证使用 `SIGIL_GEMINI_API_KEY`。通用 Google/Gemini 环境变量会被忽略。
+这些变量覆盖所有 provider 共用的 `[model_request]`。当某个 shell 或 CI job 需要不同的模型请求传输超时时，可以用环境变量覆盖，而不必修改 `sigil.toml`。Provider 专项 endpoint 和认证环境变量只在 [Provider 指南](providers.md)及其链接的 provider 专页中维护。
 
 ## Plugins
 

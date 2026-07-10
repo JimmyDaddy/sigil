@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [简体中文](../zh-CN/reference.md)
 
-This page collects the user-facing commands, keys, paths, and environment variables that are spread across the longer guides.
+This page collects user-facing commands, keys, paths, shared config sections, approval outcomes, and recovery facts. Provider selection and credentials stay in the provider documentation so this reference does not duplicate them.
 
 ## TUI Keys
 
@@ -100,51 +100,16 @@ Default user config path:
 
 Do not commit real secrets in `sigil.toml` or local memory files. A workspace-root `sigil.toml` is not loaded by default; pass `--config <path>` explicitly if you need one for an experiment.
 
-## Provider Environment Variables
+## Provider Setup
 
-Model request:
-
-- `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
-- `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
-- `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
-
-DeepSeek:
-
-- `SIGIL_API_KEY`
-- `SIGIL_BASE_URL`
-- `SIGIL_BETA_BASE_URL`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_FIM_MODEL`
-- `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_STRICT_TOOLS_MODE`
-
-OpenAI-compatible:
-
-- `SIGIL_OPENAI_COMPATIBLE_API_KEY`
-- `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-
-Anthropic:
-
-- `SIGIL_ANTHROPIC_API_KEY`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_ANTHROPIC_VERSION`
-- `SIGIL_ANTHROPIC_MAX_TOKENS`
-
-Gemini:
-
-- `SIGIL_GEMINI_API_KEY`
-- `SIGIL_GEMINI_BASE_URL`
+Use the [Provider guide](providers.md) for the supported provider values, model selection, and authentication priority. Each linked provider page owns its copyable config block and complete environment-variable list. Shared model-request timeout overrides remain in [Configuration](configuration.md#model-request-environment-overrides).
 
 ## Common Config Sections
 
 | Section | Purpose |
 | --- | --- |
 | `[workspace]` | Workspace root |
-| `[agent]` | Provider, model, tool timeout, optional max turns |
-| `[providers.deepseek]` | DeepSeek provider settings |
-| `[providers.openai_compat]` | OpenAI-compatible provider settings |
-| `[providers.anthropic]` | Anthropic provider settings |
-| `[providers.gemini]` | Gemini provider settings |
+| `[agent]` | Shared agent runtime settings |
 | `[permission]` | Default approval policy |
 | `[memory]` | Workspace memory loading |
 | `[compaction]` | Context compaction thresholds |
@@ -156,6 +121,7 @@ Gemini:
 | `[[mcp_servers]]` | stdio MCP server configuration |
 
 See [Sigil Configuration Guide](configuration.md) for examples.
+Provider and model selection, `[providers.*]` blocks, and authentication variables are indexed in the [Provider guide](providers.md).
 
 ## Approval Outcomes
 

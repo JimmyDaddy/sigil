@@ -46,29 +46,32 @@
     <script defer src="../assets/search.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
     <header class="site-header">
       <a class="brand" href="../" aria-label="Sigil home">
         <img class="brand-mark" src="../assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
         <span class="brand-wordmark" aria-hidden="true"></span>
       </a>
       <div class="header-actions">
-        <nav aria-label="Primary navigation">
-          <a href="../#workflow">Workflow</a>
-          <a href="../#safety">Safety</a>
-          <a href="./">Docs</a>
-          <a href="../zh-CN/docs/">简体中文</a>
-          <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-        </nav>
+        <details class="nav-menu" open>
+          <summary aria-controls="docs-primary-navigation">Menu</summary>
+          <nav id="docs-primary-navigation" aria-label="Primary navigation">
+            <a href="../#workflow">Workflow</a>
+            <a href="../#safety">Safety</a>
+            <a href="./" aria-current="page">Docs</a>
+            <a href="../zh-CN/docs/">简体中文</a>
+            <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+          </nav>
+        </details>
         <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme" aria-pressed="false" title="Switch to dark theme">☾</button>
       </div>
     </header>
 
-    <main>
+    <main id="main-content">
       <section class="docs-hero">
         <img
           class="docs-logo docs-logo-on-light"
           src="../assets/logo/sigil-full-staff-glow.svg"
-          srcset="../assets/logo/sigil-full-staff-glow.svg 1x, ../assets/logo/sigil-full-staff-glow-2x.png 2x"
           alt="Sigil"
         >
         <img
@@ -79,15 +82,15 @@
         >
         <div class="docs-hero-copy">
           <p class="eyebrow">Documentation</p>
-          <h1>Choose the guide that matches the work.</h1>
+          <h1>Find the guide for the work.</h1>
           <p class="lede">
             Sigil keeps the product entrypoint narrow and splits operational detail into focused guides. Use this page as the stable map for user-facing docs.
           </p>
           <div class="docs-search-panel">
             <form class="site-search" role="search" data-locale="en" data-index="../search.json">
               <label for="docs-search-en">Search docs</label>
-              <input id="docs-search-en" type="search" name="q" autocomplete="off" placeholder="Search providers, config, approvals...">
-              <div class="search-results" aria-live="polite"></div>
+              <input id="docs-search-en" type="search" name="q" autocomplete="off" placeholder="Search providers, config, approvals..." aria-controls="docs-search-results-en" aria-autocomplete="list">
+              <div class="search-results" id="docs-search-results-en" aria-label="Search results" aria-live="polite"></div>
             </form>
           </div>
         </div>
@@ -97,40 +100,6 @@
         <div class="section-heading">
           <p class="eyebrow">User guides</p>
           <h2>Start with a task path, then keep the reference nearby.</h2>
-        </div>
-        <h3 class="resource-group-heading">Recent updates</h3>
-        <div class="resource-list">
-          <a href="changelog/">
-            <span>Latest changelog</span>
-            Browse changelog, docs updates, and preview feature changes in one place.
-          </a>
-          <a href="status/">
-            <span>What works today</span>
-            Check supported capabilities, limits, and current stability before you start.
-          </a>
-          <a href="reference/">
-            <span>Quick reference</span>
-            Get fast lookups for commands, keys, config fields, paths, and approvals.
-          </a>
-        </div>
-        <h3 class="resource-group-heading">By topic</h3>
-        <div class="resource-list">
-          <a href="quickstart/">
-            <span>Quickstart</span>
-            Install and run Sigil the first time in minutes.
-          </a>
-          <a href="workflows/">
-            <span>Workflows</span>
-            Choose prompt patterns for explore, change, review, debug, and resume.
-          </a>
-          <a href="configuration/">
-            <span>Configuration</span>
-            Set up providers, permissions, runtime behavior, and local defaults.
-          </a>
-          <a href="troubleshooting/">
-            <span>Troubleshooting</span>
-            Resolve setup, terminal, approval, MCP, and workspace issues quickly.
-          </a>
         </div>
         <h3 class="resource-group-heading">Start here</h3>
         <div class="resource-grid resource-grid-featured">
@@ -150,13 +119,8 @@
             <p>Screenshot-style walkthrough of the main session, approval review, and config panel surfaces.</p>
           </a>
         </div>
-        <h3 class="resource-group-heading">Operate Sigil</h3>
+        <h3 class="resource-group-heading">Work with Sigil</h3>
         <div class="resource-grid">
-          <a class="resource-card" id="start" href="overview/">
-            <span class="resource-kicker">Map</span>
-            <h3>User docs home</h3>
-            <p>Choose the right guide for first use, daily workflow, configuration, troubleshooting, MCP, or reference lookup.</p>
-          </a>
           <a class="resource-card" id="workflows" href="workflows/">
             <span class="resource-kicker">Examples</span>
             <h3>Common workflows</h3>
@@ -195,6 +159,11 @@
         </div>
         <h3 class="resource-group-heading">Reference and support</h3>
         <div class="resource-grid resource-grid-compact">
+          <a class="resource-card" id="overview" href="overview/">
+            <span class="resource-kicker">Map</span>
+            <h3>Documentation map</h3>
+            <p>Find the shortest path from first use to daily workflows, configuration, troubleshooting, integrations, and reference material.</p>
+          </a>
           <a class="resource-card" id="privacy" href="privacy/">
             <span class="resource-kicker">Data</span>
             <h3>Privacy</h3>
@@ -224,6 +193,11 @@
             <span class="resource-kicker">Release notes</span>
             <h3>User changelog</h3>
             <p>User-facing capability and documentation changes without implementation-only detail.</p>
+          </a>
+          <a class="resource-card" id="report-bug" href="https://github.com/JimmyDaddy/sigil/issues/new/choose">
+            <span class="resource-kicker">Feedback</span>
+            <h3>Report a bug</h3>
+            <p>Open the GitHub issue chooser to report a bug, request a feature, or flag a documentation problem.</p>
           </a>
         </div>
       </section>

@@ -46,29 +46,32 @@
     <script defer src="../../assets/search.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
     <header class="site-header">
-      <a class="brand" href="../" aria-label="Sigil home">
+      <a class="brand" href="../" aria-label="Sigil 首页">
         <img class="brand-mark" src="../../assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
         <span class="brand-wordmark" aria-hidden="true"></span>
       </a>
       <div class="header-actions">
-        <nav aria-label="Primary navigation">
-          <a href="../#workflow">工作流</a>
-          <a href="../#safety">安全</a>
-          <a href="./">文档</a>
-          <a href="../../docs/">English</a>
-          <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-        </nav>
+        <details class="nav-menu" open>
+          <summary aria-controls="zh-docs-primary-navigation">菜单</summary>
+          <nav id="zh-docs-primary-navigation" aria-label="主要导航">
+            <a href="../#workflow">工作流</a>
+            <a href="../#safety">安全</a>
+            <a href="./" aria-current="page">文档</a>
+            <a href="../../docs/">English</a>
+            <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+          </nav>
+        </details>
         <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换到深色主题" aria-pressed="false" title="切换到深色主题">☾</button>
       </div>
     </header>
 
-    <main>
+    <main id="main-content">
       <section class="docs-hero">
         <img
           class="docs-logo docs-logo-on-light"
           src="../../assets/logo/sigil-full-staff-glow.svg"
-          srcset="../../assets/logo/sigil-full-staff-glow.svg 1x, ../../assets/logo/sigil-full-staff-glow-2x.png 2x"
           alt="Sigil"
         >
         <img
@@ -79,15 +82,15 @@
         >
         <div class="docs-hero-copy">
           <p class="eyebrow">文档</p>
-          <h1>按当前任务选择对应指南。</h1>
+          <h1>按任务找到对应指南。</h1>
           <p class="lede">
             Sigil 保持 README 作为简洁入口，把操作细节拆到聚焦文档里。本页是用户文档的稳定入口。
           </p>
           <div class="docs-search-panel">
             <form class="site-search" role="search" data-locale="zh-CN" data-index="../../search.json">
               <label for="docs-search-zh-cn">搜索文档</label>
-              <input id="docs-search-zh-cn" type="search" name="q" autocomplete="off" placeholder="搜索 provider、配置、审批...">
-              <div class="search-results" aria-live="polite"></div>
+              <input id="docs-search-zh-cn" type="search" name="q" autocomplete="off" placeholder="搜索 provider、配置、审批..." aria-controls="docs-search-results-zh-cn" aria-autocomplete="list">
+              <div class="search-results" id="docs-search-results-zh-cn" aria-label="搜索结果" aria-live="polite"></div>
             </form>
           </div>
         </div>
@@ -97,40 +100,6 @@
         <div class="section-heading">
           <p class="eyebrow">用户文档</p>
           <h2>先按任务选择路径，再用参考文档查细节。</h2>
-        </div>
-        <h3 class="resource-group-heading">最近更新</h3>
-        <div class="resource-list">
-          <a href="changelog/">
-            <span>更新日志</span>
-            查看最新功能变更、问题修复和文档更新记录。
-          </a>
-          <a href="status/">
-            <span>当前支持</span>
-            上手前先确认可用能力、限制项和稳定性说明。
-          </a>
-          <a href="reference/">
-            <span>速查索引</span>
-            命令、按键、配置字段、路径与审批信息一键查阅。
-          </a>
-        </div>
-        <h3 class="resource-group-heading">按主题</h3>
-        <div class="resource-list">
-          <a href="quickstart/">
-            <span>快速上手</span>
-            首次安装并完成初始化，快速跑通首个安全编辑流程。
-          </a>
-          <a href="workflows/">
-            <span>工作流</span>
-            探索、修改、review、debug、恢复常见任务的提示词模板。
-          </a>
-          <a href="configuration/">
-            <span>配置</span>
-            配置 provider、权限、运行时行为和本地默认行为。
-          </a>
-          <a href="troubleshooting/">
-            <span>排障</span>
-            处理安装、终端、approval、MCP、workspace 常见问题。
-          </a>
         </div>
         <h3 class="resource-group-heading">从这里开始</h3>
         <div class="resource-grid resource-grid-featured">
@@ -152,11 +121,6 @@
         </div>
         <h3 class="resource-group-heading">使用 Sigil</h3>
         <div class="resource-grid">
-          <a class="resource-card" id="start" href="overview/">
-            <span class="resource-kicker">地图</span>
-            <h3>用户文档首页</h3>
-            <p>按首次使用、日常工作流、配置、排障、MCP 或参考查找对应指南。</p>
-          </a>
           <a class="resource-card" id="workflows" href="workflows/">
             <span class="resource-kicker">例子</span>
             <h3>常见工作流</h3>
@@ -195,6 +159,11 @@
         </div>
         <h3 class="resource-group-heading">参考与支持</h3>
         <div class="resource-grid resource-grid-compact">
+          <a class="resource-card" id="overview" href="overview/">
+            <span class="resource-kicker">地图</span>
+            <h3>文档路径地图</h3>
+            <p>按首次使用、日常工作流、配置、排障、集成和参考资料找到最短阅读路径。</p>
+          </a>
           <a class="resource-card" id="privacy" href="privacy/">
             <span class="resource-kicker">数据</span>
             <h3>隐私与数据</h3>
@@ -224,6 +193,11 @@
             <span class="resource-kicker">版本说明</span>
             <h3>用户 Changelog</h3>
             <p>面向用户的能力和文档变化，不混入只对实现有意义的细节。</p>
+          </a>
+          <a class="resource-card" id="report-bug" href="https://github.com/JimmyDaddy/sigil/issues/new/choose">
+            <span class="resource-kicker">反馈</span>
+            <h3>提交问题</h3>
+            <p>通过 GitHub issue chooser 提交 bug、功能建议或文档问题。</p>
           </a>
         </div>
       </section>

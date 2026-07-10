@@ -2,17 +2,14 @@
 
 [Docs home](README.md) · [Installation](installation.md) · [Changelog](changelog.md) · [简体中文](../zh-CN/status.md)
 
-This page separates what users can rely on today from what is experimental, limited, or future packaging work. `v0.0.1-alpha.1` is an early preview, not a stable API or plugin compatibility promise.
+This page separates what users can rely on today from what is experimental, limited, or future packaging work. The current alpha line is an early preview, not a stable API or plugin compatibility promise. Release versions and install commands are maintained in [Installation](installation.md) and the [Changelog](changelog.md).
 
 ## Supported Today
 
 | Area | Status |
 | --- | --- |
 | TUI entrypoint | `sigil` opens the TUI and is the primary product surface. |
-| npm install | `npm install -g @sigil-ai/sigil@alpha` is the scoped first-release npm package path. |
-| Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` installs the tap formula while keeping the binary name `sigil`. |
-| Cargo git install | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil` installs from the release tag. |
-| Source install | `cargo install --path crates/sigil --locked` remains supported for local checkout development. |
+| Distribution | npm alpha, Homebrew tap, Cargo git-tag, source, and release-archive paths are available; use [Installation](installation.md) for current commands and channel details. |
 | Quick Setup | First-run setup can create a usable local config. |
 | Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |
 | Chat workflow | Users can work through the composer with visible tool activity. |
@@ -32,7 +29,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Area | Current expectation |
 | --- | --- |
 | Release archives | Available on tagged GitHub releases for manual installs; package-manager installs are preferred. |
-| Homebrew tap | The `sigil-ai` formula is published in the `JimmyDaddy/homebrew-sigil` tap. |
+| Package-manager channels | Packaging names and availability may evolve during alpha; use [Installation](installation.md) as the current source of truth. |
 | OpenAI-compatible differences | The provider intentionally omits DeepSeek-only prefix/FIM/beta behaviors. |
 | Provider-specific semantics | Anthropic and Gemini request/event details stay in provider crates; `sigil-kernel` only exposes provider-neutral capabilities and chunks. |
 | Code intelligence | Depends on installed language servers and local environment; normal chat does not require it. |

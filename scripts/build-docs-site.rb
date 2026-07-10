@@ -77,7 +77,16 @@ LOCALES = {
     language_label: "简体中文",
     previous_label: "Previous",
     next_label: "Next",
+    skip_label: "Skip to content",
+    menu_label: "Menu",
+    primary_nav_label: "Primary navigation",
+    docs_nav_label: "Documentation navigation",
+    docs_menu_label: "Docs menu",
+    toc_label: "On this page",
+    previous_next_label: "Previous and next pages",
+    home_aria_label: "Sigil home",
     search_label: "Search docs",
+    search_results_label: "Search results",
     search_placeholder: "Search providers, config, approvals..."
   },
   "zh-CN" => {
@@ -92,7 +101,16 @@ LOCALES = {
     language_label: "English",
     previous_label: "上一篇",
     next_label: "下一篇",
+    skip_label: "跳到正文",
+    menu_label: "菜单",
+    primary_nav_label: "主导航",
+    docs_nav_label: "文档导航",
+    docs_menu_label: "文档目录",
+    toc_label: "本页内容",
+    previous_next_label: "上一篇和下一篇",
+    home_aria_label: "Sigil 首页",
     search_label: "搜索文档",
+    search_results_label: "搜索结果",
     search_placeholder: "搜索 provider、配置、审批..."
   }
 }.freeze
@@ -133,11 +151,12 @@ end
 def search_form_html(locale, asset_prefix, id_suffix)
   locale_config = LOCALES.fetch(locale)
   input_id = "doc-search-#{locale.gsub(/[^a-zA-Z0-9]/, "-")}-#{id_suffix.gsub(/[^a-zA-Z0-9]/, "-")}"
+  results_id = "#{input_id}-results"
   <<~HTML
     <form class="site-search" role="search" data-locale="#{html_escape(locale)}" data-index="#{asset_prefix}/search.json">
       <label for="#{input_id}">#{html_escape(locale_config.fetch(:search_label))}</label>
-      <input id="#{input_id}" type="search" name="q" autocomplete="off" placeholder="#{html_escape(locale_config.fetch(:search_placeholder))}">
-      <div class="search-results" aria-live="polite"></div>
+      <input id="#{input_id}" type="search" name="q" autocomplete="off" aria-controls="#{results_id}" aria-autocomplete="list" placeholder="#{html_escape(locale_config.fetch(:search_placeholder))}">
+      <div class="search-results" id="#{results_id}" aria-label="#{html_escape(locale_config.fetch(:search_results_label))}" aria-live="polite"></div>
     </form>
   HTML
 end
@@ -162,9 +181,10 @@ def theme_toggle_html(locale)
   %(<button class="theme-toggle" type="button" data-theme-toggle aria-label="#{html_escape(label)}" aria-pressed="false" title="#{html_escape(label)}">☾</button>)
 end
 
-def brand_html(asset_prefix, home_href)
+def brand_html(asset_prefix, home_href, locale = "en")
+  label = LOCALES.fetch(locale).fetch(:home_aria_label)
   <<~HTML
-    <a class="brand" href="#{home_href}" aria-label="Sigil home">
+    <a class="brand" href="#{home_href}" aria-label="#{html_escape(label)}">
       <img class="brand-mark" src="#{asset_prefix}/assets/logo/sigil-mark-staff-glow.svg" alt="" width="34" height="40">
       <span class="brand-wordmark" aria-hidden="true"></span>
     </a>
@@ -188,6 +208,12 @@ def slugify(text)
   slug.empty? ? "section" : slug
 end
 
+def unique_heading_id(text, counts)
+  base = slugify(text)
+  counts[base] += 1
+  counts[base] == 1 ? base : "#{base}-#{counts[base]}"
+end
+
 def inline_markdown(text, locale)
   escaped = html_escape(text)
   escaped = escaped.gsub(/`([^`]+)`/) { "<code>#{Regexp.last_match(1)}</code>" }
@@ -195,13 +221,14 @@ def inline_markdown(text, locale)
   escaped = escaped.gsub(/!\[([^\]]*)\]\(([^)]+)\)/) do
     alt = Regexp.last_match(1)
     href = Regexp.last_match(2)
-    %(<img src="#{html_escape(rewrite_href(href, locale))}" alt="#{alt}">)
+    %(<img src="#{rewrite_href(href, locale)}" alt="#{alt}" loading="lazy" decoding="async">)
   end
   escaped.gsub(/\[([^\]]+)\]\(([^)]+)\)/) do
     label = Regexp.last_match(1)
     href = Regexp.last_match(2)
     pretty_label = normalize_link_label(label, href, locale)
-    %(<a href="#{html_escape(rewrite_href(href, locale))}">#{pretty_label}</a>)
+    safe_label = pretty_label == label ? label : html_escape(pretty_label)
+    %(<a href="#{rewrite_href(href, locale)}">#{safe_label}</a>)
   end
 end
 
@@ -310,7 +337,16 @@ end
 def render_markdown(markdown, locale)
   html = []
   toc = []
-  state = { code: false, ul: false, ol: false, table: false, table_header: false }
+  state = {
+    code: false,
+    code_lang: "",
+    code_lines: [],
+    ul: false,
+    ol: false,
+    table: false,
+    table_header: false,
+    heading_counts: Hash.new(0)
+  }
   paragraph = []
 
   flush_paragraph = lambda do
@@ -325,10 +361,13 @@ def render_markdown(markdown, locale)
 
     if state[:code]
       if line.start_with?("```")
-        html << "</code></pre>"
+        code = html_escape(state[:code_lines].join("\n"))
+        html << %(<pre><code class="language-#{html_escape(state[:code_lang])}">#{code}</code></pre>)
         state[:code] = false
+        state[:code_lang] = ""
+        state[:code_lines].clear
       else
-        html << html_escape(line)
+        state[:code_lines] << line
       end
       next
     end
@@ -338,8 +377,9 @@ def render_markdown(markdown, locale)
       close_lists(html, state)
       close_table(html, state)
       lang = line.sub("```", "").strip
-      html << %(<pre><code class="language-#{html_escape(lang)}">)
       state[:code] = true
+      state[:code_lang] = lang
+      state[:code_lines].clear
       next
     end
 
@@ -356,7 +396,7 @@ def render_markdown(markdown, locale)
       close_table(html, state)
       level = [match[1].length, 6].min
       text = match[2]
-      id = slugify(text)
+      id = unique_heading_id(text, state[:heading_counts])
       toc << [level, id, text] if level <= 3
       html << %(<h#{level} id="#{id}">#{inline_markdown(text, locale)}</h#{level}>)
       next
@@ -409,7 +449,10 @@ def render_markdown(markdown, locale)
   flush_paragraph.call
   close_lists(html, state)
   close_table(html, state)
-  html << "</code></pre>" if state[:code]
+  if state[:code]
+    code = html_escape(state[:code_lines].join("\n"))
+    html << %(<pre><code class="language-#{html_escape(state[:code_lang])}">#{code}</code></pre>)
+  end
   [html.join("\n"), toc]
 end
 
@@ -417,8 +460,9 @@ def nav_html(locale, active_slug)
   PAGES.map do |slug, _file, title|
     href = slug == active_slug ? "./" : "../#{slug}/"
     klass = slug == active_slug ? " class=\"active\"" : ""
+    current = slug == active_slug ? ' aria-current="page"' : ""
     label = locale == "zh-CN" ? ZH_PAGE_TITLES.fetch(slug, title) : title
-    %(<a#{klass} href="#{href}">#{html_escape(label)}</a>)
+    %(<a#{klass}#{current} href="#{href}">#{html_escape(label)}</a>)
   end.join("\n")
 end
 
@@ -450,6 +494,18 @@ def plain_text_from_markdown(markdown)
     .strip
 end
 
+def truncate_text(text, limit = 180)
+  normalized = text.to_s.gsub(/\s+/, " ").strip
+  return normalized if normalized.length <= limit
+
+  truncated = normalized[0, limit].rstrip
+  if truncated.include?(" ")
+    word_boundary = truncated.rindex(" ")
+    truncated = truncated[0, word_boundary] if word_boundary && word_boundary >= limit / 2
+  end
+  "#{truncated}…"
+end
+
 def page_description(markdown, fallback_title)
   markdown.lines.each do |line|
     stripped = line.strip
@@ -457,9 +513,52 @@ def page_description(markdown, fallback_title)
     next if stripped.start_with?("#", "[", "```", "|")
     next if stripped.match?(/\A[-*]\s+/)
 
-    return plain_text_from_markdown(stripped)[0, 180]
+    return truncate_text(plain_text_from_markdown(stripped))
   end
   fallback_title
+end
+
+def section_search_items(markdown, locale, page_title, base_url)
+  counts = Hash.new(0)
+  sections = []
+  current = nil
+  in_code = false
+
+  markdown.each_line do |raw_line|
+    line = raw_line.chomp
+    if line.start_with?("```")
+      in_code = !in_code
+      next
+    end
+    next if in_code
+
+    if (match = line.match(/^(#+)\s+(.+)$/))
+      sections << current if current
+      level = [match[1].length, 6].min
+      title = plain_text_from_markdown(match[2])
+      id = unique_heading_id(match[2], counts)
+      current = if (2..3).cover?(level)
+                  { title: title, id: id, lines: [] }
+                end
+      next
+    end
+
+    current[:lines] << line if current
+  end
+  sections << current if current
+
+  sections.compact.map do |section|
+    text = plain_text_from_markdown(section.fetch(:lines).join("\n"))
+    {
+      "kind" => "section",
+      "locale" => locale,
+      "title" => page_title,
+      "section" => section.fetch(:title),
+      "description" => truncate_text(text.empty? ? section.fetch(:title) : text),
+      "url" => "#{base_url}##{section.fetch(:id)}",
+      "text" => "#{section.fetch(:title)} #{text}".strip
+    }
+  end
 end
 
 def rendered_page(locale, slug, source_file, fallback_title)
@@ -471,12 +570,12 @@ def rendered_page(locale, slug, source_file, fallback_title)
   description = page_description(markdown, title)
   asset_prefix = relative_prefix(locale)
   language_href = locale == "en" ? "../../zh-CN/docs/#{slug}/" : "../../../docs/#{slug}/"
-  home_href = locale == "en" ? "../../" : "../../../"
+  home_href = "../../"
   docs_home = locale == "en" ? "../" : "../"
   canonical = "#{SITE_URL}/#{page_url(locale, slug)}"
   alternate_en = "#{SITE_URL}/#{page_url("en", slug)}"
   alternate_zh = "#{SITE_URL}/#{page_url("zh-CN", slug)}"
-  toc_html = toc.select { |level, _id, _text| level <= 3 }.map do |level, id, text|
+  toc_html = toc.select { |level, _id, _text| (2..3).cover?(level) }.map do |level, id, text|
     %(<a class="level-#{level}" href="##{id}">#{html_escape(text.gsub(/[`*_]/, ""))}</a>)
   end.join("\n")
   json_ld = {
@@ -520,38 +619,55 @@ def rendered_page(locale, slug, source_file, fallback_title)
         #{theme_boot_script}
         <link rel="stylesheet" href="#{asset_prefix}/assets/site.css">
         <script defer src="#{asset_prefix}/assets/site.js"></script>
+        <script defer src="#{asset_prefix}/assets/code.js"></script>
         <script defer src="#{asset_prefix}/assets/search.js"></script>
       </head>
       <body class="doc-page">
+        <a class="skip-link" href="#main-content">#{html_escape(locale_config.fetch(:skip_label))}</a>
         <header class="site-header">
-          #{brand_html(asset_prefix, home_href)}
+          #{brand_html(asset_prefix, home_href, locale)}
           <div class="header-actions">
-            <nav aria-label="Primary navigation">
-              <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
-              <a href="#{home_href}#safety">#{html_escape(locale_config.fetch(:safety_label))}</a>
-              <a href="#{docs_home}">#{html_escape(locale_config.fetch(:docs_label))}</a>
-              <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
-              <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">#{html_escape(locale_config.fetch(:github_label))}</a>
-            </nav>
+            <details class="nav-menu" open>
+              <summary>#{html_escape(locale_config.fetch(:menu_label))}</summary>
+              <nav aria-label="#{html_escape(locale_config.fetch(:primary_nav_label))}">
+                <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
+                <a href="#{home_href}#safety">#{html_escape(locale_config.fetch(:safety_label))}</a>
+                <a href="#{docs_home}" aria-current="page">#{html_escape(locale_config.fetch(:docs_label))}</a>
+                <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
+                <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">#{html_escape(locale_config.fetch(:github_label))}</a>
+              </nav>
+            </details>
             #{theme_toggle_html(locale)}
           </div>
         </header>
-        <main class="doc-shell">
-          <aside class="doc-sidebar" aria-label="Documentation navigation">
-            #{search_form_html(locale, asset_prefix, slug)}
-            <a class="doc-home-link" href="#{docs_home}">#{html_escape(locale_config.fetch(:docs_label))}</a>
-            #{nav_html(locale, slug)}
+        <main class="doc-shell" id="main-content">
+          <aside class="doc-sidebar" aria-label="#{html_escape(locale_config.fetch(:docs_nav_label))}">
+            <details class="doc-navigation" open>
+              <summary>#{html_escape(locale_config.fetch(:docs_menu_label))}</summary>
+              <div class="doc-navigation-panel">
+                #{search_form_html(locale, asset_prefix, slug)}
+                <a class="doc-home-link" href="#{docs_home}">#{html_escape(locale_config.fetch(:docs_label))}</a>
+                #{nav_html(locale, slug)}
+              </div>
+            </details>
           </aside>
           <article class="doc-content">
             <div class="doc-meta">
               <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
             </div>
+            <details class="doc-toc-mobile">
+              <summary>#{html_escape(locale_config.fetch(:toc_label))}</summary>
+              <nav aria-label="#{html_escape(locale_config.fetch(:toc_label))}">
+                #{toc_html}
+              </nav>
+            </details>
             #{body}
-            <nav class="doc-page-nav" aria-label="Previous and next pages">
+            <nav class="doc-page-nav" aria-label="#{html_escape(locale_config.fetch(:previous_next_label))}">
               #{sibling_nav(locale, slug)}
             </nav>
           </article>
-          <aside class="doc-toc" aria-label="On this page">
+          <aside class="doc-toc" aria-label="#{html_escape(locale_config.fetch(:toc_label))}">
+            <strong class="doc-toc-title">#{html_escape(locale_config.fetch(:toc_label))}</strong>
             #{toc_html}
           </aside>
         </main>
@@ -568,12 +684,14 @@ def write_search_index
       markdown = File.read(source_path)
       page_title = markdown[/^#\s+(.+)$/, 1] || (locale == "zh-CN" ? ZH_PAGE_TITLES.fetch(slug, title) : title)
       items << {
+        "kind" => "page",
         "locale" => locale,
         "title" => page_title,
         "description" => page_description(markdown, page_title),
         "url" => page_url(locale, slug),
         "text" => plain_text_from_markdown(markdown)
       }
+      items.concat(section_search_items(markdown, locale, page_title, page_url(locale, slug)))
     end
   end
   File.write(File.join(OUT_DIR, "search.json"), JSON.pretty_generate(items))
@@ -637,19 +755,24 @@ def write_examples_index
         #{theme_boot_script}
         <link rel="stylesheet" href="../../assets/site.css">
         <script defer src="../../assets/site.js"></script>
+        <script defer src="../../assets/code.js"></script>
       </head>
       <body class="doc-page">
+        <a class="skip-link" href="#main-content">Skip to content</a>
         <header class="site-header">
-          #{brand_html("../..", "../../")}
+          #{brand_html("../..", "../../", "en")}
           <div class="header-actions">
-            <nav aria-label="Primary navigation">
-              <a href="../../docs/">Docs</a>
-              <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
-            </nav>
+            <details class="nav-menu" open>
+              <summary>Menu</summary>
+              <nav aria-label="Primary navigation">
+                <a href="../../docs/" aria-current="page">Docs</a>
+                <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+              </nav>
+            </details>
             #{theme_toggle_html("en")}
           </div>
         </header>
-        <main class="doc-shell examples-shell">
+        <main class="doc-shell examples-shell" id="main-content">
           <article class="doc-content">
             <h1>Sigil config examples</h1>
             <p>Copy these examples as starting points, then review model names, paths, API key sources, and trust settings before use.</p>

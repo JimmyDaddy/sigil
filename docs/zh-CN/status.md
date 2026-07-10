@@ -2,17 +2,14 @@
 
 [文档首页](README.md) · [安装](installation.md) · [Changelog](changelog.md) · [English](../en/status.md)
 
-这一页把用户今天可以依赖的能力，与 experimental、limited 或 future packaging work 分开说明。`v0.0.1-alpha.1` 是 early preview，不承诺稳定 API 或插件兼容性。
+这一页把用户今天可以依赖的能力，与 experimental、limited 或 future packaging work 分开说明。当前 alpha 仍是 early preview，不承诺稳定 API 或插件兼容性。Release 版本与安装命令统一由[安装](installation.md)和 [Changelog](changelog.md)维护。
 
 ## 当前支持
 
 | 领域 | 状态 |
 | --- | --- |
 | TUI 入口 | `sigil` 打开 TUI，是主要产品表面。 |
-| npm 安装 | `npm install -g @sigil-ai/sigil@alpha` 是首个 release 的 scoped npm package 路径。 |
-| Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` 安装 tap formula，binary 名仍然是 `sigil`。 |
-| Cargo git 安装 | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.1 --locked sigil` 从 release tag 安装。 |
-| 源码安装 | `cargo install --path crates/sigil --locked` 仍支持本地 checkout 开发。 |
+| 分发 | 当前提供 npm alpha、Homebrew tap、Cargo git-tag、源码和 release archive 路径；最新命令和渠道细节见[安装](installation.md)。 |
 | Quick Setup | 首次运行 setup 可以创建可用本地配置。 |
 | Doctor | `sigil doctor` 和 `/doctor` 报告 config、auth、workspace、MCP、code intelligence 和 terminal readiness。 |
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
@@ -32,7 +29,7 @@
 | 领域 | 当前预期 |
 | --- | --- |
 | Release archives | 已在 tagged GitHub releases 提供，用于手动安装；日常优先使用包管理器安装。 |
-| Homebrew tap | `sigil-ai` formula 已发布到 `JimmyDaddy/homebrew-sigil` tap。 |
+| 包管理器渠道 | Alpha 阶段的 package name 和可用性仍可能调整；当前事实以[安装](installation.md)为准。 |
 | OpenAI-compatible 差异 | 该 provider 有意不暴露 DeepSeek-only prefix/FIM/beta 行为。 |
 | Provider-specific 语义 | Anthropic 和 Gemini 的 request/event 细节留在 provider crate；`sigil-kernel` 只暴露 provider-neutral capabilities 和 chunks。 |
 | Code intelligence | 依赖本地 language servers 和环境；普通 chat 不依赖它。 |

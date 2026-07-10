@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Configuration](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [简体中文](../zh-CN/providers.md)
 
-Sigil separates provider choice from the rest of the user workflow. The TUI, approvals, tools, sessions, MCP, and code-intelligence behavior stay the same; provider pages only explain model endpoint, authentication, and provider-specific options.
+Sigil separates provider choice from the rest of the user workflow. This guide and the linked provider pages are the source of truth for provider selection, authentication variables, model endpoints, and provider-specific options. Shared workspace, permission, task, terminal, and tool settings remain in [Configuration](configuration.md).
 
 ## Choose A Provider
 

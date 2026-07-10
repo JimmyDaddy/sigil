@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [English](../en/reference.md)
 
-这一页集中列出较长指南中分散的用户可见命令、键位、路径和环境变量。
+这一页集中列出用户可见命令、键位、路径、共享配置区块、审批结果和恢复事实。Provider 选择与凭据留在 provider 文档中，避免参考页再次复制。
 
 ## TUI 键位
 
@@ -100,51 +100,16 @@ Sigil 按以下顺序解析 config：
 
 不要提交包含真实 secret 的 `sigil.toml` 或本地 memory 文件。workspace 根目录的 `sigil.toml` 默认不会被读取；如需实验配置，请显式传入 `--config <path>`。
 
-## Provider 环境变量
+## Provider 设置
 
-Model request:
-
-- `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
-- `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
-- `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
-
-DeepSeek:
-
-- `SIGIL_API_KEY`
-- `SIGIL_BASE_URL`
-- `SIGIL_BETA_BASE_URL`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_FIM_MODEL`
-- `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_STRICT_TOOLS_MODE`
-
-OpenAI-compatible:
-
-- `SIGIL_OPENAI_COMPATIBLE_API_KEY`
-- `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-
-Anthropic:
-
-- `SIGIL_ANTHROPIC_API_KEY`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_ANTHROPIC_VERSION`
-- `SIGIL_ANTHROPIC_MAX_TOKENS`
-
-Gemini:
-
-- `SIGIL_GEMINI_API_KEY`
-- `SIGIL_GEMINI_BASE_URL`
+支持的 provider value、model 选择和认证优先级见 [Provider 指南](providers.md)。其中链接的各 provider 专页分别维护可复制的配置 block 和完整环境变量清单。共享的模型请求 timeout 覆盖仍由[配置](configuration.md#模型请求环境变量覆盖)维护。
 
 ## 常见 Config Sections
 
 | Section | 作用 |
 | --- | --- |
 | `[workspace]` | Workspace root |
-| `[agent]` | Provider、model、tool timeout、可选 max turns |
-| `[providers.deepseek]` | DeepSeek provider 设置 |
-| `[providers.openai_compat]` | OpenAI-compatible provider 设置 |
-| `[providers.anthropic]` | Anthropic provider 设置 |
-| `[providers.gemini]` | Gemini provider 设置 |
+| `[agent]` | 共享 agent runtime 设置 |
 | `[permission]` | 默认审批策略 |
 | `[memory]` | Workspace memory loading |
 | `[compaction]` | Context compaction 阈值 |
@@ -156,6 +121,7 @@ Gemini:
 | `[[mcp_servers]]` | stdio MCP server 配置 |
 
 示例见 [Sigil 配置指南](configuration.md)。
+Provider 与 model 选择、`[providers.*]` block 和认证环境变量统一由 [Provider 指南](providers.md)索引。
 
 ## Approval Outcomes
 

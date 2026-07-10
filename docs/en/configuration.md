@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [Providers](providers.md) · [Troubleshooting](troubleshooting.md) · [Reference](reference.md) · [简体中文](../zh-CN/configuration.md)
 
-This guide covers user-facing Sigil configuration. Most users should start with Quick Setup in the TUI; use this page when you need a repeatable config file, environment-variable setup, automation behavior, or advanced tool policy.
+This guide owns shared Sigil configuration: config resolution, workspace, permissions, tasks, tools, appearance, terminal behavior, plugins, and MCP. Provider selection, provider blocks, and authentication variables belong to the [Provider guide](providers.md) and its linked provider pages.
 
 ## Common User Paths
 
@@ -10,8 +10,8 @@ This guide covers user-facing Sigil configuration. Most users should start with 
 | --- | --- |
 | First local setup | Run `sigil` and complete Quick Setup |
 | Temporary local auth | Choose a provider, then use its [environment key](providers.md#authentication-priority) |
-| CI or script auth | Use environment variables, not plaintext config |
-| Change model/provider from the TUI | Use `/config` |
+| CI or script auth | Follow the chosen [provider page](providers.md) and use its environment variable |
+| Change model/provider from the TUI | Follow the [provider selection guide](providers.md#provider-selection), then use `/config` |
 | Keep one config that follows the launch directory | Use `workspace.root = "."` |
 | Debug config/auth/provider state | Run `sigil doctor` or `/doctor` |
 
@@ -58,17 +58,15 @@ sigil --config ./sigil.toml doctor
 
 The report checks config loading, workspace resolution, session log location, provider settings, API key source, configured MCP commands and trust settings, code intelligence language-server availability, and the current `TERM`. It reports where the API key was resolved from, but never prints the secret value. Warning and error checks include `fix:` remediation lines; a key resolved only from plaintext config is a warning so users can move it to an environment variable or keep the local config private intentionally.
 
-## Minimal Config Example
+## Shared Config Fragment
 
-If you want to write config manually, start here:
+If you want to write config manually, start with this provider-neutral fragment:
 
 ```toml
 [workspace]
 root = "."
 
 [agent]
-provider = "deepseek"
-model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
 [terminal]
@@ -81,34 +79,16 @@ scroll_sensitivity = 3
 theme = "sigil_dark"
 syntax_theme = "auto"
 usage_cost_currency = "auto"
-
-[providers.deepseek]
-fim_model = "deepseek-v4-pro"
-# Prefer SIGIL_API_KEY. If written here, the key is stored as plaintext.
-# api_key = "sk-..."
 ```
 
-`SIGIL_API_KEY` has higher priority than `api_key` in the config file. `doctor` warns when auth only comes from plaintext config, but it does not block the run.
+Combine these shared settings with the provider selection and authentication setup from the [Provider guide](providers.md). Provider pages contain the copyable provider blocks and environment-variable commands.
 
 Copyable templates are available under [docs/examples/config](../examples/config):
 
-- [deepseek-basic.toml](../examples/config/deepseek-basic.toml)
-- [openai-compatible.toml](../examples/config/openai-compatible.toml)
-- [anthropic.toml](../examples/config/anthropic.toml)
-- [gemini.toml](../examples/config/gemini.toml)
 - [mcp-safe-defaults.toml](../examples/config/mcp-safe-defaults.toml)
 - [code-intelligence-rust.toml](../examples/config/code-intelligence-rust.toml)
 
-Provider-specific setup now lives in focused pages:
-
-| Provider | Use when | Details |
-| --- | --- | --- |
-| DeepSeek | You want the default Quick Setup path, DeepSeek chat, and FIM-related settings. | [DeepSeek provider](provider-deepseek.md) |
-| OpenAI-compatible | You have a Chat Completions-compatible `/v1` endpoint such as OpenAI or a compatible gateway. | [OpenAI-compatible provider](provider-openai-compatible.md) |
-| Anthropic | You want Anthropic Messages streaming and Claude model settings. | [Anthropic provider](provider-anthropic.md) |
-| Gemini | You want Gemini `streamGenerateContent` with function calling support. | [Gemini provider](provider-gemini.md) |
-
-See [Provider guide](providers.md) for a comparison and copyable provider blocks.
+Provider-specific templates are indexed from the [Provider guide](providers.md), next to the selection and authentication rules they depend on.
 
 ## Workspace
 
@@ -325,17 +305,7 @@ Use explicit names and stable prefixes carefully. A scoped role registry gates t
 
 ## Providers
 
-`[agent].provider` selects the runtime provider, and `[agent].model` selects the chat model. The matching `[providers.*]` block controls endpoint, authentication, and provider-specific options.
-Only the provider values in this table are supported; any other value fails configuration validation.
-
-| Provider value | Config block | Primary API key env | Guide |
-| --- | --- | --- | --- |
-| `deepseek` | `[providers.deepseek]` | `SIGIL_API_KEY` | [DeepSeek provider](provider-deepseek.md) |
-| `openai_compat` | `[providers.openai_compat]` | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | [OpenAI-compatible provider](provider-openai-compatible.md) |
-| `anthropic` | `[providers.anthropic]` | `SIGIL_ANTHROPIC_API_KEY` | [Anthropic provider](provider-anthropic.md) |
-| `gemini` | `[providers.gemini]` | `SIGIL_GEMINI_API_KEY` | [Gemini provider](provider-gemini.md) |
-
-Keep provider-specific behavior in provider configuration. The shared `sigil-kernel` contract stays provider-neutral: messages, tools, usage, approvals, and session state should not contain provider-only terms.
+Use the [Provider guide](providers.md) to choose a provider, set `[agent].provider` and `[agent].model`, configure the matching `[providers.*]` block, and select the correct authentication environment variable. This page covers only configuration shared across providers.
 
 ## Permission
 
@@ -507,53 +477,13 @@ The TUI `/config` panel includes a read-only `Terminal` section for these contro
 
 `doctor` reports the configured switches, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk. For a repeatable manual checklist across iTerm2, Terminal.app, WezTerm, kitty, tmux, and SSH, see [Terminal Compatibility Checklist](terminal-compatibility.md).
 
-## Provider Environment Overrides
-
-Supported variables:
-
-Model request:
+## Model Request Environment Overrides
 
 - `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`
 - `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS`
 
-These override `[model_request]` for every provider. Use them when a shell or CI
-job needs a different transport timeout without editing `sigil.toml`.
-
-DeepSeek:
-
-- `SIGIL_API_KEY`
-- `SIGIL_BASE_URL`
-- `SIGIL_BETA_BASE_URL`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_FIM_MODEL`
-- `SIGIL_USER_ID_STRATEGY`
-- `SIGIL_STRICT_TOOLS_MODE`
-
-`SIGIL_API_KEY` has the highest priority. If only `[providers.deepseek].api_key` is present, Sigil treats it as plaintext config auth and `doctor` reports a warning with remediation.
-
-OpenAI-compatible:
-
-- `SIGIL_OPENAI_COMPATIBLE_API_KEY`
-- `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
-
-Use `SIGIL_OPENAI_COMPATIBLE_API_KEY` for OpenAI-compatible provider auth. Generic OpenAI environment variables are ignored so Sigil credentials do not share state with other tools.
-
-Anthropic:
-
-- `SIGIL_ANTHROPIC_API_KEY`
-- `SIGIL_ANTHROPIC_BASE_URL`
-- `SIGIL_ANTHROPIC_VERSION`
-- `SIGIL_ANTHROPIC_MAX_TOKENS`
-
-Use `SIGIL_ANTHROPIC_API_KEY` for Anthropic auth. Generic Anthropic environment variables are ignored.
-
-Gemini:
-
-- `SIGIL_GEMINI_API_KEY`
-- `SIGIL_GEMINI_BASE_URL`
-
-Use `SIGIL_GEMINI_API_KEY` for Gemini auth. Generic Google/Gemini environment variables are ignored.
+These override `[model_request]` for every provider. Use them when a shell or CI job needs a different transport timeout without editing `sigil.toml`. Provider-specific endpoint and authentication variables are documented only in the [Provider guide](providers.md) and the linked provider pages.
 
 ## Plugins
 

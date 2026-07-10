@@ -56,37 +56,11 @@ sigil --config ./sigil.toml doctor
 
 ## Sigil 找不到 API Key
 
-DeepSeek 推荐：
+1. 打开 [provider 认证映射](providers.md#认证优先级)，找到 `[agent].provider` 当前配置的 provider。
+2. 在启动 `sigil` 的同一个 shell 中，执行对应 provider 专页提供的可复制环境变量命令。
+3. 再次运行 `sigil doctor`，确认 provider 和 key 来源都符合预期。
 
-```bash
-export SIGIL_API_KEY="sk-..."
-```
-
-通用 `DEEPSEEK_API_KEY` 会被忽略。请使用 `SIGIL_API_KEY` 或 `[providers.deepseek].api_key`。
-
-OpenAI-compatible provider 推荐：
-
-```bash
-export SIGIL_OPENAI_COMPATIBLE_API_KEY="sk-..."
-```
-
-通用 `OPENAI_API_KEY` 会被忽略。请使用 `SIGIL_OPENAI_COMPATIBLE_API_KEY` 或 `[providers.openai_compat].api_key`。
-
-Anthropic 推荐：
-
-```bash
-export SIGIL_ANTHROPIC_API_KEY="sk-ant-..."
-```
-
-通用 `ANTHROPIC_API_KEY` 会被忽略。请使用 `SIGIL_ANTHROPIC_API_KEY` 或 `[providers.anthropic].api_key`。
-
-Gemini 推荐：
-
-```bash
-export SIGIL_GEMINI_API_KEY="..."
-```
-
-通用 `GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 会被忽略。请使用 `SIGIL_GEMINI_API_KEY` 或 `[providers.gemini].api_key`。
+Sigil 会主动忽略可能与其他工具共享状态的通用凭据变量。各 provider 专页是认证环境变量和 config fallback 的权威来源。
 
 如果通过 `/config` 保存 key，它会以明文写入 `sigil.toml`。私有本地配置可以这样做，但不要提交。
 
@@ -214,23 +188,19 @@ Compaction 会追加 control records，不会改写旧 session history。
 
 ## 安装后 Command Not Found
 
-确认 Cargo binary 目录在 `PATH` 中：
+确认安装器已经完成，然后检查当前 shell 的 `PATH`：
 
 ```bash
 echo "$PATH"
 ```
 
-macOS 和 Linux 通常是：
+在[安装](installation.md)中找到原安装渠道，确认该渠道的 binary 位置，并重新执行对应的安装或更新命令。安装器专项命令只在安装页维护，避免这里出现过期副本。
 
-```text
-~/.cargo/bin
-```
+## 报告问题
 
-在 Sigil 仓库根目录重新安装：
+如果决策树和 `sigil doctor` 仍无法解决问题，请[创建 GitHub Issue](https://github.com/JimmyDaddy/sigil/issues/new)，并附上最小复现以及下方列出的脱敏诊断信息。
 
-```bash
-cargo install --path crates/sigil --locked --force
-```
+疑似安全漏洞不要提交公开 Issue；请改为按照仓库的[安全策略](https://github.com/JimmyDaddy/sigil/blob/main/SECURITY.md)私下报告。
 
 ## 提 Issue 时提供什么
 

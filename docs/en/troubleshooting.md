@@ -56,37 +56,11 @@ sigil --config ./sigil.toml doctor
 
 ## Sigil Cannot Find The API Key
 
-For DeepSeek, prefer:
+1. Open the [provider authentication map](providers.md#authentication-priority) and select the provider configured in `[agent].provider`.
+2. Follow that provider page's copyable environment-variable command in the same shell that launches `sigil`.
+3. Run `sigil doctor` again and confirm that the provider and key source are the ones you intended.
 
-```bash
-export SIGIL_API_KEY="sk-..."
-```
-
-Generic `DEEPSEEK_API_KEY` is ignored. Use `SIGIL_API_KEY` or `[providers.deepseek].api_key`.
-
-For OpenAI-compatible providers, prefer:
-
-```bash
-export SIGIL_OPENAI_COMPATIBLE_API_KEY="sk-..."
-```
-
-Generic `OPENAI_API_KEY` is ignored. Use `SIGIL_OPENAI_COMPATIBLE_API_KEY` or `[providers.openai_compat].api_key`.
-
-For Anthropic, prefer:
-
-```bash
-export SIGIL_ANTHROPIC_API_KEY="sk-ant-..."
-```
-
-Generic `ANTHROPIC_API_KEY` is ignored. Use `SIGIL_ANTHROPIC_API_KEY` or `[providers.anthropic].api_key`.
-
-For Gemini, prefer:
-
-```bash
-export SIGIL_GEMINI_API_KEY="..."
-```
-
-Generic `GEMINI_API_KEY` and `GOOGLE_API_KEY` are ignored. Use `SIGIL_GEMINI_API_KEY` or `[providers.gemini].api_key`.
+Sigil deliberately ignores common generic credential names that could share state with other tools. The relevant provider page is the source of truth for accepted authentication variables and config fallbacks.
 
 If you saved a key in `/config`, it is stored as plaintext in `sigil.toml`. That can be acceptable for a private local config, but do not commit it.
 
@@ -214,23 +188,19 @@ If no LSP server is available, Rust projects can still use Tree-sitter fallback 
 
 ## Command Not Found After Install
 
-Confirm Cargo's binary directory is on `PATH`:
+Confirm the installer completed, then inspect the current shell's `PATH`:
 
 ```bash
 echo "$PATH"
 ```
 
-On macOS and Linux, Cargo usually installs binaries into:
+Use the matching channel in [Installation](installation.md) to confirm that channel's binary location and repeat its install or update command. Keeping installer-specific commands there prevents stale recovery instructions on this page.
 
-```text
-~/.cargo/bin
-```
+## Report A Bug
 
-Reinstall from the Sigil repository root:
+If the decision tree and `sigil doctor` do not resolve the problem, [open a GitHub issue](https://github.com/JimmyDaddy/sigil/issues/new) with a minimal reproduction and the redacted diagnostics listed below.
 
-```bash
-cargo install --path crates/sigil --locked --force
-```
+Do not open a public issue for a suspected vulnerability. Follow the repository [Security Policy](https://github.com/JimmyDaddy/sigil/blob/main/SECURITY.md) for private reporting instead.
 
 ## What To Include In A Bug Report
 

@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [配置](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [English](../en/providers.md)
 
-Sigil 把 provider 选择和其他用户工作流拆开。TUI、审批、工具、session、MCP 和 code-intelligence 行为保持一致；provider 页面只说明模型 endpoint、认证和 provider 专项配置。
+Sigil 把 provider 选择和其他用户工作流拆开。本指南及其链接的 provider 专页统一维护 provider 选择、认证环境变量、模型 endpoint 和 provider 专项配置。共享的 workspace、权限、任务、终端和工具设置仍由[配置](configuration.md)说明。
 
 ## 选择 Provider
 

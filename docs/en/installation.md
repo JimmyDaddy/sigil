@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
 
-This guide covers the first-release install paths. If you want a first-run walkthrough, start with [Quickstart](quickstart.md). `v0.0.1-alpha.1` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
+This page is the authoritative source for Sigil install channels, update and uninstall commands, and release-archive handling. Other user guides link here instead of copying those details. If you want a first-run walkthrough, start with [Quickstart](quickstart.md). `v0.0.1-alpha.1` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
 
 ## Requirements
 

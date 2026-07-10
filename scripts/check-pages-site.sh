@@ -10,6 +10,7 @@ stage_dir="${stage_root}/public"
 
 scripts/check-docs.sh >/dev/null
 scripts/build-pages-site.sh "${stage_dir}" >/dev/null
+ruby scripts/check-site-structure.rb "${stage_dir}" >/dev/null
 scripts/test-docs-table-render.rb >/dev/null
 scripts/check-site-viewport.rb "${stage_dir}" >/dev/null
 scripts/check-site-artifact-links.rb "${stage_dir}" >/dev/null
@@ -45,6 +46,7 @@ required_files=(
   "search.json"
   "assets/site.css"
   "assets/site.js"
+  "assets/code.js"
   "assets/search.js"
   "assets/logo/sigil-full-staff-glow.svg"
   "assets/logo/sigil-full-staff-glow-dark-mode.svg"
@@ -168,9 +170,11 @@ grep -q 'data-theme-toggle' "${stage_dir}/docs/index.html"
 grep -q 'data-theme-toggle' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'data-theme-toggle' "${stage_dir}/docs/quickstart/index.html"
 grep -q 'src="assets/site.js"' "${stage_dir}/index.html"
+grep -q 'src="assets/code.js"' "${stage_dir}/index.html"
 grep -q 'src="../assets/site.js"' "${stage_dir}/docs/index.html"
 grep -q 'src="../../assets/site.js"' "${stage_dir}/zh-CN/docs/index.html"
 grep -q 'src="../../assets/site.js"' "${stage_dir}/docs/quickstart/index.html"
+grep -q 'src="../../assets/code.js"' "${stage_dir}/docs/quickstart/index.html"
 if grep -R -n 'class="brand-mark" src="[^"]*sigil-mark-square-1024.png"' "${stage_dir}/index.html" "${stage_dir}/docs" "${stage_dir}/zh-CN"; then
   echo "square package icon leaked into Pages header brand mark" >&2
   exit 1
