@@ -1,44 +1,56 @@
 use super::*;
-use crate::CommandPermissionMatch;
+use crate::{CommandPermissionMatch, LegacyEvent};
 
 /// Append-only session log entry stored in the durable JSONL session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // Keep the durable JSONL shape unboxed across control variants.
 #[serde(rename_all = "snake_case")]
 pub enum SessionLogEntry {
+    #[serde(alias = "User")]
     User(ModelMessage),
+    #[serde(alias = "Assistant")]
     Assistant(ModelMessage),
+    #[serde(alias = "ToolResult")]
     ToolResult(ModelMessage),
+    #[serde(alias = "Control")]
     Control(ControlEntry),
 }
 
-/// One physical record in the durable v2 session stream.
+/// One physical record in a mixed legacy/v2 session stream.
 #[derive(Debug, Clone)]
 pub enum SessionStreamRecord {
+    Legacy {
+        event: LegacyEvent,
+        entry: Box<SessionLogEntry>,
+    },
     Stored(StoredEvent),
 }
 
 impl SessionStreamRecord {
     pub fn stream_sequence(&self) -> u64 {
         match self {
+            Self::Legacy { event, .. } => event.stream_sequence,
             Self::Stored(event) => event.stream_sequence,
         }
     }
 
     pub fn session_id(&self) -> &str {
         match self {
+            Self::Legacy { event, .. } => &event.session_id,
             Self::Stored(event) => &event.session_id,
         }
     }
 
     pub fn event_id(&self) -> &str {
         match self {
+            Self::Legacy { event, .. } => &event.event_id,
             Self::Stored(event) => &event.event_id,
         }
     }
 
     pub fn record_checksum(&self) -> &str {
         match self {
+            Self::Legacy { event, .. } => &event.raw_line_hash,
             Self::Stored(event) => &event.record_checksum,
         }
     }
@@ -55,6 +67,7 @@ impl SessionStreamRecord {
 
     pub fn domain_event_record(&self) -> Result<Option<DomainEventRecord>> {
         let domain_event = match self {
+            Self::Legacy { event, .. } => Some(DomainEvent::Legacy(event.clone())),
             Self::Stored(event) => match decode_stored_event(event.clone())? {
                 StoredEventDecode::Known(event) => Some(event),
                 StoredEventDecode::UnknownNonCritical(_) => None,
@@ -67,7 +80,9 @@ impl SessionStreamRecord {
     }
 
     pub fn typed_domain_event_record(&self) -> Result<Option<TypedDomainEventRecord>> {
-        let Self::Stored(event) = self;
+        let Self::Stored(event) = self else {
+            return Ok(None);
+        };
         let typed_event = match decode_typed_stored_event(event.clone())? {
             TypedStoredEventDecode::Known(event) => Some(*event),
             TypedStoredEventDecode::UnknownNonCritical(_) => None,

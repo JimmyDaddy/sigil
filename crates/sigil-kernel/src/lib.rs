@@ -109,8 +109,8 @@ pub use eval::{
 pub use event::{
     ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent,
     DurableEventPayloadMetadata, DurableEventPayloadStorage, DurableEventType, EventClass,
-    EventHandler, EventId, EventSyncClass, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, NoopEventHandler,
-    PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision, ProjectionCursor,
+    EventHandler, EventId, EventSyncClass, LegacyEvent, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
+    NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision, ProjectionCursor,
     PublicAssistantMessage, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
     RECORD_CHECKSUM_PREFIX, ReducerDisposition, RunEvent, STORED_EVENT_SCHEMA_VERSION, SessionId,
     StoredEvent, StoredEventDecode, TypedDomainEvent, TypedStoredEventDecode, decode_stored_event,
@@ -219,12 +219,14 @@ pub use resume::{
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
     CompactionPreview, CompactionRecord, ContextAssemblySkippedEntry, ControlEntry,
-    DomainEventRecord, JsonlSessionStore, McpElicitationDecision, McpElicitationEntry,
-    MemorySnapshot, Session, SessionLogEntry, SessionStreamRecord, ToolApprovalAllowSource,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalSessionGrantEntry,
-    ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolSubjectAudit, TypedDomainEventRecord, latest_compaction_record,
-    session_stats_from_entries,
+    DomainEventRecord, DurableAppendExpectation, DurableAppendPermit, DurableAppendReceipt,
+    DurableAppendRecordExpectation, DurableAppendRecordReceipt, DurableAuditBatch,
+    DurableAuditError, DurableAuditRecord, DurableAuditWriter, JsonlSessionStore,
+    McpElicitationDecision, McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry,
+    SessionStreamRecord, ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalEntry,
+    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
+    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
+    TypedDomainEventRecord, latest_compaction_record, session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,

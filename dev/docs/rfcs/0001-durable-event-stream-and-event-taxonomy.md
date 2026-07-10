@@ -287,6 +287,27 @@ Rules:
 - A writer-mode loader must hold the OS file lock across tail validation, max sequence calculation and all load-time reconciliation appends.
 - Load-time reconciliation events must have deterministic ids or idempotency keys so repeated writer-mode opens do not duplicate recovery records.
 
+The file-backed implementation uses one process-wide owner per canonical session path. Store and
+mutation-recorder clones share that owner; a sidecar writer lease rejects a second process owner,
+while the JSONL data-file lock remains limited to reload/recovery/append windows so readers are not
+permanently excluded. The owner caches session id, next sequence, durable offset, last-record
+identity/checksum, bounded tail fingerprint and a full durable-prefix hash state. Normal append
+therefore validates only file identity/metadata and the bounded tail before extending the cached
+hash; an external change triggers one full reload and must preserve the exact previous durable
+prefix or the writer fails closed.
+
+Recovery-critical pre-effect records use the sealed blocking `DurableAuditWriter`. It returns a
+non-cloneable, non-serializable receipt only after complete write, flush, `sync_all` and offset
+verification. The receipt binds writer generation, session, event kind/id/checksum, sequence,
+optional correlation id, record/authorization identities, batch identity and durable byte ranges.
+Record and authorization identities must occur in the checksum-covered payload, and receipt
+construction validates the event's registered session-entry or typed-domain payload schema.
+Direct-JSON event types without a typed schema cannot use the strict pre-effect writer. Receipt
+consumption re-reads the recorded byte ranges before returning a one-shot permit. In-memory
+sessions return `MissingDurableStore`; ordinary `append_durable_event` results are not authorization
+proofs. Because this interface performs blocking file synchronization, async callers must use the
+runtime blocking-I/O bridge.
+
 Initial sync classes:
 
 ```text
@@ -485,6 +506,7 @@ Required deterministic tests:
 - 已新增 `RunStatusChanged` / `RunFinalized` 基础 durable event，并在 agent terminal/max-turn 路径中记录。
 - 已加强 session append / tail recovery 的 sync 策略：recovery-critical event 写入会 sync session file；新建 session log、tail recovery quarantine/intent 创建和清理会同步父目录，降低目录项丢失造成的恢复不一致窗口。
 - 已将 session stream 健康诊断接入共享 doctor 面：CLI `sigil doctor` 与 TUI `/doctor` 会扫描当前 session log dir 中最近的 JSONL stream，使用 RFC-0001 reader 校验 checksum/sequence/session id，并展示 record、legacy/stored、last sequence 与 tail recovery 摘要；损坏流会作为 error 暴露而不是静默跳过。
+- 已实现 E21.3 canonical per-session linear writer、跨进程 sidecar lease、热路径 O(1) tail 校验、外部修改精确 prefix reload/fail-closed、legacy/mixed deserialize-only upcast，以及 store-backed strict durable append/sync receipt；无 durable store、sync 失败或 receipt mismatch 均不能授权后续 effect。
 - 已新增 typed durable decode seam：`decode_typed_stored_event` 会把 mutation、verification、task、agent thread、terminal 和 changeset family 收敛为强类型 `TypedDomainEvent`，并继续对 unknown critical event fail closed。
 - 已新增 projection-facing typed record API：`SessionStreamRecord::typed_domain_event_record` 输出 typed event 和 `ProjectionCursor`，后续 typed reducer / projection store 可在不重新解析 JSON 的情况下消费 cursor-bound event。
 - 已新增文件型 persistent projection store：`FileProjectionStore` 将 projection snapshot 与 `ProjectionCursor` 写入同一 envelope，并通过 temporary file + atomic replace 持久化，首个真实 projection 为 `VerificationStateProjectionSnapshot`；duplicate replay、sequence gap、cursor ahead 和 JSONL rebuild 已有测试覆盖。

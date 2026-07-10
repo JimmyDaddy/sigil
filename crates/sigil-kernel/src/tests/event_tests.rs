@@ -650,6 +650,9 @@ fn typed_event_decode_covers_other_event_fallbacks() {
 #[test]
 fn stored_event_decode_covers_every_known_domain_variant() {
     for event_type in ALL_DURABLE_EVENT_TYPES.iter().copied() {
+        if !event_type.appendable() {
+            continue;
+        }
         let event_class = event_type
             .expected_event_class()
             .expect("known durable event type should have expected class");
@@ -677,10 +680,12 @@ fn stored_event_decode_covers_every_known_domain_variant() {
             Some(event_type.as_str())
         );
 
-        let direct_domain_event = event_type.to_domain_event(crate::event::DomainPayload {
-            event_version: 1,
-            payload: json!({"event_type": event_type.as_str()}),
-        });
+        let direct_domain_event = event_type
+            .to_domain_event(crate::event::DomainPayload {
+                event_version: 1,
+                payload: json!({"event_type": event_type.as_str()}),
+            })
+            .expect("appendable event should map to a domain event");
         assert_eq!(direct_domain_event.event_type(), event_type);
         assert_eq!(
             direct_domain_event
@@ -790,6 +795,10 @@ fn stored_event_rejects_oversized_payload() {
 #[test]
 fn durable_event_sync_mapping_covers_all_appendable_events() {
     for event_type in ALL_DURABLE_EVENT_TYPES {
+        if !event_type.appendable() {
+            assert!(event_type.sync_class().is_none());
+            continue;
+        }
         assert!(
             event_type.sync_class().is_some(),
             "{} should have a sync class",

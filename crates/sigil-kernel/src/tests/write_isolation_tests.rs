@@ -54,7 +54,9 @@ fn note_diff() -> String {
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         event_types.push(event.event_type);
     }
     Ok(event_types)

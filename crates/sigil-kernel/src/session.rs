@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -39,10 +39,11 @@ use crate::{
         ConversationInputStatusEntry, ConversationQueueProjection,
     },
     event::{
-        DomainEvent, DurableEventType, EventClass, EventSyncClass, ProjectionApplyDecision,
-        ProjectionCursor, StoredEvent, StoredEventDecode, TypedDomainEvent, TypedStoredEventDecode,
-        decode_stored_event, decode_typed_stored_event, is_v2_stored_event_value,
-        projection_apply_decision_for_record, stable_event_hash, stable_event_uuid,
+        DomainEvent, DurableEventPayloadStorage, DurableEventType, EventClass, EventSyncClass,
+        ProjectionApplyDecision, ProjectionCursor, StoredEvent, StoredEventDecode,
+        TypedDomainEvent, TypedStoredEventDecode, decode_stored_event, decode_typed_stored_event,
+        is_v2_stored_event_value, projection_apply_decision_for_record, stable_event_hash,
+        stable_event_uuid,
     },
     memory::{apply_memory_report, materialize_memory},
     mutation::{ExecutionMutationProfile, MutationEventRecorder},
@@ -100,12 +101,18 @@ mod projection;
 mod recovery;
 mod stats;
 mod store;
+mod writer;
 
 pub use entry::*;
 pub use facade::Session;
 pub use stats::{latest_compaction_record, session_stats_from_entries};
 pub use store::JsonlSessionStore;
 pub(crate) use store::session_entry_from_domain_event;
+pub use writer::{
+    DurableAppendExpectation, DurableAppendPermit, DurableAppendReceipt,
+    DurableAppendRecordExpectation, DurableAppendRecordReceipt, DurableAuditBatch,
+    DurableAuditError, DurableAuditRecord, DurableAuditWriter,
+};
 
 use context::*;
 use projection::*;

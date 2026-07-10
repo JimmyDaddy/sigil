@@ -196,7 +196,6 @@ pub(super) fn task_step_readiness(
     let workspace_id = stable_workspace_id(&options.workspace_root)?;
     let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let projection = session.verification_state_projection();
-    let source_stream_sequence = session.next_stream_sequence_hint().unwrap_or(1);
     let mut policy = projection
         .latest_policy(&scope)
         .map(|entry| entry.policy.clone())
@@ -215,13 +214,15 @@ pub(super) fn task_step_readiness(
         &policy,
         &baseline_policy_hash,
     );
-    let mut durable_mutation_evidence = match durable_workspace_mutation_evidence(
+    let durable_mutation_evidence_result = durable_workspace_mutation_evidence(
         session,
         &request.task_id,
         &VerificationScope::all_tracked(task_step_verification_scope_hash()),
         &output.outcome.tool_call_ids,
         latest_successful_verification_sequence,
-    ) {
+    );
+    let source_stream_sequence = session.next_stream_sequence_hint().unwrap_or(1);
+    let mut durable_mutation_evidence = match durable_mutation_evidence_result {
         Ok(evidence) => evidence,
         Err(_) => vec![durable_mutation_replay_failed_evidence(
             request,

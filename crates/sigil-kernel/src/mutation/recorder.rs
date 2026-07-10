@@ -193,8 +193,8 @@ impl MutationEventRecorder {
 
     /// Appends a neutral extension-process lifecycle audit without marking the workspace dirty.
     ///
-    /// This store-backed bridge is used by current extension launchers; RFC-0021 E21.3 will
-    /// replace the wider recorder plumbing with a dedicated linear durable writer.
+    /// This store-backed bridge is used by current extension launchers and shares the session's
+    /// linear writer owner with every cloned recorder.
     ///
     /// # Errors
     ///

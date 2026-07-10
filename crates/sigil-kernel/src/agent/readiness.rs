@@ -137,7 +137,9 @@ fn agent_run_workspace_mutation_evidence(
     let records = JsonlSessionStore::read_event_records(path)?;
     let mut prepared_tool_calls = BTreeMap::<String, Option<String>>::new();
     for record in &records {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if DurableEventType::from_event_type(&event.event_type)
             == Some(DurableEventType::MutationPrepared)
             && let Ok(payload) =
@@ -150,7 +152,9 @@ fn agent_run_workspace_mutation_evidence(
     let mut evidence = records
         .iter()
         .filter_map(|record| {
-            let SessionStreamRecord::Stored(event) = record;
+            let SessionStreamRecord::Stored(event) = record else {
+                return None;
+            };
             match DurableEventType::from_event_type(&event.event_type) {
                 Some(DurableEventType::MutationCommitted) => {
                     let payload =
@@ -259,9 +263,18 @@ fn active_terminal_mutation_evidence(
     let mut active_terminals = BTreeMap::<String, (String, u64)>::new();
 
     for record in records {
-        let SessionStreamRecord::Stored(event) = record;
-        let Some(entry) = session_entry_from_stored_event(event) else {
-            continue;
+        let (entry, event_id, stream_sequence) = match record {
+            SessionStreamRecord::Legacy { entry, event, .. } => (
+                (**entry).clone(),
+                event.event_id.clone(),
+                event.stream_sequence,
+            ),
+            SessionStreamRecord::Stored(event) => {
+                let Some(entry) = session_entry_from_stored_event(event) else {
+                    continue;
+                };
+                (entry, event.event_id.clone(), event.stream_sequence)
+            }
         };
         match entry {
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) => {
@@ -271,7 +284,7 @@ fn active_terminal_mutation_evidence(
                     {
                         open_profiles.insert(
                             execution.call_id.clone(),
-                            (profile, event.event_id.clone(), event.stream_sequence),
+                            (profile, event_id.clone(), stream_sequence),
                         );
                     }
                     continue;
@@ -286,8 +299,7 @@ fn active_terminal_mutation_evidence(
             SessionLogEntry::Control(ControlEntry::TerminalTask(entry)) => {
                 let task_id = entry.handle.task_id.as_str().to_owned();
                 if entry.status.is_active() {
-                    active_terminals
-                        .insert(task_id, (event.event_id.clone(), event.stream_sequence));
+                    active_terminals.insert(task_id, (event_id.clone(), stream_sequence));
                 } else {
                     active_terminals.remove(&task_id);
                 }

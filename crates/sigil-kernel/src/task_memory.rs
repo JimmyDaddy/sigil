@@ -336,7 +336,9 @@ pub fn extract_task_memory_from_stream_records(
         if let Some(entry) = session_entry_from_stream_record(record)? {
             builder.apply_session_entry(record.event_id(), &entry);
         }
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_kind() == Some(DurableEventType::MutationCommitted) {
             let committed: MutationCommitted = serde_json::from_value(event.payload.clone())?;
             builder.apply_mutation_committed(record.event_id(), &committed);
@@ -413,6 +415,7 @@ fn session_entry_from_stream_record(
     record: &SessionStreamRecord,
 ) -> Result<Option<SessionLogEntry>> {
     match record {
+        SessionStreamRecord::Legacy { entry, .. } => Ok(Some((**entry).clone())),
         SessionStreamRecord::Stored(event) => {
             let Some(value) = event.payload.get("session_log_entry") else {
                 return Ok(None);

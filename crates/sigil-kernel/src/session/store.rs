@@ -1,20 +1,21 @@
+#[cfg(test)]
+use super::writer::SessionWriterFault;
+use super::writer::{LinearSessionWriter, PendingStoredEvent, shared_session_writer};
 use super::*;
+use crate::LegacyEvent;
 
 /// Append-only JSONL store for session and control-plane history.
 #[derive(Debug, Clone)]
 pub struct JsonlSessionStore {
     path: PathBuf,
+    writer: std::sync::Arc<Mutex<LinearSessionWriter>>,
 }
 
 impl JsonlSessionStore {
     /// Creates a store rooted at `path`, creating parent directories when needed.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        Ok(Self { path })
+        let (path, writer) = shared_session_writer(path)?;
+        Ok(Self { path, writer })
     }
 
     /// Appends a single serialized session entry to the durable JSONL file.
@@ -29,20 +30,22 @@ impl JsonlSessionStore {
         event_class: EventClass,
         payload: serde_json::Value,
     ) -> Result<StoredEvent> {
-        let _guard = SESSION_LOG_IO_LOCK
+        let mut writer = self
+            .writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
-        let mut file = self.open_locked_file()?;
-        let mut records = recover_tail_if_needed_locked(&mut file, &self.path)?;
-        let event = append_event_locked(
-            &self.path,
-            &mut file,
-            &mut records,
-            event_type,
-            event_class,
-            payload,
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let (mut events, _) = writer.append_events(
+            vec![PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                correlation_id: None,
+            }],
+            false,
         )?;
-        Ok(event)
+        events
+            .pop()
+            .context("session writer returned no event for a single append")
     }
 
     /// Appends a provider-visible or control session entry as a v2 stored event.
@@ -57,7 +60,7 @@ impl JsonlSessionStore {
         &self.path
     }
 
-    /// Reads all durable v2 records from `path`.
+    /// Reads all durable records from `path`, including a deserialize-only legacy prefix.
     pub fn read_event_records(path: impl AsRef<Path>) -> Result<Vec<SessionStreamRecord>> {
         let path = path.as_ref();
         if !path.exists() {
@@ -73,13 +76,13 @@ impl JsonlSessionStore {
         read_stream_records_from_file(&mut file, path)
     }
 
-    /// Reads all durable v2 records in writer mode, performing tail recovery when needed.
+    /// Reads all durable records in writer mode, performing tail recovery when needed.
     pub fn read_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
-        let _guard = SESSION_LOG_IO_LOCK
+        let mut writer = self
+            .writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
-        let mut file = self.open_locked_file()?;
-        recover_tail_if_needed_locked(&mut file, &self.path)
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        writer.read_records_writer()
     }
 
     pub(super) fn load_entries_writer_reconciled(
@@ -87,47 +90,65 @@ impl JsonlSessionStore {
         fallback_provider_name: String,
         fallback_model_name: String,
     ) -> Result<(Vec<SessionLogEntry>, String, String)> {
-        let _guard = SESSION_LOG_IO_LOCK
+        let mut writer = self
+            .writer
             .lock()
-            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
-        let mut file = self.open_locked_file()?;
-        let mut records = recover_tail_if_needed_locked(&mut file, &self.path)?;
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let records = writer.read_records_writer()?;
         let mut entries = session_entries_from_records(&records)?;
         let (provider_name, model_name) = session_identity_from_entries(&entries)
             .unwrap_or((fallback_provider_name, fallback_model_name));
+
+        let mut reconciled_entries = Vec::new();
 
         if !has_session_identity(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::SessionIdentity {
                 provider_name: provider_name.clone(),
                 model_name: model_name.clone(),
             });
-            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
             entries.push(entry);
+            reconciled_entries.push(entries.last().expect("identity entry was pushed").clone());
         }
 
         for execution in interrupted_tool_executions(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(execution)));
-            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
-            entries.push(entry);
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
         }
 
         for interruption in interrupted_agent_attempts(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interruption));
-            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
-            entries.push(entry);
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
         }
 
         for closed_route in closed_agent_routes(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::AgentRouteClosed(closed_route));
-            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
-            entries.push(entry);
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
         }
 
         for interrupted_message in interrupted_agent_mailbox_messages(&entries) {
             let entry =
                 SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(interrupted_message));
-            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
-            entries.push(entry);
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
+        }
+
+        if !reconciled_entries.is_empty() {
+            let pending = reconciled_entries
+                .iter()
+                .map(|entry| {
+                    let event_type = session_entry_event_type(entry);
+                    PendingStoredEvent {
+                        event_type,
+                        event_class: session_entry_event_class(event_type),
+                        payload: serde_json::json!({ "session_log_entry": entry }),
+                        correlation_id: None,
+                    }
+                })
+                .collect();
+            writer.append_events(pending, false)?;
         }
 
         Ok((entries, provider_name, model_name))
@@ -147,31 +168,78 @@ impl JsonlSessionStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the line is not a valid stored event, or when a stored event's
-    /// embedded session entry payload is malformed.
+    /// Returns an error when the line is neither a legacy entry nor a valid stored event, or when
+    /// a stored event's embedded session entry payload is malformed.
     pub fn session_entry_from_json_line(line: &str) -> Result<Option<SessionLogEntry>> {
         let line = line.trim();
         if line.is_empty() {
             return Ok(None);
+        }
+        if let Ok(entry) = serde_json::from_str::<SessionLogEntry>(line) {
+            return Ok(Some(entry));
         }
         let event = StoredEvent::from_json_str(line)
             .context("failed to decode stored event from session JSONL line")?;
         session_entry_from_stored_event(&event)
     }
 
-    pub(super) fn open_locked_file(&self) -> Result<File> {
-        let existed = self.path.exists();
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&self.path)
-            .with_context(|| format!("failed to open {}", self.path.display()))?;
-        lock_exclusive_with_retry(&file, &self.path)?;
-        if !existed {
-            sync_parent_dir(&self.path)?;
-        }
-        Ok(file)
+    pub(super) fn append_audit_batch(
+        &self,
+        batch: DurableAuditBatch,
+    ) -> Result<DurableAppendReceipt> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        writer.append_audit_batch(batch)
+    }
+
+    pub(super) fn validate_audit_receipt(
+        &self,
+        receipt: DurableAppendReceipt,
+        expectation: DurableAppendExpectation,
+    ) -> Result<DurableAppendPermit> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        writer.validate_audit_receipt(receipt, expectation)
+    }
+
+    pub fn next_stream_sequence(&self) -> Result<u64> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        writer.next_sequence()
+    }
+
+    #[cfg(test)]
+    pub(super) fn writer_full_scan_count(&self) -> Result<u64> {
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        Ok(writer.full_scan_count())
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_writer_fault(&self, fault: SessionWriterFault) -> Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        writer.inject_fault(fault);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn writer_parent_sync_count(&self) -> Result<u64> {
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        Ok(writer.parent_sync_count())
     }
 }
 
@@ -262,26 +330,81 @@ pub(super) fn read_stream_records_from_str(
         return Ok(Vec::new());
     }
 
+    let first_v2 = raw_records
+        .iter()
+        .position(|(_, line)| line_is_v2_stored_event(line).unwrap_or(false));
+    let legacy_prefix_lines = match first_v2 {
+        Some(index) => &raw_records[..index],
+        None => raw_records.as_slice(),
+    };
+    let legacy_session_id = (!legacy_prefix_lines.is_empty()).then(|| {
+        let mut prefix = String::new();
+        for (_, line) in legacy_prefix_lines {
+            prefix.push_str(line);
+            prefix.push('\n');
+        }
+        stable_event_uuid(
+            "sigil-legacy-session",
+            &stable_event_hash(prefix.as_bytes()),
+        )
+    });
+
     let mut records = Vec::with_capacity(raw_records.len());
     let mut expected_session_id = None;
     for (record_ordinal, (physical_line, line)) in raw_records.iter().enumerate() {
         let stream_sequence = record_ordinal as u64 + 1;
-        if !line_is_v2_stored_event(line)? {
-            bail!(
-                "{}",
-                stream_line_context("stored event", *physical_line, path)
-            );
+        if line_is_v2_stored_event(line)? {
+            let event = StoredEvent::from_json_str(line)
+                .with_context(|| stream_line_context("stored event", *physical_line, path))?;
+            validate_stream_record_identity(
+                *physical_line,
+                stream_sequence,
+                &event.session_id,
+                event.stream_sequence,
+                &mut expected_session_id,
+            )?;
+            records.push(SessionStreamRecord::Stored(event));
+            continue;
         }
-        let event = StoredEvent::from_json_str(line)
-            .with_context(|| stream_line_context("stored event", *physical_line, path))?;
+
+        if first_v2.is_some_and(|index| record_ordinal >= index) {
+            if serde_json::from_str::<SessionLogEntry>(line).is_ok() {
+                bail!(
+                    "legacy session entry appears after v2 stored event in {}",
+                    path.display()
+                );
+            }
+            StoredEvent::from_json_str(line)
+                .with_context(|| stream_line_context("stored event", *physical_line, path))?;
+            unreachable!("a non-v2 line cannot decode as a stored event");
+        }
+
+        let session_id = legacy_session_id
+            .as_ref()
+            .expect("legacy session id is derived when legacy records are present");
+        let entry: SessionLogEntry = serde_json::from_str(line)
+            .with_context(|| stream_line_context("session entry", *physical_line, path))?;
         validate_stream_record_identity(
             *physical_line,
             stream_sequence,
-            &event.session_id,
-            event.stream_sequence,
+            session_id,
+            stream_sequence,
             &mut expected_session_id,
         )?;
-        records.push(SessionStreamRecord::Stored(event));
+        let raw_line_hash = stable_event_hash(line.as_bytes());
+        let event_id = stable_event_uuid(session_id, &format!("{stream_sequence}:{raw_line_hash}"));
+        let payload = serde_json::to_value(&entry).context("failed to serialize legacy entry")?;
+        let event = LegacyEvent {
+            event_id,
+            session_id: session_id.clone(),
+            stream_sequence,
+            raw_line_hash,
+            payload,
+        };
+        records.push(SessionStreamRecord::Legacy {
+            event,
+            entry: Box::new(entry),
+        });
     }
     Ok(records)
 }
@@ -364,43 +487,6 @@ pub(super) fn event_id_seed(
     let event_type = event_type.as_str();
     let payload_hash = stable_json_hash(payload);
     format!("{session_id}:{stream_sequence}:{event_type}:{payload_hash}")
-}
-
-pub(super) fn append_event_locked(
-    path: &Path,
-    file: &mut File,
-    records: &mut Vec<SessionStreamRecord>,
-    event_type: DurableEventType,
-    event_class: EventClass,
-    payload: serde_json::Value,
-) -> Result<StoredEvent> {
-    if !event_type.appendable() {
-        bail!("{} cannot be appended as a v2 event", event_type.as_str());
-    }
-
-    let session_id = stream_session_id(records).unwrap_or_else(|| session_id_for_path(path));
-    let next_sequence = next_stream_sequence(records);
-    let event_id_seed = event_id_seed(&session_id, next_sequence, event_type, &payload);
-    let event_id = stable_event_uuid("sigil-event", &event_id_seed);
-    let kind = event_type;
-    let class = event_class;
-    let sequence = next_sequence;
-    let event = StoredEvent::new(kind, class, event_id, session_id, sequence, payload)?;
-    append_stored_event_to_locked_file(file, &event)?;
-    records.push(SessionStreamRecord::Stored(event.clone()));
-    Ok(event)
-}
-
-pub(super) fn append_session_entry_event_locked(
-    path: &Path,
-    file: &mut File,
-    records: &mut Vec<SessionStreamRecord>,
-    entry: &SessionLogEntry,
-) -> Result<StoredEvent> {
-    let event_type = session_entry_event_type(entry);
-    let payload = serde_json::json!({ "session_log_entry": entry });
-    let class = session_entry_event_class(event_type);
-    append_event_locked(path, file, records, event_type, class, payload)
 }
 
 pub(super) fn stream_session_id(records: &[SessionStreamRecord]) -> Option<String> {
@@ -516,6 +602,11 @@ pub(super) fn session_entry_from_stored_event(
 pub(crate) fn session_entry_from_domain_event(
     event: &DomainEvent,
 ) -> Result<Option<SessionLogEntry>> {
+    if let DomainEvent::Legacy(event) = event {
+        return serde_json::from_value(event.payload.clone())
+            .context("failed to decode legacy session entry")
+            .map(Some);
+    }
     let payload = event
         .payload()
         .unwrap_or_else(|| unreachable!("domain event must carry payload"));

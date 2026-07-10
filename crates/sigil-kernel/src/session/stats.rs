@@ -167,6 +167,15 @@ pub(super) fn latest_task_memory_workspace_snapshot_id(
 ) -> Result<Option<crate::WorkspaceSnapshotId>> {
     for record in records.iter().rev() {
         match record {
+            SessionStreamRecord::Legacy { entry, .. } => {
+                if let SessionLogEntry::Control(ControlEntry::VerificationRecorded(verification)) =
+                    entry.as_ref()
+                {
+                    return Ok(Some(
+                        verification.receipt.binding.workspace_snapshot_id.clone(),
+                    ));
+                }
+            }
             SessionStreamRecord::Stored(event)
                 if event.event_kind() == Some(DurableEventType::MutationCommitted) =>
             {

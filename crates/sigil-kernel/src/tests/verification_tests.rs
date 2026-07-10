@@ -736,8 +736,9 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
 
     let stored_events = JsonlSessionStore::read_event_records(&store_path)?
         .into_iter()
-        .map(|record| match record {
-            SessionStreamRecord::Stored(event) => event,
+        .filter_map(|record| match record {
+            SessionStreamRecord::Legacy { .. } => None,
+            SessionStreamRecord::Stored(event) => Some(event),
         })
         .collect::<Vec<_>>();
     let event_types = stored_events

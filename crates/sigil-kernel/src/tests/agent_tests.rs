@@ -2517,8 +2517,9 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
     let records = JsonlSessionStore::read_event_records(&path)?;
     let event_types = records
         .iter()
-        .map(|record| match record {
-            SessionStreamRecord::Stored(event) => event.event_type.as_str(),
+        .filter_map(|record| match record {
+            SessionStreamRecord::Legacy { .. } => None,
+            SessionStreamRecord::Stored(event) => Some(event.event_type.as_str()),
         })
         .collect::<Vec<_>>();
     assert!(event_types.contains(&DurableEventType::RunStatusChanged.as_str()));

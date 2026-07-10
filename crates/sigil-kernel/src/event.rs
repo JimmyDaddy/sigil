@@ -73,44 +73,60 @@ pub struct DurableEventPayloadMetadata {
     pub payload_name: &'static str,
 }
 
+/// Stable deserialize-only view of one legacy `SessionLogEntry` line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyEvent {
+    pub event_id: EventId,
+    pub session_id: SessionId,
+    pub stream_sequence: u64,
+    pub raw_line_hash: String,
+    pub payload: Value,
+}
+
 macro_rules! durable_event_types {
     ($($variant:ident => ($wire_name:literal, $sync_class:ident, $event_class:ident, $payload_storage:ident, $payload_name:literal),)+) => {
         /// Known durable event type names.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum DurableEventType {
             $($variant,)+
+            Legacy,
         }
 
         /// Strong reducer-facing event.
         #[derive(Debug, Clone, PartialEq)]
         pub enum DurableDomainEvent {
             $($variant(DomainPayload),)+
+            Legacy(LegacyEvent),
         }
 
         impl DurableEventType {
             pub fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $wire_name,)+
+                    Self::Legacy => "legacy",
                 }
             }
 
             pub fn from_event_type(value: &str) -> Option<Self> {
                 Some(match value {
                     $($wire_name => Self::$variant,)+
+                    "legacy" => Self::Legacy,
                     _ => return None,
                 })
             }
 
             pub fn sync_class(self) -> Option<EventSyncClass> {
-                Some(match self {
-                    $(Self::$variant => EventSyncClass::$sync_class,)+
-                })
+                match self {
+                    $(Self::$variant => Some(EventSyncClass::$sync_class),)+
+                    Self::Legacy => None,
+                }
             }
 
             pub fn expected_event_class(self) -> Option<EventClass> {
-                Some(match self {
-                    $(Self::$variant => EventClass::$event_class,)+
-                })
+                match self {
+                    $(Self::$variant => Some(EventClass::$event_class),)+
+                    Self::Legacy => None,
+                }
             }
 
             pub fn payload_metadata(self) -> DurableEventPayloadMetadata {
@@ -119,16 +135,21 @@ macro_rules! durable_event_types {
                         storage: DurableEventPayloadStorage::$payload_storage,
                         payload_name: $payload_name,
                     },)+
+                    Self::Legacy => DurableEventPayloadMetadata {
+                        storage: DurableEventPayloadStorage::SessionLogEntry,
+                        payload_name: "legacy_session_entry",
+                    },
                 }
             }
 
             pub fn appendable(self) -> bool {
-                true
+                self != Self::Legacy
             }
 
-            pub fn to_domain_event(self, payload: DomainPayload) -> DurableDomainEvent {
+            pub fn to_domain_event(self, payload: DomainPayload) -> Result<DurableDomainEvent> {
                 match self {
-                    $(Self::$variant => DurableDomainEvent::$variant(payload),)+
+                    $(Self::$variant => Ok(DurableDomainEvent::$variant(payload)),)+
+                    Self::Legacy => bail!("legacy is deserialize-only and cannot be a v2 event"),
                 }
             }
         }
@@ -137,12 +158,14 @@ macro_rules! durable_event_types {
             pub fn event_type(&self) -> DurableEventType {
                 match self {
                     $(Self::$variant(_) => DurableEventType::$variant,)+
+                    Self::Legacy(_) => DurableEventType::Legacy,
                 }
             }
 
             pub fn payload(&self) -> Option<&DomainPayload> {
                 match self {
                     $(Self::$variant(payload) => Some(payload),)+
+                    Self::Legacy(_) => None,
                 }
             }
         }
@@ -150,6 +173,7 @@ macro_rules! durable_event_types {
         /// Ordered known durable event types.
         pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
             $(DurableEventType::$variant,)+
+            DurableEventType::Legacy,
         ];
     };
 }
@@ -443,7 +467,7 @@ pub fn decode_stored_event(event: StoredEvent) -> Result<StoredEventDecode> {
         payload: event.payload,
     };
     Ok(StoredEventDecode::Known(
-        event_type.to_domain_event(payload),
+        event_type.to_domain_event(payload)?,
     ))
 }
 
@@ -543,7 +567,9 @@ fn typed_other_event(event_type: DurableEventType, event: StoredEvent) -> Result
         event_version: event.event_version,
         payload: event.payload,
     };
-    Ok(TypedDomainEvent::Other(event_type.to_domain_event(payload)))
+    Ok(TypedDomainEvent::Other(
+        event_type.to_domain_event(payload)?,
+    ))
 }
 
 fn decode_event_payload<T>(event: &StoredEvent) -> Result<T>

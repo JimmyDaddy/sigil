@@ -12,10 +12,15 @@ pub(super) struct TailRecoveryIntent {
     pub(super) session_id: String,
 }
 
+pub(super) struct RecoveredSessionStream {
+    pub(super) records: Vec<SessionStreamRecord>,
+    pub(super) content: Vec<u8>,
+}
+
 pub(super) fn recover_tail_if_needed_locked(
     file: &mut File,
     path: &Path,
-) -> Result<Vec<SessionStreamRecord>> {
+) -> Result<RecoveredSessionStream> {
     if let Some(intent) = read_tail_recovery_intent(path)? {
         match read_stream_records_from_file(file, path) {
             Ok(records) => {
@@ -28,17 +33,20 @@ pub(super) fn recover_tail_if_needed_locked(
                     )
                 }) {
                     clear_tail_recovery_intent(path)?;
-                    return Ok(records);
+                    return recovered_stream_from_records(file, path, records);
                 }
+                validate_pending_tail_recovery_prefix(file, path, &intent, &records)?;
             }
             Err(read_error) => {
                 recover_from_pending_tail_intent(file, path, &intent)
                     .with_context(|| read_error.to_string())?;
+                let records = read_stream_records_from_file(file, path)?;
+                validate_pending_tail_recovery_prefix(file, path, &intent, &records)?;
             }
         }
         append_tail_recovery_event_locked(file, path, &intent)?;
         clear_tail_recovery_intent(path)?;
-        return read_stream_records_from_file(file, path);
+        return read_recovered_stream_from_file(file, path);
     }
 
     file.seek(SeekFrom::Start(0))
@@ -48,7 +56,10 @@ pub(super) fn recover_tail_if_needed_locked(
         .with_context(|| format!("failed to read {}", path.display()))?;
 
     let Some(corruption) = tail_corruption(path, &content)? else {
-        return read_stream_records_from_str(path, &content);
+        return Ok(RecoveredSessionStream {
+            records: read_stream_records_from_str(path, &content)?,
+            content: content.into_bytes(),
+        });
     };
 
     let original_hash = stable_event_hash(content.as_bytes());
@@ -81,7 +92,76 @@ pub(super) fn recover_tail_if_needed_locked(
         .with_context(|| format!("failed to sync truncated {}", path.display()))?;
     append_tail_recovery_event_locked(file, path, &intent)?;
     clear_tail_recovery_intent(path)?;
-    read_stream_records_from_file(file, path)
+    read_recovered_stream_from_file(file, path)
+}
+
+fn read_recovered_stream_from_file(file: &mut File, path: &Path) -> Result<RecoveredSessionStream> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(RecoveredSessionStream {
+        records: read_stream_records_from_str(path, &content)?,
+        content: content.into_bytes(),
+    })
+}
+
+fn recovered_stream_from_records(
+    file: &mut File,
+    path: &Path,
+    records: Vec<SessionStreamRecord>,
+) -> Result<RecoveredSessionStream> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(RecoveredSessionStream { records, content })
+}
+
+fn validate_pending_tail_recovery_prefix(
+    file: &mut File,
+    path: &Path,
+    intent: &TailRecoveryIntent,
+    records: &[SessionStreamRecord],
+) -> Result<()> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut current = Vec::new();
+    file.read_to_end(&mut current)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if current.len() as u64 != intent.recovered_size {
+        bail!(
+            "tail recovery intent recovered prefix length changed: expected {}, got {}",
+            intent.recovered_size,
+            current.len()
+        );
+    }
+
+    let quarantine = fs::read(&intent.quarantine_path).with_context(|| {
+        format!(
+            "failed to read tail recovery quarantine {}",
+            intent.quarantine_path.display()
+        )
+    })?;
+    if stable_event_hash(&quarantine) != intent.original_hash {
+        bail!("tail recovery quarantine hash does not match recorded original hash");
+    }
+    let recovered_size = usize::try_from(intent.recovered_size)
+        .context("tail recovery intent recovered_size does not fit usize")?;
+    let expected_prefix = quarantine
+        .get(..recovered_size)
+        .context("tail recovery quarantine is shorter than the recovered prefix")?;
+    if current != expected_prefix {
+        bail!("tail recovery intent current stream does not match quarantined recovered prefix");
+    }
+    if let Some(session_id) = stream_session_id(records)
+        && session_id != intent.session_id
+    {
+        bail!("tail recovery intent session_id does not match recovered stream");
+    }
+    Ok(())
 }
 
 pub(super) fn recover_from_pending_tail_intent(
@@ -150,6 +230,9 @@ pub(super) fn record_line_is_valid_or_fail_closed(
     line: &str,
     path: &Path,
 ) -> Result<bool> {
+    if serde_json::from_str::<SessionLogEntry>(line).is_ok() {
+        return Ok(true);
+    }
     if line_is_v2_stored_event(line)? {
         StoredEvent::from_json_str(line)
             .with_context(|| stream_line_context("stored event", physical_line, path))?;

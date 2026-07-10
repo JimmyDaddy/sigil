@@ -23,7 +23,9 @@ use crate::{
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         event_types.push(event.event_type);
     }
     Ok(event_types)
@@ -52,7 +54,9 @@ fn artifact_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn first_prepared_payload(store: &JsonlSessionStore) -> Result<MutationPrepared> {
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_type == DurableEventType::MutationPrepared.as_str() {
             return serde_json::from_value(event.payload)
                 .map_err(|error| anyhow::anyhow!("failed to decode mutation prepared: {error}"));
@@ -64,7 +68,9 @@ fn first_prepared_payload(store: &JsonlSessionStore) -> Result<MutationPrepared>
 fn checkpoint_restored_payloads(store: &JsonlSessionStore) -> Result<Vec<CheckpointRestored>> {
     let mut payloads = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_type == DurableEventType::CheckpointRestored.as_str() {
             payloads.push(serde_json::from_value(event.payload)?);
         }
@@ -77,7 +83,9 @@ fn artifact_lifecycle_payloads(
 ) -> Result<Vec<MutationArtifactLifecycleRecorded>> {
     let mut payloads = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_type == DurableEventType::MutationArtifactLifecycleRecorded.as_str() {
             payloads.push(serde_json::from_value(event.payload)?);
         }
@@ -90,7 +98,9 @@ fn artifact_cleanup_request_payloads(
 ) -> Result<Vec<MutationArtifactCleanupRequested>> {
     let mut payloads = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_type == DurableEventType::MutationArtifactCleanupRequested.as_str() {
             payloads.push(serde_json::from_value(event.payload)?);
         }
@@ -111,7 +121,9 @@ fn captured_artifact_id(
         .coordinator(workspace, file_name, None)?
         .prepare_file(file_name, &target, Some(bytes_hash(new_content.as_bytes())))?;
     for record in JsonlSessionStore::read_event_records(recorder.store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_type == DurableEventType::MutationPrepared.as_str() {
             let payload = serde_json::from_value::<MutationPrepared>(event.payload)?;
             if payload.operation_id != prepared.operation_id {
@@ -895,6 +907,7 @@ fn controlled_directory_delete_rejects_non_empty_before_prepare() -> Result<()> 
     let prepared_events = JsonlSessionStore::read_event_records(store.path())?
         .into_iter()
         .filter(|record| match record {
+            SessionStreamRecord::Legacy { .. } => false,
             SessionStreamRecord::Stored(event) => {
                 event.event_type == DurableEventType::MutationPrepared.as_str()
             }

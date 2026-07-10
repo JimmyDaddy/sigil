@@ -41,7 +41,9 @@ impl MutationEventRecorder {
         let mut latest_revision = 0;
 
         for record in JsonlSessionStore::read_event_records(self.store.path())? {
-            let crate::SessionStreamRecord::Stored(event) = record;
+            let crate::SessionStreamRecord::Stored(event) = record else {
+                continue;
+            };
             match DurableEventType::from_event_type(&event.event_type) {
                 Some(DurableEventType::MutationPrepared) => {
                     let payload = serde_json::from_value::<MutationPrepared>(event.payload.clone())
@@ -545,7 +547,9 @@ impl MutationEventRecorder {
     ) -> Result<Option<WorkspaceMutationDetected>> {
         let mut latest = None;
         for record in JsonlSessionStore::read_event_records(self.store.path())? {
-            let crate::SessionStreamRecord::Stored(event) = record;
+            let crate::SessionStreamRecord::Stored(event) = record else {
+                continue;
+            };
             if DurableEventType::from_event_type(&event.event_type)
                 != Some(DurableEventType::WorkspaceMutationDetected)
             {
@@ -567,7 +571,9 @@ pub(super) fn latest_workspace_revision(
 ) -> Result<WorkspaceRevision> {
     let mut latest = 0;
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let crate::SessionStreamRecord::Stored(event) = record;
+        let crate::SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_type == DurableEventType::MutationCommitted.as_str() {
             if let Ok(payload) = serde_json::from_value::<MutationCommitted>(event.payload.clone())
                 && payload.workspace_id.as_deref().unwrap_or(workspace_id) == workspace_id

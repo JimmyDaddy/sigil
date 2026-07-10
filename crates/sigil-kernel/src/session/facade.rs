@@ -85,7 +85,9 @@ impl Session {
     /// Appends a durable domain event that does not project into provider-visible chat history.
     ///
     /// In-memory sessions without a backing store cannot persist durable-only events, so they return
-    /// `Ok(None)` instead of fabricating an in-memory fact that would disappear on resume.
+    /// `Ok(None)` instead of fabricating an in-memory fact that would disappear on resume. This
+    /// compatibility API does not return a durable receipt and must never authorize network or
+    /// extension effects; use [`Session::durable_audit_writer`] for that boundary.
     pub fn append_durable_event(
         &mut self,
         event_type: DurableEventType,
@@ -96,6 +98,21 @@ impl Session {
             .as_ref()
             .map(|store| store.append_event(event_type, event_class, payload))
             .transpose()
+    }
+
+    /// Returns the strict store-backed writer used by pre-effect durable audit ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableAuditError::MissingDurableStore`] for an in-memory-only session.
+    pub fn durable_audit_writer(
+        &self,
+    ) -> std::result::Result<std::sync::Arc<dyn DurableAuditWriter>, DurableAuditError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or(DurableAuditError::MissingDurableStore)?;
+        Ok(std::sync::Arc::new(store.clone()))
     }
 
     /// Returns a store-backed mutation recorder for tool contexts when this session is durable.
@@ -887,13 +904,12 @@ impl Session {
     /// Returns the next session-stream sequence for synthetic evidence tied to this session.
     ///
     /// Durable-only domain events do not appear in `Session::entries`, so callers that need
-    /// stream ordering must read the durable v2 JSONL stream when a store is present.
+    /// stream ordering must use the durable mixed-stream writer state when a store is present.
     pub fn next_stream_sequence_hint(&self) -> Result<u64> {
-        let Some(path) = self.store_path() else {
+        let Some(store) = &self.store else {
             return Ok((self.entries.len() as u64).saturating_add(1));
         };
-        let records = JsonlSessionStore::read_event_records(path)?;
-        Ok(next_stream_sequence(&records))
+        store.next_stream_sequence()
     }
 
     pub fn stats(&self) -> &SessionStats {

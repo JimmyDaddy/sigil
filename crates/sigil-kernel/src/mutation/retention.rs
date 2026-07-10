@@ -668,7 +668,9 @@ fn referenced_mutation_artifact_ids(
 ) -> Result<BTreeSet<MutationArtifactId>> {
     let mut artifact_ids = BTreeSet::new();
     for record in JsonlSessionStore::read_event_records(session_log_path)? {
-        let crate::SessionStreamRecord::Stored(event) = record;
+        let crate::SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
         if event.event_type != DurableEventType::MutationPrepared.as_str() {
             continue;
         }

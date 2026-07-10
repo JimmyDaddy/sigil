@@ -729,18 +729,14 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
 }
 
 #[test]
-fn session_entry_from_json_line_decodes_v2_and_skips_unknown_noncritical() -> Result<()> {
+fn session_entry_from_json_line_decodes_legacy_v2_and_skips_unknown_noncritical() -> Result<()> {
     assert!(JsonlSessionStore::session_entry_from_json_line("  \n  ")?.is_none());
 
-    let non_v2_entry = SessionLogEntry::User(ModelMessage::user("non-v2"));
-    let non_v2_line = serde_json::to_string(&non_v2_entry)?;
-    let error = JsonlSessionStore::session_entry_from_json_line(&non_v2_line)
-        .expect_err("non-v2 session entry lines should be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("failed to decode stored event from session JSONL line")
-    );
+    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
+    let legacy_line = serde_json::to_string(&legacy_entry)?;
+    let decoded = JsonlSessionStore::session_entry_from_json_line(&legacy_line)?
+        .expect("legacy line should decode to session entry");
+    assert!(matches!(decoded, SessionLogEntry::User(_)));
 
     let v2_entry =
         SessionLogEntry::Assistant(ModelMessage::assistant(Some("v2".to_owned()), Vec::new()));
@@ -762,7 +758,7 @@ fn session_entry_from_json_line_decodes_v2_and_skips_unknown_noncritical() -> Re
         "event-future".to_owned(),
         "session-1".to_owned(),
         2,
-        serde_json::json!({ "session_log_entry": non_v2_entry }),
+        serde_json::json!({ "session_log_entry": legacy_entry }),
     )?;
     assert!(JsonlSessionStore::session_entry_from_json_line(&future.to_json_line()?)?.is_none());
 
@@ -1317,7 +1313,11 @@ fn non_v2_line_after_v2_fails_closed() -> Result<()> {
 
     let error = JsonlSessionStore::read_event_records(&path)
         .expect_err("non-v2 entry after v2 should fail closed");
-    assert!(error.to_string().contains("failed to parse stored event"));
+    assert!(
+        error
+            .to_string()
+            .contains("legacy session entry appears after v2")
+    );
     Ok(())
 }
 
@@ -1361,13 +1361,15 @@ fn append_event_reconciles_pending_tail_recovery_intent_before_append() -> Resul
     let recovered_size = fs::metadata(&path)?.len();
     let corrupt_content = format!("{}{{bad-tail", fs::read_to_string(&path)?);
     fs::write(&path, &corrupt_content)?;
+    let quarantine_path = temp.path().join("quarantined-copy");
+    fs::write(&quarantine_path, &corrupt_content)?;
     super::write_tail_recovery_intent(
         &path,
         &super::TailRecoveryIntent {
             original_size: corrupt_content.len() as u64,
             recovered_size,
             discarded_bytes: corrupt_content.len() as u64 - recovered_size,
-            quarantine_path: temp.path().join("quarantined-copy"),
+            quarantine_path,
             original_hash: stable_event_hash(corrupt_content.as_bytes()),
             event_id: "tail-recovery-event".to_owned(),
             session_id,
@@ -1572,7 +1574,9 @@ fn writer_mode_loader_recovers_tail_corruption_without_prior_records() -> Result
     let records = store.read_event_records_writer()?;
 
     assert_eq!(records.len(), 1);
-    let SessionStreamRecord::Stored(event) = &records[0];
+    let SessionStreamRecord::Stored(event) = &records[0] else {
+        panic!("tail recovery should append a stored event");
+    };
     assert_eq!(
         event.event_type,
         DurableEventType::LogTailRecovered.as_str()
@@ -1889,14 +1893,17 @@ fn writer_mode_loader_finishes_tail_recovery_intent() -> Result<()> {
     let records = JsonlSessionStore::read_event_records(&path)?;
     let session_id = records[0].session_id().to_owned();
     let recovered_size = fs::metadata(&path)?.len();
+    let corrupt_content = format!("{}{{bad-tail", fs::read_to_string(&path)?);
+    let quarantine_path = temp.path().join("quarantined-copy");
+    fs::write(&quarantine_path, &corrupt_content)?;
     super::write_tail_recovery_intent(
         &path,
         &super::TailRecoveryIntent {
-            original_size: recovered_size + 9,
+            original_size: corrupt_content.len() as u64,
             recovered_size,
-            discarded_bytes: 9,
-            quarantine_path: temp.path().join("quarantined-copy"),
-            original_hash: "sha256:original".to_owned(),
+            discarded_bytes: corrupt_content.len() as u64 - recovered_size,
+            quarantine_path,
+            original_hash: stable_event_hash(corrupt_content.as_bytes()),
             event_id: "tail-recovery-event".to_owned(),
             session_id,
         },
@@ -1928,13 +1935,15 @@ fn writer_mode_loader_replays_tail_recovery_intent_before_truncate() -> Result<(
     let recovered_size = fs::metadata(&path)?.len();
     let corrupt_content = format!("{}{{bad-tail", fs::read_to_string(&path)?);
     fs::write(&path, &corrupt_content)?;
+    let quarantine_path = temp.path().join("quarantined-copy");
+    fs::write(&quarantine_path, &corrupt_content)?;
     super::write_tail_recovery_intent(
         &path,
         &super::TailRecoveryIntent {
             original_size: corrupt_content.len() as u64,
             recovered_size,
             discarded_bytes: corrupt_content.len() as u64 - recovered_size,
-            quarantine_path: temp.path().join("quarantined-copy"),
+            quarantine_path,
             original_hash: stable_event_hash(corrupt_content.as_bytes()),
             event_id: "tail-recovery-event".to_owned(),
             session_id,
@@ -1954,6 +1963,54 @@ fn writer_mode_loader_replays_tail_recovery_intent_before_truncate() -> Result<(
     }));
     assert!(!fs::read_to_string(&path)?.contains("bad-tail"));
     assert!(!super::tail_recovery_intent_path(&path).exists());
+    Ok(())
+}
+
+#[test]
+fn session_recovery_pending_intent_rejects_valid_external_append() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let valid = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("ok")), 1)?;
+    fs::write(&path, valid)?;
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let session_id = records[0].session_id().to_owned();
+    let recovered_size = fs::metadata(&path)?.len();
+    let corrupt_content = format!("{}{{bad-tail", fs::read_to_string(&path)?);
+    let quarantine_path = temp.path().join("quarantined-copy");
+    fs::write(&quarantine_path, &corrupt_content)?;
+    super::write_tail_recovery_intent(
+        &path,
+        &super::TailRecoveryIntent {
+            original_size: corrupt_content.len() as u64,
+            recovered_size,
+            discarded_bytes: corrupt_content.len() as u64 - recovered_size,
+            quarantine_path,
+            original_hash: stable_event_hash(corrupt_content.as_bytes()),
+            event_id: "tail-recovery-event".to_owned(),
+            session_id: session_id.clone(),
+        },
+    )?;
+    let external = StoredEvent::new(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        "external-event".to_owned(),
+        session_id,
+        2,
+        serde_json::json!({ "status": "external" }),
+    )?;
+    let mut file = fs::OpenOptions::new().append(true).open(&path)?;
+    file.write_all(external.to_json_line()?.as_bytes())?;
+    file.sync_all()?;
+    let before = fs::read(&path)?;
+    let store = JsonlSessionStore::new(&path)?;
+
+    let error = store
+        .read_event_records_writer()
+        .expect_err("valid external append must not be mistaken for the recovered prefix");
+
+    assert!(format!("{error:#}").contains("recovered prefix length changed"));
+    assert_eq!(fs::read(&path)?, before);
+    assert!(super::tail_recovery_intent_path(&path).exists());
     Ok(())
 }
 
