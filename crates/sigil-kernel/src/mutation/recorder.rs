@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use crate::{
-    DurableEventType, EventClass, JsonlSessionStore, StoredEvent, verification::stable_workspace_id,
+    DurableEventType, EventClass, ExtensionProcessLifecycleAudit, JsonlSessionStore, StoredEvent,
+    verification::stable_workspace_id,
 };
 
 use super::{
@@ -187,6 +188,27 @@ impl MutationEventRecorder {
                 "committed_operations": committed_operations,
                 "failed_operations": failed_operations,
             }),
+        )
+    }
+
+    /// Appends a neutral extension-process lifecycle audit without marking the workspace dirty.
+    ///
+    /// This store-backed bridge is used by current extension launchers; RFC-0021 E21.3 will
+    /// replace the wider recorder plumbing with a dedicated linear durable writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the payload cannot be serialized or the session store cannot append
+    /// and synchronize the recovery-critical event.
+    pub fn append_extension_process_lifecycle(
+        &self,
+        payload: &ExtensionProcessLifecycleAudit,
+    ) -> Result<StoredEvent> {
+        self.store.append_event(
+            DurableEventType::ExtensionProcessLifecycleRecorded,
+            EventClass::Critical,
+            serde_json::to_value(payload)
+                .context("failed to encode extension process lifecycle payload")?,
         )
     }
 }

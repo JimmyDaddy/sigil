@@ -133,8 +133,9 @@ pub use mcp_registry::{
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder,
     build_configured_execution_backend, build_tool_registry,
     build_tool_registry_with_mcp_elicitation, build_tool_registry_with_mcp_handlers,
-    build_tool_registry_without_eager_mcp, mcp_process_receipts_summary,
-    mcp_stdio_boundary_summary, refresh_mcp_server_tools_with_mcp_handlers,
+    build_tool_registry_with_mutation_recorder, build_tool_registry_without_eager_mcp,
+    mcp_process_receipts_summary, mcp_stdio_boundary_summary,
+    refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder,
 };
 pub use provider_factory::{

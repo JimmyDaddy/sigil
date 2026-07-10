@@ -106,6 +106,13 @@ impl PluginManifest {
         }
         for server in &self.mcp_servers {
             validate_plugin_id(&server.name)?;
+            if !server.inherit_env.is_empty() {
+                bail!(
+                    "plugin {} MCP server {} cannot declare inherit_env; move credentialed MCP servers to the user root config",
+                    self.id,
+                    server.name
+                );
+            }
             if server.command.trim().is_empty() {
                 bail!(
                     "plugin {} MCP server {} has empty command",
@@ -491,6 +498,8 @@ pub struct PluginHookExecutionStartedEntry {
     pub execution_coverage: ExecutionCoverageLabel,
     #[serde(default)]
     pub sandbox_profile: ExecutionSandboxProfile,
+    #[serde(default)]
+    pub environment_policy: crate::process_environment::ProcessEnvironmentPolicy,
     #[serde(default = "default_plugin_egress_logging")]
     pub egress_logging: bool,
     #[serde(default)]
@@ -528,6 +537,8 @@ pub struct PluginHookExecutionFinishedEntry {
     pub execution_coverage: ExecutionCoverageLabel,
     #[serde(default)]
     pub sandbox_profile: ExecutionSandboxProfile,
+    #[serde(default)]
+    pub environment_policy: crate::process_environment::ProcessEnvironmentPolicy,
     #[serde(default = "default_plugin_egress_logging")]
     pub egress_logging: bool,
     #[serde(default)]

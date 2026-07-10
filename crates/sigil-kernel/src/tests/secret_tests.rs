@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::{REDACTED_SECRET, SecretRedactor};
+use crate::SecretString;
 
 #[test]
 fn redacts_known_secret_values_longest_first() {
@@ -71,6 +72,24 @@ fn secret_redactor_ignores_short_duplicates_and_empty_inputs() {
         redactor.redact_text("token sk-live-123"),
         format!("token {REDACTED_SECRET}")
     );
+}
+
+#[test]
+fn secret_carrier_redacts_short_values_keys_and_debug_output() {
+    let mut redactor = SecretRedactor::empty();
+    redactor.add_secret_carrier(SecretString::new("abc"));
+
+    assert_eq!(
+        redactor.redact_value(&json!({"abc": "value", "nested": "abc"})),
+        json!({(REDACTED_SECRET): "value", "nested": REDACTED_SECRET})
+    );
+    assert!(redactor.value_contains_secret(&json!({"abc": "value"})));
+    assert!(!format!("{redactor:?}").contains("abc"));
+
+    let mut numeric = SecretRedactor::empty();
+    numeric.add_secret_carrier(SecretString::new("1"));
+    assert_eq!(numeric.redact_value(&json!(1)), json!(REDACTED_SECRET));
+    assert!(numeric.value_contains_secret(&json!(1)));
 }
 
 #[test]

@@ -11,6 +11,7 @@ pub struct McpToolRegistrationOptions {
     pub mutation_recorder: Option<MutationEventRecorder>,
     pub mutation_workspace_root: Option<PathBuf>,
     pub process_launcher: Arc<dyn McpProcessLauncher>,
+    pub expected_process_subject: Option<ToolSubject>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,6 +40,7 @@ impl McpToolRegistrationOptions {
             mutation_recorder: None,
             mutation_workspace_root: None,
             process_launcher: Arc::new(LocalMcpProcessLauncher),
+            expected_process_subject: None,
         })
     }
 
@@ -90,6 +92,13 @@ impl McpToolRegistrationOptions {
 
     pub fn with_process_launcher(mut self, process_launcher: Arc<dyn McpProcessLauncher>) -> Self {
         self.process_launcher = process_launcher;
+        self
+    }
+
+    /// Requires the launch-time process binding to match the exact subject approved by the agent.
+    #[must_use]
+    pub fn with_expected_process_subject(mut self, subject: ToolSubject) -> Self {
+        self.expected_process_subject = Some(subject);
         self
     }
 }
@@ -160,16 +169,20 @@ pub(super) async fn register_mcp_tools_for_startup(
             Arc::clone(&options.elicitation_handler),
             Arc::clone(&options.runtime_event_handler),
             Arc::clone(&options.process_launcher),
+            options.expected_process_subject.as_ref(),
         )
         .await
         {
             Ok(client) => client,
             Err(error) if !server.required => {
+                let receipt = error
+                    .downcast_ref::<super::client::McpPostSpawnStartupError>()
+                    .map(super::client::McpPostSpawnStartupError::receipt);
                 record_mcp_server_lifecycle_scan_result(
                     &options,
                     &server.name,
                     lifecycle_scan.as_ref(),
-                    None,
+                    receipt,
                     "startup_failed",
                 )?;
                 warn!(
@@ -181,11 +194,14 @@ pub(super) async fn register_mcp_tools_for_startup(
                 continue;
             }
             Err(error) => {
+                let receipt = error
+                    .downcast_ref::<super::client::McpPostSpawnStartupError>()
+                    .map(super::client::McpPostSpawnStartupError::receipt);
                 record_mcp_server_lifecycle_scan_result(
                     &options,
                     &server.name,
                     lifecycle_scan.as_ref(),
-                    None,
+                    receipt,
                     "startup_failed",
                 )?;
                 return Err(error);
@@ -251,7 +267,6 @@ pub(super) async fn register_mcp_tools_for_startup(
                 },
                 tool_name,
                 trust: server.trust.clone(),
-                secret_redactor: options.secret_redactor.clone(),
             }));
         }
         if client.supports_resources() {
@@ -276,7 +291,6 @@ pub(super) async fn register_mcp_tools_for_startup(
                     tool_name,
                     kind: resource_kind,
                     trust: server.trust.clone(),
-                    secret_redactor: options.secret_redactor.clone(),
                 }));
             }
         }
@@ -302,7 +316,6 @@ pub(super) async fn register_mcp_tools_for_startup(
                     tool_name,
                     kind: prompt_kind,
                     trust: server.trust.clone(),
-                    secret_redactor: options.secret_redactor.clone(),
                 }));
             }
         }
@@ -360,11 +373,46 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
     else {
         return Ok(());
     };
+    let metadata = mcp_lifecycle_metadata(receipt, startup_result);
+    let status = match startup_result {
+        "registered" => ExtensionProcessLifecycleStatus::Registered,
+        "startup_failed" => ExtensionProcessLifecycleStatus::StartupFailed,
+        "tools_list_failed" => ExtensionProcessLifecycleStatus::ToolsListFailed,
+        _ => {
+            bail!("unsupported MCP lifecycle result {startup_result}");
+        }
+    };
+    recorder
+        .append_extension_process_lifecycle(&ExtensionProcessLifecycleAudit {
+            process_kind: "mcp_stdio".to_owned(),
+            subject: server_name.to_owned(),
+            phase: if receipt.is_some() {
+                ExtensionProcessLaunchPhase::PostSpawn
+            } else {
+                ExtensionProcessLaunchPhase::PreSpawn
+            },
+            status,
+            safe_metadata: metadata.clone(),
+        })
+        .with_context(|| {
+            format!("failed to record MCP server {server_name} durable lifecycle audit")
+        })?;
+    let process_name = format!("mcp_server:{server_name}");
     let Some(before) = before else {
+        recorder
+            .record_external_process_unknown_dirty_with_metadata(
+                workspace_root,
+                process_name,
+                ToolEffect::Unknown,
+                metadata,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to record MCP server {server_name} lifecycle receipt after the pre-start scan was unavailable"
+                )
+            })?;
         return Ok(());
     };
-    let metadata = mcp_lifecycle_metadata(receipt, startup_result);
-    let process_name = format!("mcp_server:{server_name}");
     match recorder.capture_workspace_scan(workspace_root, &before.scope) {
         Ok(after) => {
             recorder.record_external_process_mutation_scan_result(

@@ -10,12 +10,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ApprovalMode, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackendCapabilities,
-    ExecutionBackendKind, ExecutionSandboxProfile, McpServerConfig, McpServerPinnedIdentity,
-    McpServerStartup, McpServerTrustPolicy, MutationEventRecorder, ProviderCapabilities,
-    SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext, ToolEffect, ToolEgressAudit,
-    ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, VerificationScope, WorkspaceMutationScan,
+    ApprovalMode, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EXTENSION_ENVIRONMENT_POLICY_VERSION,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
+    ExecutionSandboxProfile, ExtensionProcessLaunchError, ExtensionProcessLaunchPhase,
+    ExtensionProcessLifecycleAudit, ExtensionProcessLifecycleStatus, McpServerConfig,
+    McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, MutationEventRecorder,
+    ProcessEnvironmentPolicy, ProviderCapabilities, ResolvedProcessEnvironment, SecretRedactor,
+    Tool, ToolAccess, ToolCategory, ToolContext, ToolEffect, ToolEgressAudit, ToolErrorKind,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -50,7 +53,10 @@ use process::drain_mcp_stderr;
 use prompts::{McpPromptTool, McpPromptToolKind};
 use resources::{McpResourceTool, McpResourceToolKind};
 use roots::{canonical_root, file_uri, root_name};
-use tools::{McpTool, McpToolDescriptor, mcp_command_fingerprint};
+use tools::{McpTool, McpToolDescriptor};
+
+#[cfg(test)]
+use tools::mcp_command_fingerprint;
 
 #[cfg(test)]
 use client::{read_message, validate_mcp_pin};
@@ -80,6 +86,7 @@ pub use process::{
     LocalMcpProcessLauncher, McpProcessClass, McpProcessCoverage, McpProcessLaunch,
     McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,
 };
+pub use tools::{mcp_launch_static_fingerprint, mcp_launch_static_fingerprint_at};
 
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]

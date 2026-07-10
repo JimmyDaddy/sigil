@@ -15,7 +15,8 @@ use sigil_kernel::{
     ExecutionBackendSelectionDiagnostic, ExecutionCleanupReceipt, ExecutionConfig,
     ExecutionNetworkReceipt, ExecutionReceipt, ExecutionRequest, ExecutionResourceLimitKind,
     ExecutionResourceLimitReceipt, ExecutionResourceReceipt, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, ExecutionTimeoutSource,
+    ExecutionSandboxProfile, ExecutionTimeoutSource, ProcessEnvironmentPolicy,
+    ResolvedProcessEnvironment, validate_extension_process_isolation,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -41,16 +42,24 @@ pub(crate) use seatbelt::macos_seatbelt_workspace_write_profile;
 #[cfg(test)]
 pub(crate) use docker::current_user_group_flag;
 
+pub(crate) fn configure_command_environment(command: &mut Command, request: &ExecutionRequest) {
+    if request.environment_policy.clears_parent() {
+        command.env_clear();
+    }
+    command.envs(&request.env);
+}
+
 /// Command plan for a long-lived stdio process that needs the same sandbox policy as built-in tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LongLivedStdioProcessPlan {
     pub program: PathBuf,
     pub args: Vec<OsString>,
     pub cwd: PathBuf,
-    pub env: BTreeMap<String, String>,
+    pub environment: ResolvedProcessEnvironment,
     pub backend: ExecutionBackendKind,
     pub backend_capabilities: ExecutionBackendCapabilities,
     pub sandbox_profile: ExecutionSandboxProfile,
+    pub network: ExecutionNetworkReceipt,
     pub sandboxed: bool,
 }
 
@@ -65,7 +74,7 @@ pub fn long_lived_stdio_process_plan(
     program: &str,
     args: &[String],
     cwd: &Path,
-    env: &BTreeMap<String, String>,
+    environment: &ResolvedProcessEnvironment,
 ) -> Result<LongLivedStdioProcessPlan> {
     if program.trim().is_empty() {
         bail!("long-lived stdio process command must not be empty");
@@ -74,6 +83,13 @@ pub fn long_lived_stdio_process_plan(
         .with_context(|| format!("failed to canonicalize cwd {}", cwd.display()))?;
     match config.backend() {
         ExecutionBackendKind::Local => {
+            let backend = LocalExecutionBackend;
+            validate_extension_process_isolation(
+                config.profile(),
+                backend.capabilities(),
+                &backend.planned_network_receipt(),
+                "mcp_stdio",
+            )?;
             if config.requires_sandbox() {
                 bail!(
                     "MCP stdio sandbox unavailable: local execution backend cannot enforce local stdio sandbox"
@@ -83,10 +99,13 @@ pub fn long_lived_stdio_process_plan(
                 program: PathBuf::from(program),
                 args: args.iter().map(OsString::from).collect(),
                 cwd: canonical_cwd,
-                env: env.clone(),
+                environment: environment.clone(),
                 backend: ExecutionBackendKind::Local,
                 backend_capabilities: ExecutionBackendCapabilities::default(),
                 sandbox_profile: ExecutionSandboxProfile::Unconfined,
+                network: ExecutionNetworkReceipt::unknown(
+                    "local MCP stdio process does not report network enforcement",
+                ),
                 sandboxed: false,
             })
         }
@@ -94,7 +113,11 @@ pub fn long_lived_stdio_process_plan(
             let backend = MacosSeatbeltExecutionBackend::default()
                 .with_network_allowed(config.profile_spec().network_allowed);
             let capabilities = backend.capabilities();
-            validate_long_lived_stdio_capabilities(config, capabilities)?;
+            validate_long_lived_stdio_capabilities(
+                config,
+                capabilities,
+                &backend.planned_network_receipt(),
+            )?;
             if let Err(error) = ensure_macos_seatbelt_available(&backend) {
                 bail!("MCP stdio sandbox unavailable: {error}");
             }
@@ -109,10 +132,17 @@ pub fn long_lived_stdio_process_plan(
                 program: PathBuf::from("/usr/bin/sandbox-exec"),
                 args: planned_args,
                 cwd: canonical_cwd,
-                env: env.clone(),
+                environment: environment.clone(),
                 backend: ExecutionBackendKind::MacosSeatbelt,
                 backend_capabilities: capabilities,
                 sandbox_profile: config.profile(),
+                network: if config.profile_spec().network_allowed {
+                    ExecutionNetworkReceipt::allowed("profile allows network access")
+                } else {
+                    ExecutionNetworkReceipt::unsupported(
+                        "macos_seatbelt cannot prove network denial",
+                    )
+                },
                 sandboxed: true,
             })
         }
@@ -127,7 +157,11 @@ pub fn long_lived_stdio_process_plan(
                 config.profile_spec().network_allowed,
             );
             let capabilities = backend.capabilities();
-            validate_long_lived_stdio_capabilities(config, capabilities)?;
+            validate_long_lived_stdio_capabilities(
+                config,
+                capabilities,
+                &backend.planned_network_receipt(),
+            )?;
             if let Err(error) = ensure_linux_bubblewrap_available(&backend) {
                 bail!("MCP stdio sandbox unavailable: {error}");
             }
@@ -135,7 +169,8 @@ pub fn long_lived_stdio_process_plan(
                 program: program.to_owned(),
                 args: args.to_vec(),
                 cwd: canonical_cwd.clone(),
-                env: env.clone(),
+                env: BTreeMap::new(),
+                environment_policy: ProcessEnvironmentPolicy::IsolatedExtension,
                 timeout_ms: None,
                 timeout_secs: 0,
                 cpu_time_ms: None,
@@ -153,10 +188,15 @@ pub fn long_lived_stdio_process_plan(
                 program: bwrap,
                 args: planned_args,
                 cwd: canonical_cwd,
-                env: env.clone(),
+                environment: environment.clone(),
                 backend: ExecutionBackendKind::LinuxBubblewrap,
                 backend_capabilities: capabilities,
                 sandbox_profile: config.profile(),
+                network: if config.profile_spec().network_allowed {
+                    ExecutionNetworkReceipt::allowed("profile allows network access")
+                } else {
+                    ExecutionNetworkReceipt::denied("bubblewrap uses --unshare-net")
+                },
                 sandboxed: true,
             })
         }
@@ -171,7 +211,14 @@ pub fn long_lived_stdio_process_plan(
 fn validate_long_lived_stdio_capabilities(
     config: &ExecutionConfig,
     capabilities: ExecutionBackendCapabilities,
+    planned_network: &ExecutionNetworkReceipt,
 ) -> Result<()> {
+    validate_extension_process_isolation(
+        config.profile(),
+        capabilities,
+        planned_network,
+        "mcp_stdio",
+    )?;
     let requirements = config.required_capabilities_for_persistent_pty();
     let missing = capabilities.missing_requirements(requirements);
     if !missing.is_empty() {
@@ -421,6 +468,7 @@ pub(crate) async fn command_output_to_receipt(
         capabilities,
         network,
         resources,
+        environment_policy: request.environment_policy,
         exit_code,
         stdout,
         stderr,

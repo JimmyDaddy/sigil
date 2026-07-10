@@ -5,7 +5,7 @@ use sigil_kernel::{
 };
 use tokio::process::Command;
 
-use super::command_output_to_receipt;
+use super::{command_output_to_receipt, configure_command_environment};
 
 #[derive(Debug, Default)]
 pub struct LocalExecutionBackend;
@@ -17,6 +17,12 @@ impl ExecutionBackend for LocalExecutionBackend {
 
     fn capabilities(&self) -> ExecutionBackendCapabilities {
         ExecutionBackendCapabilities::default()
+    }
+
+    fn planned_network_receipt(&self) -> ExecutionNetworkReceipt {
+        ExecutionNetworkReceipt::unknown(
+            "local execution backend does not enforce a network policy",
+        )
     }
 
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
@@ -33,8 +39,8 @@ pub(crate) async fn local_execute(
     command
         .args(&request.args)
         .current_dir(&request.cwd)
-        .envs(&request.env)
         .kill_on_drop(true);
+    configure_command_environment(&mut command, &request);
 
     command_output_to_receipt(
         backend,

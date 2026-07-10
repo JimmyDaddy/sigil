@@ -15,6 +15,7 @@ use crate::{
     execution_backend::ExecutionConfig,
     mutation::MutationArtifactRetentionPolicy,
     permission::{ApprovalMode, PermissionConfig},
+    process_environment::normalize_environment_variable_names,
     provider::ReasoningEffort,
     task::AgentRole,
     verification::VerificationConfig,
@@ -1109,6 +1110,13 @@ pub struct McpServerConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_inherit_env",
+        serialize_with = "serialize_inherit_env"
+    )]
+    pub inherit_env: Vec<String>,
     #[serde(default = "default_startup_timeout_secs")]
     pub startup_timeout_secs: u64,
     #[serde(default = "default_mcp_server_required")]
@@ -1125,12 +1133,29 @@ impl Default for McpServerConfig {
             name: String::new(),
             command: String::new(),
             args: Vec::new(),
+            inherit_env: Vec::new(),
             startup_timeout_secs: default_startup_timeout_secs(),
             required: default_mcp_server_required(),
             startup: McpServerStartup::default(),
             trust: McpServerTrustPolicy::default(),
         }
     }
+}
+
+fn deserialize_inherit_env<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let names = Vec::<String>::deserialize(deserializer)?;
+    normalize_environment_variable_names(&names).map_err(serde::de::Error::custom)
+}
+
+fn serialize_inherit_env<S>(names: &[String], serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let names = normalize_environment_variable_names(names).map_err(serde::ser::Error::custom)?;
+    names.serialize(serializer)
 }
 
 /// MCP server startup strategy.
@@ -1273,7 +1298,7 @@ fn default_code_intel_report_missing() -> bool {
 }
 
 fn default_terminal_mouse_capture() -> bool {
-    false
+    true
 }
 
 fn default_terminal_keyboard_enhancement() -> TerminalKeyboardEnhancement {

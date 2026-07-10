@@ -11,7 +11,9 @@ use sigil_kernel::{
 };
 use tokio::process::Command;
 
-use super::{command_output_to_receipt, command_output_with_timeout};
+use super::{
+    command_output_to_receipt, command_output_with_timeout, configure_command_environment,
+};
 
 #[derive(Debug, Clone)]
 pub struct DockerExecutionBackend {
@@ -54,6 +56,14 @@ impl ExecutionBackend for DockerExecutionBackend {
             resource_limits: false,
             persistent_pty: false,
             workspace_snapshot: false,
+        }
+    }
+
+    fn planned_network_receipt(&self) -> ExecutionNetworkReceipt {
+        if self.network_allowed {
+            ExecutionNetworkReceipt::allowed("profile allows network access")
+        } else {
+            ExecutionNetworkReceipt::denied("docker launch plan uses --network none")
         }
     }
 
@@ -139,6 +149,7 @@ pub(crate) async fn docker_execute(
         .arg(&request.program)
         .args(&request.args)
         .kill_on_drop(true);
+    configure_command_environment(&mut command, &request);
 
     let network = if network_allowed {
         ExecutionNetworkReceipt::allowed("profile allows network access")

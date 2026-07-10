@@ -4,7 +4,12 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
-use crate::tool::ToolCategory;
+use crate::{
+    process_environment::{
+        ExtensionProcessLaunchError, ExtensionProcessLaunchErrorCode, ProcessEnvironmentPolicy,
+    },
+    tool::ToolCategory,
+};
 
 /// Stable identifier for an execution backend implementation.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -605,6 +610,77 @@ impl ExecutionSandboxProfile {
     }
 }
 
+/// Validates extension process-tree isolation before a backend may spawn a process.
+///
+/// This uses the existing execution profile as the launch intent. It deliberately does not add
+/// the independent network permission lattice tracked by RFC-0021 E21.6. Both static capability
+/// and the concrete backend instance's planned network receipt are required so a backend that can
+/// isolate networking but is configured to allow it cannot pass a deny preflight.
+///
+/// # Errors
+///
+/// Returns a typed pre-spawn error when required process-tree isolation is unavailable, or when a
+/// network-deny profile is not bound to a denied network launch plan.
+pub fn validate_extension_process_isolation(
+    profile: ExecutionSandboxProfile,
+    capabilities: ExecutionBackendCapabilities,
+    planned_network: &ExecutionNetworkReceipt,
+    subject: impl Into<String>,
+) -> std::result::Result<(), ExtensionProcessLaunchError> {
+    let subject = subject.into();
+    let spec = profile.spec();
+    if spec.requires_sandbox && !capabilities.process_isolation {
+        return Err(ExtensionProcessLaunchError::isolation_unavailable(
+            ExtensionProcessLaunchErrorCode::ProcessIsolationUnavailable,
+            subject,
+            format!(
+                "extension process profile {} requires process-tree isolation before spawn",
+                profile.as_str()
+            ),
+        ));
+    }
+    if !spec.network_allowed
+        && (!capabilities.network_isolation
+            || !capabilities.process_isolation
+            || !planned_network.is_denied())
+    {
+        return Err(ExtensionProcessLaunchError::isolation_unavailable(
+            ExtensionProcessLaunchErrorCode::NetworkIsolationUnavailable,
+            subject,
+            format!(
+                "extension process profile {} denies network access but the backend launch plan is {} and cannot prove network and process-tree isolation",
+                profile.as_str(),
+                planned_network.policy.as_str()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Cross-checks the backend receipt after an extension process ran under network-deny intent.
+///
+/// # Errors
+///
+/// Returns a typed receipt error when a network-deny profile did not produce a denied receipt.
+pub fn validate_extension_process_network_receipt(
+    profile: ExecutionSandboxProfile,
+    receipt: &ExecutionNetworkReceipt,
+    subject: impl Into<String>,
+) -> std::result::Result<(), ExtensionProcessLaunchError> {
+    if !profile.spec().network_allowed && !receipt.is_denied() {
+        return Err(ExtensionProcessLaunchError::isolation_unavailable(
+            ExtensionProcessLaunchErrorCode::BackendReceiptInvalid,
+            subject,
+            format!(
+                "extension process profile {} requires a denied network receipt, observed {}",
+                profile.as_str(),
+                receipt.policy.as_str()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ExecutionSandboxProfileSpec {
@@ -943,6 +1019,8 @@ pub struct ExecutionRequest {
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub environment_policy: ProcessEnvironmentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     pub timeout_secs: u64,
@@ -984,6 +1062,8 @@ pub struct ExecutionReceipt {
     pub network: ExecutionNetworkReceipt,
     #[serde(default)]
     pub resources: ExecutionResourceReceipt,
+    #[serde(default)]
+    pub environment_policy: ProcessEnvironmentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default)]
@@ -1000,6 +1080,16 @@ pub trait ExecutionBackend: Send + Sync {
     fn kind(&self) -> ExecutionBackendKind;
 
     fn capabilities(&self) -> ExecutionBackendCapabilities;
+
+    /// Returns the network policy that this concrete backend instance will apply to its next
+    /// execution. Extension-process callers use this pre-spawn plan in addition to capability
+    /// flags; capability alone only means that a backend can enforce isolation, not that the
+    /// current instance is configured to do so.
+    fn planned_network_receipt(&self) -> ExecutionNetworkReceipt {
+        ExecutionNetworkReceipt::unknown(
+            "execution backend did not declare a pre-spawn network enforcement plan",
+        )
+    }
 
     /// Executes one non-interactive command.
     ///

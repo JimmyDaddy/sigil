@@ -59,6 +59,7 @@ impl ExecutionBackend for FakeVerificationBackend {
                     "fake local backend does not report network enforcement",
                 ),
                 resources: Default::default(),
+                environment_policy: request.environment_policy,
                 exit_code: if timed_out {
                     None
                 } else if failed {
@@ -105,6 +106,7 @@ impl ExecutionBackend for FakeSandboxVerificationBackend {
                 capabilities,
                 network: ExecutionNetworkReceipt::denied("fake sandbox denied network"),
                 resources: Default::default(),
+                environment_policy: request.environment_policy,
                 exit_code: Some(0),
                 stdout: format!("fake sandbox executed {}\n", request.program).into_bytes(),
                 stderr: Vec::new(),
@@ -4001,6 +4003,7 @@ fn plugin_verification_hook_started(effect: ToolEffect) -> PluginHookExecutionSt
         backend_capabilities: capabilities,
         execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
         sandbox_profile: ExecutionSandboxProfile::WorkspaceWrite,
+        environment_policy: crate::ProcessEnvironmentPolicy::IsolatedExtension,
         egress_logging: true,
         allow_secrets: false,
     }
@@ -4030,6 +4033,7 @@ fn plugin_verification_hook_finished(
         backend_capabilities: started.backend_capabilities,
         execution_coverage: started.execution_coverage,
         sandbox_profile: started.sandbox_profile,
+        environment_policy: started.environment_policy,
         egress_logging: started.egress_logging,
         allow_secrets: started.allow_secrets,
         network: ExecutionNetworkReceipt::denied("plugin hook sandbox denied network"),

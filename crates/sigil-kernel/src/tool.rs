@@ -255,6 +255,32 @@ impl ToolSubject {
         }
     }
 
+    /// Creates an MCP trust subject whose durable identity binds one concrete process environment.
+    ///
+    /// The stable normalized value remains suitable for permission-rule matching, while the
+    /// original value retains the static and live fingerprints for approval/audit consumers.
+    #[must_use]
+    pub fn mcp_trust_class_with_process_binding(
+        server_name: impl Into<String>,
+        trust_class: impl Into<String>,
+        static_fingerprint: impl AsRef<str>,
+        live_fingerprint: impl AsRef<str>,
+    ) -> Self {
+        let server_name = server_name.into();
+        let trust_class = trust_class.into();
+        Self {
+            kind: ToolSubjectKind::McpTrustClass,
+            original: format!(
+                "{server_name}:{trust_class}:{}:{}",
+                static_fingerprint.as_ref(),
+                live_fingerprint.as_ref()
+            ),
+            normalized: format!("mcp_trust_class:{trust_class}"),
+            canonical_path: None,
+            scope: ToolSubjectScope::Unknown,
+        }
+    }
+
     pub fn agent(profile_id: impl Into<String>) -> Self {
         let profile_id = profile_id.into();
         Self {
@@ -330,6 +356,7 @@ pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub timeout_secs: u64,
     pub mutation_recorder: Option<MutationEventRecorder>,
+    approved_subjects: Vec<ToolSubject>,
     progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
 }
@@ -340,6 +367,7 @@ impl std::fmt::Debug for ToolContext {
             .field("workspace_root", &self.workspace_root)
             .field("timeout_secs", &self.timeout_secs)
             .field("mutation_recorder", &self.mutation_recorder.is_some())
+            .field("approved_subjects", &self.approved_subjects.len())
             .field("progress_sink", &self.progress_sink.is_some())
             .field(
                 "execution_mutation_profile_recorded_call_ids",
@@ -356,6 +384,7 @@ impl ToolContext {
             workspace_root: workspace_root.into(),
             timeout_secs,
             mutation_recorder: None,
+            approved_subjects: Vec::new(),
             progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
         }
@@ -365,6 +394,22 @@ impl ToolContext {
     pub fn with_mutation_recorder(mut self, recorder: MutationEventRecorder) -> Self {
         self.mutation_recorder = Some(recorder);
         self
+    }
+
+    /// Carries the exact subjects authorized by the agent into the execution boundary.
+    ///
+    /// This does not grant permission by itself. Tools may use it only to fail closed when a
+    /// dynamic subject changes after approval and before an external effect starts.
+    #[must_use]
+    pub fn with_approved_subjects(mut self, subjects: Vec<ToolSubject>) -> Self {
+        self.approved_subjects = subjects;
+        self
+    }
+
+    /// Returns the exact subjects authorized for this execution, if it was dispatched by an agent.
+    #[must_use]
+    pub fn approved_subjects(&self) -> &[ToolSubject] {
+        &self.approved_subjects
     }
 
     #[must_use]

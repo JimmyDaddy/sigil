@@ -250,6 +250,7 @@ fn plugin_hook_execution_control_entries_round_trip() {
         backend_capabilities: ExecutionBackendCapabilities::default(),
         execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
         sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        environment_policy: crate::ProcessEnvironmentPolicy::IsolatedExtension,
         egress_logging: true,
         allow_secrets: false,
     };
@@ -269,6 +270,7 @@ fn plugin_hook_execution_control_entries_round_trip() {
         backend_capabilities: ExecutionBackendCapabilities::default(),
         execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
         sandbox_profile: ExecutionSandboxProfile::Unconfined,
+        environment_policy: crate::ProcessEnvironmentPolicy::IsolatedExtension,
         egress_logging: true,
         allow_secrets: false,
         network: ExecutionNetworkReceipt::default(),
@@ -433,6 +435,13 @@ fn plugin_manifest_validation_rejects_unsafe_edges() {
     let mut empty_mcp_command = sample_manifest();
     empty_mcp_command.mcp_servers[0].command.clear();
     assert!(empty_mcp_command.validate().is_err());
+
+    let mut plugin_environment_grant = sample_manifest();
+    plugin_environment_grant.mcp_servers[0].inherit_env = vec!["PLUGIN_TOKEN".to_owned()];
+    let error = plugin_environment_grant
+        .validate()
+        .expect_err("plugin environment grants must be rejected");
+    assert!(error.to_string().contains("cannot declare inherit_env"));
 }
 
 #[test]

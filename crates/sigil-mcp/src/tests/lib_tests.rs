@@ -7,14 +7,15 @@ use std::{
 use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ApprovalMode, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
+    ApprovalMode, DurableEventType, ExtensionProcessLaunchPhase, ExtensionProcessLifecycleAudit,
+    ExtensionProcessLifecycleStatus, JsonlSessionStore, McpServerConfig, McpServerStartup,
     McpServerTrustPolicy, McpTrustClass, MutationEventRecorder, ProviderCapabilities,
     ReasoningStreamSupport, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
-    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason,
+    ToolRegistry, ToolResultStatus, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
 };
 use tokio::{
-    io::BufReader,
+    io::{AsyncReadExt, BufReader},
     process::{ChildStdout, Command},
 };
 
@@ -253,7 +254,8 @@ async fn local_mcp_process_launcher_marks_stdio_outside_sandbox() -> Result<()> 
         command: "sh".to_owned(),
         args: vec!["-c".to_owned(), "sleep 1".to_owned()],
         working_dir: Some(temp.path().to_path_buf()),
-        env: Default::default(),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: McpProcessClass::LocalStdioConfigured,
     })?;
@@ -277,6 +279,457 @@ async fn local_mcp_process_launcher_marks_stdio_outside_sandbox() -> Result<()> 
 
     let mut child = launch.child;
     let _ = child.kill().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extension_process_environment_clears_ambient_and_injects_only_grants() -> Result<()> {
+    let Some(home) = std::env::var("HOME").ok() else {
+        return Ok(());
+    };
+    let temp = tempfile::tempdir()?;
+    let run = |grant_names: &[String]| -> Result<_> {
+        LocalMcpProcessLauncher.launch(McpProcessLaunchRequest {
+            server_name: "environment-test".to_owned(),
+            command: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "printf '%s|%s' \"${HOME-unset}\" \"${PATH-unset}\"".to_owned(),
+            ],
+            working_dir: Some(temp.path().to_path_buf()),
+            environment: sigil_kernel::resolve_extension_process_environment(grant_names)?,
+            launch_static_fingerprint: "sha256:test-launch".to_owned(),
+            startup_timeout_secs: 1,
+            classification: McpProcessClass::LocalStdioConfigured,
+        })
+    };
+
+    let mut isolated = run(&[])?;
+    let mut isolated_stdout = isolated
+        .child
+        .stdout
+        .take()
+        .expect("isolated stdout should be piped");
+    let mut isolated_output = String::new();
+    isolated_stdout.read_to_string(&mut isolated_output).await?;
+    isolated.child.wait().await?;
+    assert!(isolated_output.starts_with("unset|"));
+    assert!(!isolated_output.ends_with("|unset"));
+
+    let mut granted = run(&["HOME".to_owned()])?;
+    let metadata = granted.receipt.audit_metadata();
+    let metadata_text = format!("{metadata:?}");
+    assert_eq!(granted.receipt.environment_grant_names, vec!["HOME"]);
+    assert_eq!(
+        granted.receipt.environment_policy,
+        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
+    );
+    assert!(!metadata_text.contains(&home));
+    assert_eq!(metadata["mcp_environment_grant_names"], "HOME");
+    let mut granted_stdout = granted
+        .child
+        .stdout
+        .take()
+        .expect("granted stdout should be piped");
+    let mut granted_output = String::new();
+    granted_stdout.read_to_string(&mut granted_output).await?;
+    granted.child.wait().await?;
+    assert!(granted_output.starts_with(&format!("{home}|")));
+    Ok(())
+}
+
+#[test]
+fn mcp_environment_grant_is_orthogonal_to_payload_secret_policy() -> Result<()> {
+    if std::env::var("HOME").is_err() {
+        return Ok(());
+    }
+    for allow_secrets in [false, true] {
+        let config = McpServerConfig {
+            name: "orthogonal".to_owned(),
+            command: "sh".to_owned(),
+            inherit_env: vec!["HOME".to_owned()],
+            trust: McpServerTrustPolicy {
+                allow_secrets,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        };
+        let request = McpProcessLaunchRequest::from_config(&config, None)?;
+        assert_eq!(request.environment.grant_names(), &["HOME"]);
+    }
+    Ok(())
+}
+
+#[test]
+fn missing_mcp_environment_grant_is_typed_pre_spawn_configuration_error() {
+    let config = McpServerConfig {
+        name: "missing-env".to_owned(),
+        command: "definitely-must-not-spawn".to_owned(),
+        inherit_env: vec!["SIGIL_E21_ENV_THAT_MUST_NOT_EXIST_7F33".to_owned()],
+        ..McpServerConfig::default()
+    };
+    let error = McpProcessLaunchRequest::from_config(&config, None)
+        .expect_err("missing environment grant should fail before launch");
+    assert_eq!(
+        error
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::ConfigurationInvalid)
+    );
+}
+
+#[tokio::test]
+async fn pre_spawn_failure_records_lifecycle_without_launch_receipt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let marker = temp.path().join("pre-spawn-marker");
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let error = register_mcp_tools_with_options(
+        &mut ToolRegistry::new(),
+        &[McpServerConfig {
+            name: "missing-env-audit".to_owned(),
+            command: "sh".to_owned(),
+            args: vec!["-c".to_owned(), format!("touch {}", marker.display())],
+            inherit_env: vec!["SIGIL_E21_ENV_THAT_MUST_NOT_EXIST_41C2".to_owned()],
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone())),
+    )
+    .await
+    .expect_err("missing grant must fail before spawn");
+    assert!(
+        error
+            .to_string()
+            .contains("missing inherited environment variables")
+    );
+    assert!(!marker.exists());
+
+    let lifecycle = JsonlSessionStore::read_event_records(session_store.path())?
+        .into_iter()
+        .find_map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ExtensionProcessLifecycleRecorded.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .expect("pre-spawn failure should be durably distinguished");
+    let payload: ExtensionProcessLifecycleAudit = serde_json::from_value(lifecycle.payload)?;
+    assert_eq!(payload.phase, ExtensionProcessLaunchPhase::PreSpawn);
+    assert_eq!(
+        payload.status,
+        ExtensionProcessLifecycleStatus::StartupFailed
+    );
+    assert_eq!(payload.safe_metadata["mcp_process_coverage"], "unsupported");
+    assert!(
+        !payload
+            .safe_metadata
+            .contains_key("mcp_environment_live_fingerprint")
+    );
+    Ok(())
+}
+
+#[test]
+fn changed_live_environment_fingerprint_invalidates_process_binding() -> Result<()> {
+    let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
+    let request = McpProcessLaunchRequest {
+        server_name: "binding".to_owned(),
+        command: "sh".to_owned(),
+        args: Vec::new(),
+        working_dir: None,
+        environment: environment.clone(),
+        launch_static_fingerprint: "sha256:binding".to_owned(),
+        startup_timeout_secs: 1,
+        classification: McpProcessClass::LocalStdioConfigured,
+    };
+    let mut receipt = super::McpProcessLaunchReceipt::local_outside_sandbox(&request);
+    assert!(super::client::environment_binding_matches(
+        &receipt,
+        &environment
+    ));
+    receipt.environment_live_fingerprint = "hmac-sha256:changed".to_owned();
+    assert!(!super::client::environment_binding_matches(
+        &receipt,
+        &environment
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn credentialed_mcp_redacts_grant_across_identity_descriptors_results_and_args_gate()
+-> Result<()> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Ok(());
+    };
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("secret-argument-reached-server");
+    let script = temp.path().join("credential_echo_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+
+SECRET = os.environ["HOME"]
+MARKER = pathlib.Path(sys.argv[1])
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    return json.loads(sys.stdin.buffer.read(length).decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":SECRET,"version":SECRET},"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"leak","description":SECRET,"inputSchema":{"type":"object","properties":{SECRET:{"type":"string"},"value":{"type":"string","description":SECRET}}}}]}})
+    elif method == "tools/call":
+        value = message["params"]["arguments"].get("value", "")
+        if value == SECRET:
+            MARKER.write_text("leaked", encoding="utf-8")
+        if value == "error":
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":SECRET}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":SECRET}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "credential-echo".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![
+                script.to_string_lossy().into_owned(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            inherit_env: vec!["HOME".to_owned()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                approval_default: ApprovalMode::Allow,
+                allow_secrets: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let spec = registry
+        .spec_for("mcp__credential_echo__leak")
+        .expect("credentialed MCP tool should register");
+    assert_eq!(spec.description, "[redacted]");
+    assert!(!serde_json::to_string(&spec.input_schema)?.contains(&home));
+
+    let egress = registry
+        .egress_audit(
+            &ToolContext::new(temp.path().to_path_buf(), 5),
+            &sigil_kernel::ToolCall {
+                id: "identity".to_owned(),
+                name: "mcp__credential_echo__leak".to_owned(),
+                args_json: r#"{"value":"ordinary"}"#.to_owned(),
+            },
+        )?
+        .expect("egress audit should exist");
+    let egress_text = serde_json::to_string(&egress.payload)?;
+    assert!(!egress_text.contains(&home));
+    assert!(egress_text.contains("[redacted]"));
+
+    let secret_key_args = Value::Object(
+        [(home.clone(), Value::String("ordinary".to_owned()))]
+            .into_iter()
+            .collect(),
+    );
+    let secret_key_egress = registry
+        .egress_audit(
+            &ToolContext::new(temp.path().to_path_buf(), 5),
+            &sigil_kernel::ToolCall {
+                id: "identity-secret-key".to_owned(),
+                name: "mcp__credential_echo__leak".to_owned(),
+                args_json: serde_json::to_string(&secret_key_args)?,
+            },
+        )?
+        .expect("secret-key egress audit should exist");
+    let secret_key_egress_text = serde_json::to_string(&secret_key_egress.payload)?;
+    assert!(!secret_key_egress_text.contains(&home));
+    assert!(secret_key_egress_text.contains("[redacted]"));
+
+    let blocked = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            sigil_kernel::ToolCall {
+                id: "blocked-secret".to_owned(),
+                name: "mcp__credential_echo__leak".to_owned(),
+                args_json: serde_json::to_string(&json!({"value": home}))?,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        blocked.status,
+        ToolResultStatus::Error(ref error) if error.kind == ToolErrorKind::PermissionDenied
+    ));
+    assert!(!marker.exists(), "blocked secret must not reach MCP bytes");
+
+    let echoed = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            sigil_kernel::ToolCall {
+                id: "echoed-secret".to_owned(),
+                name: "mcp__credential_echo__leak".to_owned(),
+                args_json: r#"{"value":"echo"}"#.to_owned(),
+            },
+        )
+        .await?;
+    assert_eq!(echoed.content, "[redacted]");
+    assert!(!format!("{echoed:?}").contains(&home));
+
+    let protocol_error = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            sigil_kernel::ToolCall {
+                id: "protocol-secret".to_owned(),
+                name: "mcp__credential_echo__leak".to_owned(),
+                args_json: r#"{"value":"error"}"#.to_owned(),
+            },
+        )
+        .await?;
+    assert!(!format!("{protocol_error:?}").contains(&home));
+    assert!(format!("{protocol_error:?}").contains("[redacted]"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn credentialed_mcp_redacts_grant_from_registration_protocol_error() -> Result<()> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Ok(());
+    };
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("credential_error_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+
+SECRET = os.environ["HOME"]
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])).decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":SECRET}})
+"#,
+    )?;
+    let error = register_mcp_tools(
+        &mut ToolRegistry::new(),
+        &[McpServerConfig {
+            name: "credential-error".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().into_owned()],
+            inherit_env: vec!["HOME".to_owned()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await
+    .expect_err("tools/list error should fail required registration");
+    let error_text = format!("{error:#}");
+    assert!(!error_text.contains(&home));
+    assert!(error_text.contains("[redacted]"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_environment_binding_rejects_inbound_notification_before_handler() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("binding_mcp_server.py");
+    write_identity_server_script(&script, "binding", "1.0.0")?;
+    let handler = Arc::new(RecordingMcpRuntimeEventHandler::default());
+    let runtime_handler: Arc<dyn McpRuntimeEventHandler> = handler.clone();
+    let mut client = super::client::McpClient::spawn(
+        McpServerConfig {
+            name: "binding".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().into_owned()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        },
+        vec![temp.path().to_path_buf()],
+        Some(temp.path().to_path_buf()),
+        SecretRedactor::empty(),
+        super::unsupported_mcp_elicitation_handler(),
+        runtime_handler,
+        Arc::new(LocalMcpProcessLauncher),
+        None,
+    )
+    .await?;
+    client._process_receipt.environment_live_fingerprint = "hmac-sha256:stale".to_owned();
+    let mut connection = client.connection.lock().await;
+    let error = client
+        .handle_inbound_message(
+            &mut connection,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {"progressToken": "stale", "message": "must-not-surface"}
+            }),
+        )
+        .await
+        .expect_err("stale binding must reject inbound messages");
+    assert_eq!(
+        error
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::EnvironmentBindingChanged)
+    );
+    assert!(handler.progress.lock().expect("progress lock").is_empty());
     Ok(())
 }
 
@@ -364,7 +817,7 @@ while True:
     assert_eq!(subjects[0].normalized, "mcp__fake__echo");
     assert_eq!(subjects[0].scope, ToolSubjectScope::Unknown);
     assert_eq!(subjects[1].kind, ToolSubjectKind::McpTrustClass);
-    assert_eq!(subjects[1].original, "fake:third_party");
+    assert!(subjects[1].original.starts_with("fake:third_party:sha256:"));
     assert_eq!(subjects[1].normalized, "mcp_trust_class:third_party");
     assert_eq!(subjects[1].scope, ToolSubjectScope::Unknown);
 
@@ -438,6 +891,9 @@ while True:
 
 #[tokio::test]
 async fn registration_with_mutation_recorder_does_not_dirty_clean_startup() -> Result<()> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Ok(());
+    };
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -488,6 +944,7 @@ while True:
             name: "lifecycle".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
+            inherit_env: vec!["HOME".to_owned()],
             startup_timeout_secs: 5,
             trust: McpServerTrustPolicy {
                 trust_class: McpTrustClass::ThirdParty,
@@ -502,21 +959,33 @@ while True:
     .await?;
 
     assert!(registry.spec_for("mcp__lifecycle__echo").is_some());
-    let detected = JsonlSessionStore::read_event_records(session_store.path())?
+    let events = JsonlSessionStore::read_event_records(session_store.path())?
         .into_iter()
-        .filter_map(|record| match record {
-            sigil_kernel::SessionStreamRecord::Stored(event)
-                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
-            {
-                Some(event)
-            }
-            _ => None,
+        .map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event) => event,
         })
         .collect::<Vec<_>>();
     assert!(
-        detected.is_empty(),
+        events
+            .iter()
+            .all(|event| event.event_type != DurableEventType::WorkspaceMutationDetected.as_str()),
         "clean MCP startup must not make verification inconclusive"
     );
+    let lifecycle = events
+        .iter()
+        .find(|event| {
+            event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
+        })
+        .expect("clean startup should record neutral durable lifecycle evidence");
+    let payload: ExtensionProcessLifecycleAudit =
+        serde_json::from_value(lifecycle.payload.clone())?;
+    assert_eq!(payload.process_kind, "mcp_stdio");
+    assert_eq!(payload.subject, "lifecycle");
+    assert_eq!(payload.phase, ExtensionProcessLaunchPhase::PostSpawn);
+    assert_eq!(payload.status, ExtensionProcessLifecycleStatus::Registered);
+    assert_eq!(payload.safe_metadata["mcp_environment_grant_names"], "HOME");
+    assert!(!payload.safe_metadata["mcp_environment_live_fingerprint"].is_empty());
+    assert!(!serde_json::to_string(&payload)?.contains(&home));
     Ok(())
 }
 
@@ -613,6 +1082,9 @@ while True:
 
 #[tokio::test]
 async fn mcp_startup_failure_without_workspace_change_does_not_dirty() -> Result<()> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Ok(());
+    };
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -634,6 +1106,7 @@ sys.exit(7)
             name: "crashy".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
+            inherit_env: vec!["HOME".to_owned()],
             startup_timeout_secs: 5,
             trust: McpServerTrustPolicy {
                 trust_class: McpTrustClass::ThirdParty,
@@ -649,21 +1122,34 @@ sys.exit(7)
     .expect_err("startup failure should still surface");
 
     assert!(registry.specs().is_empty());
-    let detected = JsonlSessionStore::read_event_records(session_store.path())?
+    let events = JsonlSessionStore::read_event_records(session_store.path())?
         .into_iter()
-        .filter_map(|record| match record {
-            sigil_kernel::SessionStreamRecord::Stored(event)
-                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
-            {
-                Some(event)
-            }
-            _ => None,
+        .map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event) => event,
         })
         .collect::<Vec<_>>();
     assert!(
-        detected.is_empty(),
+        events
+            .iter()
+            .all(|event| event.event_type != DurableEventType::WorkspaceMutationDetected.as_str()),
         "failed MCP startup without workspace writes must not stale verification"
     );
+    let lifecycle = events
+        .iter()
+        .find(|event| {
+            event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
+        })
+        .expect("post-spawn failure should retain a neutral durable launch receipt");
+    let payload: ExtensionProcessLifecycleAudit =
+        serde_json::from_value(lifecycle.payload.clone())?;
+    assert_eq!(payload.phase, ExtensionProcessLaunchPhase::PostSpawn);
+    assert_eq!(
+        payload.status,
+        ExtensionProcessLifecycleStatus::StartupFailed
+    );
+    assert_eq!(payload.safe_metadata["mcp_environment_grant_names"], "HOME");
+    assert!(!payload.safe_metadata["mcp_launch_static_fingerprint"].is_empty());
+    assert!(!serde_json::to_string(&payload)?.contains(&home));
     Ok(())
 }
 
@@ -737,6 +1223,27 @@ sys.exit(7)
             .get("mcp_startup_result")
             .map(String::as_str),
         Some("startup_failed")
+    );
+    assert_eq!(
+        payload
+            .metadata
+            .get("mcp_process_coverage")
+            .map(String::as_str),
+        Some("local_stdio_outside_sandbox")
+    );
+    assert_eq!(
+        payload
+            .metadata
+            .get("mcp_environment_policy")
+            .map(String::as_str),
+        Some("isolated_extension")
+    );
+    assert_eq!(
+        payload
+            .metadata
+            .get("mcp_process_network")
+            .map(String::as_str),
+        Some("unknown")
     );
     Ok(())
 }
@@ -906,7 +1413,7 @@ while True:
     assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
     assert_eq!(subjects[0].normalized, "mcp__docs__resources_read");
     assert_eq!(subjects[1].kind, ToolSubjectKind::McpTrustClass);
-    assert_eq!(subjects[1].original, "docs:self_hosted");
+    assert!(subjects[1].original.starts_with("docs:self_hosted:sha256:"));
     assert_eq!(subjects[1].normalized, "mcp_trust_class:self_hosted");
 
     let default_mode = registry.permission_default_mode(
@@ -1308,7 +1815,11 @@ while True:
     assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
     assert_eq!(subjects[0].normalized, "mcp__prompts__prompts_get");
     assert_eq!(subjects[1].kind, ToolSubjectKind::McpTrustClass);
-    assert_eq!(subjects[1].original, "prompts:self_hosted");
+    assert!(
+        subjects[1]
+            .original
+            .starts_with("prompts:self_hosted:sha256:")
+    );
 
     let default_mode = registry.permission_default_mode(
         &ctx,
@@ -1758,12 +2269,17 @@ while True:
 #[tokio::test]
 async fn mcp_runtime_event_handler_receives_progress_and_list_changed_notifications() -> Result<()>
 {
+    let Ok(home) = std::env::var("HOME") else {
+        return Ok(());
+    };
     let temp = tempfile::tempdir()?;
     let script = temp.path().join("event_mcp_server.py");
     write_fake_server_script(
         &script,
         r#"#!/usr/bin/env python3
-import json, sys
+import json, os, sys
+
+SECRET = os.environ["HOME"]
 
 def read_message():
     headers = {}
@@ -1795,7 +2311,7 @@ while True:
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
-        write_message({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"scan","progress":1,"total":2,"message":"Scanning"}})
+        write_message({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":SECRET,"progress":1,"total":2,"message":SECRET}})
         write_message({"jsonrpc":"2.0","method":"notifications/prompts/list_changed","params":{}})
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
 "#,
@@ -1810,6 +2326,7 @@ while True:
             name: "events".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
+            inherit_env: vec!["HOME".to_owned()],
             startup_timeout_secs: 5,
             ..McpServerConfig::default()
         }],
@@ -1822,8 +2339,9 @@ while True:
     let progress = handler.progress.lock().expect("progress lock").clone();
     assert_eq!(progress.len(), 1);
     assert_eq!(progress[0].server_name, "events");
-    assert_eq!(progress[0].progress_token, "scan");
-    assert_eq!(progress[0].message.as_deref(), Some("Scanning"));
+    assert_eq!(progress[0].progress_token, "[redacted]");
+    assert_eq!(progress[0].message.as_deref(), Some("[redacted]"));
+    assert!(!format!("{progress:?}").contains(&home));
 
     let list_changed = handler.list_changed.lock().expect("list lock").clone();
     assert_eq!(list_changed.len(), 1);
@@ -1950,6 +2468,244 @@ async fn pinned_mcp_server_registers_when_identity_matches() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn mcp_launch_static_fingerprint_preserves_empty_grant_compatibility_and_binds_names() -> Result<()>
+{
+    let args = vec!["server.py".to_owned()];
+    let legacy = super::mcp_command_fingerprint("python3", &args)?;
+    let empty = sigil_mcp_launch_fingerprint(McpServerConfig {
+        command: "python3".to_owned(),
+        args: args.clone(),
+        ..McpServerConfig::default()
+    })?;
+    let granted = sigil_mcp_launch_fingerprint(McpServerConfig {
+        command: "python3".to_owned(),
+        args,
+        inherit_env: vec!["HOME".to_owned()],
+        ..McpServerConfig::default()
+    })?;
+
+    assert_eq!(empty, legacy);
+    assert_ne!(granted, legacy);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn credentialed_static_pin_rejects_replaced_executable_before_spawn() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var("HOME").is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("credentialed-mcp");
+    let marker = temp.path().join("replacement-spawned");
+    fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
+    let mut permissions = fs::metadata(&executable)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions)?;
+
+    let mut config = McpServerConfig {
+        name: "executable-pin".to_owned(),
+        command: executable.to_string_lossy().into_owned(),
+        inherit_env: vec!["HOME".to_owned()],
+        startup_timeout_secs: 2,
+        ..McpServerConfig::default()
+    };
+    let fingerprint = super::mcp_launch_static_fingerprint_at(&config, temp.path())?;
+    config.trust = McpServerTrustPolicy {
+        pin_version: true,
+        pinned: Some(sigil_kernel::McpServerPinnedIdentity {
+            command_fingerprint: fingerprint,
+            protocol_version: "2025-06-18".to_owned(),
+            server_name: "expected".to_owned(),
+            server_version: "1".to_owned(),
+        }),
+        ..McpServerTrustPolicy::default()
+    };
+
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\ntouch {}\n", marker.display()),
+    )?;
+    let error = register_mcp_tools_with_options(
+        &mut ToolRegistry::new(),
+        &[config],
+        McpToolRegistrationOptions::eager()?.with_working_dir(temp.path().to_path_buf()),
+    )
+    .await
+    .expect_err("same-path executable replacement must stale the pre-spawn pin");
+    assert!(
+        error
+            .to_string()
+            .contains("pre-spawn command_fingerprint mismatch")
+    );
+    assert!(
+        !marker.exists(),
+        "replacement must receive zero process spawn"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn credentialed_launch_resolves_relative_executable_against_working_dir() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var("HOME").is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("server");
+    fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
+    let mut permissions = fs::metadata(&executable)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions)?;
+    let config = McpServerConfig {
+        name: "relative".to_owned(),
+        command: "./server".to_owned(),
+        inherit_env: vec!["HOME".to_owned()],
+        ..McpServerConfig::default()
+    };
+    let expected = super::mcp_launch_static_fingerprint_at(&config, temp.path())?;
+    let request = McpProcessLaunchRequest::from_config(&config, Some(temp.path().to_path_buf()))?;
+
+    assert_eq!(
+        request.command,
+        executable.canonicalize()?.to_string_lossy()
+    );
+    assert_eq!(request.working_dir, Some(temp.path().canonicalize()?));
+    assert_eq!(request.launch_static_fingerprint, expected);
+    Ok(())
+}
+
+#[test]
+fn interpreter_launch_pin_binds_argument_text_but_not_script_contents() -> Result<()> {
+    if std::env::var("HOME").is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("server.py");
+    fs::write(&script, "print('first')\n")?;
+    let config = McpServerConfig {
+        name: "interpreter-boundary".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.to_string_lossy().into_owned()],
+        inherit_env: vec!["HOME".to_owned()],
+        ..McpServerConfig::default()
+    };
+    let first = super::mcp_launch_static_fingerprint_at(&config, temp.path())?;
+    fs::write(&script, "print('second')\n")?;
+    let changed_script = super::mcp_launch_static_fingerprint_at(&config, temp.path())?;
+    let changed_args = super::mcp_launch_static_fingerprint_at(
+        &McpServerConfig {
+            args: vec!["different.py".to_owned()],
+            ..config
+        },
+        temp.path(),
+    )?;
+
+    assert_eq!(
+        first, changed_script,
+        "the executable pin does not interpret or attest script argument contents"
+    );
+    assert_ne!(
+        first, changed_args,
+        "argument text remains statically bound"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn changed_approved_process_binding_rejects_before_spawn() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var("HOME").is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("must-not-spawn-after-binding-change");
+    let executable = temp.path().join("binding-server");
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\ntouch {}\n", marker.display()),
+    )?;
+    let mut permissions = fs::metadata(&executable)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions)?;
+    let config = McpServerConfig {
+        name: "binding-change".to_owned(),
+        command: executable.to_string_lossy().into_owned(),
+        inherit_env: vec!["HOME".to_owned()],
+        ..McpServerConfig::default()
+    };
+    let launch_fingerprint = super::mcp_launch_static_fingerprint_at(&config, temp.path())?;
+    let stale_subject = ToolSubject::mcp_trust_class_with_process_binding(
+        &config.name,
+        config.trust.trust_class.as_str(),
+        launch_fingerprint,
+        "hmac-sha256:stale-approved-binding",
+    );
+
+    let error = register_mcp_tools_with_options(
+        &mut ToolRegistry::new(),
+        &[config],
+        McpToolRegistrationOptions::eager()?
+            .with_working_dir(temp.path().to_path_buf())
+            .with_expected_process_subject(stale_subject),
+    )
+    .await
+    .expect_err("changed approval binding must fail before launch");
+
+    assert!(
+        error
+            .to_string()
+            .contains("process binding changed after approval")
+    );
+    assert!(!marker.exists(), "stale approval must produce zero spawn");
+    Ok(())
+}
+
+fn sigil_mcp_launch_fingerprint(config: McpServerConfig) -> Result<String> {
+    super::mcp_launch_static_fingerprint(&config)
+}
+
+#[tokio::test]
+async fn mismatched_static_pin_rejects_before_process_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("must-not-exist");
+    let config = McpServerConfig {
+        name: "pre-spawn-pin".to_owned(),
+        command: "sh".to_owned(),
+        args: vec!["-c".to_owned(), format!("touch {}", marker.display())],
+        trust: McpServerTrustPolicy {
+            pin_version: true,
+            pinned: Some(sigil_kernel::McpServerPinnedIdentity {
+                command_fingerprint: "sha256:stale".to_owned(),
+                protocol_version: "2024-11-05".to_owned(),
+                server_name: "stale".to_owned(),
+                server_version: "0".to_owned(),
+            }),
+            ..McpServerTrustPolicy::default()
+        },
+        ..McpServerConfig::default()
+    };
+    let mut registry = ToolRegistry::new();
+    let error = register_mcp_tools(&mut registry, &[config])
+        .await
+        .expect_err("stale static pin should fail before spawn");
+
+    assert!(
+        error
+            .to_string()
+            .contains("pre-spawn command_fingerprint mismatch")
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
 #[tokio::test]
 async fn pinned_mcp_server_errors_when_pin_is_missing() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -1977,7 +2733,7 @@ async fn pinned_mcp_server_errors_when_pin_is_missing() -> Result<()> {
     let message = error.to_string();
     assert!(message.contains("pin_version = true but no pinned identity"));
     assert!(message.contains("command_fingerprint"));
-    assert!(message.contains("sigil-test-server"));
+    assert!(message.contains("MCP server unpinned"));
     Ok(())
 }
 
@@ -3003,8 +3759,13 @@ impl McpElicitationHandler for AcceptingElicitationHandler {
 
     async fn elicit(&self, request: McpElicitationRequest) -> Result<McpElicitationResponse> {
         assert_eq!(request.server_name, "elicitation");
-        assert_eq!(request.message, "Need input");
+        assert_eq!(request.message, "[redacted]");
         assert!(request.requested_schema.get("properties").is_some());
+        assert!(
+            serde_json::to_string(&request.requested_schema)
+                .expect("schema should serialize")
+                .contains("[redacted]")
+        );
         Ok(McpElicitationResponse::accept(serde_json::json!({
             "value": "accepted from test"
         })))
@@ -3013,12 +3774,17 @@ impl McpElicitationHandler for AcceptingElicitationHandler {
 
 #[tokio::test]
 async fn mcp_client_answers_elicitation_requests_with_handler() -> Result<()> {
+    if std::env::var("HOME").is_err() {
+        return Ok(());
+    }
     let temp = tempfile::tempdir()?;
     let script = temp.path().join("elicitation_supported_mcp_server.py");
     write_fake_server_script(
         &script,
         r#"#!/usr/bin/env python3
-import json, sys
+import json, os, sys
+
+SECRET = os.environ["HOME"]
 
 def read_message():
     headers = {}
@@ -3055,7 +3821,7 @@ while True:
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
-        write_message({"jsonrpc":"2.0","id":"server-elicitation-1","method":"elicitation/create","params":{"message":"Need input","requestedSchema":{"type":"object","properties":{"value":{"type":"string","title":"Value"}},"required":["value"]}}})
+        write_message({"jsonrpc":"2.0","id":"server-elicitation-1","method":"elicitation/create","params":{"message":SECRET,"requestedSchema":{"type":"object","properties":{"value":{"type":"string","title":SECRET}},"required":["value"]}}})
         elicitation_response = read_message()
         result = elicitation_response.get("result", {})
         content = result.get("content", {})
@@ -3073,6 +3839,7 @@ while True:
             name: "elicitation".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
+            inherit_env: vec!["HOME".to_owned()],
             startup_timeout_secs: 5,
             ..McpServerConfig::default()
         }],
@@ -3474,6 +4241,9 @@ fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
 
     let observed = super::McpServerObservedIdentity {
         command_fingerprint: "sha256:observed".to_owned(),
+        environment_grant_names: Vec::new(),
+        environment_static_fingerprint: "sha256:environment".to_owned(),
+        environment_live_fingerprint: "hmac-sha256:environment".to_owned(),
         protocol_version: "2025-06-18".to_owned(),
         server_name: "observed-server".to_owned(),
         server_version: "2.0.0".to_owned(),
@@ -4093,6 +4863,9 @@ fn validate_mcp_pin_reports_all_supported_mismatch_fields() {
         },
         &super::McpServerObservedIdentity {
             command_fingerprint: "observed-fingerprint".to_owned(),
+            environment_grant_names: Vec::new(),
+            environment_static_fingerprint: "sha256:environment".to_owned(),
+            environment_live_fingerprint: "hmac-sha256:environment".to_owned(),
             protocol_version: "observed-protocol".to_owned(),
             server_name: "expected-name".to_owned(),
             server_version: "observed-version".to_owned(),

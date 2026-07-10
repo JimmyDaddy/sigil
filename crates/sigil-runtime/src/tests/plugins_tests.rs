@@ -428,6 +428,44 @@ version = "bad version"
 }
 
 #[test]
+fn plugin_mcp_environment_grant_is_typed_pre_discovery_rejection() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[mcp_servers]]
+name = "credentialed"
+command = "node"
+inherit_env = ["PLUGIN_TOKEN"]
+"#,
+    );
+
+    let report =
+        discover_workspace_plugins(workspace.path(), &[]).expect("discovery should not abort");
+
+    assert!(report.manifests.is_empty());
+    assert!(report.registrations.is_empty());
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.kind == PluginDiscoveryWarningKind::McpEnvironmentGrantNotSupported)
+        .expect("typed environment grant diagnostic should exist");
+    assert_eq!(
+        warning.kind.code(),
+        "plugin_mcp_environment_grant_not_supported"
+    );
+    assert_eq!(warning.entry_index, Some(0));
+    assert_eq!(warning.server_name.as_deref(), Some("credentialed"));
+    assert_eq!(warning.field.as_deref(), Some("inherit_env"));
+    assert!(warning.remediation.is_some());
+    assert!(!warning.trust_action_allowed);
+}
+
+#[test]
 fn matching_trust_entry_emits_source_attributed_registrations() {
     let workspace = tempfile::tempdir().expect("workspace should create");
     write_plugin_agent(
@@ -638,10 +676,7 @@ timeout_ms = 45000
     let registration = report.registrations.hooks[0].clone();
     let backend = RecordingExecutionBackend::default();
     let requests = backend.requests.clone();
-    let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
-        Arc::new(backend),
-        ExecutionSandboxProfile::WorkspaceWrite,
-    );
+    let runner = PluginHookExecutionRunner::new(Arc::new(backend));
 
     let outcome = runner
         .execute(PluginHookExecutionRequest::new(
@@ -673,6 +708,11 @@ timeout_ms = 45000
     );
     assert_eq!(requests[0].timeout_ms, Some(45_000));
     assert_eq!(requests[0].timeout_secs, 0);
+    assert_eq!(
+        requests[0].environment_policy,
+        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
+    );
+    assert!(!requests[0].env.contains_key("HOME"));
     drop(requests);
 
     assert_eq!(outcome.started.plugin_id, "repo-review");
@@ -685,7 +725,7 @@ timeout_ms = 45000
     );
     assert_eq!(
         outcome.started.sandbox_profile,
-        ExecutionSandboxProfile::WorkspaceWrite
+        ExecutionSandboxProfile::Unconfined
     );
     assert!(outcome.started.egress_logging);
     assert!(!outcome.started.allow_secrets);
@@ -712,7 +752,7 @@ timeout_ms = 45000
     );
     assert_eq!(
         outcome.finished.sandbox_profile,
-        ExecutionSandboxProfile::WorkspaceWrite
+        ExecutionSandboxProfile::Unconfined
     );
     assert!(outcome.finished.egress_logging);
     assert!(!outcome.finished.allow_secrets);
@@ -753,14 +793,12 @@ allow_secrets = true
             process_isolation: true,
             ..ExecutionBackendCapabilities::default()
         },
-        network: ExecutionNetworkReceipt::unsupported(
-            "macos_seatbelt backend does not enforce network denial",
-        ),
+        network: ExecutionNetworkReceipt::allowed("profile allows network access"),
         ..RecordingExecutionBackend::default()
     };
     let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
         Arc::new(backend),
-        ExecutionSandboxProfile::WorkspaceWrite,
+        ExecutionSandboxProfile::BuildNetworked,
     );
 
     let outcome = runner
@@ -780,7 +818,7 @@ allow_secrets = true
     );
     assert_eq!(
         outcome.started.sandbox_profile,
-        ExecutionSandboxProfile::WorkspaceWrite
+        ExecutionSandboxProfile::BuildNetworked
     );
     assert!(!outcome.started.egress_logging);
     assert!(outcome.started.allow_secrets);
@@ -790,14 +828,137 @@ allow_secrets = true
     );
     assert_eq!(
         outcome.finished.network.policy,
-        sigil_kernel::ExecutionNetworkPolicy::Unsupported
+        sigil_kernel::ExecutionNetworkPolicy::Allowed
     );
     assert_eq!(
         outcome.finished.sandbox_profile,
-        ExecutionSandboxProfile::WorkspaceWrite
+        ExecutionSandboxProfile::BuildNetworked
     );
     assert!(!outcome.finished.egress_logging);
     assert!(outcome.finished.allow_secrets);
+}
+
+#[tokio::test]
+async fn plugin_hook_network_deny_without_proven_isolation_is_zero_execute() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "context-pack"
+event = "context"
+kind = "context"
+command = "hook-runner"
+declared_effect = "read_only"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted discovery should succeed");
+    let backends = [
+        RecordingExecutionBackend {
+            backend_kind: ExecutionBackendKind::MacosSeatbelt,
+            capabilities: ExecutionBackendCapabilities {
+                filesystem_isolation: true,
+                process_isolation: true,
+                network_isolation: false,
+                ..ExecutionBackendCapabilities::default()
+            },
+            ..RecordingExecutionBackend::default()
+        },
+        RecordingExecutionBackend {
+            backend_kind: ExecutionBackendKind::LinuxBubblewrap,
+            capabilities: ExecutionBackendCapabilities {
+                filesystem_isolation: true,
+                process_isolation: true,
+                network_isolation: true,
+                ..ExecutionBackendCapabilities::default()
+            },
+            network: ExecutionNetworkReceipt::allowed(
+                "backend supports isolation but this instance allows network",
+            ),
+            ..RecordingExecutionBackend::default()
+        },
+    ];
+
+    for backend in backends {
+        let requests = backend.requests.clone();
+        let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
+            Arc::new(backend),
+            ExecutionSandboxProfile::WorkspaceWrite,
+        );
+        let error = runner
+            .execute(PluginHookExecutionRequest::new(
+                report.registrations.hooks[0].clone(),
+                workspace.path().to_path_buf(),
+            ))
+            .await
+            .expect_err("unproven network denial must fail before execute");
+
+        assert_eq!(
+            error
+                .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+                .map(|error| error.code),
+            Some(sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkIsolationUnavailable)
+        );
+        assert!(requests.lock().expect("requests should lock").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn plugin_hook_local_backend_clears_ambient_environment() {
+    if std::env::var("HOME").is_err() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "environment"
+event = "context"
+kind = "context"
+command = "/bin/sh"
+args = ["-c", "printf '%s|%s' \"${HOME-unset}\" \"${PATH-unset}\""]
+declared_effect = "read_only"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted discovery should succeed");
+    let runner =
+        PluginHookExecutionRunner::new(Arc::new(sigil_tools_builtin::LocalExecutionBackend));
+
+    let outcome = runner
+        .execute(PluginHookExecutionRequest::new(
+            report.registrations.hooks[0].clone(),
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect("isolated hook should execute");
+
+    assert!(outcome.output.stdout.content.starts_with("unset|"));
+    assert!(!outcome.output.stdout.content.ends_with("|unset"));
+    assert_eq!(
+        outcome.receipt.environment_policy,
+        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
+    );
 }
 
 #[tokio::test]
@@ -1436,8 +1597,21 @@ required = false
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted plugin discovery should succeed");
 
-    let merged_mcp = merge_plugin_mcp_servers(&[], &report.registrations.mcp_servers);
+    let merged_mcp = merge_plugin_mcp_servers(&[], &report.registrations.mcp_servers)?;
     assert_eq!(merged_mcp[0].name, "repo-review.repo-tools");
+    let mut invalid_registration = report.registrations.mcp_servers[0].clone();
+    invalid_registration.server.inherit_env = vec!["PLUGIN_TOKEN".to_owned()];
+    let error = merge_plugin_mcp_servers(&[], &[invalid_registration])
+        .expect_err("programmatic plugin environment grant should fail merge");
+    let diagnostic = error
+        .downcast_ref::<super::PluginMcpEnvironmentGrantNotSupported>()
+        .expect("merge error should preserve its typed diagnostic");
+    assert_eq!(
+        diagnostic.code(),
+        "plugin_mcp_environment_grant_not_supported"
+    );
+    assert_eq!(diagnostic.entry_index, 0);
+    assert_eq!(diagnostic.server_name.as_deref(), Some("repo-tools"));
     let conflicting_base = vec![sigil_kernel::McpServerConfig {
         name: "repo-review.repo-tools".to_owned(),
         command: "existing".to_owned(),
@@ -1454,7 +1628,7 @@ required = false
         },
     ];
     let conflict_merged =
-        merge_plugin_mcp_servers(&conflicting_base, &report.registrations.mcp_servers);
+        merge_plugin_mcp_servers(&conflicting_base, &report.registrations.mcp_servers)?;
     assert_eq!(conflict_merged[0].name, "repo-review.repo-tools");
     assert!(
         conflict_merged[1]
@@ -1463,7 +1637,7 @@ required = false
     );
     assert_ne!(conflict_merged[0].name, conflict_merged[1].name);
     let deep_conflict_merged =
-        merge_plugin_mcp_servers(&deeply_conflicting_base, &report.registrations.mcp_servers);
+        merge_plugin_mcp_servers(&deeply_conflicting_base, &report.registrations.mcp_servers)?;
     assert!(deep_conflict_merged[2].name.ends_with(".1"));
     let mut config = root_config();
     config.mcp_servers = merged_mcp;
@@ -1688,6 +1862,10 @@ impl ExecutionBackend for RecordingExecutionBackend {
         self.capabilities
     }
 
+    fn planned_network_receipt(&self) -> ExecutionNetworkReceipt {
+        self.network.clone()
+    }
+
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
         let requests = self.requests.clone();
         let stdout = self.stdout.clone();
@@ -1697,6 +1875,7 @@ impl ExecutionBackend for RecordingExecutionBackend {
         let capabilities = self.capabilities;
         let network = self.network.clone();
         Box::pin(async move {
+            let environment_policy = request.environment_policy;
             if let Some((relative_path, content)) = workspace_write {
                 let workspace_root = request
                     .env
@@ -1714,6 +1893,7 @@ impl ExecutionBackend for RecordingExecutionBackend {
                 capabilities,
                 network,
                 resources: Default::default(),
+                environment_policy,
                 exit_code: Some(0),
                 stdout,
                 stderr,

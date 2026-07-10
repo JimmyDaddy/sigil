@@ -74,6 +74,11 @@ pub struct PluginDiscoveryWarning {
     pub kind: PluginDiscoveryWarningKind,
     pub path: PathBuf,
     pub message: String,
+    pub entry_index: Option<usize>,
+    pub server_name: Option<String>,
+    pub field: Option<String>,
+    pub remediation: Option<String>,
+    pub trust_action_allowed: bool,
 }
 
 /// Stable warning categories for plugin diagnostics and future TUI review display.
@@ -81,8 +86,52 @@ pub struct PluginDiscoveryWarning {
 pub enum PluginDiscoveryWarningKind {
     InvalidPath,
     InvalidManifest,
+    McpEnvironmentGrantNotSupported,
     ReadFailed,
 }
+
+impl PluginDiscoveryWarningKind {
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::InvalidPath => "plugin_invalid_path",
+            Self::InvalidManifest => "plugin_invalid_manifest",
+            Self::McpEnvironmentGrantNotSupported => "plugin_mcp_environment_grant_not_supported",
+            Self::ReadFailed => "plugin_read_failed",
+        }
+    }
+}
+
+/// Typed plugin-manifest error for an MCP entry that attempts to inherit parent environment
+/// values. Callers may downcast `anyhow::Error` to this type without parsing display text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMcpEnvironmentGrantNotSupported {
+    pub entry_index: usize,
+    pub server_name: Option<String>,
+}
+
+impl PluginMcpEnvironmentGrantNotSupported {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        PluginDiscoveryWarningKind::McpEnvironmentGrantNotSupported.code()
+    }
+}
+
+impl std::fmt::Display for PluginMcpEnvironmentGrantNotSupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "plugin MCP entry {}{} cannot declare inherit_env; move the credentialed server to the user root config",
+            self.entry_index,
+            self.server_name
+                .as_deref()
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default()
+        )
+    }
+}
+
+impl std::error::Error for PluginMcpEnvironmentGrantNotSupported {}
 
 impl PluginRegistrations {
     #[must_use]
@@ -107,7 +156,6 @@ impl PluginRegistrations {
 pub struct PluginHookExecutionRequest {
     pub registration: PluginHookRegistration,
     pub workspace_root: PathBuf,
-    pub env: BTreeMap<String, String>,
     pub output_limit_bytes: usize,
     pub redactor: SecretRedactor,
     pub artifact_refs: Vec<PluginHookOutputArtifactRef>,
@@ -120,7 +168,6 @@ impl PluginHookExecutionRequest {
         Self {
             registration,
             workspace_root,
-            env: BTreeMap::new(),
             output_limit_bytes: DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES,
             redactor: SecretRedactor::empty(),
             artifact_refs: Vec::new(),
@@ -207,6 +254,13 @@ impl PluginHookExecutionRunner {
         let tool_name = plugin_hook_tool_name(&registration.plugin_id, &hook_id);
         let backend = self.backend.kind();
         let backend_capabilities = self.backend.capabilities();
+        let planned_network = self.backend.planned_network_receipt();
+        sigil_kernel::validate_extension_process_isolation(
+            self.sandbox_profile,
+            backend_capabilities,
+            &planned_network,
+            format!("plugin_hook:{tool_name}"),
+        )?;
         let execution_coverage = ExecutionCoverageLabel::LocalBackendEnforced;
         let sandbox_profile = self.sandbox_profile;
         let egress_logging = registration.hook.egress_logging;
@@ -225,6 +279,7 @@ impl PluginHookExecutionRunner {
             backend_capabilities,
             execution_coverage,
             sandbox_profile,
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
             egress_logging,
             allow_secrets,
         };
@@ -240,7 +295,11 @@ impl PluginHookExecutionRunner {
             .min(MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES);
         let redactor = request.redactor;
         let artifact_refs = request.artifact_refs;
-        let mut env = request.env;
+        let resolved_environment = sigil_kernel::resolve_extension_process_environment(&[])?;
+        let mut env = resolved_environment
+            .variables()
+            .map(|(name, value)| (name.to_owned(), value.expose_secret().to_owned()))
+            .collect::<BTreeMap<_, _>>();
         env.insert(
             "SIGIL_WORKSPACE_ROOT".to_owned(),
             request.workspace_root.to_string_lossy().into_owned(),
@@ -254,6 +313,7 @@ impl PluginHookExecutionRunner {
                 args: registration.hook.args.clone(),
                 cwd: plugin_root,
                 env,
+                environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
                 timeout_ms: Some(registration.hook.timeout_ms),
                 timeout_secs: 0,
                 cpu_time_ms: None,
@@ -281,6 +341,21 @@ impl PluginHookExecutionRunner {
                 return Err(error);
             }
         };
+        if let Err(error) = sigil_kernel::validate_extension_process_network_receipt(
+            self.sandbox_profile,
+            &receipt.network,
+            format!("plugin_hook:{tool_name}"),
+        ) {
+            finish_plugin_hook_mutation_scan(
+                request.mutation_recorder.as_ref(),
+                mutation_scan,
+                &request.workspace_root,
+                execution_id,
+                tool_name,
+                declared_effect,
+            )?;
+            return Err(error.into());
+        }
         let mutation_event_id = finish_plugin_hook_mutation_scan(
             request.mutation_recorder.as_ref(),
             mutation_scan,
@@ -312,6 +387,7 @@ impl PluginHookExecutionRunner {
             backend_capabilities: receipt.capabilities,
             execution_coverage,
             sandbox_profile,
+            environment_policy: receipt.environment_policy,
             egress_logging,
             allow_secrets,
             network: receipt.network.clone(),
@@ -607,17 +683,27 @@ pub fn merge_plugin_skill_descriptors(
 ///
 /// Plugin server names are already namespaced during discovery, so the returned configs can be
 /// handed to the existing MCP eager/lazy lifecycle without starting plugin servers early.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns a typed error if a programmatically constructed plugin registration attempts to carry
+/// an environment grant that plugin manifests are not allowed to declare.
 pub fn merge_plugin_mcp_servers(
     base: &[McpServerConfig],
     plugin_servers: &[PluginMcpServerRegistration],
-) -> Vec<McpServerConfig> {
+) -> Result<Vec<McpServerConfig>> {
     let mut used_names = base
         .iter()
         .map(|server| server.name.clone())
         .collect::<BTreeSet<_>>();
     let mut merged = base.to_vec();
-    for registration in plugin_servers {
+    for (index, registration) in plugin_servers.iter().enumerate() {
+        if !registration.server.inherit_env.is_empty() {
+            return Err(anyhow::Error::new(PluginMcpEnvironmentGrantNotSupported {
+                entry_index: index,
+                server_name: Some(registration.original_name.clone()),
+            }));
+        }
         let mut server = registration.server.clone();
         if !used_names.insert(server.name.clone()) {
             server.name = unique_plugin_mcp_server_name(
@@ -629,7 +715,7 @@ pub fn merge_plugin_mcp_servers(
         }
         merged.push(server);
     }
-    merged
+    Ok(merged)
 }
 
 struct PluginDiscovery {
@@ -696,11 +782,7 @@ impl PluginDiscovery {
         let outcome = match self.read_manifest(plugin_root, &manifest_path) {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.warn(
-                    warning_kind_for_manifest_error(&error),
-                    manifest_path,
-                    error.to_string(),
-                );
+                self.warn_manifest_error(manifest_path, &error);
                 return;
             }
         };
@@ -769,6 +851,7 @@ impl PluginDiscovery {
         let raw = std::str::from_utf8(&bytes).with_context(|| {
             format!("plugin manifest is not utf-8: {}", manifest_path.display())
         })?;
+        reject_plugin_mcp_environment_grants(raw)?;
         let mut manifest = toml::from_str::<PluginManifest>(raw)
             .with_context(|| format!("invalid plugin manifest {}", manifest_path.display()))?;
         let directory_id = plugin_root
@@ -862,7 +945,36 @@ impl PluginDiscovery {
             kind,
             path: path.as_ref().to_path_buf(),
             message: message.into(),
+            entry_index: None,
+            server_name: None,
+            field: None,
+            remediation: None,
+            trust_action_allowed: false,
         });
+    }
+
+    fn warn_manifest_error(&mut self, path: impl AsRef<Path>, error: &anyhow::Error) {
+        if let Some(diagnostic) = error.downcast_ref::<PluginMcpEnvironmentGrantNotSupported>() {
+            self.warnings.push(PluginDiscoveryWarning {
+                kind: PluginDiscoveryWarningKind::McpEnvironmentGrantNotSupported,
+                path: path.as_ref().to_path_buf(),
+                message: diagnostic.to_string(),
+                entry_index: Some(diagnostic.entry_index),
+                server_name: diagnostic.server_name.clone(),
+                field: Some("inherit_env".to_owned()),
+                remediation: Some(
+                    "remove inherit_env from plugin.toml and configure the credentialed stdio MCP server in the user root sigil.toml"
+                        .to_owned(),
+                ),
+                trust_action_allowed: false,
+            });
+            return;
+        }
+        self.warn(
+            warning_kind_for_manifest_error(error),
+            path,
+            error.to_string(),
+        );
     }
 
     fn finish(self) -> PluginDiscoveryReport {
@@ -872,6 +984,28 @@ impl PluginDiscovery {
             warnings: self.warnings,
         }
     }
+}
+
+fn reject_plugin_mcp_environment_grants(raw: &str) -> Result<()> {
+    let value = toml::from_str::<toml::Value>(raw).context("invalid plugin manifest TOML")?;
+    let Some(entries) = value.get("mcp_servers").and_then(toml::Value::as_array) else {
+        return Ok(());
+    };
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(table) = entry.as_table() else {
+            continue;
+        };
+        if table.contains_key("inherit_env") {
+            return Err(anyhow::Error::new(PluginMcpEnvironmentGrantNotSupported {
+                entry_index: index,
+                server_name: table
+                    .get("name")
+                    .and_then(toml::Value::as_str)
+                    .map(ToOwned::to_owned),
+            }));
+        }
+    }
+    Ok(())
 }
 
 struct PluginManifestReadOutcome {

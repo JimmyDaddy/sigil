@@ -178,6 +178,7 @@ impl TerminalExecutionConfig {
             args: vec!["-lc".to_owned(), command.to_owned()],
             cwd: resolved_cwd.to_path_buf(),
             env: env.clone(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 0,
             cpu_time_ms: None,

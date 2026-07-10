@@ -50,22 +50,38 @@ pub struct McpProcessLaunchRequest {
     pub command: String,
     pub args: Vec<String>,
     pub working_dir: Option<PathBuf>,
-    pub env: BTreeMap<String, String>,
+    pub environment: ResolvedProcessEnvironment,
+    pub launch_static_fingerprint: String,
     pub startup_timeout_secs: u64,
     pub classification: McpProcessClass,
 }
 
 impl McpProcessLaunchRequest {
-    pub(super) fn from_config(config: &McpServerConfig, working_dir: Option<PathBuf>) -> Self {
-        Self {
+    pub(super) fn from_config(
+        config: &McpServerConfig,
+        working_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        let environment = resolve_extension_process_environment(&config.inherit_env)?;
+        let fingerprint_working_dir = working_dir
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_dir)
+            .context("failed to resolve MCP launch cwd")?;
+        let static_binding = super::tools::mcp_launch_static_binding(
+            config,
+            &fingerprint_working_dir,
+            &environment,
+        )?;
+        Ok(Self {
             server_name: config.name.clone(),
-            command: config.command.clone(),
+            command: static_binding.executable.to_string_lossy().into_owned(),
             args: config.args.clone(),
-            working_dir,
-            env: BTreeMap::new(),
+            working_dir: static_binding.working_dir.or(working_dir),
+            environment,
+            launch_static_fingerprint: static_binding.fingerprint,
             startup_timeout_secs: config.startup_timeout_secs,
             classification: McpProcessClass::LocalStdioConfigured,
-        }
+        })
     }
 }
 
@@ -78,6 +94,20 @@ pub struct McpProcessLaunchReceipt {
     pub backend: Option<ExecutionBackendKind>,
     pub backend_capabilities: Option<ExecutionBackendCapabilities>,
     pub sandbox_profile: Option<ExecutionSandboxProfile>,
+    #[serde(default)]
+    pub network: ExecutionNetworkReceipt,
+    #[serde(default)]
+    pub environment_policy: ProcessEnvironmentPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_baseline_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_grant_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub environment_static_fingerprint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub environment_live_fingerprint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub launch_static_fingerprint: String,
 }
 
 impl McpProcessLaunchReceipt {
@@ -90,6 +120,15 @@ impl McpProcessLaunchReceipt {
             backend: Some(ExecutionBackendKind::Local),
             backend_capabilities: Some(ExecutionBackendCapabilities::default()),
             sandbox_profile: Some(ExecutionSandboxProfile::Unconfined),
+            network: ExecutionNetworkReceipt::unknown(
+                "local MCP launcher does not report network enforcement",
+            ),
+            environment_policy: request.environment.policy(),
+            environment_baseline_names: request.environment.baseline_names().to_vec(),
+            environment_grant_names: request.environment.grant_names().to_vec(),
+            environment_static_fingerprint: request.environment.static_fingerprint().to_owned(),
+            environment_live_fingerprint: request.environment.live_fingerprint().to_owned(),
+            launch_static_fingerprint: request.launch_static_fingerprint.clone(),
         }
     }
 
@@ -123,6 +162,38 @@ impl McpProcessLaunchReceipt {
                 mcp_backend_capability_labels(capabilities).join(","),
             );
         }
+        metadata.insert(
+            "mcp_process_network".to_owned(),
+            self.network.policy.as_str().to_owned(),
+        );
+        metadata.insert(
+            "mcp_environment_policy".to_owned(),
+            self.environment_policy.as_str().to_owned(),
+        );
+        metadata.insert(
+            "mcp_environment_baseline_names".to_owned(),
+            self.environment_baseline_names.join(","),
+        );
+        metadata.insert(
+            "mcp_environment_grant_names".to_owned(),
+            self.environment_grant_names.join(","),
+        );
+        metadata.insert(
+            "mcp_environment_grant_source".to_owned(),
+            "parent_environment".to_owned(),
+        );
+        metadata.insert(
+            "mcp_environment_static_fingerprint".to_owned(),
+            self.environment_static_fingerprint.clone(),
+        );
+        metadata.insert(
+            "mcp_environment_live_fingerprint".to_owned(),
+            self.environment_live_fingerprint.clone(),
+        );
+        metadata.insert(
+            "mcp_launch_static_fingerprint".to_owned(),
+            self.launch_static_fingerprint.clone(),
+        );
         metadata
     }
 }
@@ -194,7 +265,10 @@ impl McpProcessLauncher for LocalMcpProcessLauncher {
         if let Some(working_dir) = &request.working_dir {
             command.current_dir(working_dir);
         }
-        command.envs(&request.env);
+        command.env_clear();
+        for (name, value) in request.environment.variables() {
+            command.env(name, value.expose_secret());
+        }
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn MCP server {}", request.server_name))?;

@@ -95,7 +95,6 @@ pub(super) struct McpResourceTool {
     pub(super) tool_name: McpToolName,
     pub(super) kind: McpResourceToolKind,
     pub(super) trust: McpServerTrustPolicy,
-    pub(super) secret_redactor: SecretRedactor,
 }
 
 #[async_trait]
@@ -107,7 +106,7 @@ impl Tool for McpResourceTool {
     fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
         Ok(vec![
             ToolSubject::mcp_tool(self.spec.name.clone()),
-            ToolSubject::mcp_trust_class(
+            self.client.identity.trust_subject(
                 self.tool_name.server_name.clone(),
                 self.trust.trust_class.as_str(),
             ),
@@ -126,7 +125,11 @@ impl Tool for McpResourceTool {
         if !self.trust.egress_logging {
             return Ok(None);
         }
-        let secret_detected = self.secret_redactor.value_contains_secret(args);
+        let secret_detected = self.client.secret_redactor.value_contains_secret(args);
+        let argument_summary = self
+            .client
+            .secret_redactor
+            .redact_value(&summarize_egress_json(args));
         Ok(Some(ToolEgressAudit {
             destination: format!("mcp:{}", self.tool_name.server_name),
             operation: self.kind.method().to_owned(),
@@ -138,14 +141,14 @@ impl Tool for McpResourceTool {
                 "allow_secrets": self.trust.allow_secrets,
                 "secret_detected": secret_detected,
                 "server_identity": self.client.identity.to_json(),
-                "arguments": summarize_egress_json(args),
+                "arguments": argument_summary,
             }),
             redacted: secret_detected,
         }))
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
-        if !self.trust.allow_secrets && self.secret_redactor.value_contains_secret(&args) {
+        if !self.trust.allow_secrets && self.client.secret_redactor.value_contains_secret(&args) {
             return Ok(ToolResult::error(
                 call_id,
                 self.spec.name.clone(),
@@ -169,7 +172,7 @@ impl Tool for McpResourceTool {
             .send_request_response(self.kind.method(), params)
             .await?;
         if let Some(error) = response.get("error") {
-            let redacted_error = self.secret_redactor.redact_value(error);
+            let redacted_error = self.client.secret_redactor.redact_value(error);
             return Ok(ToolResult::error(
                 call_id,
                 self.spec.name.clone(),
@@ -184,7 +187,7 @@ impl Tool for McpResourceTool {
             .ok_or_else(|| anyhow!("MCP response missing result"))?;
         let content = serde_json::to_string_pretty(&result)?;
         let (content, metadata) = bounded_mcp_tool_result(
-            &self.secret_redactor,
+            &self.client.secret_redactor,
             &self.tool_name,
             &self.trust,
             &self.client.identity,

@@ -19,6 +19,30 @@ pub async fn build_tool_registry(
     .await
 }
 
+/// Builds the complete runtime tool registry while durably recording eager MCP process lifecycle
+/// evidence into the active session store.
+///
+/// # Errors
+///
+/// Returns an error when one configured MCP server cannot be started or queried, when lifecycle
+/// evidence cannot be appended, or when local tool construction fails.
+pub async fn build_tool_registry_with_mutation_recorder(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    mutation_recorder: MutationEventRecorder,
+) -> Result<ToolRegistry> {
+    build_tool_registry_with_mcp_handlers_and_mutation_recorder(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        Some(mutation_recorder),
+    )
+    .await
+}
+
 /// Builds the runtime tool registry using a caller-provided MCP elicitation handler.
 ///
 /// # Errors
@@ -52,19 +76,43 @@ pub async fn build_tool_registry_with_mcp_handlers(
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 ) -> Result<ToolRegistry> {
+    build_tool_registry_with_mcp_handlers_and_mutation_recorder(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        None,
+    )
+    .await
+}
+
+async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     register_local_tools(&mut registry, root_config, workspace_root.clone())?;
+    let mut registration_options = sigil_mcp::McpToolRegistrationOptions::eager()?
+        .with_capabilities(provider_capabilities)
+        .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
+        .with_working_dir(workspace_root.clone())
+        .with_secret_redactor(secret_redactor_for_root_config(root_config))
+        .with_elicitation_handler(Arc::clone(&elicitation_handler))
+        .with_runtime_event_handler(Arc::clone(&runtime_event_handler))
+        .with_process_launcher(configured_mcp_process_launcher(root_config));
+    if let Some(recorder) = mutation_recorder {
+        registration_options =
+            registration_options.with_mutation_recorder(workspace_root.clone(), recorder);
+    }
     sigil_mcp::register_mcp_tools_with_options(
         &mut registry,
         &root_config.mcp_servers,
-        sigil_mcp::McpToolRegistrationOptions::eager()?
-            .with_capabilities(provider_capabilities)
-            .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
-            .with_working_dir(workspace_root.clone())
-            .with_secret_redactor(secret_redactor_for_root_config(root_config))
-            .with_elicitation_handler(Arc::clone(&elicitation_handler))
-            .with_runtime_event_handler(Arc::clone(&runtime_event_handler))
-            .with_process_launcher(configured_mcp_process_launcher(root_config)),
+        registration_options,
     )
     .await?;
     register_lazy_mcp_activation_tool(
@@ -232,6 +280,32 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     mutation_recorder: Option<MutationEventRecorder>,
 ) -> Result<LazyMcpActivationResult> {
+    activate_lazy_mcp_tools_detailed_inner(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        runtime_event_handler,
+        mutation_recorder,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn activate_lazy_mcp_tools_detailed_inner(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+    expected_process_subject: Option<ToolSubject>,
+) -> Result<LazyMcpActivationResult> {
     let servers = root_config
         .mcp_servers
         .iter()
@@ -259,6 +333,9 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
     if let Some(recorder) = mutation_recorder {
         registration_options =
             registration_options.with_mutation_recorder(workspace_root.clone(), recorder);
+    }
+    if let Some(subject) = expected_process_subject {
+        registration_options = registration_options.with_expected_process_subject(subject);
     }
     let report =
         sigil_mcp::register_mcp_tools_with_report(registry, &servers, registration_options).await?;
@@ -346,17 +423,20 @@ impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
             &request.command,
             &request.args,
             &cwd,
-            &request.env,
+            &request.environment,
         )?;
         let mut command = Command::new(&plan.program);
         command
             .args(&plan.args)
             .current_dir(&plan.cwd)
-            .envs(&plan.env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        command.env_clear();
+        for (name, value) in plan.environment.variables() {
+            command.env(name, value.expose_secret());
+        }
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn MCP server {}", request.server_name))?;
@@ -379,6 +459,13 @@ impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
                 backend: Some(plan.backend),
                 backend_capabilities: Some(plan.backend_capabilities),
                 sandbox_profile: Some(plan.sandbox_profile),
+                network: plan.network,
+                environment_policy: plan.environment.policy(),
+                environment_baseline_names: plan.environment.baseline_names().to_vec(),
+                environment_grant_names: plan.environment.grant_names().to_vec(),
+                environment_static_fingerprint: plan.environment.static_fingerprint().to_owned(),
+                environment_live_fingerprint: plan.environment.live_fingerprint().to_owned(),
+                launch_static_fingerprint: request.launch_static_fingerprint,
             },
         })
     }
@@ -541,9 +628,17 @@ impl Tool for McpActivateServerTool {
         let Some(server) = self.lazy_server(server_name) else {
             return Ok(vec![mcp_server_subject(server_name)]);
         };
+        let environment = sigil_kernel::resolve_extension_process_environment(&server.inherit_env)?;
+        let static_fingerprint =
+            sigil_mcp::mcp_launch_static_fingerprint_at(server, &self.workspace_root)?;
         Ok(vec![
             mcp_server_subject(server_name),
-            ToolSubject::mcp_trust_class(server.name.clone(), server.trust.trust_class.as_str()),
+            ToolSubject::mcp_trust_class_with_process_binding(
+                server.name.clone(),
+                server.trust.trust_class.as_str(),
+                static_fingerprint,
+                environment.live_fingerprint(),
+            ),
         ])
     }
 
@@ -566,6 +661,7 @@ impl Tool for McpActivateServerTool {
         if !server.trust.egress_logging {
             return Ok(None);
         }
+        let environment = sigil_kernel::resolve_extension_process_environment(&server.inherit_env)?;
         Ok(Some(ToolEgressAudit {
             destination: format!("mcp:{server_name}"),
             operation: "server/activate".to_owned(),
@@ -573,6 +669,11 @@ impl Tool for McpActivateServerTool {
                 "server": server_name,
                 "trust_class": server.trust.trust_class.as_str(),
                 "startup": server.startup.as_str(),
+                "environment_grant_names": environment.grant_names(),
+                "environment_grant_source": "parent_environment",
+                "environment_static_fingerprint": environment.static_fingerprint(),
+                "environment_live_fingerprint": environment.live_fingerprint(),
+                "launch_static_fingerprint": sigil_mcp::mcp_launch_static_fingerprint_at(server, &self.workspace_root)?,
             }),
             redacted: false,
         }))
@@ -600,7 +701,12 @@ impl Tool for McpActivateServerTool {
         }
 
         let mut registry = self.registry.clone();
-        let result = activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder(
+        let expected_process_subject = ctx
+            .approved_subjects()
+            .iter()
+            .find(|subject| subject.kind == ToolSubjectKind::McpTrustClass)
+            .cloned();
+        let result = activate_lazy_mcp_tools_detailed_inner(
             &mut registry,
             &self.root_config,
             &self.provider_capabilities,
@@ -609,6 +715,7 @@ impl Tool for McpActivateServerTool {
             Arc::clone(&self.elicitation_handler),
             Arc::clone(&self.runtime_event_handler),
             ctx.mutation_recorder.clone(),
+            expected_process_subject,
         )
         .await?;
         Ok(activation_result(
@@ -706,12 +813,16 @@ pub fn mcp_stdio_boundary_summary(
     workspace_root: &std::path::Path,
     server: &McpServerConfig,
 ) -> String {
+    let environment = match sigil_kernel::resolve_extension_process_environment(&[]) {
+        Ok(environment) => environment,
+        Err(error) => return format!("unsupported: {error}"),
+    };
     match sigil_tools_builtin::long_lived_stdio_process_plan(
         &root_config.execution,
         &server.command,
         &server.args,
         workspace_root,
-        &Default::default(),
+        &environment,
     ) {
         Ok(plan) if plan.sandboxed => {
             format!(

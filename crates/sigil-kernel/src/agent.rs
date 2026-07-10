@@ -1083,6 +1083,9 @@ where
                         execution_mutation_profile.as_ref(),
                     )?;
                     let execution_started = Instant::now();
+                    let execution_tool_ctx = tool_ctx
+                        .clone()
+                        .with_approved_subjects(execution_subjects.clone());
                     let mut result = match agent_delegate
                         .as_deref_mut()
                         .filter(|_| tool_registered && tool_is_agent_category)
@@ -1100,7 +1103,7 @@ where
                             Ok(Some(result)) => result,
                             Ok(None) => match execute_after_started_audit_with_progress(
                                 tools,
-                                tool_ctx.clone(),
+                                execution_tool_ctx.clone(),
                                 call.clone(),
                                 handler,
                             )
@@ -1123,7 +1126,7 @@ where
                         },
                         None => match execute_after_started_audit_with_progress(
                             tools,
-                            tool_ctx.clone(),
+                            execution_tool_ctx,
                             call.clone(),
                             handler,
                         )

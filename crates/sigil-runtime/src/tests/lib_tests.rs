@@ -18,7 +18,8 @@ use sigil_kernel::{
     ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionConfig,
     SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool,
     ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind,
+    WorkspaceConfig,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -979,7 +980,8 @@ async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Resu
         command: "sh".to_owned(),
         args: vec!["-c".to_owned(), "sleep 1".to_owned()],
         working_dir: Some(temp.path().to_path_buf()),
-        env: Default::default(),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
     })?;
@@ -1014,7 +1016,9 @@ fn configured_mcp_process_launcher_local_required_sandbox_fails_closed() {
         command: "sh".to_owned(),
         args: vec!["-c".to_owned(), "true".to_owned()],
         working_dir: None,
-        env: Default::default(),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])
+            .expect("test environment should resolve"),
+        launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
     });
@@ -1022,10 +1026,11 @@ fn configured_mcp_process_launcher_local_required_sandbox_fails_closed() {
     let Err(error) = result else {
         panic!("local MCP launcher must fail closed when sandbox is required");
     };
-    assert!(
+    assert_eq!(
         error
-            .to_string()
-            .contains("local execution backend cannot enforce local stdio sandbox")
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::ProcessIsolationUnavailable)
     );
 }
 
@@ -1041,15 +1046,10 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace)?;
     let outside = temp.path().join("outside.txt");
-    let mut env = BTreeMap::new();
-    env.insert(
-        "SIGIL_TEST_OUTSIDE".to_owned(),
-        outside.to_string_lossy().into_owned(),
-    );
     let launcher = super::ConfiguredMcpProcessLauncher {
         execution: sandbox_execution_config(
             ExecutionBackendKind::MacosSeatbelt,
-            ExecutionSandboxProfile::WorkspaceWrite,
+            ExecutionSandboxProfile::BuildNetworked,
             ExecutionSandboxFallback::Deny,
             None,
         ),
@@ -1059,10 +1059,13 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
         command: "sh".to_owned(),
         args: vec![
             "-c".to_owned(),
-            "printf ok > inside.txt; if printf nope > \"$SIGIL_TEST_OUTSIDE\"; then printf outside-wrote; else printf outside-denied; fi".to_owned(),
+            "printf ok > inside.txt; if printf nope > \"$1\"; then printf outside-wrote; else printf outside-denied; fi".to_owned(),
+            "sh".to_owned(),
+            outside.to_string_lossy().into_owned(),
         ],
         working_dir: Some(workspace.clone()),
-        env,
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
     })?;
@@ -1081,7 +1084,7 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
     );
     assert_eq!(
         launch.receipt.sandbox_profile,
-        Some(ExecutionSandboxProfile::WorkspaceWrite)
+        Some(ExecutionSandboxProfile::BuildNetworked)
     );
 
     let output = launch.child.wait_with_output().await?;
@@ -1263,14 +1266,41 @@ while True:
     assert!(registry.spec_for("mcp_activate_server").is_some());
     assert!(registry.spec_for("mcp__lazy__echo").is_none());
 
+    let activation_call = ToolCall {
+        id: "activate-lazy".to_owned(),
+        name: "mcp_activate_server".to_owned(),
+        args_json: json!({ "server_name": "lazy" }).to_string(),
+    };
+    let approved_subjects = registry.permission_subjects(
+        &ToolContext::new(temp.path().to_path_buf(), 5),
+        &activation_call,
+    )?;
+    let mut stale_subjects = approved_subjects.clone();
+    stale_subjects
+        .iter_mut()
+        .find(|subject| subject.kind == ToolSubjectKind::McpTrustClass)
+        .expect("lazy activation should have a process-bound trust subject")
+        .original
+        .push_str(":stale");
+    let stale_error = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5).with_approved_subjects(stale_subjects),
+            activation_call.clone(),
+        )
+        .await
+        .expect_err("stale approval binding must fail before MCP spawn");
+    assert!(
+        stale_error
+            .to_string()
+            .contains("process binding changed after approval")
+    );
+    assert!(registry.spec_for("mcp__lazy__echo").is_none());
+
     let activation = registry
         .execute(
-            ToolContext::new(temp.path().to_path_buf(), 5),
-            ToolCall {
-                id: "activate-lazy".to_owned(),
-                name: "mcp_activate_server".to_owned(),
-                args_json: json!({ "server_name": "lazy" }).to_string(),
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5)
+                .with_approved_subjects(approved_subjects),
+            activation_call,
         )
         .await?;
 

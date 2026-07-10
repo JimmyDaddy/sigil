@@ -13,6 +13,7 @@ pub mod mutation;
 pub mod permission;
 pub mod plan;
 pub mod plugin;
+pub mod process_environment;
 pub mod projection;
 pub mod provider;
 pub mod provider_error;
@@ -126,7 +127,8 @@ pub use execution_backend::{
     ExecutionRequest, ExecutionResourceLimitKind, ExecutionResourceLimitReceipt,
     ExecutionResourceReceipt, ExecutionSandboxFallback, ExecutionSandboxProfile,
     ExecutionSandboxProfileSpec, ExecutionSandboxStrategyConfig, ExecutionStrategyConfig,
-    ExecutionStrategyMode, ExecutionTimeoutSource,
+    ExecutionStrategyMode, ExecutionTimeoutSource, validate_extension_process_isolation,
+    validate_extension_process_network_receipt,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
@@ -173,6 +175,13 @@ pub use plugin::{
     plugin_manifest_digests_match, validate_plugin_capability_digest,
     validate_plugin_hook_schema_digest, validate_plugin_id, validate_plugin_manifest_digest,
     validate_plugin_version,
+};
+pub use process_environment::{
+    EXTENSION_ENVIRONMENT_POLICY_VERSION, ExtensionProcessLaunchError,
+    ExtensionProcessLaunchErrorCode, ExtensionProcessLaunchPhase, ExtensionProcessLifecycleAudit,
+    ExtensionProcessLifecycleStatus, ProcessEnvironmentPolicy, ResolvedProcessEnvironment,
+    SecretString, extension_environment_static_fingerprint, normalize_environment_variable_names,
+    resolve_extension_process_environment,
 };
 pub use projection::{
     AGENT_GRAPH_PROJECTION_SCHEMA_VERSION, DISPATCH_TRACE_PROJECTION_SCHEMA_VERSION,

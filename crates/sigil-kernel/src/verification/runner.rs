@@ -426,6 +426,7 @@ async fn execute_check_command(
         args: command.args.clone(),
         cwd: cwd.clone(),
         env: BTreeMap::new(),
+        environment_policy: crate::process_environment::ProcessEnvironmentPolicy::InheritParent,
         timeout_ms,
         timeout_secs: timeout_ms
             .map(|timeout_ms| timeout_ms.saturating_add(999) / 1000)

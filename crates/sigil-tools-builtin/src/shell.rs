@@ -331,6 +331,7 @@ pub(crate) fn bash_execution_request(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),
             scratch_root.to_string_lossy().into_owned(),
         )]),
+        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
         timeout_ms: None,
         timeout_secs,
         cpu_time_ms: None,

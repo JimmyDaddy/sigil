@@ -866,6 +866,7 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     let session_contents = fs::read_to_string(session_path)?;
     assert!(session_contents.contains("Say hi"));
     assert!(session_contents.contains("hello from agent"));
+    assert!(session_contents.contains("\"event_type\":\"session_entry_recorded\""));
     Ok(())
 }
 

@@ -2,6 +2,9 @@ use super::*;
 
 pub(super) struct McpServerObservedIdentity {
     pub(super) command_fingerprint: String,
+    pub(super) environment_grant_names: Vec<String>,
+    pub(super) environment_static_fingerprint: String,
+    pub(super) environment_live_fingerprint: String,
     pub(super) protocol_version: String,
     pub(super) server_name: String,
     pub(super) server_version: String,
@@ -20,10 +23,27 @@ impl McpServerObservedIdentity {
     pub(super) fn to_json(&self) -> Value {
         json!({
             "command_fingerprint": self.command_fingerprint,
+            "environment_grant_names": self.environment_grant_names,
+            "environment_grant_source": "parent_environment",
+            "environment_static_fingerprint": self.environment_static_fingerprint,
+            "environment_live_fingerprint": self.environment_live_fingerprint,
             "protocol_version": self.protocol_version,
             "server_name": self.server_name,
             "server_version": self.server_version,
         })
+    }
+
+    pub(super) fn trust_subject(
+        &self,
+        server_name: impl Into<String>,
+        trust_class: impl Into<String>,
+    ) -> ToolSubject {
+        ToolSubject::mcp_trust_class_with_process_binding(
+            server_name,
+            trust_class,
+            &self.command_fingerprint,
+            &self.environment_live_fingerprint,
+        )
     }
 }
 
@@ -46,6 +66,38 @@ pub(super) struct McpServerInfo {
 pub(super) struct McpInitializeOutcome {
     pub(super) identity: McpServerObservedIdentity,
     pub(super) capabilities: Value,
+}
+
+#[derive(Debug)]
+pub(super) struct McpPostSpawnStartupError {
+    receipt: McpProcessLaunchReceipt,
+    source: anyhow::Error,
+}
+
+impl McpPostSpawnStartupError {
+    fn new(receipt: McpProcessLaunchReceipt, source: anyhow::Error) -> Self {
+        Self { receipt, source }
+    }
+
+    pub(super) fn receipt(&self) -> &McpProcessLaunchReceipt {
+        &self.receipt
+    }
+}
+
+impl std::fmt::Display for McpPostSpawnStartupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "MCP server {} failed after process spawn: {:#}",
+            self.receipt.server_name, self.source
+        )
+    }
+}
+
+impl std::error::Error for McpPostSpawnStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 pub(super) struct McpClient {
@@ -78,67 +130,83 @@ impl McpClient {
         config: McpServerConfig,
         roots: Vec<PathBuf>,
         working_dir: Option<PathBuf>,
-        secret_redactor: SecretRedactor,
+        mut secret_redactor: SecretRedactor,
         elicitation_handler: Arc<dyn McpElicitationHandler>,
         runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
         process_launcher: Arc<dyn McpProcessLauncher>,
+        expected_process_subject: Option<&ToolSubject>,
     ) -> Result<Self> {
-        let launch_request = McpProcessLaunchRequest::from_config(&config, working_dir);
+        let launch_request = McpProcessLaunchRequest::from_config(&config, working_dir)?;
+        validate_expected_process_subject(&config, &launch_request, expected_process_subject)?;
+        validate_mcp_static_pin(&config, &launch_request.launch_static_fingerprint)?;
+        for name in launch_request.environment.grant_names() {
+            if let Some(secret) = launch_request.environment.variable(name) {
+                secret_redactor.add_secret_carrier(secret.clone());
+            }
+        }
         let launch = process_launcher.launch(launch_request)?;
-        let mut child = launch.child;
+        let startup_receipt = launch.receipt.clone();
+        let startup = async move {
+            let mut child = launch.child;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("missing stdin for MCP server {}", config.name))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("missing stdout for MCP server {}", config.name))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("missing stderr for MCP server {}", config.name))?;
-        let stderr_task = tokio::spawn(drain_mcp_stderr(stderr));
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("missing stdin for MCP server {}", config.name))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow!("missing stdout for MCP server {}", config.name))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| anyhow!("missing stderr for MCP server {}", config.name))?;
+            let stderr_task = tokio::spawn(drain_mcp_stderr(stderr));
 
-        let mut client = Self {
-            _child: Mutex::new(child),
-            _process_receipt: launch.receipt,
-            _stderr_task: stderr_task,
-            connection: Mutex::new(Connection {
-                stdin,
-                stdout: BufReader::new(stdout),
-                next_id: 0,
-            }),
-            server_name: config.name.clone(),
-            trust: config.trust.clone(),
-            secret_redactor,
-            elicitation_handler,
-            runtime_event_handler,
-            roots,
-            identity: McpServerObservedIdentity {
-                command_fingerprint: String::new(),
-                protocol_version: String::new(),
-                server_name: String::new(),
-                server_version: String::new(),
-            },
-            server_capabilities: Value::Null,
-        };
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(config.startup_timeout_secs),
-            client.initialize(&config),
-        )
-        .await
-        .with_context(|| format!("MCP server {} initialize timed out", config.name))??;
-        validate_mcp_pin(&config, &outcome.identity)?;
-        client.identity = outcome.identity;
-        client.server_capabilities = outcome.capabilities;
-        Ok(client)
+            let mut client = Self {
+                _child: Mutex::new(child),
+                _process_receipt: launch.receipt,
+                _stderr_task: stderr_task,
+                connection: Mutex::new(Connection {
+                    stdin,
+                    stdout: BufReader::new(stdout),
+                    next_id: 0,
+                }),
+                server_name: config.name.clone(),
+                trust: config.trust.clone(),
+                secret_redactor,
+                elicitation_handler,
+                runtime_event_handler,
+                roots,
+                identity: McpServerObservedIdentity {
+                    command_fingerprint: String::new(),
+                    environment_grant_names: Vec::new(),
+                    environment_static_fingerprint: String::new(),
+                    environment_live_fingerprint: String::new(),
+                    protocol_version: String::new(),
+                    server_name: String::new(),
+                    server_version: String::new(),
+                },
+                server_capabilities: Value::Null,
+            };
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(config.startup_timeout_secs),
+                client.initialize(&config),
+            )
+            .await
+            .with_context(|| format!("MCP server {} initialize timed out", config.name))??;
+            validate_mcp_pin(&config, &outcome.identity)?;
+            client.identity = outcome.identity;
+            client.server_capabilities = outcome.capabilities;
+            Ok(client)
+        }
+        .await;
+        startup.map_err(|source| McpPostSpawnStartupError::new(startup_receipt, source).into())
     }
 
     pub(super) async fn initialize(
         &self,
-        config: &McpServerConfig,
+        _config: &McpServerConfig,
     ) -> Result<McpInitializeOutcome> {
         let mut capabilities = json!({
             "roots": { "listChanged": true }
@@ -168,12 +236,23 @@ impl McpClient {
         });
         Ok(McpInitializeOutcome {
             identity: McpServerObservedIdentity {
-                command_fingerprint: mcp_command_fingerprint(&config.command, &config.args)?,
-                protocol_version: initialize
-                    .protocol_version
-                    .unwrap_or_else(|| MCP_PROTOCOL_VERSION.to_owned()),
-                server_name: server_info.name,
-                server_version: server_info.version,
+                command_fingerprint: self._process_receipt.launch_static_fingerprint.clone(),
+                environment_grant_names: self._process_receipt.environment_grant_names.clone(),
+                environment_static_fingerprint: self
+                    ._process_receipt
+                    .environment_static_fingerprint
+                    .clone(),
+                environment_live_fingerprint: self
+                    ._process_receipt
+                    .environment_live_fingerprint
+                    .clone(),
+                protocol_version: self.secret_redactor.redact_text(
+                    &initialize
+                        .protocol_version
+                        .unwrap_or_else(|| MCP_PROTOCOL_VERSION.to_owned()),
+                ),
+                server_name: self.secret_redactor.redact_text(&server_info.name),
+                server_version: self.secret_redactor.redact_text(&server_info.version),
             },
             capabilities: initialize.capabilities,
         })
@@ -223,13 +302,18 @@ impl McpClient {
             "params": params,
         });
         let mut connection = self.connection.lock().await;
+        self.ensure_environment_binding_current().await?;
         write_message(&mut connection.stdin, &message).await
     }
 
     pub(super) async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
         let response = self.send_request_response(method, params).await?;
         if let Some(error) = response.get("error") {
-            bail!("MCP request {} failed: {}", method, error);
+            bail!(
+                "MCP request {} failed: {}",
+                method,
+                self.secret_redactor.redact_value(error)
+            );
         }
         response
             .get("result")
@@ -239,6 +323,7 @@ impl McpClient {
 
     pub(super) async fn send_request_response(&self, method: &str, params: Value) -> Result<Value> {
         let mut connection = self.connection.lock().await;
+        self.ensure_environment_binding_current().await?;
         connection.next_id += 1;
         let id = connection.next_id;
         let message = json!({
@@ -255,8 +340,38 @@ impl McpClient {
                     .await?;
                 continue;
             }
-            return Ok(response);
+            self.ensure_environment_binding_current().await?;
+            return Ok(self.secret_redactor.redact_value(&response));
         }
+    }
+
+    async fn ensure_environment_binding_current(&self) -> Result<()> {
+        let current = match resolve_extension_process_environment(
+            &self._process_receipt.environment_grant_names,
+        ) {
+            Ok(current) => current,
+            Err(error) => {
+                self.invalidate_process().await;
+                return Err(error.into());
+            }
+        };
+        if environment_binding_matches(&self._process_receipt, &current) {
+            return Ok(());
+        }
+        self.invalidate_process().await;
+        Err(ExtensionProcessLaunchError::environment_binding_changed(
+            &self.server_name,
+            format!(
+                "MCP server {} environment binding changed; restart or refresh the server before retrying",
+                self.server_name
+            ),
+        )
+        .into())
+    }
+
+    async fn invalidate_process(&self) {
+        let mut child = self._child.lock().await;
+        let _ = child.start_kill();
     }
 
     pub(super) async fn handle_inbound_message(
@@ -264,11 +379,14 @@ impl McpClient {
         connection: &mut Connection,
         message: &Value,
     ) -> Result<()> {
+        self.ensure_environment_binding_current().await?;
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             return Ok(());
         };
+        let safe_message = self.secret_redactor.redact_value(message);
         if method == "notifications/progress" {
-            if let Some(notification) = mcp_progress_notification(&self.server_name, message) {
+            if let Some(notification) = mcp_progress_notification(&self.server_name, &safe_message)
+            {
                 self.runtime_event_handler.progress(notification).await?;
             }
             return Ok(());
@@ -302,13 +420,16 @@ impl McpClient {
                 if !self.trust.allow_secrets && self.secret_redactor.value_contains_secret(&payload)
                 {
                     let message = "MCP roots/list would expose a secret and this server has allow_secrets = false";
+                    self.ensure_environment_binding_current().await?;
                     write_error_response(connection, id, -32000, message).await?;
                     bail!("MCP server {} {message}", self.server_name);
                 }
+                self.ensure_environment_binding_current().await?;
                 write_success_response(connection, id, payload).await
             }
             "elicitation/create" => {
                 if !self.elicitation_handler.supports_elicitation() {
+                    self.ensure_environment_binding_current().await?;
                     return write_error_response(
                         connection,
                         id,
@@ -317,7 +438,7 @@ impl McpClient {
                     )
                     .await;
                 }
-                let request = mcp_elicitation_request(&self.server_name, message)?;
+                let request = mcp_elicitation_request(&self.server_name, &safe_message)?;
                 match self.elicitation_handler.elicit(request).await {
                     Ok(response) => {
                         let payload = response.into_result();
@@ -325,27 +446,102 @@ impl McpClient {
                             && self.secret_redactor.value_contains_secret(&payload)
                         {
                             let message = "MCP elicitation response contains a secret and this server has allow_secrets = false";
+                            self.ensure_environment_binding_current().await?;
                             write_error_response(connection, id, -32000, message).await?;
                             bail!("MCP server {} {message}", self.server_name);
                         }
+                        self.ensure_environment_binding_current().await?;
                         write_success_response(connection, id, payload).await
                     }
                     Err(error) => {
-                        write_error_response(connection, id, -32000, format!("{error:#}")).await
+                        self.ensure_environment_binding_current().await?;
+                        write_error_response(
+                            connection,
+                            id,
+                            -32000,
+                            self.secret_redactor.redact_text(&format!("{error:#}")),
+                        )
+                        .await
                     }
                 }
             }
             _ => {
+                self.ensure_environment_binding_current().await?;
                 write_error_response(
                     connection,
                     id,
                     -32601,
-                    format!("MCP client method is not supported: {method}"),
+                    format!(
+                        "MCP client method is not supported: {}",
+                        self.secret_redactor.redact_text(method)
+                    ),
                 )
                 .await
             }
         }
     }
+}
+
+fn validate_expected_process_subject(
+    config: &McpServerConfig,
+    request: &McpProcessLaunchRequest,
+    expected: Option<&ToolSubject>,
+) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let observed = ToolSubject::mcp_trust_class_with_process_binding(
+        &config.name,
+        config.trust.trust_class.as_str(),
+        &request.launch_static_fingerprint,
+        request.environment.live_fingerprint(),
+    );
+    if &observed == expected {
+        return Ok(());
+    }
+    Err(ExtensionProcessLaunchError::environment_binding_changed(
+        &config.name,
+        format!(
+            "MCP server {} process binding changed after approval; retry activation to review the current binding",
+            config.name
+        ),
+    )
+    .into())
+}
+
+pub(super) fn environment_binding_matches(
+    receipt: &McpProcessLaunchReceipt,
+    current: &ResolvedProcessEnvironment,
+) -> bool {
+    current.static_fingerprint() == receipt.environment_static_fingerprint
+        && current.live_fingerprint() == receipt.environment_live_fingerprint
+}
+
+pub(super) fn validate_mcp_static_pin(config: &McpServerConfig, observed: &str) -> Result<()> {
+    if !config.trust.pin_version {
+        return Ok(());
+    }
+    let Some(expected) = config.trust.pinned.as_ref() else {
+        return Err(ExtensionProcessLaunchError::configuration_invalid(
+            &config.name,
+            format!(
+                "MCP server {} has pin_version = true but no pinned identity; pre-spawn command_fingerprint={observed}",
+                config.name
+            ),
+        )
+        .into());
+    };
+    if expected.command_fingerprint != observed {
+        return Err(ExtensionProcessLaunchError::configuration_invalid(
+            &config.name,
+            format!(
+                "MCP server {} pre-spawn command_fingerprint mismatch: expected {} observed {}",
+                config.name, expected.command_fingerprint, observed
+            ),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub(super) fn validate_mcp_pin(

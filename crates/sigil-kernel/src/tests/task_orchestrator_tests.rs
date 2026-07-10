@@ -89,6 +89,7 @@ impl ExecutionBackend for FakeTaskExecutionBackend {
                 capabilities: ExecutionBackendCapabilities::default(),
                 network: Default::default(),
                 resources: Default::default(),
+                environment_policy: request.environment_policy,
                 exit_code: if failed { Some(1) } else { Some(0) },
                 stdout: format!("fake backend executed {}\n", request.program).into_bytes(),
                 stderr: if failed {

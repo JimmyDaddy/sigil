@@ -136,12 +136,13 @@ fn local_execution_backend_policy_fails_closed_when_sandbox_required() -> Result
 #[test]
 fn long_lived_stdio_process_plan_local_unconfined_is_outside_sandbox() -> Result<()> {
     let temp = tempfile::tempdir()?;
+    let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
     let plan = super::long_lived_stdio_process_plan(
         &ExecutionConfig::default(),
         "sh",
         &["-c".to_owned(), "true".to_owned()],
         temp.path(),
-        &BTreeMap::new(),
+        &environment,
     )?;
 
     assert_eq!(plan.backend, ExecutionBackendKind::Local);
@@ -154,6 +155,7 @@ fn long_lived_stdio_process_plan_local_unconfined_is_outside_sandbox() -> Result
 #[test]
 fn long_lived_stdio_process_plan_local_required_sandbox_fails_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
+    let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
     let result = super::long_lived_stdio_process_plan(
         &sandbox_execution_config(
             ExecutionBackendKind::Local,
@@ -164,16 +166,17 @@ fn long_lived_stdio_process_plan_local_required_sandbox_fails_closed() -> Result
         "sh",
         &["-c".to_owned(), "true".to_owned()],
         temp.path(),
-        &BTreeMap::new(),
+        &environment,
     );
 
     let Err(error) = result else {
         panic!("local stdio MCP process must fail closed when sandbox is required");
     };
-    assert!(
+    assert_eq!(
         error
-            .to_string()
-            .contains("local execution backend cannot enforce local stdio sandbox")
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::ProcessIsolationUnavailable)
     );
     Ok(())
 }
@@ -181,6 +184,7 @@ fn long_lived_stdio_process_plan_local_required_sandbox_fails_closed() -> Result
 #[test]
 fn long_lived_stdio_process_plan_docker_fails_closed_for_stdio_mcp() -> Result<()> {
     let temp = tempfile::tempdir()?;
+    let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
     let result = super::long_lived_stdio_process_plan(
         &sandbox_execution_config(
             ExecutionBackendKind::Docker,
@@ -191,7 +195,7 @@ fn long_lived_stdio_process_plan_docker_fails_closed_for_stdio_mcp() -> Result<(
         "sh",
         &["-c".to_owned(), "true".to_owned()],
         temp.path(),
-        &BTreeMap::new(),
+        &environment,
     );
 
     let Err(error) = result else {
@@ -360,6 +364,7 @@ fn linux_bubblewrap_args_mount_workspace_scratch_and_disable_network_by_default(
             "SIGIL_SCRATCH_DIR".to_owned(),
             canonical_scratch.to_string_lossy().into_owned(),
         )]),
+        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
         timeout_ms: None,
         timeout_secs: 5,
         cpu_time_ms: None,
@@ -406,6 +411,7 @@ fn linux_bubblewrap_args_keep_tmp_workspace_visible_after_tmpfs() {
         args: vec!["-c".to_owned(), "true".to_owned()],
         cwd: canonical_workspace.clone(),
         env: BTreeMap::new(),
+        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
         timeout_ms: None,
         timeout_secs: 5,
         cpu_time_ms: None,
@@ -485,6 +491,7 @@ async fn linux_bubblewrap_execution_backend_real_conformance() -> Result<()> {
                 "OUTSIDE_PATH".to_owned(),
                 external_path.to_string_lossy().into_owned(),
             )]),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: Some(10_000),
             timeout_secs: 10,
             cpu_time_ms: None,
@@ -621,6 +628,7 @@ async fn docker_execution_backend_builds_offline_container_command() -> Result<(
             ],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::from([("RUST_LOG".to_owned(), "debug".to_owned())]),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 5,
             cpu_time_ms: None,
@@ -674,6 +682,7 @@ async fn docker_execution_backend_networked_receipt_allows_network() -> Result<(
             args: vec!["test".to_owned()],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 5,
             cpu_time_ms: None,
@@ -720,6 +729,7 @@ async fn docker_execution_backend_real_daemon_conformance() -> Result<()> {
             ],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: Some(10_000),
             timeout_secs: 10,
             cpu_time_ms: None,
@@ -798,6 +808,7 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
             args: vec!["-lc".to_owned(), "printf backend-ok".to_owned()],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 5,
             cpu_time_ms: None,
@@ -816,6 +827,57 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
 }
 
 #[tokio::test]
+async fn process_environment_policy_preserves_user_shell_and_clears_extension_ambient() -> Result<()>
+{
+    let Ok(home) = std::env::var("HOME") else {
+        return Ok(());
+    };
+    let temp = tempfile::tempdir()?;
+    let backend = LocalExecutionBackend;
+    let inherited = backend
+        .execute(ExecutionRequest {
+            program: "/bin/sh".to_owned(),
+            args: vec!["-c".to_owned(), "printf '%s' \"${HOME-unset}\"".to_owned()],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+            timeout_ms: None,
+            timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await?;
+    assert_eq!(String::from_utf8_lossy(&inherited.stdout), home);
+
+    let resolved = sigil_kernel::resolve_extension_process_environment(&[])?;
+    let extension_env = resolved
+        .variables()
+        .map(|(name, value)| (name.to_owned(), value.expose_secret().to_owned()))
+        .collect();
+    let isolated = backend
+        .execute(ExecutionRequest {
+            program: "/bin/sh".to_owned(),
+            args: vec!["-c".to_owned(), "printf '%s' \"${HOME-unset}\"".to_owned()],
+            cwd: temp.path().to_path_buf(),
+            env: extension_env,
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
+            timeout_ms: None,
+            timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await?;
+    assert_eq!(String::from_utf8_lossy(&isolated.stdout), "unset");
+    assert_eq!(
+        isolated.environment_policy,
+        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn execution_backend_records_timeout_cleanup_and_unsupported_limits() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let backend = LocalExecutionBackend;
@@ -826,6 +888,7 @@ async fn execution_backend_records_timeout_cleanup_and_unsupported_limits() -> R
             args: vec!["-c".to_owned(), "sleep 5".to_owned()],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: Some(20),
             timeout_secs: 1,
             cpu_time_ms: Some(100),
@@ -873,6 +936,7 @@ async fn execution_backend_timeout_cleans_process_group_children() -> Result<()>
             args: vec!["-c".to_owned(), script],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: Some(100),
             timeout_secs: 1,
             cpu_time_ms: None,
@@ -926,6 +990,7 @@ async fn macos_seatbelt_execution_backend_allows_workspace_write_and_denies_exte
             ],
             cwd: workspace_root.clone(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 5,
             cpu_time_ms: None,
@@ -1019,6 +1084,7 @@ async fn sandbox_conformance_macos_seatbelt_enforces_filesystem_write_claim() ->
             ],
             cwd: workspace_root.clone(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 5,
             cpu_time_ms: None,
@@ -1056,6 +1122,7 @@ async fn sandbox_conformance_macos_seatbelt_missing_binary_fails_closed() -> Res
             args: vec!["-c".to_owned(), "printf should-not-run".to_owned()],
             cwd: workspace.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 5,
             cpu_time_ms: None,
@@ -1090,6 +1157,7 @@ async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
             args: vec!["no-timeout".to_owned()],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 0,
             cpu_time_ms: None,
@@ -1115,6 +1183,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             args: vec!["-lc".to_owned(), "sleep 2".to_owned()],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: Some(1),
             timeout_secs: 1,
             cpu_time_ms: None,
@@ -1133,6 +1202,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             args: Vec::new(),
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             timeout_ms: None,
             timeout_secs: 1,
             cpu_time_ms: None,
@@ -1170,6 +1240,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             capabilities: ExecutionBackendCapabilities::default(),
             network: Default::default(),
             resources: Default::default(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             exit_code: None,
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -1189,6 +1260,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             capabilities: ExecutionBackendCapabilities::default(),
             network: Default::default(),
             resources: Default::default(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             exit_code: Some(0),
             stdout: b"stdout".to_vec(),
             stderr: b"stderr".to_vec(),
@@ -1209,6 +1281,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             capabilities: ExecutionBackendCapabilities::default(),
             network: Default::default(),
             resources: Default::default(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
             exit_code: Some(7),
             stdout: Vec::new(),
             stderr: b"bad".to_vec(),
@@ -3197,6 +3270,7 @@ async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
         capabilities: ExecutionBackendCapabilities::default(),
         network: Default::default(),
         resources: Default::default(),
+        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
     };
     let workspace = tempfile::tempdir()?;
     let analysis = super::analyze_shell_command(

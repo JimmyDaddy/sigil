@@ -13,22 +13,44 @@ pub(super) fn check_mcp_servers(
 
     for server in servers {
         let command_status = command_status(&server.command, workspace_root);
-        let status = match command_status {
-            CommandStatus::Available => DoctorStatus::Ok,
-            CommandStatus::Empty => DoctorStatus::Error,
-            CommandStatus::Missing
-                if server.required && server.startup == McpServerStartup::Eager =>
-            {
-                DoctorStatus::Error
+        let environment = sigil_kernel::resolve_extension_process_environment(&server.inherit_env);
+        let status = if environment.is_err() {
+            DoctorStatus::Error
+        } else {
+            match command_status {
+                CommandStatus::Available => DoctorStatus::Ok,
+                CommandStatus::Empty => DoctorStatus::Error,
+                CommandStatus::Missing
+                    if server.required && server.startup == McpServerStartup::Eager =>
+                {
+                    DoctorStatus::Error
+                }
+                CommandStatus::Missing => DoctorStatus::Warn,
             }
-            CommandStatus::Missing => DoctorStatus::Warn,
         };
-        let remediation = mcp_remediation(server, command_status);
+        let environment_summary = match &environment {
+            Ok(environment) => format!(
+                "isolated grants={} missing=none live={}",
+                environment_grant_names_summary(environment.grant_names()),
+                short_environment_fingerprint(environment.live_fingerprint())
+            ),
+            Err(error) => format!(
+                "isolated grants={} missing error={}",
+                environment_grant_names_summary(&server.inherit_env),
+                error.code.as_str()
+            ),
+        };
+        let remediation = environment.as_ref().err().map(|error| {
+            format!(
+                "{}; set every inherit_env variable before starting Sigil, or remove the unused grant",
+                error.message
+            )
+        }).or_else(|| mcp_remediation(server, command_status).map(ToOwned::to_owned));
         report.push_with_remediation(
             status,
             format!("mcp:{}", server.name),
             format!(
-                "{} required={} command={} trust={} approval={} secrets={} pin={} boundary={}",
+                "{} required={} command={} trust={} approval={} secrets={} pin={} environment=({}) boundary={}",
                 server.startup.as_str(),
                 server.required,
                 command_status.as_str(),
@@ -44,11 +66,25 @@ pub(super) fn check_mcp_servers(
                 } else {
                     "off"
                 },
+                environment_summary,
                 crate::mcp_stdio_boundary_summary(root_config, workspace_root, server),
             ),
             remediation,
         );
     }
+}
+
+fn environment_grant_names_summary(names: &[String]) -> String {
+    if names.is_empty() {
+        "none".to_owned()
+    } else {
+        names.join(",")
+    }
+}
+
+fn short_environment_fingerprint(fingerprint: &str) -> String {
+    const MAX_CHARS: usize = 24;
+    fingerprint.chars().take(MAX_CHARS).collect()
 }
 
 #[derive(Debug, Default)]
@@ -145,9 +181,9 @@ pub(super) fn check_plugin_hooks(
             DoctorStatus::Warn,
             "plugins:discovery",
             format!(
-                "{} warnings; first={:?} {}",
+                "{} warnings; first={} {}",
                 discovery.warnings.len(),
-                warning.kind,
+                warning.kind.code(),
                 warning.path.display()
             ),
             Some("open /config Plugins to review manifest warnings before trusting plugins"),

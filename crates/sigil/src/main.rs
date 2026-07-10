@@ -13,8 +13,8 @@ use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
-    Agent, EventHandler, InteractionMode, JsonlSessionStore, ProviderChunk, RootConfig, RunEvent,
-    Session, UsageStats, resolve_workspace_root,
+    Agent, EventHandler, InteractionMode, JsonlSessionStore, MutationEventRecorder, ProviderChunk,
+    RootConfig, RunEvent, Session, UsageStats, resolve_workspace_root,
 };
 use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
 use sigil_runtime::{
@@ -273,17 +273,19 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
         &root_config.session,
         &workspace_root,
     );
+    let session_store = JsonlSessionStore::new(default_session_path(&sigil_paths.session_log_dir))?;
+    let mutation_recorder = MutationEventRecorder::new(session_store.clone());
 
     let provider = sigil_runtime::build_provider(&root_config)?;
-    let registry = sigil_runtime::build_tool_registry(
+    let registry = sigil_runtime::build_tool_registry_with_mutation_recorder(
         &root_config,
         &provider.capabilities(),
         workspace_root.clone(),
+        mutation_recorder,
     )
     .await?;
     let agent = Agent::new(provider, registry);
 
-    let session_store = JsonlSessionStore::new(default_session_path(&sigil_paths.session_log_dir))?;
     let mut session = Session::load_from_store(
         root_config.agent.provider.clone(),
         root_config.agent.model.clone(),

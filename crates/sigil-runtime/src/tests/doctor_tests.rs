@@ -784,6 +784,71 @@ required = true
 }
 
 #[test]
+fn doctor_reports_mcp_environment_grant_names_and_missing_without_values() -> Result<()> {
+    let Ok(home) = env::var("HOME") else {
+        return Ok(());
+    };
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    fs::write(workspace.join("mcp-server"), "#!/bin/sh\n")?;
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "test-secret-key"
+
+[[mcp_servers]]
+name = "ready-env"
+command = "./mcp-server"
+startup = "lazy"
+required = false
+inherit_env = ["HOME"]
+
+[[mcp_servers]]
+name = "missing-env"
+command = "./mcp-server"
+startup = "lazy"
+required = false
+inherit_env = ["SIGIL_E21_DOCTOR_MISSING_4D21"]
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+    let ready = report
+        .checks
+        .iter()
+        .find(|check| check.name == "mcp:ready-env")
+        .expect("ready environment check should exist");
+    assert!(ready.message.contains("grants=HOME"));
+    assert!(ready.message.contains("missing=none"));
+    assert!(ready.message.contains("live=hmac-sha256:"));
+    assert!(!ready.message.contains(&home));
+
+    let missing = report
+        .checks
+        .iter()
+        .find(|check| check.name == "mcp:missing-env")
+        .expect("missing environment check should exist");
+    assert_eq!(missing.status, DoctorStatus::Error);
+    assert!(missing.message.contains("configuration_invalid"));
+    assert!(
+        missing
+            .remediation
+            .as_deref()
+            .is_some_and(|value| value.contains("SIGIL_E21_DOCTOR_MISSING_4D21"))
+    );
+    assert!(!missing.message.contains("test-secret-key"));
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_provider_config_errors() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();

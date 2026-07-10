@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::process_environment::SecretString;
+
 pub const REDACTED_SECRET: &str = "[redacted]";
 
 const SECRET_KEY_MARKERS: &[&str] = &[
@@ -15,7 +17,7 @@ const SECRET_KEY_MARKERS: &[&str] = &[
 /// content is shown in UI, logs, tool metadata, or external egress.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SecretRedactor {
-    secrets: Vec<String>,
+    secrets: Vec<SecretString>,
 }
 
 impl SecretRedactor {
@@ -42,12 +44,31 @@ impl SecretRedactor {
         if trimmed.chars().count() < 4 {
             return;
         }
-        if self.secrets.iter().any(|value| value == trimmed) {
+        self.insert_secret(SecretString::new(trimmed));
+    }
+
+    /// Adds a resolved secret carrier without materializing it as a debug-visible `String`.
+    ///
+    /// Unlike [`Self::add_secret`], this accepts short non-empty values because an explicitly
+    /// granted process credential must never be emitted merely to avoid broad redaction.
+    pub fn add_secret_carrier(&mut self, secret: SecretString) {
+        if secret.expose_secret().is_empty() {
             return;
         }
-        self.secrets.push(trimmed.to_owned());
+        self.insert_secret(secret);
+    }
+
+    fn insert_secret(&mut self, secret: SecretString) {
+        if self
+            .secrets
+            .iter()
+            .any(|value| value.expose_secret() == secret.expose_secret())
+        {
+            return;
+        }
+        self.secrets.push(secret);
         self.secrets
-            .sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+            .sort_by_key(|secret| std::cmp::Reverse(secret.expose_secret().len()));
     }
 
     #[must_use]
@@ -57,7 +78,7 @@ impl SecretRedactor {
         }
         let mut redacted = redact_bearer_tokens(text);
         for secret in &self.secrets {
-            redacted = redacted.replace(secret, REDACTED_SECRET);
+            redacted = redacted.replace(secret.expose_secret(), REDACTED_SECRET);
         }
         redact_secret_assignments(&redacted)
     }
@@ -69,7 +90,7 @@ impl SecretRedactor {
     #[must_use]
     pub fn redact_truncated_bytes(&self, bytes: &[u8]) -> String {
         for secret in &self.secrets {
-            let secret = secret.as_bytes();
+            let secret = secret.expose_secret().as_bytes();
             for prefix_len in (1..=secret.len()).rev() {
                 if bytes.ends_with(&secret[..prefix_len]) {
                     let mut redacted = bytes[..bytes.len() - prefix_len].to_vec();
@@ -97,17 +118,35 @@ impl SecretRedactor {
                         } else {
                             self.redact_value(nested)
                         };
-                        (key.clone(), value)
+                        (self.redact_text(key), value)
                     })
                     .collect(),
             ),
-            _ => value.clone(),
+            Value::Bool(value) => {
+                let rendered = value.to_string();
+                if self.text_contains_secret(&rendered) {
+                    Value::String(REDACTED_SECRET.to_owned())
+                } else {
+                    Value::Bool(*value)
+                }
+            }
+            Value::Number(value) => {
+                if self.text_contains_secret(&value.to_string()) {
+                    Value::String(REDACTED_SECRET.to_owned())
+                } else {
+                    Value::Number(value.clone())
+                }
+            }
+            Value::Null => Value::Null,
         }
     }
 
     #[must_use]
     pub fn text_contains_secret(&self, text: &str) -> bool {
-        self.secrets.iter().any(|secret| text.contains(secret)) || self.redact_text(text) != text
+        self.secrets
+            .iter()
+            .any(|secret| text.contains(secret.expose_secret()))
+            || self.redact_text(text) != text
     }
 
     #[must_use]
@@ -116,10 +155,13 @@ impl SecretRedactor {
             Value::String(text) => self.text_contains_secret(text),
             Value::Array(items) => items.iter().any(|item| self.value_contains_secret(item)),
             Value::Object(object) => object.iter().any(|(key, nested)| {
-                (secret_like_key(key) && value_has_non_empty_data(nested))
+                self.text_contains_secret(key)
+                    || (secret_like_key(key) && value_has_non_empty_data(nested))
                     || self.value_contains_secret(nested)
             }),
-            _ => false,
+            Value::Bool(value) => self.text_contains_secret(&value.to_string()),
+            Value::Number(value) => self.text_contains_secret(&value.to_string()),
+            Value::Null => false,
         }
     }
 }

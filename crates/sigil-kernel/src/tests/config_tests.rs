@@ -927,7 +927,7 @@ scroll_sensitivity = 5
 }
 
 #[test]
-fn root_config_defaults_terminal_keyboard_enhancement_to_auto() {
+fn root_config_defaults_terminal_controls_for_interactive_tui() {
     let config: RootConfig = toml::from_str(
         r#"
 [agent]
@@ -941,6 +941,9 @@ model = "deepseek-v4-flash"
         config.terminal.keyboard_enhancement,
         TerminalKeyboardEnhancement::Auto
     );
+    assert!(config.terminal.mouse_capture);
+    assert!(config.terminal.osc52_clipboard);
+    assert_eq!(config.terminal.scroll_sensitivity, 3);
 }
 
 #[test]
@@ -983,6 +986,7 @@ model = "deepseek-v4-flash"
 name = "required-filesystem"
 command = "node"
 args = ["/srv/filesystem.js"]
+inherit_env = ["SIGIL_MCP_TOKEN", "MCP_REGION", "SIGIL_MCP_TOKEN"]
 startup_timeout_secs = 7
 
 [[mcp_servers]]
@@ -1013,6 +1017,7 @@ server_version = "1.2.3"
 
     let required = &config.mcp_servers[0];
     assert!(required.required);
+    assert_eq!(required.inherit_env, vec!["MCP_REGION", "SIGIL_MCP_TOKEN"]);
     assert_eq!(required.startup, McpServerStartup::Eager);
     assert_eq!(required.trust.trust_class, McpTrustClass::SelfHosted);
     assert_eq!(required.trust.approval_default, ApprovalMode::Ask);
@@ -1037,6 +1042,28 @@ server_version = "1.2.3"
     assert_eq!(pinned.protocol_version, "2024-11-05");
     assert_eq!(pinned.server_name, "third-party");
     assert_eq!(pinned.server_version, "1.2.3");
+
+    let encoded = toml::to_string(&config).expect("mcp config should serialize");
+    assert!(encoded.contains("inherit_env = [\"MCP_REGION\", \"SIGIL_MCP_TOKEN\"]"));
+}
+
+#[test]
+fn mcp_server_config_rejects_invalid_inherit_env_name() {
+    let error = toml::from_str::<RootConfig>(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[[mcp_servers]]
+name = "invalid-env"
+command = "node"
+inherit_env = ["BAD-NAME"]
+"#,
+    )
+    .expect_err("invalid inherit_env should fail");
+
+    assert!(error.to_string().contains("[A-Za-z_][A-Za-z0-9_]*"));
 }
 
 #[test]

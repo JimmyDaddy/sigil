@@ -207,6 +207,7 @@ durable_event_types! {
     ExtensionTrustDecision => ("extension_trust_decision", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PluginHookExecutionStarted => ("plugin_hook_execution_started", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PluginHookExecutionFinished => ("plugin_hook_execution_finished", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ExtensionProcessLifecycleRecorded => ("extension_process_lifecycle_recorded", RecoveryCritical, Critical, DirectJson, "extension_process_lifecycle"),
     SandboxDecisionRecorded => ("sandbox_decision_recorded", RecoveryCritical, Critical, DirectJson, "sandbox_decision_recorded"),
     LogTailRecovered => ("log_tail_recovered", TailRecovery, Critical, DirectJson, "log_tail_recovered"),
 }

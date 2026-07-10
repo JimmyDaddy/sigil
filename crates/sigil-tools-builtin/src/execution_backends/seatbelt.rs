@@ -10,7 +10,7 @@ use sigil_kernel::{
 };
 use tokio::process::Command;
 
-use super::command_output_to_receipt;
+use super::{command_output_to_receipt, configure_command_environment};
 
 #[derive(Debug, Clone)]
 pub struct MacosSeatbeltExecutionBackend {
@@ -61,6 +61,14 @@ impl ExecutionBackend for MacosSeatbeltExecutionBackend {
             resource_limits: false,
             persistent_pty: true,
             workspace_snapshot: false,
+        }
+    }
+
+    fn planned_network_receipt(&self) -> ExecutionNetworkReceipt {
+        if self.network_allowed {
+            ExecutionNetworkReceipt::allowed("profile allows network access")
+        } else {
+            ExecutionNetworkReceipt::unsupported("macos_seatbelt cannot prove network denial")
         }
     }
 
@@ -115,8 +123,8 @@ pub(crate) async fn macos_seatbelt_execute(
         .arg(&request.program)
         .args(&request.args)
         .current_dir(&canonical_cwd)
-        .envs(&request.env)
         .kill_on_drop(true);
+    configure_command_environment(&mut command, &request);
 
     let network = if network_allowed {
         ExecutionNetworkReceipt::allowed("profile allows network access")

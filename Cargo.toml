@@ -53,6 +53,7 @@ unicode-segmentation = "1.13.0"
 unicode-width = "0.2.0"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5"] }
 walkdir = "2.5.0"
+zeroize = "1.8.2"
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
