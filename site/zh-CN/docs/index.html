@@ -69,17 +69,19 @@
 
     <main id="main-content">
       <section class="docs-hero">
-        <img
-          class="docs-logo docs-logo-on-light"
-          src="../../assets/logo/sigil-full-staff-glow.svg"
-          alt="Sigil"
-        >
-        <img
-          class="docs-logo docs-logo-on-dark"
-          src="../../assets/logo/sigil-full-staff-glow-dark-mode.svg"
-          alt=""
-          aria-hidden="true"
-        >
+        <div class="docs-brand-lockup">
+          <img
+            class="docs-logo docs-logo-on-light"
+            src="../../assets/logo/sigil-full-staff-glow.svg"
+            alt="Sigil"
+          >
+          <img
+            class="docs-logo docs-logo-on-dark"
+            src="../../assets/logo/sigil-full-staff-glow-dark-mode.svg"
+            alt=""
+            aria-hidden="true"
+          >
+        </div>
         <div class="docs-hero-copy">
           <p class="eyebrow">文档</p>
           <h1>按任务找到对应指南。</h1>
@@ -87,9 +89,12 @@
             Sigil 保持 README 作为简洁入口，把操作细节拆到聚焦文档里。本页是用户文档的稳定入口。
           </p>
           <div class="docs-search-panel">
-            <form class="site-search" role="search" data-locale="zh-CN" data-index="../../search.json">
+            <form class="site-search docs-command-palette" role="search" data-locale="zh-CN" data-index="../../search.json">
               <label for="docs-search-zh-cn">搜索文档</label>
-              <input id="docs-search-zh-cn" type="search" name="q" autocomplete="off" placeholder="搜索 provider、配置、审批..." aria-controls="docs-search-results-zh-cn" aria-autocomplete="list">
+              <div class="docs-command-line">
+                <span class="docs-command-prefix" aria-hidden="true">sigil docs &gt;</span>
+                <input id="docs-search-zh-cn" type="search" name="q" autocomplete="off" placeholder="搜索 provider、配置、审批..." aria-controls="docs-search-results-zh-cn" aria-autocomplete="list">
+              </div>
               <div class="search-results" id="docs-search-results-zh-cn" aria-label="搜索结果" aria-live="polite"></div>
             </form>
           </div>
@@ -102,21 +107,21 @@
           <h2>先按任务选择路径，再用参考文档查细节。</h2>
         </div>
         <h3 class="resource-group-heading">从这里开始</h3>
-        <div class="resource-grid resource-grid-featured">
-          <a class="resource-card" id="quickstart" href="quickstart/">
-            <span class="resource-kicker">从这里开始</span>
-            <h3>快速上手</h3>
-            <p>安装 preview release，在 workspace 启动，完成 Quick Setup，运行 doctor，并完成第一个安全编辑。</p>
-          </a>
-          <a class="resource-card" id="install" href="installation/">
+        <div class="resource-grid resource-grid-featured task-router">
+          <a class="resource-card task-card" id="install" href="installation/" data-step="01">
             <span class="resource-kicker">安装</span>
             <h3>安装与更新</h3>
             <p>通过 npm、Homebrew、Cargo git tag、源码 checkout 或 release archive 安装，并在需要时更新或卸载已有 binary。</p>
           </a>
-          <a class="resource-card" id="visual-tour" href="visual-tour/">
-            <span class="resource-kicker">预览</span>
-            <h3>视觉导览</h3>
-            <p>用 screenshot-style walkthrough 了解主界面、approval review 和 config panel。</p>
+          <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="02">
+            <span class="resource-kicker">首次运行</span>
+            <h3>完成第一个任务</h3>
+            <p>在 workspace 启动 Sigil，完成 Quick Setup，运行 doctor，并完成第一个安全编辑。</p>
+          </a>
+          <a class="resource-card task-card" id="daily-work" href="user-guide/" data-step="03">
+            <span class="resource-kicker">日常工作</span>
+            <h3>在 TUI 中工作</h3>
+            <p>在日常仓库工作中使用 composer、命令、计划、session、transcript 控制和剪贴板行为。</p>
           </a>
         </div>
         <h3 class="resource-group-heading">使用 Sigil</h3>
@@ -131,10 +136,10 @@
             <h3>Cookbook</h3>
             <p>用于仓库探索、文档编辑、review、调试、planning、MCP 和终端问题的可复制 prompt。</p>
           </a>
-          <a class="resource-card" id="tui" href="user-guide/">
-            <span class="resource-kicker">日常使用</span>
-            <h3>TUI 使用指南</h3>
-            <p>Composer 工作流、命令、计划任务、session 切换、控制区、transcript 选择和剪贴板行为。</p>
+          <a class="resource-card" id="visual-tour" href="visual-tour/">
+            <span class="resource-kicker">预览</span>
+            <h3>视觉导览</h3>
+            <p>在开始第一个仓库任务前，先了解主界面、approval review 和 config panel。</p>
           </a>
           <a class="resource-card" id="safety" href="safety/">
             <span class="resource-kicker">控制权</span>

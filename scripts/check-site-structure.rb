@@ -85,6 +85,86 @@ html_paths.each do |path|
   end
 end
 
+[
+  "index.html",
+  "zh-CN/index.html"
+].each do |page|
+  path = File.join(site_root, page)
+  next unless File.file?(path)
+
+  html = File.read(path)
+  lockups = tags(html, "div").count { |tag| class_token?(attributes(tag), "hero-brand-lockup") }
+  failures << "#{page}: expected one hero brand lockup, found #{lockups}" unless lockups == 1
+
+  timeline_phases = tags(html, "li").filter_map do |tag|
+    attrs = attributes(tag)
+    attrs["data-phase"] if class_token?(attrs, "session-phase")
+  end
+  expected_phases = %w[planner worker tool verify status]
+  unless timeline_phases == expected_phases
+    failures << "#{page}: session timeline phases must be #{expected_phases.inspect}, found #{timeline_phases.inspect}"
+  end
+
+  decks = tags(html, "div").count { |tag| class_token?(attributes(tag), "terminal-deck") }
+  failures << "#{page}: expected one layered terminal deck, found #{decks}" unless decks == 1
+  %w[terminal-window-main terminal-window-approval terminal-window-config].each do |window_class|
+    count = tags(html, "a").count { |tag| class_token?(attributes(tag), window_class) }
+    failures << "#{page}: expected one #{window_class}, found #{count}" unless count == 1
+  end
+end
+
+[
+  "docs/index.html",
+  "zh-CN/docs/index.html"
+].each do |page|
+  path = File.join(site_root, page)
+  next unless File.file?(path)
+
+  html = File.read(path)
+  lockups = tags(html, "div").count { |tag| class_token?(attributes(tag), "docs-brand-lockup") }
+  failures << "#{page}: expected one docs brand lockup, found #{lockups}" unless lockups == 1
+
+  command_palettes = tags(html, "form").count { |tag| class_token?(attributes(tag), "docs-command-palette") }
+  failures << "#{page}: expected one docs command palette, found #{command_palettes}" unless command_palettes == 1
+
+  task_cards = tags(html, "a").filter_map do |tag|
+    attrs = attributes(tag)
+    [attrs["data-step"], attrs["href"]] if class_token?(attrs, "task-card")
+  end
+  expected_tasks = [["01", "installation/"], ["02", "quickstart/"], ["03", "user-guide/"]]
+  unless task_cards == expected_tasks
+    failures << "#{page}: task router must be #{expected_tasks.inspect}, found #{task_cards.inspect}"
+  end
+
+  hrefs = tags(html, "a").filter_map { |tag| attributes(tag)["href"] }
+  %w[installation/ quickstart/ user-guide/ visual-tour/].each do |href|
+    count = hrefs.count(href)
+    failures << "#{page}: task/resource target #{href.inspect} must appear once, found #{count}" unless count == 1
+  end
+end
+
+site_css_path = File.join(site_root, "assets", "site.css")
+if File.file?(site_css_path)
+  site_css = File.read(site_css_path)
+  logo_animation = site_css[/@keyframes heroLogoBreath\b(.*?)@keyframes logoGlowBreath/m, 1].to_s
+  if logo_animation.empty?
+    failures << "assets/site.css: missing heroLogoBreath and logoGlowBreath keyframes"
+  elsif logo_animation.include?("filter:")
+    failures << "assets/site.css: heroLogoBreath must not animate the expensive filter property"
+  end
+
+  shimmer_rules = site_css.scan(/\.terminal-preview::after\s*\{([^}]*)\}/m).flatten
+  if shimmer_rules.any? { |rule| rule.match?(/animation:[^;]*infinite/) }
+    failures << "assets/site.css: terminal shimmer must be finite"
+  end
+
+  %w[session-timeline terminal-deck docs-command-palette task-router].each do |class_name|
+    failures << "assets/site.css: missing .#{class_name} styles" unless site_css.include?(".#{class_name}")
+  end
+else
+  failures << "assets/site.css: built stylesheet is missing"
+end
+
 generated_doc_pattern = %r{\A(?:zh-CN/)?docs/[^/]+/index\.html\z}
 html_paths.each do |path|
   page = relative_path(path, site_root)

@@ -69,17 +69,19 @@
 
     <main id="main-content">
       <section class="docs-hero">
-        <img
-          class="docs-logo docs-logo-on-light"
-          src="../assets/logo/sigil-full-staff-glow.svg"
-          alt="Sigil"
-        >
-        <img
-          class="docs-logo docs-logo-on-dark"
-          src="../assets/logo/sigil-full-staff-glow-dark-mode.svg"
-          alt=""
-          aria-hidden="true"
-        >
+        <div class="docs-brand-lockup">
+          <img
+            class="docs-logo docs-logo-on-light"
+            src="../assets/logo/sigil-full-staff-glow.svg"
+            alt="Sigil"
+          >
+          <img
+            class="docs-logo docs-logo-on-dark"
+            src="../assets/logo/sigil-full-staff-glow-dark-mode.svg"
+            alt=""
+            aria-hidden="true"
+          >
+        </div>
         <div class="docs-hero-copy">
           <p class="eyebrow">Documentation</p>
           <h1>Find the guide for the work.</h1>
@@ -87,9 +89,12 @@
             Sigil keeps the product entrypoint narrow and splits operational detail into focused guides. Use this page as the stable map for user-facing docs.
           </p>
           <div class="docs-search-panel">
-            <form class="site-search" role="search" data-locale="en" data-index="../search.json">
+            <form class="site-search docs-command-palette" role="search" data-locale="en" data-index="../search.json">
               <label for="docs-search-en">Search docs</label>
-              <input id="docs-search-en" type="search" name="q" autocomplete="off" placeholder="Search providers, config, approvals..." aria-controls="docs-search-results-en" aria-autocomplete="list">
+              <div class="docs-command-line">
+                <span class="docs-command-prefix" aria-hidden="true">sigil docs &gt;</span>
+                <input id="docs-search-en" type="search" name="q" autocomplete="off" placeholder="Search providers, config, approvals..." aria-controls="docs-search-results-en" aria-autocomplete="list">
+              </div>
               <div class="search-results" id="docs-search-results-en" aria-label="Search results" aria-live="polite"></div>
             </form>
           </div>
@@ -102,21 +107,21 @@
           <h2>Start with a task path, then keep the reference nearby.</h2>
         </div>
         <h3 class="resource-group-heading">Start here</h3>
-        <div class="resource-grid resource-grid-featured">
-          <a class="resource-card" id="quickstart" href="quickstart/">
-            <span class="resource-kicker">Start here</span>
-            <h3>Quickstart</h3>
-            <p>Install the preview release, launch in a workspace, complete Quick Setup, run doctor, and make the first safe edit.</p>
-          </a>
-          <a class="resource-card" id="install" href="installation/">
+        <div class="resource-grid resource-grid-featured task-router">
+          <a class="resource-card task-card" id="install" href="installation/" data-step="01">
             <span class="resource-kicker">Install</span>
             <h3>Install and update</h3>
             <p>Install with npm, Homebrew, Cargo git tags, source checkout, or release archives; update or uninstall an existing binary when needed.</p>
           </a>
-          <a class="resource-card" id="visual-tour" href="visual-tour/">
-            <span class="resource-kicker">Preview</span>
-            <h3>Visual tour</h3>
-            <p>Screenshot-style walkthrough of the main session, approval review, and config panel surfaces.</p>
+          <a class="resource-card task-card" id="quickstart" href="quickstart/" data-step="02">
+            <span class="resource-kicker">First run</span>
+            <h3>Complete your first task</h3>
+            <p>Launch Sigil in a workspace, complete Quick Setup, run doctor, and make the first safe edit.</p>
+          </a>
+          <a class="resource-card task-card" id="daily-work" href="user-guide/" data-step="03">
+            <span class="resource-kicker">Daily work</span>
+            <h3>Work in the TUI</h3>
+            <p>Use the composer, commands, plans, sessions, transcript controls, and clipboard behavior in everyday repository work.</p>
           </a>
         </div>
         <h3 class="resource-group-heading">Work with Sigil</h3>
@@ -131,10 +136,10 @@
             <h3>Cookbook</h3>
             <p>Copyable prompt patterns for repository exploration, docs edits, reviews, debugging, planning, MCP, and terminal issues.</p>
           </a>
-          <a class="resource-card" id="tui" href="user-guide/">
-            <span class="resource-kicker">Daily use</span>
-            <h3>TUI user guide</h3>
-            <p>Composer workflow, commands, planning, session switching, controls, transcript selection, and clipboard behavior.</p>
+          <a class="resource-card" id="visual-tour" href="visual-tour/">
+            <span class="resource-kicker">Preview</span>
+            <h3>Visual tour</h3>
+            <p>See the main session, approval review, and configuration panel before starting your first repository task.</p>
           </a>
           <a class="resource-card" id="safety" href="safety/">
             <span class="resource-kicker">Control</span>

@@ -11,6 +11,13 @@ VIEWPORTS = [
   { width: 1440, height: 720, label: "desktop" }
 ].freeze
 
+RENDER_VARIANTS = [
+  { label: "default", flags: [] },
+  { label: "dark", flags: ["--force-dark-mode"] },
+  { label: "explicit-dark", flags: [] },
+  { label: "reduced-motion", flags: ["--force-prefers-reduced-motion"] }
+].freeze
+
 PAGES = [
   { path: "index.html", kind: "home" },
   { path: "zh-CN/index.html", kind: "home" },
@@ -47,7 +54,7 @@ def find_browser
   candidates.filter_map { |candidate| executable_on_path(candidate) }.first
 end
 
-def probe_html(viewport)
+def probe_html(viewport, variant)
   frames = PAGES.each_with_index.map do |page, index|
     <<~HTML
       <section class="case">
@@ -95,6 +102,25 @@ def probe_html(viewport)
               const doc = frame.contentDocument;
               const root = doc.documentElement;
               const body = doc.body;
+              const renderVariant = #{variant.fetch(:label).inspect};
+              if (renderVariant === "explicit-dark") {
+                root.dataset.theme = "dark";
+              }
+              const prefersDark = view.matchMedia("(prefers-color-scheme: dark)").matches;
+              const prefersReducedMotion = view.matchMedia("(prefers-reduced-motion: reduce)").matches;
+              const motionAnimationNames = [];
+              if (frame.dataset.kind === "home" || frame.dataset.kind === "docs-hub") {
+                const motionElements = [root, body, ...body.querySelectorAll("*")];
+                for (const element of motionElements) {
+                  for (const pseudo of [null, "::before", "::after"]) {
+                    const name = view.getComputedStyle(element, pseudo).animationName;
+                    if (name && name !== "none") {
+                      const suffix = pseudo || "";
+                      motionAnimationNames.push(`${elementName(element)}${suffix}:${name}`);
+                    }
+                  }
+                }
+              }
               const style = doc.createElement("style");
               style.textContent = "* { animation: none !important; transition: none !important; }";
               doc.head.appendChild(style);
@@ -138,9 +164,27 @@ def probe_html(viewport)
               const firstCodeLine = doc.querySelector(".doc-content pre code .code-line:first-child");
               const firstCodeNumber = firstCodeLine && firstCodeLine.querySelector(".code-line-number");
               const firstCodeContent = firstCodeLine && firstCodeLine.querySelector(".code-line-content");
+              const timelinePhases = doc.querySelectorAll(".session-timeline .session-phase");
+              const deckMain = doc.querySelector(".terminal-window-main");
+              const deckApproval = doc.querySelector(".terminal-window-approval");
+              const deckWindows = doc.querySelectorAll(".terminal-deck .visual-card");
+              const docsCommandLine = doc.querySelector(".docs-command-line");
+              const docsCommandInput = doc.querySelector(".docs-command-line input");
+              const taskCards = doc.querySelectorAll(".task-router .task-card");
+              const visibleHeroLogos = Array.from(doc.querySelectorAll(".hero-logo, .docs-logo"))
+                .filter((element) => rendered(view, element));
+              const rectanglesOverlap = (left, right) => {
+                if (!left || !right) return false;
+                const leftRect = left.getBoundingClientRect();
+                const rightRect = right.getBoundingClientRect();
+                return leftRect.left < rightRect.right &&
+                  leftRect.right > rightRect.left &&
+                  leftRect.top < rightRect.bottom &&
+                  leftRect.bottom > rightRect.top;
+              };
               let menuClosesAfterAnchor = "";
               const samePageMenuLink = menu && menu.querySelector('nav a[href^="#"]');
-              if (samePageMenuLink) {
+              if (samePageMenuLink && clientWidth === 390) {
                 menu.setAttribute("open", "");
                 samePageMenuLink.click();
                 menuClosesAfterAnchor = String(!menu.hasAttribute("open"));
@@ -162,6 +206,18 @@ def probe_html(viewport)
               result.dataset.sigilCodeScript = String(codeScript);
               result.dataset.sigilFirstCodeNumber = firstCodeNumber ? firstCodeNumber.textContent.trim() : "";
               result.dataset.sigilFirstCodeContent = firstCodeContent ? firstCodeContent.textContent.trim() : "";
+              result.dataset.sigilTimelinePhases = String(timelinePhases.length);
+              result.dataset.sigilDeckWindows = String(deckWindows.length);
+              result.dataset.sigilDeckOverlap = String(rectanglesOverlap(deckMain, deckApproval));
+              result.dataset.sigilDocsCommandVisible = String(rendered(view, docsCommandLine));
+              result.dataset.sigilTaskCards = String(taskCards.length);
+              result.dataset.sigilVisibleHeroLogos = String(visibleHeroLogos.length);
+              result.dataset.sigilPrefersDark = String(prefersDark);
+              result.dataset.sigilExplicitTheme = root.dataset.theme || "";
+              result.dataset.sigilPrefersReducedMotion = String(prefersReducedMotion);
+              result.dataset.sigilMotionAnimations = motionAnimationNames.join(",");
+              result.dataset.sigilDocsCommandInputBackground = docsCommandInput ?
+                view.getComputedStyle(docsCommandInput).backgroundColor : "";
             } catch (error) {
               result.dataset.sigilError = String(error);
             }
@@ -220,12 +276,16 @@ unless failures.empty?
   exit 1
 end
 
-VIEWPORTS.each do |viewport|
-  probe_path = File.join(site_root, ".sigil-viewport-#{Process.pid}-#{viewport.fetch(:width)}.html")
-  File.write(probe_path, probe_html(viewport))
+VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
+  probe_path = File.join(
+    site_root,
+    ".sigil-viewport-#{Process.pid}-#{viewport.fetch(:width)}-#{variant.fetch(:label)}.html"
+  )
+  File.write(probe_path, probe_html(viewport, variant))
   begin
     stdout, stderr, status = Open3.capture3(
       browser,
+      *variant.fetch(:flags),
       "--headless",
       "--disable-gpu",
       "--force-device-scale-factor=1",
@@ -236,12 +296,12 @@ VIEWPORTS.each do |viewport|
       "file://#{probe_path}"
     )
     unless status.success?
-      failures << "#{viewport.fetch(:label)}: browser exited #{status.exitstatus}: #{stderr.lines.last(5).join.strip}"
+      failures << "#{viewport.fetch(:label)} #{variant.fetch(:label)}: browser exited #{status.exitstatus}: #{stderr.lines.last(5).join.strip}"
       next
     end
 
     PAGES.each_with_index do |page, index|
-      page_label = "#{page.fetch(:path)} at #{viewport.fetch(:width)}px"
+      page_label = "#{page.fetch(:path)} at #{viewport.fetch(:width)}px (#{variant.fetch(:label)})"
       tag = result_tag(stdout, index)
       unless tag
         failures << "#{page_label}: browser did not emit viewport measurements"
@@ -270,6 +330,23 @@ VIEWPORTS.each do |viewport|
         failures << "#{page_label}: visible content crosses the viewport (#{overflowing})"
       end
 
+      if variant.fetch(:label) == "dark" && result_attribute(tag, "data-sigil-prefers-dark") != "true"
+        failures << "#{page_label}: dark render variant did not activate prefers-color-scheme: dark"
+      end
+      if variant.fetch(:label) == "explicit-dark" &&
+         result_attribute(tag, "data-sigil-explicit-theme") != "dark"
+        failures << "#{page_label}: explicit dark variant did not apply data-theme=dark"
+      end
+      if variant.fetch(:label) == "reduced-motion"
+        unless result_attribute(tag, "data-sigil-prefers-reduced-motion") == "true"
+          failures << "#{page_label}: reduced-motion variant did not activate the media query"
+        end
+        if ["home", "docs-hub"].include?(page.fetch(:kind)) &&
+           !result_attribute(tag, "data-sigil-motion-animations").to_s.empty?
+          failures << "#{page_label}: motion animations remain active under prefers-reduced-motion"
+        end
+      end
+
       if viewport.fetch(:width) == 390
         unless result_attribute(tag, "data-sigil-menu-exists") == "true"
           failures << "#{page_label}: missing details.nav-menu mobile navigation"
@@ -291,6 +368,41 @@ VIEWPORTS.each do |viewport|
         end
         unless result_attribute(tag, "data-sigil-menu-content-visible") == "true"
           failures << "#{page_label}: desktop primary navigation is not visible"
+        end
+      end
+
+      if page.fetch(:kind) == "home"
+        unless result_attribute(tag, "data-sigil-visible-hero-logos") == "1"
+          failures << "#{page_label}: exactly one theme-specific hero logo must be visible"
+        end
+        unless result_attribute(tag, "data-sigil-timeline-phases") == "5"
+          failures << "#{page_label}: homepage session timeline must render five phases"
+        end
+        unless result_attribute(tag, "data-sigil-deck-windows") == "3"
+          failures << "#{page_label}: homepage terminal deck must render three windows"
+        end
+        if [1024, 1440].include?(viewport.fetch(:width)) &&
+           result_attribute(tag, "data-sigil-deck-overlap") != "true"
+          failures << "#{page_label}: desktop terminal deck must use the layered overlap layout"
+        end
+        if viewport.fetch(:width) == 390 && result_attribute(tag, "data-sigil-deck-overlap") != "false"
+          failures << "#{page_label}: mobile terminal deck must return to a non-overlapping stack"
+        end
+      end
+
+      if page.fetch(:kind) == "docs-hub"
+        unless result_attribute(tag, "data-sigil-visible-hero-logos") == "1"
+          failures << "#{page_label}: exactly one theme-specific docs logo must be visible"
+        end
+        unless result_attribute(tag, "data-sigil-docs-command-visible") == "true"
+          failures << "#{page_label}: docs command palette is not visible"
+        end
+        unless result_attribute(tag, "data-sigil-task-cards") == "3"
+          failures << "#{page_label}: docs task router must render three task cards"
+        end
+        if ["dark", "explicit-dark"].include?(variant.fetch(:label)) &&
+           result_attribute(tag, "data-sigil-docs-command-input-background") != "rgba(0, 0, 0, 0)"
+          failures << "#{page_label}: dark command palette input must remain transparent"
         end
       end
 
@@ -357,4 +469,5 @@ unless failures.empty?
 end
 
 dimensions = VIEWPORTS.map { |viewport| "#{viewport.fetch(:width)}x#{viewport.fetch(:height)}" }.join(", ")
-puts "site viewport check passed at #{dimensions} with #{File.basename(browser)}"
+variants = RENDER_VARIANTS.map { |variant| variant.fetch(:label) }.join(", ")
+puts "site viewport check passed at #{dimensions} for #{variants} with #{File.basename(browser)}"

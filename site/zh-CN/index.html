@@ -72,17 +72,19 @@
 
     <main id="main-content">
       <section class="hero">
-        <img
-          class="hero-logo hero-logo-on-light"
-          src="../assets/logo/sigil-full-staff-glow.svg"
-          alt="Sigil"
-        >
-        <img
-          class="hero-logo hero-logo-on-dark"
-          src="../assets/logo/sigil-full-staff-glow-dark-mode.svg"
-          alt=""
-          aria-hidden="true"
-        >
+        <div class="hero-brand-lockup">
+          <img
+            class="hero-logo hero-logo-on-light"
+            src="../assets/logo/sigil-full-staff-glow.svg"
+            alt="Sigil"
+          >
+          <img
+            class="hero-logo hero-logo-on-dark"
+            src="../assets/logo/sigil-full-staff-glow-dark-mode.svg"
+            alt=""
+            aria-hidden="true"
+          >
+        </div>
         <div class="hero-copy">
           <p class="eyebrow">TUI-first Rust coding agent</p>
           <h1>在一个终端里完成仓库工作。</h1>
@@ -104,12 +106,37 @@
             <span></span><span></span><span></span>
             <strong>sigil</strong>
           </div>
-          <pre><code>&gt; /task audit the release docs
-planner  写入 durable steps
-worker   完成只读 review
-tool     edit_file preview ready
-verify   pages check, docs links
-status   alpha release published</code></pre>
+          <div class="terminal-command">
+            <span class="terminal-prompt" aria-hidden="true">&gt;</span>
+            <code>/task 审核发布文档</code>
+          </div>
+          <ol class="session-timeline" aria-label="任务执行阶段">
+            <li class="session-phase session-phase-planner" data-phase="planner">
+              <span class="session-role">planner</span>
+              <span class="session-description">为发布审核写入可持久化步骤</span>
+              <span class="session-state session-state-complete">已完成</span>
+            </li>
+            <li class="session-phase session-phase-worker" data-phase="worker">
+              <span class="session-role">worker</span>
+              <span class="session-description">完成只读文档评审</span>
+              <span class="session-state session-state-complete">已完成</span>
+            </li>
+            <li class="session-phase session-phase-tool" data-phase="tool">
+              <span class="session-role">tool</span>
+              <span class="session-description">生成待审批的 edit_file 预览</span>
+              <span class="session-state session-state-ready">待审批</span>
+            </li>
+            <li class="session-phase session-phase-verify" data-phase="verify">
+              <span class="session-role">verify</span>
+              <span class="session-description">运行 Pages 检查和链接验证</span>
+              <span class="session-state session-state-passed">已通过</span>
+            </li>
+            <li class="session-phase session-phase-status" data-phase="status">
+              <span class="session-role">status</span>
+              <span class="session-description">发布 alpha 版本</span>
+              <span class="session-state session-state-live">已上线</span>
+            </li>
+          </ol>
         </div>
       </section>
 
@@ -155,16 +182,16 @@ sigil</code></pre>
           <p class="eyebrow">视觉导览</p>
           <h2>安装前先看清主要界面。</h2>
         </div>
-        <div class="visual-grid">
-          <a class="visual-card visual-card-large" href="docs/visual-tour/">
+        <div class="visual-grid terminal-deck">
+          <a class="visual-card visual-card-large terminal-window-main" href="docs/visual-tour/">
             <img src="../assets/screenshots/tui-session.svg" alt="Sigil 主 TUI 会话截图" loading="lazy" decoding="async">
             <span>主 TUI 会话</span>
           </a>
-          <a class="visual-card" href="docs/visual-tour/">
+          <a class="visual-card terminal-window-approval" href="docs/visual-tour/#审批检查">
             <img src="../assets/screenshots/approval-review.svg" alt="Sigil 审批检查截图" loading="lazy" decoding="async">
             <span>审批检查</span>
           </a>
-          <a class="visual-card" href="docs/visual-tour/">
+          <a class="visual-card terminal-window-config" href="docs/visual-tour/#配置面板">
             <img src="../assets/screenshots/config-panel.svg" alt="Sigil 配置面板截图" loading="lazy" decoding="async">
             <span>配置面板</span>
           </a>
