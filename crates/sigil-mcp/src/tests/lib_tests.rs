@@ -953,6 +953,9 @@ while True:
         .into_iter()
         .map(|record| match record {
             sigil_kernel::SessionStreamRecord::Stored(event) => event,
+            sigil_kernel::SessionStreamRecord::Legacy { .. } => {
+                panic!("MCP audit test should not emit legacy session records")
+            }
         })
         .collect::<Vec<_>>();
     assert!(
@@ -1033,6 +1036,9 @@ while True:
         .into_iter()
         .map(|record| match record {
             sigil_kernel::SessionStreamRecord::Stored(event) => event,
+            sigil_kernel::SessionStreamRecord::Legacy { .. } => {
+                panic!("MCP audit test should not emit legacy session records")
+            }
         })
         .filter(|event| {
             event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
@@ -1261,6 +1267,9 @@ sys.exit(7)
         .into_iter()
         .map(|record| match record {
             sigil_kernel::SessionStreamRecord::Stored(event) => event,
+            sigil_kernel::SessionStreamRecord::Legacy { .. } => {
+                panic!("MCP audit test should not emit legacy session records")
+            }
         })
         .collect::<Vec<_>>();
     assert!(

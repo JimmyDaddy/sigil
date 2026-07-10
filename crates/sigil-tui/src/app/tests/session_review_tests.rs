@@ -4,6 +4,28 @@ use super::*;
 use sigil_kernel::DurableEventType;
 
 #[test]
+fn session_review_projects_legacy_stream_entries() {
+    let records = vec![sigil_kernel::SessionStreamRecord::Legacy {
+        event: sigil_kernel::LegacyEvent {
+            event_id: "legacy-review-1".to_owned(),
+            session_id: "legacy-session".to_owned(),
+            stream_sequence: 1,
+            raw_line_hash: "sha256:legacy-review".to_owned(),
+            payload: serde_json::Value::Null,
+        },
+        entry: Box::new(SessionLogEntry::User(ModelMessage::user(
+            "Review legacy session",
+        ))),
+    }];
+
+    let review =
+        super::super::session_review::session_review_sidebar_lines_from_records(&records, &[])
+            .join("\n");
+    assert!(review.contains("review: turn 1/1"));
+    assert!(review.contains("Review legacy session"));
+}
+
+#[test]
 fn session_review_reads_v2_mutation_and_readiness_evidence() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {

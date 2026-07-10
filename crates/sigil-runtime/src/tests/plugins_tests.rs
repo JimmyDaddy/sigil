@@ -1993,7 +1993,9 @@ fn workspace_mutation_events(
 ) -> Result<Vec<(String, WorkspaceMutationDetected)>> {
     let mut events = Vec::new();
     for record in JsonlSessionStore::read_event_records(session_path)? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            panic!("plugin lifecycle test should not emit legacy session records");
+        };
         if event.event_type != "workspace_mutation_detected" {
             continue;
         }

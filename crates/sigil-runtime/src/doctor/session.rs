@@ -231,6 +231,7 @@ impl SessionStreamDoctorSummary {
                     }
                     self.stored_records += 1;
                 }
+                SessionStreamRecord::Legacy { .. } => {}
             }
         }
     }

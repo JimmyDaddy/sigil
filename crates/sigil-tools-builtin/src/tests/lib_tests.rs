@@ -2062,7 +2062,9 @@ fn apply_changeset_tool() -> ApplyChangeSetTool {
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record;
+        let SessionStreamRecord::Stored(event) = record else {
+            panic!("builtin tool test should not emit legacy session records");
+        };
         event_types.push(event.event_type);
     }
     Ok(event_types)
