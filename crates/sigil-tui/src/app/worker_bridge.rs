@@ -363,6 +363,10 @@ impl AppState {
                     format!("{task_id} status={}", task_run_status_label(status)),
                 );
             }
+            WorkerMessage::RunCancellationRequested => {
+                self.last_notice = Some("cancelling — waiting for active work to stop".to_owned());
+                self.push_event("run:cancel", "cancellation requested".to_owned());
+            }
             WorkerMessage::RunCancelled {
                 session_log_path,
                 provider_name,
@@ -378,6 +382,25 @@ impl AppState {
                     entries,
                     "run cancelled; restored",
                 );
+                self.schedule_balance_refresh();
+            }
+            WorkerMessage::RunInterrupted {
+                session_log_path,
+                provider_name,
+                model_name,
+                reason,
+                entries,
+            } => {
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
+                self.restore_session_view(
+                    session_log_path,
+                    provider_name,
+                    model_name,
+                    entries,
+                    "run interrupted — cleanup could not be confirmed",
+                );
+                self.last_notice = Some(format!("run interrupted: {reason}"));
                 self.schedule_balance_refresh();
             }
             WorkerMessage::TerminalTaskUpdated { entry, entries } => {

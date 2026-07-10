@@ -3,7 +3,10 @@ use std::{
     fs,
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -432,6 +435,7 @@ impl Provider for ChildUsageProvider {
 
 struct SlowTextProvider {
     delay: Duration,
+    started: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -448,6 +452,7 @@ impl Provider for SlowTextProvider {
         &self,
         _request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.started.store(true, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta("slow child done".to_owned())),
@@ -920,6 +925,7 @@ impl AgentToolProviderFactory for UsageProviderFactory {
 
 struct SlowTextProviderFactory {
     delay: Duration,
+    started: Arc<AtomicBool>,
 }
 
 impl AgentToolProviderFactory for SlowTextProviderFactory {
@@ -929,7 +935,10 @@ impl AgentToolProviderFactory for SlowTextProviderFactory {
         _role: sigil_kernel::AgentRole,
         _profile_id: &sigil_kernel::AgentProfileId,
     ) -> Result<Box<dyn Provider>> {
-        Ok(Box::new(SlowTextProvider { delay: self.delay }))
+        Ok(Box::new(SlowTextProvider {
+            delay: self.delay,
+            started: self.started.clone(),
+        }))
     }
 }
 
@@ -1916,15 +1925,20 @@ async fn list_and_cancel_agent_manage_running_background_thread() -> Result<()> 
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
+    let provider_started = Arc::new(AtomicBool::new(false));
     let mut runtime = AgentToolRuntime::with_provider_factory(
         supervisor,
         config,
         registry,
         Arc::new(SlowTextProviderFactory {
             delay: Duration::from_secs(5),
+            started: provider_started.clone(),
         }),
     );
-    let mut session = Session::new("parent", "model");
+    let state = tempfile::tempdir()?;
+    let mut session = Session::new("parent", "model").with_store(JsonlSessionStore::new(
+        state.path().join("cancel-agent.jsonl"),
+    )?);
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
     let options = run_options(std::env::temp_dir());
@@ -1977,6 +1991,12 @@ async fn list_and_cancel_agent_manage_running_background_thread() -> Result<()> 
     assert_eq!(agent["messageable"], true);
     assert_eq!(agent["closable"], false);
 
+    let started_deadline = Instant::now() + Duration::from_secs(1);
+    while !provider_started.load(Ordering::SeqCst) && Instant::now() < started_deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(provider_started.load(Ordering::SeqCst));
+
     let cancelled = runtime
         .handle_agent_tool_call(
             &mut session,
@@ -1999,10 +2019,10 @@ async fn list_and_cancel_agent_manage_running_background_thread() -> Result<()> 
     let cancel_payload: serde_json::Value = serde_json::from_str(&cancelled.content)?;
     assert_eq!(cancel_payload["previous_status"], "running");
     assert_eq!(cancel_payload["status"], "cancelled");
-    assert_eq!(cancel_payload["handle_cancelled"], true);
+    assert_eq!(cancel_payload["cleanup_complete"], true);
     assert!(session.entries().iter().any(|entry| {
         matches!(entry, SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interrupted))
-            if interrupted.thread_id == thread_id && interrupted.reason == "test cancel")
+            if interrupted.thread_id == thread_id && interrupted.reason.contains("test cancel"))
     }));
     assert!(handler.events.iter().any(|event| {
         matches!(

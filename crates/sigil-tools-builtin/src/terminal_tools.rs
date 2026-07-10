@@ -9,9 +9,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCategory,
-    ToolContext, ToolErrorKind, ToolExecutionId, ToolOperation, ToolPreviewCapability,
-    ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
+    ExecutionCleanupStatus, TerminalTaskEntry, TerminalTaskId, TerminalTaskStatus, Tool,
+    ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolExecutionId, ToolOperation,
+    ToolPreviewCapability, ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolSubjectKind,
 };
 use tokio::time::sleep;
 
@@ -184,6 +185,7 @@ impl Tool for TerminalStartTool {
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
         let args = parse_terminal_start_args(&args)?;
         let manager = self.managers.manager_for(
             &ctx.workspace_root,
@@ -528,10 +530,15 @@ impl Tool for TerminalCancelTool {
             &self.artifact_label_root,
         )?;
         let entry = manager.cancel(&task_id).await?;
+        let action = match entry.status {
+            TerminalTaskStatus::Cancelled => "cancelled",
+            TerminalTaskStatus::Interrupted => "interrupted",
+            _ => "terminal",
+        };
         Ok(terminal_entry_result(
             call_id,
             self.spec().name,
-            "cancelled",
+            action,
             entry,
         ))
     }
@@ -893,6 +900,33 @@ async fn wait_for_foreground_terminal(
     )?;
 
     loop {
+        if let Some(cancellation) = ctx.cancellation_handle()
+            && cancellation.is_cancel_requested()
+        {
+            let cancelled = manager
+                .cancel(&task_id)
+                .await
+                .unwrap_or_else(|_| latest.clone());
+            if !cancelled
+                .cleanup
+                .as_ref()
+                .is_some_and(|receipt| receipt.status == ExecutionCleanupStatus::Completed)
+            {
+                cancellation.mark_cleanup_incomplete();
+            }
+            return Ok(terminal_foreground_result(
+                call_id,
+                tool_name,
+                cancelled,
+                analysis,
+                execution_mode,
+                elapsed_millis(started),
+                timeouts,
+                Some("interrupted"),
+                None,
+                Some(ToolErrorKind::Interrupted),
+            ));
+        }
         if latest.status.is_terminal() {
             return Ok(terminal_foreground_result(
                 call_id,

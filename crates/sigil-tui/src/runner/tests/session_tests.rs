@@ -233,8 +233,9 @@ fn cancel_active_run_restores_current_session_from_log() -> Result<()> {
         )
     })?;
     worker.send(WorkerCommand::CancelRun)?;
-    let cancelled =
-        worker.recv_until(|message| matches!(message, WorkerMessage::RunCancelled { .. }))?;
+    let cancelled = worker.recv_until_with_timeout(Duration::from_secs(5), |message| {
+        matches!(message, WorkerMessage::RunCancelled { .. })
+    })?;
     assert!(matches!(
         cancelled,
         WorkerMessage::RunCancelled {
@@ -280,7 +281,12 @@ fn switch_session_while_active_run_reports_error() -> Result<()> {
     ));
 
     worker.send(WorkerCommand::CancelRun)?;
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunCancelled { .. }))?;
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(5), |message| {
+        matches!(
+            message,
+            WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
+        )
+    })?;
     worker.shutdown()?;
     Ok(())
 }
@@ -312,7 +318,12 @@ fn start_new_session_while_active_run_reports_error() -> Result<()> {
     ));
 
     worker.send(WorkerCommand::CancelRun)?;
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunCancelled { .. }))?;
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(5), |message| {
+        matches!(
+            message,
+            WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
+        )
+    })?;
     worker.shutdown()?;
     Ok(())
 }

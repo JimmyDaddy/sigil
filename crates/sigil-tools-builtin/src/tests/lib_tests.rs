@@ -14,11 +14,11 @@ use sigil_kernel::{
     ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
     ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionTerminationCause,
     ExecutionTimeoutSource, JsonlSessionStore, MutationEventRecorder, PathTrustZone,
-    PermissionRisk, SessionStreamRecord, TerminalExecutionBackendCapabilities,
-    TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
-    ToolPreviewCapability, ToolProgressEvent, ToolProgressSink, ToolRegistry, ToolResultStatus,
-    ToolSubjectKind, ToolSubjectScope,
+    PermissionRisk, RunCancellationOwner, SessionStreamRecord,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCall,
+    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
+    ToolProgressSink, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -2932,6 +2932,60 @@ async fn terminal_start_foreground_waits_and_returns_final_facts() -> Result<()>
 }
 
 #[serial]
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_start_foreground_cancellation_reaps_process_tree() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().to_path_buf();
+    let shell = test_shell(&root)?;
+    let pid_file = root.join("foreground-descendant.pid");
+    let owner = RunCancellationOwner::new();
+    let ctx = ToolContext::new(root.clone(), 30).with_cancellation(owner.handle());
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+    let task = tokio::spawn(async move {
+        registry
+            .execute(
+                ctx,
+                tool_call(
+                    "terminal_start",
+                    json!({
+                        "task_id": "terminal-foreground-cancel",
+                        "command": "(trap '' TERM; while :; do sleep 1; done) & echo $! > foreground-descendant.pid; wait",
+                        "shell": shell,
+                        "mode": "foreground"
+                    }),
+                ),
+            )
+            .await
+    });
+    for _ in 0..100 {
+        if pid_file.exists() {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    let descendant_pid = fs::read_to_string(&pid_file)?.trim().parse::<u32>()?;
+    assert!(owner.request_cancel());
+    let result = task.await??;
+    let ToolResultStatus::Error(error) = result.status else {
+        anyhow::bail!("cancelled foreground terminal must be interrupted");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Interrupted);
+    assert!(owner.cleanup_complete());
+    let descendant_pid = descendant_pid.to_string();
+    let alive = std::process::Command::new("kill")
+        .args(["-0", descendant_pid.as_str()])
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(
+        !alive,
+        "foreground terminal descendant survived cancellation"
+    );
+    Ok(())
+}
+
+#[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_start_defaults_check_touched_to_foreground() -> Result<()> {
@@ -3547,6 +3601,70 @@ async fn bash_large_output_is_truncated_with_metadata() -> Result<()> {
     assert!(result.metadata.truncated);
     assert!(result.content.contains("output truncated"));
     assert!(result.metadata.stdout_bytes.unwrap_or_default() > 64 * 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_cancellation_rejects_process_spawn_before_filesystem_effect() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let owner = RunCancellationOwner::new();
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5).with_cancellation(owner.handle());
+    owner.request_cancel();
+    let sentinel = temp.path().join("spawned.txt");
+
+    let error = bash_tool(temp.path())
+        .execute(
+            ctx,
+            "bash-cancelled".to_owned(),
+            json!({ "command": "printf spawned > spawned.txt" }),
+        )
+        .await
+        .expect_err("cancelled tool context must reject process spawn");
+
+    assert!(error.to_string().contains("refusing new Process effect"));
+    assert!(!sentinel.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_inflight_cancellation_reaps_the_process_group() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let owner = RunCancellationOwner::new();
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 30).with_cancellation(owner.handle());
+    let pid_file = temp.path().join("descendant.pid");
+    let task = tokio::spawn(async move {
+        bash_tool(temp.path())
+            .execute(
+                ctx,
+                "bash-inflight-cancel".to_owned(),
+                json!({
+                    "command": "(trap '' TERM; while :; do sleep 1; done) & echo $! > descendant.pid; wait"
+                }),
+            )
+            .await
+    });
+    for _ in 0..100 {
+        if pid_file.exists() {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    let descendant_pid = fs::read_to_string(&pid_file)?.trim().parse::<u32>()?;
+    assert!(owner.request_cancel());
+    let result = task.await??;
+    let ToolResultStatus::Error(error) = result.status else {
+        anyhow::bail!("cancelled bash execution must return an interrupted tool result");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Interrupted);
+    let alive = std::process::Command::new("kill")
+        .args(["-0", descendant_pid.to_string().as_str()])
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(
+        !alive,
+        "descendant process survived cooperative cancellation"
+    );
     Ok(())
 }
 

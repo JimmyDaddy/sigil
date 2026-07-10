@@ -10,7 +10,7 @@ use sigil_kernel::{
 };
 use tokio::process::Command;
 
-use super::{command_output_to_receipt, configure_command_environment};
+use super::{command_output_to_receipt_with_cancellation, configure_command_environment};
 
 #[derive(Debug, Clone)]
 pub struct MacosSeatbeltExecutionBackend {
@@ -75,9 +75,21 @@ impl ExecutionBackend for MacosSeatbeltExecutionBackend {
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
         let sandbox_exec = self.sandbox_exec.clone();
         let network_allowed = self.network_allowed;
-        Box::pin(
-            async move { macos_seatbelt_execute(sandbox_exec, network_allowed, request).await },
-        )
+        Box::pin(async move {
+            macos_seatbelt_execute(sandbox_exec, network_allowed, request, None).await
+        })
+    }
+
+    fn execute_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    ) -> ExecutionFuture<'_> {
+        let sandbox_exec = self.sandbox_exec.clone();
+        let network_allowed = self.network_allowed;
+        Box::pin(async move {
+            macos_seatbelt_execute(sandbox_exec, network_allowed, request, cancellation).await
+        })
     }
 }
 
@@ -100,6 +112,7 @@ pub(crate) async fn macos_seatbelt_execute(
     sandbox_exec: PathBuf,
     network_allowed: bool,
     request: ExecutionRequest,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     if !cfg!(target_os = "macos") {
         bail!("macos_seatbelt execution backend is only available on macOS");
@@ -133,12 +146,13 @@ pub(crate) async fn macos_seatbelt_execute(
             "macos_seatbelt backend does not enforce network denial",
         )
     };
-    command_output_to_receipt(
+    command_output_to_receipt_with_cancellation(
         ExecutionBackendKind::MacosSeatbelt,
         capabilities,
         network,
         command,
         &request,
+        cancellation,
     )
     .await
 }

@@ -62,6 +62,7 @@
 - 必须桥接阻塞逻辑时，短时阻塞工作使用 `tokio::task::spawn_blocking`
 - `spawn_blocking` 只用于会自行结束的阻塞工作；长期常驻的阻塞 loop / worker 优先使用专用线程，并提供明确的退出路径
 - 后台任务不能“放飞不管”；需要有明确 owner、`JoinHandle`、取消信号或收尾路径
+- run/task/agent 取消必须使用唯一 root owner 与可复制 child handle；所有 forward effect 在最后责任边界取得 RAII permit，取消后不得再取得新 permit。cleanup/rollback/reap 使用独立 cleanup permit；只有 owned task 与 permit 全部归零才能记录 `Cancelled`，deadline 超时只能记录 `Interrupted`/cleanup-incomplete
 
 ### 2.6 公开接口与 Rustdoc
 

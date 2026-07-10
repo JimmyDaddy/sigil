@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ExecutionBackend, ExecutionOutputReceipt, ExecutionReceipt, ExecutionRequest,
-    ExecutionStreamCapture, ExecutionTerminationCause, Tool, ToolAccess, ToolCategory, ToolContext,
-    ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectScope,
+    ExecutionBackend, ExecutionCleanupStatus, ExecutionOutputReceipt, ExecutionReceipt,
+    ExecutionRequest, ExecutionStreamCapture, ExecutionTerminationCause, Tool, ToolAccess,
+    ToolCategory, ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
 };
 use tree_sitter::{Node, Parser};
 
@@ -71,6 +71,7 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
         let command = required_string(&args, "command")?;
         let timeout_secs = args
             .get("timeout_secs")
@@ -83,7 +84,18 @@ impl Tool for BashTool {
         let analysis = analyze_shell_command(&ctx.workspace_root, command)?;
         let request =
             bash_execution_request(command, &ctx.workspace_root, &scratch_root, timeout_secs);
-        let receipt = self.backend.execute(request).await?;
+        let receipt = self
+            .backend
+            .execute_with_cancellation(request, ctx.cancellation_handle())
+            .await?;
+        if matches!(
+            receipt.effective_output().termination,
+            ExecutionTerminationCause::Cancelled
+        ) && receipt.resources.cleanup.status != ExecutionCleanupStatus::Completed
+            && let Some(cancellation) = ctx.cancellation_handle()
+        {
+            cancellation.mark_cleanup_incomplete();
+        }
         bash_tool_result_from_execution_receipt_with_analysis(
             call_id,
             self.spec().name,
@@ -521,6 +533,10 @@ fn execution_termination_error(
         ExecutionTerminationCause::TimedOut => {
             Some((ToolErrorKind::Timeout, "bash command timed out"))
         }
+        ExecutionTerminationCause::Cancelled => Some((
+            ToolErrorKind::Interrupted,
+            "bash command interrupted by run cancellation",
+        )),
         ExecutionTerminationCause::OutputLimit { .. } => Some((
             ToolErrorKind::ResourceLimit,
             "bash command exceeded the output limit",
@@ -598,6 +614,9 @@ fn execution_output_details(output: &ExecutionOutputReceipt) -> Value {
         ExecutionTerminationCause::TimedOut => {
             details["code"] = json!("execution_timeout");
         }
+        ExecutionTerminationCause::Cancelled => {
+            details["code"] = json!("execution_cancelled");
+        }
         ExecutionTerminationCause::Exited => {}
     }
     details
@@ -616,6 +635,7 @@ pub(crate) fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Val
 fn shell_verdict(receipt: &ExecutionReceipt) -> &'static str {
     match receipt.effective_output().termination {
         ExecutionTerminationCause::TimedOut => "timed_out",
+        ExecutionTerminationCause::Cancelled => "interrupted",
         ExecutionTerminationCause::OutputLimit { .. } => "resource_limited",
         ExecutionTerminationCause::ReaderFailed { .. } => "output_reader_failed",
         ExecutionTerminationCause::Exited => match receipt.exit_code {

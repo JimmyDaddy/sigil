@@ -370,6 +370,7 @@ pub struct ToolContext {
     approved_subjects: Vec<ToolSubject>,
     progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
+    cancellation: Option<crate::RunCancellationHandle>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -380,6 +381,7 @@ impl std::fmt::Debug for ToolContext {
             .field("mutation_recorder", &self.mutation_recorder.is_some())
             .field("approved_subjects", &self.approved_subjects.len())
             .field("progress_sink", &self.progress_sink.is_some())
+            .field("cancellation", &self.cancellation.is_some())
             .field(
                 "execution_mutation_profile_recorded_call_ids",
                 &self.execution_mutation_profile_recorded_call_ids.len(),
@@ -398,6 +400,7 @@ impl ToolContext {
             approved_subjects: Vec::new(),
             progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
+            cancellation: None,
         }
     }
 
@@ -405,6 +408,29 @@ impl ToolContext {
     pub fn with_mutation_recorder(mut self, recorder: MutationEventRecorder) -> Self {
         self.mutation_recorder = Some(recorder);
         self
+    }
+
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: crate::RunCancellationHandle) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    /// Admits one nested forward effect at the last responsible execution boundary.
+    pub fn begin_forward_effect(
+        &self,
+        kind: crate::RunEffectKind,
+    ) -> Result<Option<crate::RunEffectGuard>> {
+        self.cancellation
+            .as_ref()
+            .map(|handle| handle.begin_effect(crate::RunEffectClass::Forward, kind))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    #[must_use]
+    pub fn cancellation_handle(&self) -> Option<crate::RunCancellationHandle> {
+        self.cancellation.clone()
     }
 
     /// Carries the exact subjects authorized by the agent into the execution boundary.

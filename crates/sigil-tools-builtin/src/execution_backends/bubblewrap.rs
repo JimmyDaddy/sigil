@@ -15,7 +15,8 @@ use tokio::process::Command;
 use crate::constants::SIGIL_SCRATCH_DIR_ENV;
 
 use super::{
-    command_output_to_receipt, command_output_with_timeout, configure_command_environment,
+    command_output_to_receipt_with_cancellation, command_output_with_timeout,
+    configure_command_environment,
 };
 
 #[derive(Debug, Clone)]
@@ -80,7 +81,21 @@ impl ExecutionBackend for LinuxBubblewrapExecutionBackend {
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
         let bwrap = self.bwrap.clone();
         let network_allowed = self.network_allowed;
-        Box::pin(async move { linux_bubblewrap_execute(bwrap, network_allowed, request).await })
+        Box::pin(
+            async move { linux_bubblewrap_execute(bwrap, network_allowed, request, None).await },
+        )
+    }
+
+    fn execute_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    ) -> ExecutionFuture<'_> {
+        let bwrap = self.bwrap.clone();
+        let network_allowed = self.network_allowed;
+        Box::pin(async move {
+            linux_bubblewrap_execute(bwrap, network_allowed, request, cancellation).await
+        })
     }
 }
 
@@ -142,6 +157,7 @@ pub(crate) async fn linux_bubblewrap_execute(
     bwrap: PathBuf,
     network_allowed: bool,
     request: ExecutionRequest,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     if !cfg!(target_os = "linux") {
         bail!("linux_bubblewrap execution backend is only available on Linux");
@@ -175,12 +191,13 @@ pub(crate) async fn linux_bubblewrap_execute(
     } else {
         ExecutionNetworkReceipt::denied("bubblewrap uses --unshare-net")
     };
-    command_output_to_receipt(
+    command_output_to_receipt_with_cancellation(
         ExecutionBackendKind::LinuxBubblewrap,
         capabilities,
         network,
         command,
         &request,
+        cancellation,
     )
     .await
 }

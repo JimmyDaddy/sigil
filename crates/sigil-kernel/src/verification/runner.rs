@@ -502,6 +502,9 @@ pub(super) fn check_failure_reason(
                 stream.as_str()
             ));
         }
+        ExecutionTerminationCause::Cancelled => {
+            return Some("check interrupted by run cancellation".to_owned());
+        }
         ExecutionTerminationCause::Exited => {}
     }
     Some(match command_output.exit_code {

@@ -133,7 +133,8 @@ Sigil stores session and control state as append-only JSONL. For users, this mea
 
 - Restarting the TUI restores the latest session by default.
 - Exiting the TUI prints the current session id and `sigil resume <session-id>` for command-line restore.
-- Cancelling a run does not discard messages and tool results already written to the log.
+- Cancelling a run first closes admission for new provider, tool, process, socket, retry, redirect, and child-work effects, then waits up to a bounded cleanup deadline. The UI shows `Cancelling` while active work is converging; `Cancelled` means cleanup was confirmed, while `Interrupted` means the deadline expired or cleanup could not be proven.
+- Cancelling a run does not discard messages and tool results already written to the log. `/queue interrupt` dispatches its follow-up only after the prior run reaches a durable cancellation terminal state.
 - Tool executions that started but did not finish are shown as interrupted after restore.
 - File-change activities are restored with their captured diff summaries.
 - Saving new provider/model defaults in `/config` does not rewrite the identity of the current session.

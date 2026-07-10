@@ -48,6 +48,36 @@ impl JsonlSessionStore {
             .context("session writer returned no event for a single append")
     }
 
+    pub(crate) fn append_event_if<F>(
+        &self,
+        event_type: DurableEventType,
+        event_class: EventClass,
+        payload: serde_json::Value,
+        should_append: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let records = writer.read_records_writer()?;
+        if !should_append(&records)? {
+            return Ok(false);
+        }
+        writer.append_events(
+            vec![PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                correlation_id: None,
+            }],
+            false,
+        )?;
+        Ok(true)
+    }
+
     /// Appends a provider-visible or control session entry as a v2 stored event.
     pub fn append_session_entry_event(&self, entry: &SessionLogEntry) -> Result<StoredEvent> {
         let event_type = session_entry_event_type(entry);

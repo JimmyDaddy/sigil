@@ -671,6 +671,7 @@ async fn execute_prepared_mutation_artifact(
     audit_binding: sigil_kernel::PreparedToolAuditBinding,
     artifact: PreparedMutation,
 ) -> Result<ToolResult> {
+    let cancellation = ctx.cancellation_handle();
     let Some(recorder) = ctx.mutation_recorder else {
         let details = json!({
             "reason": "mutation_recorder_required",
@@ -695,6 +696,7 @@ async fn execute_prepared_mutation_artifact(
             &recorder,
             &binding_for_execution,
             &call_id_for_execution,
+            cancellation.as_ref(),
         )
     })
     .await??;

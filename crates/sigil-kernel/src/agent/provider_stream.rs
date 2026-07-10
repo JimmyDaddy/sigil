@@ -28,11 +28,20 @@ pub(super) async fn collect_provider_turn<H>(
     previous_response_handle: &mut Option<ResponseHandle>,
     total_tool_calls: usize,
     handler: &mut H,
+    cancellation: Option<&crate::RunCancellationHandle>,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
 {
-    let mut stream = match provider.stream(request).await {
+    let stream_result = match cancellation {
+        Some(cancellation) => tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => anyhow::bail!("run cancellation requested during provider connect"),
+            result = provider.stream(request) => result,
+        },
+        None => provider.stream(request).await,
+    };
+    let mut stream = match stream_result {
         Ok(stream) => stream,
         Err(error) => {
             let error_message = format!("{error:#}");
@@ -51,7 +60,18 @@ where
     let mut completed_calls: Vec<ToolCall> = Vec::new();
     let mut pending_states: Vec<ProviderContinuationState> = Vec::new();
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = match cancellation {
+            Some(cancellation) => tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => anyhow::bail!("run cancellation requested during provider stream"),
+                chunk = stream.next() => chunk,
+            },
+            None => stream.next().await,
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let chunk = match chunk.context("provider stream failed") {
             Ok(chunk) => chunk,
             Err(error) => {

@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupReceipt,
-    ExecutionConfig, ExecutionRequest, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
+    ExecutionCleanupStatus, ExecutionConfig, ExecutionRequest, ExecutionSandboxFallback,
+    ExecutionSandboxProfile, TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
     TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
     TerminalTaskStatus, terminal_cleanup_receipt_for_status,
 };

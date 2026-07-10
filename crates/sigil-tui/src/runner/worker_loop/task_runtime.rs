@@ -40,6 +40,8 @@ pub(in crate::runner) struct TaskRunSpawn {
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
+    pub(in crate::runner) cancellation_handle: RunCancellationHandle,
+    pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
 }
 
 pub(in crate::runner) struct TaskContinueSpawn {
@@ -59,6 +61,8 @@ pub(in crate::runner) struct TaskContinueSpawn {
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
+    pub(in crate::runner) cancellation_handle: RunCancellationHandle,
+    pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
 }
 
 pub(in crate::runner) struct SkillChildRunSpawn {
@@ -80,6 +84,8 @@ pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
     pub(in crate::runner) handler: ChannelEventHandler,
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
+    pub(in crate::runner) cancellation_handle: RunCancellationHandle,
+    pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
 }
 
 pub(in crate::runner) struct TaskRoleRuntime {
@@ -112,7 +118,11 @@ pub(in crate::runner) fn spawn_task_run(
             approval_rx,
             mut handler,
             elicitation_audit_buffer,
+            cancellation_handle,
+            cancellation_task_guard,
         } = spawn;
+        let _cancellation_task_guard = cancellation_task_guard;
+        let terminal_cancellation = cancellation_handle.clone();
         let result = run_task_orchestration(
             &mut session,
             TaskRunOrchestration {
@@ -126,9 +136,15 @@ pub(in crate::runner) fn spawn_task_run(
                 role_provider_builder: role_provider_builder.as_ref(),
                 approval_rx,
                 handler: &mut handler,
+                cancellation_handle,
             },
         )
         .await;
+        let result = if terminal_cancellation.try_finalize_naturally() {
+            result
+        } else {
+            Err("run cancellation won the task terminal-state race".to_owned())
+        };
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
             Ok(()) => result,
             Err(error) => Err(error),
@@ -159,7 +175,11 @@ pub(in crate::runner) fn spawn_task_continue(
             approval_rx,
             mut handler,
             elicitation_audit_buffer,
+            cancellation_handle,
+            cancellation_task_guard,
         } = spawn;
+        let _cancellation_task_guard = cancellation_task_guard;
+        let terminal_cancellation = cancellation_handle.clone();
         let result = continue_task_orchestration(
             &mut session,
             TaskContinueOrchestration {
@@ -174,9 +194,15 @@ pub(in crate::runner) fn spawn_task_continue(
                 role_provider_builder: role_provider_builder.as_ref(),
                 approval_rx,
                 handler: &mut handler,
+                cancellation_handle,
             },
         )
         .await;
+        let result = if terminal_cancellation.try_finalize_naturally() {
+            result
+        } else {
+            Err("run cancellation won the task terminal-state race".to_owned())
+        };
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
             Ok(()) => result,
             Err(error) => Err(error),
@@ -209,7 +235,11 @@ pub(in crate::runner) fn spawn_skill_child_run(
             approval_rx,
             mut handler,
             elicitation_audit_buffer,
+            cancellation_handle,
+            cancellation_task_guard,
         } = spawn;
+        let _cancellation_task_guard = cancellation_task_guard;
+        let terminal_cancellation = cancellation_handle.clone();
         let result = run_skill_child_orchestration(
             &mut session,
             SkillChildRunOrchestration {
@@ -226,9 +256,15 @@ pub(in crate::runner) fn spawn_skill_child_run(
                 role_provider_builder: role_provider_builder.as_ref(),
                 approval_rx,
                 handler: &mut handler,
+                cancellation_handle,
             },
         )
         .await;
+        let result = if terminal_cancellation.try_finalize_naturally() {
+            result
+        } else {
+            Err("run cancellation won the task terminal-state race".to_owned())
+        };
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
             Ok(()) => result,
             Err(error) => Err(error),
@@ -248,6 +284,7 @@ pub(in crate::runner) struct TaskRunOrchestration<'a> {
     role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
+    cancellation_handle: RunCancellationHandle,
 }
 
 pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
@@ -264,6 +301,7 @@ pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
     role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
+    cancellation_handle: RunCancellationHandle,
 }
 
 pub(in crate::runner) struct TaskContinueOrchestration<'a> {
@@ -278,6 +316,7 @@ pub(in crate::runner) struct TaskContinueOrchestration<'a> {
     role_provider_builder: &'a dyn TaskRoleProviderBuilder,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
+    cancellation_handle: RunCancellationHandle,
 }
 
 pub(in crate::runner) async fn run_task_orchestration(
@@ -295,6 +334,7 @@ pub(in crate::runner) async fn run_task_orchestration(
         role_provider_builder,
         approval_rx,
         handler,
+        cancellation_handle,
     } = request;
     materialize_task_verification_config(
         session,
@@ -316,6 +356,7 @@ pub(in crate::runner) async fn run_task_orchestration(
         agent_supervisor,
         role_provider_builder,
     )?;
+    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .run(
@@ -354,6 +395,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
         role_provider_builder,
         approval_rx,
         handler,
+        cancellation_handle,
     } = request;
     materialize_task_verification_config(
         session,
@@ -375,6 +417,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
         agent_supervisor,
         role_provider_builder,
     )?;
+    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .continue_run(
@@ -414,6 +457,7 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         role_provider_builder,
         approval_rx,
         handler,
+        cancellation_handle,
     } = request;
     materialize_task_verification_config(
         session,
@@ -437,6 +481,7 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
         agent_supervisor,
         role_provider_builder,
     )?;
+    let orchestrator = orchestrator.with_cancellation(cancellation_handle);
     session
         .append_control(ControlEntry::SkillLoaded(loaded.entry))
         .map_err(|error| format!("{error:#}"))?;
@@ -1432,6 +1477,35 @@ pub(in crate::runner) fn reject_plan(
 pub(in crate::runner) fn append_cancelled_task_state(
     session: &mut Session,
 ) -> std::result::Result<(), String> {
+    append_terminated_task_state(
+        session,
+        TaskRunStatus::Cancelled,
+        TaskStepStatus::Cancelled,
+        TaskChildSessionStatus::Cancelled,
+        "run cancelled from TUI",
+    )
+}
+
+pub(in crate::runner) fn append_interrupted_task_state(
+    session: &mut Session,
+    reason: &str,
+) -> std::result::Result<(), String> {
+    append_terminated_task_state(
+        session,
+        TaskRunStatus::Interrupted,
+        TaskStepStatus::Interrupted,
+        TaskChildSessionStatus::Interrupted,
+        reason,
+    )
+}
+
+fn append_terminated_task_state(
+    session: &mut Session,
+    task_status: TaskRunStatus,
+    step_status: TaskStepStatus,
+    child_status: TaskChildSessionStatus,
+    reason: &str,
+) -> std::result::Result<(), String> {
     let projection = session.task_state_projection();
     let Some(task) = projection.latest_task() else {
         return Ok(());
@@ -1466,15 +1540,15 @@ pub(in crate::runner) fn append_cancelled_task_state(
                 plan_version: step.plan_version,
                 step_id: step.step_id,
                 role: step.role,
-                status: TaskStepStatus::Cancelled,
+                status: step_status,
                 title: step.title,
                 summary: None,
-                reason: Some("run cancelled from TUI".to_owned()),
+                reason: Some(reason.to_owned()),
             }))
             .map_err(|error| format!("failed to append cancelled task step: {error:#}"))?;
     }
     for mut child in child_cancellations {
-        child.status = TaskChildSessionStatus::Cancelled;
+        child.status = child_status;
         session
             .append_control(ControlEntry::TaskChildSession(child))
             .map_err(|error| format!("failed to append cancelled child session: {error:#}"))?;
@@ -1484,8 +1558,8 @@ pub(in crate::runner) fn append_cancelled_task_state(
             task_id,
             parent_session_ref,
             objective,
-            status: TaskRunStatus::Cancelled,
-            reason: Some("run cancelled from TUI".to_owned()),
+            status: task_status,
+            reason: Some(reason.to_owned()),
         }))
         .map_err(|error| format!("failed to append cancelled task run: {error:#}"))?;
     Ok(())

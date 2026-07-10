@@ -614,10 +614,14 @@ async fn terminal_process_manager_cancel_after_exit_returns_current_status() -> 
 
     let cancel_result = manager.cancel(&entry.handle.task_id).await?;
 
-    assert!(matches!(
-        cancel_result.status,
-        TerminalTaskStatus::Exited { exit_code: Some(0) }
-    ));
+    assert!(
+        matches!(
+            cancel_result.status,
+            TerminalTaskStatus::Exited { exit_code: Some(0) }
+        ),
+        "unexpected status: {:?}",
+        cancel_result.status
+    );
     Ok(())
 }
 
@@ -1303,14 +1307,14 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     let mut quick_child = quick_child;
     assert!(matches!(
         super::cancel_child(&mut quick_child, None, Duration::from_secs(1)).await,
-        TerminalTaskStatus::Cancelled
+        TerminalTaskStatus::Interrupted
     ));
 
     let slow_child = Command::new("/bin/sh").arg("-c").arg("sleep 5").spawn()?;
     let mut slow_child = slow_child;
     assert!(matches!(
         super::cancel_child(&mut slow_child, None, Duration::from_millis(1)).await,
-        TerminalTaskStatus::Cancelled
+        TerminalTaskStatus::Interrupted
     ));
 
     #[cfg(unix)]
@@ -1372,8 +1376,11 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
             control: super::TerminalTaskControl::Process { cancel_tx },
         },
     );
-    let current = manager.cancel(&task_id).await?;
-    assert!(matches!(current.status, TerminalTaskStatus::Running));
+    let error = manager
+        .cancel(&task_id)
+        .await
+        .expect_err("lost cancellation response must not report running as success");
+    assert!(error.to_string().contains("cleanup could be confirmed"));
 
     let missing_receiver_task_id = TerminalTaskId::new("terminal-cancel-no-receiver")?;
     let missing_receiver_summary =
@@ -1430,7 +1437,10 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         8,
     )
     .await?;
-    assert!(matches!(cancelled.status, TerminalTaskStatus::Cancelled));
+    assert!(matches!(cancelled.status, TerminalTaskStatus::Interrupted));
+    assert!(cancelled.cleanup.as_ref().is_some_and(|cleanup| {
+        cleanup.status != sigil_kernel::ExecutionCleanupStatus::Completed
+    }));
 
     let pty_cancel_error_summary = Arc::new(Mutex::new(test_entry(TerminalTaskId::new(
         "terminal-pty-cancel-helper-error",
@@ -1522,6 +1532,7 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
         )),
         process_id: None,
         capture_ledger: Arc::new(super::TerminalCaptureLedger::default()),
+        cancel_requested: Arc::new(AtomicBool::new(false)),
         capture_failure_rx,
         child_exit_rx,
         preview_limit_bytes: 8,

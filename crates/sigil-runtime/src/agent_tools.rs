@@ -20,14 +20,15 @@ use sigil_kernel::{
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, FileType, FinalAnswerContext,
     IsolatedChangeSetProduced, JsonlSessionStore, MergeReviewId, MergeReviewRequested,
     ModelMessage, MultiAgentMode, MutationSubject, PermissionConfig, PermissionMode, Provider,
-    RootConfig, RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId,
-    Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, VerificationScope, WriteIsolationMode,
-    build_workspace_snapshot_for_event, changeset_only_child_contract_prompt,
-    changeset_only_child_tool_registry, decode_changeset_only_child_output, saturating_elapsed,
-    stable_event_uuid, stable_workspace_id,
+    RootConfig, RunCancellationFinalizedEntry, RunCancellationOwner, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, Session,
+    SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolErrorKind, ToolExecutionStatus, ToolPreview,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    VerificationScope, WriteIsolationMode, build_workspace_snapshot_for_event,
+    changeset_only_child_contract_prompt, changeset_only_child_tool_registry,
+    decode_changeset_only_child_output, saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
 
 use crate::{

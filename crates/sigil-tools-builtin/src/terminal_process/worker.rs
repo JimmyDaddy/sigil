@@ -60,6 +60,7 @@ pub(super) struct PtyWorker {
     pub(super) killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
     pub(super) process_id: Option<u32>,
     pub(super) capture_ledger: Arc<TerminalCaptureLedger>,
+    pub(super) cancel_requested: Arc<AtomicBool>,
     pub(super) capture_failure_rx: mpsc::UnboundedReceiver<TerminalCaptureFailure>,
     pub(super) child_exit_rx: mpsc::UnboundedReceiver<TerminalTaskStatus>,
     pub(super) preview_limit_bytes: usize,
@@ -165,7 +166,6 @@ pub(super) fn spawn_pty_runtime(
     let process_id = child.process_id();
     let killer = Arc::new(StdMutex::new(child.clone_killer()));
     let cancel_requested = Arc::new(AtomicBool::new(false));
-    let wait_cancel_requested = Arc::clone(&cancel_requested);
     let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
     let capture_ledger = Arc::new(TerminalCaptureLedger::default());
     let (child_exit_tx, child_exit_rx) = mpsc::unbounded_channel();
@@ -179,11 +179,7 @@ pub(super) fn spawn_pty_runtime(
     );
     let wait_task = task::spawn_blocking(move || {
         let wait_result = child.wait();
-        let status = if wait_cancel_requested.load(Ordering::SeqCst) {
-            TerminalTaskStatus::Cancelled
-        } else {
-            status_from_pty_wait_result(wait_result)
-        };
+        let status = status_from_pty_wait_result(wait_result);
         let _ = child_exit_tx.send(status.clone());
         let capture_error = join_pty_read_thread(read_thread);
         PtyWaitOutcome {
@@ -263,9 +259,13 @@ pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
             .await;
         }
         WorkerEvent::Cancel(cancel) => {
-            let status =
-                cancel_child(&mut worker.child, worker.process_id, worker.cancel_grace).await;
-            let entry = finalize_terminal_task_states(
+            let (status, cleanup) = cancel_child_with_cleanup(
+                &mut worker.child,
+                worker.process_id,
+                worker.cancel_grace,
+            )
+            .await;
+            let entry = finalize_terminal_task_with_override(
                 &worker.summary,
                 &worker.artifacts,
                 status,
@@ -273,6 +273,8 @@ pub(super) async fn run_terminal_worker(mut worker: TerminalWorker) {
                 stderr_task,
                 Arc::clone(&worker.capture_ledger),
                 worker.preview_limit_bytes,
+                Some(cleanup),
+                None,
             )
             .await;
             let _ = cancel.respond_to.send(entry);
@@ -423,7 +425,18 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
 
     match event {
         PtyWorkerEvent::WaitCompleted(outcome) => {
-            let outcome = joined_pty_outcome(outcome);
+            let mut outcome = joined_pty_outcome(outcome);
+            let cleanup = if worker.cancel_requested.load(Ordering::SeqCst) {
+                let cleanup = cleanup_process_group_after_direct_exit(worker.process_id).await;
+                outcome.status = if cleanup.status == ExecutionCleanupStatus::Completed {
+                    TerminalTaskStatus::Cancelled
+                } else {
+                    TerminalTaskStatus::Interrupted
+                };
+                Some(cleanup)
+            } else {
+                None
+            };
             let fallback = outcome
                 .capture_error
                 .as_ref()
@@ -434,7 +447,7 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
                 outcome.status,
                 outcome.capture_error,
                 worker.preview_limit_bytes,
-                None,
+                cleanup,
                 TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback),
             )
             .await;
@@ -470,7 +483,18 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
     )
     .await
     {
-        let outcome = joined_pty_outcome(outcome);
+        let mut outcome = joined_pty_outcome(outcome);
+        let cleanup = if worker.cancel_requested.load(Ordering::SeqCst) {
+            let cleanup = cleanup_process_group_after_direct_exit(worker.process_id).await;
+            outcome.status = if cleanup.status == ExecutionCleanupStatus::Completed {
+                TerminalTaskStatus::Cancelled
+            } else {
+                TerminalTaskStatus::Interrupted
+            };
+            Some(cleanup)
+        } else {
+            None
+        };
         let fallback = outcome
             .capture_error
             .as_ref()
@@ -481,7 +505,7 @@ async fn finalize_pty_after_child_exit(worker: &mut PtyWorker, status: TerminalT
             outcome.status,
             outcome.capture_error,
             worker.preview_limit_bytes,
-            None,
+            cleanup,
             TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback),
         )
         .await;
@@ -558,6 +582,7 @@ pub(super) async fn finalize_terminal_task(
     .await
 }
 
+#[cfg(test)]
 async fn finalize_terminal_task_states(
     summary: &Arc<Mutex<TerminalTaskEntry>>,
     artifacts: &TerminalTaskArtifacts,
@@ -669,6 +694,13 @@ async fn finalize_terminal_summary(
         };
     }
 
+    if matches!(final_status, TerminalTaskStatus::Cancelled)
+        && !cleanup_override
+            .as_ref()
+            .is_some_and(|receipt| receipt.status == ExecutionCleanupStatus::Completed)
+    {
+        final_status = TerminalTaskStatus::Interrupted;
+    }
     let mut entry = summary.lock().await;
     entry.status = final_status;
     entry.output_preview = (!log_summary.preview.is_empty()).then_some(log_summary.preview);
@@ -681,7 +713,11 @@ async fn finalize_terminal_summary(
         .max(log_summary.total_bytes);
     entry.output_limit_bytes = capture_evidence.limit_bytes;
     entry.output_termination_reason = capture_evidence.termination_reason;
-    entry.cleanup = cleanup_override.or_else(|| terminal_cleanup_receipt_for_status(&entry.status));
+    entry.cleanup = if matches!(entry.status, TerminalTaskStatus::Cancelled) {
+        cleanup_override
+    } else {
+        cleanup_override.or_else(|| terminal_cleanup_receipt_for_status(&entry.status))
+    };
     entry.updated_at_ms = current_epoch_ms();
     let cloned = entry.clone();
     drop(entry);
@@ -1020,38 +1056,71 @@ async fn cleanup_process_group_after_direct_exit(
     )
 }
 
+#[cfg(test)]
 pub(super) async fn cancel_child(
     child: &mut TokioChild,
     process_id: Option<u32>,
     cancel_grace: Duration,
 ) -> TerminalTaskStatus {
+    cancel_child_with_cleanup(child, process_id, cancel_grace)
+        .await
+        .0
+}
+
+async fn cancel_child_with_cleanup(
+    child: &mut TokioChild,
+    process_id: Option<u32>,
+    cancel_grace: Duration,
+) -> (TerminalTaskStatus, ExecutionCleanupReceipt) {
     if let Some(process_id) = process_id {
         let _ = send_terminate_signal(process_id).await;
     }
 
     match timeout(cancel_grace, child.wait()).await {
-        Ok(Ok(_)) => TerminalTaskStatus::Cancelled,
-        Ok(Err(error)) => TerminalTaskStatus::Failed {
-            reason: format!("terminal process cancel wait failed: {error}"),
-        },
+        Ok(Ok(_)) => cancellation_status_after_process_tree_cleanup(process_id).await,
+        Ok(Err(error)) => (
+            TerminalTaskStatus::Failed {
+                reason: format!("terminal process cancel wait failed: {error}"),
+            },
+            ExecutionCleanupReceipt::failed("direct child cancel wait failed"),
+        ),
         Err(_) => match child.start_kill() {
             Ok(()) => match timeout(TERMINAL_CLEANUP_WAIT_TIMEOUT, child.wait()).await {
-                Ok(Ok(_)) => TerminalTaskStatus::Cancelled,
-                Ok(Err(error)) => TerminalTaskStatus::Failed {
-                    reason: format!("terminal process kill wait failed: {error}"),
-                },
-                Err(_) => TerminalTaskStatus::Failed {
-                    reason: format!(
+                Ok(Ok(_)) => cancellation_status_after_process_tree_cleanup(process_id).await,
+                Ok(Err(error)) => (
+                    TerminalTaskStatus::Failed {
+                        reason: format!("terminal process kill wait failed: {error}"),
+                    },
+                    ExecutionCleanupReceipt::failed("direct child kill wait failed"),
+                ),
+                Err(_) => (
+                    TerminalTaskStatus::Interrupted,
+                    ExecutionCleanupReceipt::failed(format!(
                         "terminal process kill wait exceeded {:?}",
                         TERMINAL_CLEANUP_WAIT_TIMEOUT
-                    ),
+                    )),
+                ),
+            },
+            Err(error) => (
+                TerminalTaskStatus::Failed {
+                    reason: format!("failed to kill terminal process: {error}"),
                 },
-            },
-            Err(error) => TerminalTaskStatus::Failed {
-                reason: format!("failed to kill terminal process: {error}"),
-            },
+                ExecutionCleanupReceipt::failed("direct child kill request failed"),
+            ),
         },
     }
+}
+
+async fn cancellation_status_after_process_tree_cleanup(
+    process_id: Option<u32>,
+) -> (TerminalTaskStatus, ExecutionCleanupReceipt) {
+    let cleanup = cleanup_process_group_after_direct_exit(process_id).await;
+    let status = if cleanup.status == ExecutionCleanupStatus::Completed {
+        TerminalTaskStatus::Cancelled
+    } else {
+        TerminalTaskStatus::Interrupted
+    };
+    (status, cleanup)
 }
 
 pub(super) async fn cancel_pty_task(
@@ -1078,13 +1147,19 @@ pub(super) async fn cancel_pty_task(
     if let Some(entry) = wait_for_terminal_summary(summary, cancel_grace).await {
         Ok(entry)
     } else {
+        let cleanup = cleanup_process_group_after_direct_exit(process_id).await;
+        let status = if cleanup.status == ExecutionCleanupStatus::Completed {
+            TerminalTaskStatus::Cancelled
+        } else {
+            TerminalTaskStatus::Interrupted
+        };
         Ok(finalize_terminal_summary(
             summary,
             &artifacts,
-            TerminalTaskStatus::Cancelled,
+            status,
             None,
             preview_limit_bytes,
-            None,
+            Some(cleanup),
             TerminalCaptureEvidence::from_ledger(&capture_ledger, None),
         )
         .await)

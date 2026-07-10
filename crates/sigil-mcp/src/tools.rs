@@ -101,6 +101,7 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let _transport_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Socket)?;
         if !self.trust.allow_secrets && self.client.secret_redactor.value_contains_secret(&args) {
             return Ok(ToolResult::error(
                 call_id,
@@ -109,15 +110,41 @@ impl Tool for McpTool {
                 "MCP tool arguments contain a secret and this server has allow_secrets = false",
             ));
         }
-        let response = match self
-            .client
-            .call_tool_response(
+        let cancellation = ctx.cancellation_handle();
+        let operation = {
+            let operation = self.client.call_tool_response(
                 &self.tool_name.original_name,
                 args,
                 McpOperationDeadline::from_secs(ctx.timeout_secs),
-            )
-            .await
-        {
+            );
+            tokio::pin!(operation);
+            match cancellation.as_ref() {
+                Some(cancellation) => tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => None,
+                    response = &mut operation => Some(response),
+                },
+                None => Some(operation.await),
+            }
+        };
+        let Some(operation) = operation else {
+            let cleanup = self
+                .client
+                .close_connection("MCP tool call interrupted by run cancellation".to_owned())
+                .await;
+            if !cleanup.completed
+                && let Some(cancellation) = cancellation
+            {
+                cancellation.mark_cleanup_incomplete();
+            }
+            return Ok(ToolResult::error(
+                call_id,
+                self.spec.name.clone(),
+                ToolErrorKind::Interrupted,
+                "MCP tool call interrupted by run cancellation",
+            ));
+        };
+        let response = match operation {
             Ok(response) => response,
             Err(error) => {
                 return Ok(error.to_tool_result(

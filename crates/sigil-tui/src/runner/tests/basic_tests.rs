@@ -1523,14 +1523,19 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
     })?;
 
     let first = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(message, WorkerMessage::RunCancelled { .. })
-            || matches!(
-                message,
-                WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
-                    if prompt == "urgent queued prompt"
-            )
+        matches!(
+            message,
+            WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
+        ) || matches!(
+            message,
+            WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+                if prompt == "urgent queued prompt"
+        )
     })?;
-    let saw_cancel_first = matches!(first, WorkerMessage::RunCancelled { .. });
+    let saw_cancel_first = matches!(
+        first,
+        WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
+    );
     let second = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         if saw_cancel_first {
             matches!(
@@ -1539,7 +1544,10 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
                     if prompt == "urgent queued prompt"
             )
         } else {
-            matches!(message, WorkerMessage::RunCancelled { .. })
+            matches!(
+                message,
+                WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
+            )
         }
     })?;
     assert!(
@@ -1548,7 +1556,11 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
                 second,
                 WorkerMessage::ConversationQueueDispatchStarted { .. }
             ))
-            || (!saw_cancel_first && matches!(second, WorkerMessage::RunCancelled { .. }))
+            || (!saw_cancel_first
+                && matches!(
+                    second,
+                    WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }
+                ))
     );
 
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;

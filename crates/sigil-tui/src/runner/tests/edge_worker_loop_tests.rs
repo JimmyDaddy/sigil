@@ -1395,7 +1395,7 @@ fn cancel_run_reports_load_error_if_session_log_cannot_be_reloaded() -> Result<(
 }
 
 #[test]
-fn shutdown_with_active_run_does_not_emit_run_cancelled_event() -> Result<()> {
+fn shutdown_with_active_run_emits_an_honest_cancellation_terminal() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/shutdown-active.jsonl");
@@ -1419,14 +1419,16 @@ fn shutdown_with_active_run_does_not_emit_run_cancelled_event() -> Result<()> {
     let _ = worker.recv(Duration::from_secs(3))?;
 
     worker.send_shutdown()?;
-    let timeout_deadline = Instant::now() + Duration::from_millis(400);
+    let timeout_deadline = Instant::now() + Duration::from_secs(3);
+    let mut saw_terminal = false;
     loop {
         if Instant::now() >= timeout_deadline {
             break;
         }
         match worker.recv_optional(Duration::from_millis(80))? {
-            Some(WorkerMessage::RunCancelled { .. }) => {
-                anyhow::bail!("unexpected RunCancelled during shutdown with active run")
+            Some(WorkerMessage::RunCancelled { .. } | WorkerMessage::RunInterrupted { .. }) => {
+                saw_terminal = true;
+                break;
             }
             Some(_) => continue,
             None => break,
@@ -1434,6 +1436,10 @@ fn shutdown_with_active_run_does_not_emit_run_cancelled_event() -> Result<()> {
     }
 
     worker.join()?;
+    assert!(
+        saw_terminal,
+        "shutdown must emit a durable cancellation terminal"
+    );
     Ok(())
 }
 

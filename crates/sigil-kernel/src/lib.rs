@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_thread;
 pub mod approval;
+pub mod cancellation;
 pub mod changeset;
 pub mod config;
 pub mod context_engine;
@@ -56,6 +57,13 @@ pub use agent_thread::{
     closed_agent_routes, interrupted_agent_attempts, interrupted_agent_mailbox_messages,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
+pub use cancellation::{
+    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    RunCancellationRecorder, RunCancellationRequested, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEffectClass, RunEffectGuard,
+    RunEffectKind, RunQuiescenceOutcome, RunTaskGuard, append_run_cancellation_finalized,
+    append_run_cancellation_requested, reconcile_unfinished_run_cancellations,
+};
 pub use changeset::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetProjection, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk,

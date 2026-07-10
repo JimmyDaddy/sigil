@@ -5,7 +5,7 @@ use sigil_kernel::{
 };
 use tokio::process::Command;
 
-use super::{command_output_to_receipt, configure_command_environment};
+use super::{command_output_to_receipt_with_cancellation, configure_command_environment};
 
 #[derive(Debug, Default)]
 pub struct LocalExecutionBackend;
@@ -26,7 +26,25 @@ impl ExecutionBackend for LocalExecutionBackend {
     }
 
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
-        Box::pin(local_execute(self.kind(), self.capabilities(), request))
+        Box::pin(local_execute(
+            self.kind(),
+            self.capabilities(),
+            request,
+            None,
+        ))
+    }
+
+    fn execute_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    ) -> ExecutionFuture<'_> {
+        Box::pin(local_execute(
+            self.kind(),
+            self.capabilities(),
+            request,
+            cancellation,
+        ))
     }
 }
 
@@ -34,6 +52,7 @@ pub(crate) async fn local_execute(
     backend: ExecutionBackendKind,
     capabilities: ExecutionBackendCapabilities,
     request: ExecutionRequest,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     let mut command = Command::new(&request.program);
     command
@@ -42,12 +61,13 @@ pub(crate) async fn local_execute(
         .kill_on_drop(true);
     configure_command_environment(&mut command, &request);
 
-    command_output_to_receipt(
+    command_output_to_receipt_with_cancellation(
         backend,
         capabilities,
         ExecutionNetworkReceipt::unknown("local backend does not report network enforcement"),
         command,
         &request,
+        cancellation,
     )
     .await
 }

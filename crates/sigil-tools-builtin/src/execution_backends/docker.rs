@@ -373,7 +373,20 @@ impl ExecutionBackend for DockerExecutionBackend {
         let docker = self.docker.clone();
         let image = self.image.clone();
         let network_allowed = self.network_allowed;
-        Box::pin(async move { docker_execute(docker, image, network_allowed, request).await })
+        Box::pin(async move { docker_execute(docker, image, network_allowed, request, None).await })
+    }
+
+    fn execute_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    ) -> ExecutionFuture<'_> {
+        let docker = self.docker.clone();
+        let image = self.image.clone();
+        let network_allowed = self.network_allowed;
+        Box::pin(async move {
+            docker_execute(docker, image, network_allowed, request, cancellation).await
+        })
     }
 }
 
@@ -421,6 +434,7 @@ pub(crate) async fn docker_execute(
     image: String,
     network_allowed: bool,
     request: ExecutionRequest,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     let docker_cleanup = DockerContainerCleanup::new(docker.clone(), &request)?;
     let canonical_cwd = fs::canonicalize(&request.cwd)
@@ -468,6 +482,7 @@ pub(crate) async fn docker_execute(
         command,
         &request,
         docker_cleanup,
+        cancellation,
     )
     .await
 }

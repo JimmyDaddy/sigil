@@ -198,21 +198,36 @@ impl AgentToolRuntime {
                 );
             };
             let thread_id = child_thread.thread_id.clone();
-            let handle = tokio::spawn(run_background_chat_agent(
-                thread_id.clone(),
-                child_agent,
-                child_session,
-                child_thread.child_session_ref.clone(),
-                child_input,
-                child_options,
-                mailbox_rx,
-                self.background_runs.event_sink(),
-            ));
+            let cancellation_owner = RunCancellationOwner::new();
+            let cancellation_handle = cancellation_owner.handle();
+            let cancellation_task_guard = cancellation_handle
+                .register_task()
+                .expect("new background cancellation owner must admit its first task");
+            let child_input = child_input.with_cancellation(cancellation_handle);
+            let run_thread_id = thread_id.clone();
+            let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
+            let child_session_ref = child_thread.child_session_ref.clone();
+            let event_sink = self.background_runs.event_sink();
+            let handle = tokio::spawn(async move {
+                let _cancellation_task_guard = cancellation_task_guard;
+                run_background_chat_agent(
+                    run_thread_id,
+                    child_agent,
+                    child_session,
+                    child_session_ref,
+                    child_input,
+                    child_options,
+                    mailbox_rx,
+                    event_sink,
+                )
+                .await
+            });
             if let Err(error) = self.background_runs.insert(
                 thread_id.clone(),
                 BackgroundChatAgentHandle {
-                    thread: BackgroundChatAgentThreadRecord::from_thread(&child_thread),
+                    thread: thread_record,
                     handle,
+                    cancellation_owner,
                 },
             ) {
                 let _ = self.supervisor.record_chat_child_failure(
@@ -247,7 +262,8 @@ impl AgentToolRuntime {
             );
         }
 
-        if !changeset_only_write
+        if self.run_cancellation.is_none()
+            && !changeset_only_write
             && matches!(parsed.mode, AgentInvocationMode::JoinBeforeFinal)
             && tool_scope_is_safe_readonly_for_auto_spawn(&resolved_profile.profile.tool_scope)
         {
@@ -265,6 +281,13 @@ impl AgentToolRuntime {
                 )
                 .await;
         }
+
+        let child_input = self
+            .run_cancellation
+            .as_ref()
+            .map_or(child_input.clone(), |handle| {
+                child_input.with_child_cancellation(handle.clone())
+            });
 
         let changeset_only_base_snapshot_id = match changeset_only_write {
             true => match capture_chat_changeset_only_parent_snapshot_id(
@@ -451,21 +474,35 @@ impl AgentToolRuntime {
         let thread_id = child_thread.thread_id.clone();
         let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
         let (_mailbox_tx, mailbox_rx) = mpsc::channel();
-        let handle = tokio::spawn(run_background_chat_agent(
-            thread_id.clone(),
-            child_agent,
-            child_session,
-            child_thread.child_session_ref.clone(),
-            child_input,
-            child_options,
-            mailbox_rx,
-            self.background_runs.event_sink(),
-        ));
+        let cancellation_owner = RunCancellationOwner::new();
+        let cancellation_handle = cancellation_owner.handle();
+        let cancellation_task_guard = cancellation_handle
+            .register_task()
+            .expect("new background cancellation owner must admit its first task");
+        let child_input = child_input.with_cancellation(cancellation_handle);
+        let run_thread_id = thread_id.clone();
+        let child_session_ref = child_thread.child_session_ref.clone();
+        let event_sink = self.background_runs.event_sink();
+        let handle = tokio::spawn(async move {
+            let _cancellation_task_guard = cancellation_task_guard;
+            run_background_chat_agent(
+                run_thread_id,
+                child_agent,
+                child_session,
+                child_session_ref,
+                child_input,
+                child_options,
+                mailbox_rx,
+                event_sink,
+            )
+            .await
+        });
         if let Err(error) = self.background_runs.insert(
             thread_id.clone(),
             BackgroundChatAgentHandle {
                 thread: thread_record,
                 handle,
+                cancellation_owner,
             },
         ) {
             let _ = self.supervisor.record_chat_child_failure(
@@ -613,30 +650,12 @@ impl AgentToolRuntime {
             &child_options.permission_config,
             &request.resolved_profile.profile.permission_policy,
         );
-        if !changeset_only_write
-            && matches!(request.mode, AgentInvocationMode::JoinBeforeFinal)
-            && tool_scope_is_safe_readonly_for_auto_spawn(
-                &request.resolved_profile.profile.tool_scope,
-            )
-        {
-            let result = self
-                .run_detachable_chat_child(
-                    session,
-                    call,
-                    child_thread,
-                    child_agent,
-                    child_session,
-                    child_input,
-                    child_options,
-                    budget_scope_id,
-                    handler,
-                )
-                .await;
-            if result.is_error() {
-                return Err(anyhow!(result.content));
-            }
-            return Ok(thread_id);
-        }
+        let child_input = self
+            .run_cancellation
+            .as_ref()
+            .map_or(child_input.clone(), |handle| {
+                child_input.with_child_cancellation(handle.clone())
+            });
         let _thread_guard = ChatChildThreadGuard {
             supervisor: self.supervisor.clone(),
             thread_id: child_thread.thread_id.clone(),

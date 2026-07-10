@@ -54,7 +54,13 @@ impl Session {
         let fallback_model_name = model_name.into();
         let (entries, provider_name, model_name) =
             store.load_entries_writer_reconciled(fallback_provider_name, fallback_model_name)?;
-        Ok(Self::from_entries(provider_name, model_name, entries).with_store(store))
+        let mut session = Self::from_entries(provider_name, model_name, entries).with_store(store);
+        let recovered_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        crate::reconcile_unfinished_run_cancellations(&mut session, recovered_at_ms)?;
+        Ok(session)
     }
 
     /// Appends a single entry to the in-memory log and durable store when present.
@@ -113,6 +119,17 @@ impl Session {
             .as_ref()
             .ok_or(DurableAuditError::MissingDurableStore)?;
         Ok(std::sync::Arc::new(store.clone()))
+    }
+
+    /// Returns the session-backed recorder used by a root cancellation owner.
+    pub fn run_cancellation_recorder(
+        &self,
+    ) -> std::result::Result<crate::RunCancellationRecorder, DurableAuditError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or(DurableAuditError::MissingDurableStore)?;
+        Ok(crate::RunCancellationRecorder::new(store.clone()))
     }
 
     /// Returns a store-backed mutation recorder for tool contexts when this session is durable.

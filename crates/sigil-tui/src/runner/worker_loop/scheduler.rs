@@ -512,6 +512,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         if let Some(run) = active_run.take() {
                             cancel_active_run(
                                 run,
+                                &runtime,
                                 &root_config,
                                 &current_session_log_path,
                                 &mut current_session,
@@ -621,8 +622,24 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let run_id = next_run_id;
                 next_run_id += 1;
                 let workspace_root = options.workspace_root.clone();
+                let cancellation_recorder = match run_session.run_cancellation_recorder() {
+                    Ok(recorder) => recorder,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "failed to create cancellation recorder: {error}"
+                        )));
+                        continue;
+                    }
+                };
+                let cancellation_owner = RunCancellationOwner::new();
+                let cancellation_handle = cancellation_owner.handle();
+                let run_task_guard = cancellation_handle
+                    .register_task()
+                    .expect("new root cancellation owner must admit its first task");
 
                 let handle = runtime.spawn(async move {
+                    let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
                     let result = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
@@ -631,7 +648,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             prompt,
                             plan_mode,
                             Vec::new(),
-                        );
+                        )
+                        .with_cancellation(cancellation_handle);
                         if let Some(tools) = plan_tools {
                             agent
                                 .run_with_approval_input_tool_registry_and_agent_delegate(
@@ -683,6 +701,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
                 });
             }
             Ok(WorkerCommand::InvokeAgentProfile {
@@ -735,10 +755,31 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
                 next_run_id += 1;
+                let cancellation_recorder = match run_session.run_cancellation_recorder() {
+                    Ok(recorder) => recorder,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "failed to create cancellation recorder: {error}"
+                        )));
+                        continue;
+                    }
+                };
+                let cancellation_owner = RunCancellationOwner::new();
+                let cancellation_handle = cancellation_owner.handle();
+                let run_task_guard = cancellation_handle
+                    .register_task()
+                    .expect("new root cancellation owner must admit its first task");
+                sigil_kernel::AgentToolDelegate::set_run_cancellation(
+                    &mut agent_delegate,
+                    Some(cancellation_handle.clone()),
+                );
 
                 let handle = runtime.spawn(async move {
+                    let _run_task_guard = run_task_guard;
                     let profile_id_for_summary = profile_id.clone();
-                    let result = {
+                    let terminal_cancellation = cancellation_handle.clone();
+                    let result = async {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
                         match AgentProfileId::new(profile_id.clone()) {
                             Ok(profile_id_value) => agent_delegate
@@ -768,6 +809,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             Err(error) => Err(format!("{error:#}")),
                         }
                     };
+                    let result = result.await;
+                    let result = if terminal_cancellation.try_finalize_naturally() {
+                        result
+                    } else {
+                        Err("run cancellation won the manual agent terminal-state race".to_owned())
+                    };
                     let result = match append_mcp_elicitation_audits(
                         &mut run_session,
                         &run_elicitation_audit_buffer,
@@ -787,6 +834,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
                 });
             }
             Ok(WorkerCommand::InvokeInlineSkill {
@@ -845,11 +894,29 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
                 let task_result_tx = task_result_tx.clone();
+                let run_id = next_run_id;
                 next_run_id += 1;
+                let cancellation_recorder = match run_session.run_cancellation_recorder() {
+                    Ok(recorder) => recorder,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "failed to create cancellation recorder: {error}"
+                        )));
+                        continue;
+                    }
+                };
+                let cancellation_owner = RunCancellationOwner::new();
+                let cancellation_handle = cancellation_owner.handle();
+                let run_task_guard = cancellation_handle
+                    .register_task()
+                    .expect("new root cancellation owner must admit its first task");
 
                 let handle = runtime.spawn(async move {
+                    let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
-                    let input = AgentRunInput::transient(prompt, vec![loaded.transient_context]);
+                    let input = AgentRunInput::transient(prompt, vec![loaded.transient_context])
+                        .with_cancellation(cancellation_handle);
                     let result =
                         match run_session.append_control(ControlEntry::SkillLoaded(loaded.entry)) {
                             Ok(()) => {
@@ -893,6 +960,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
                 });
             }
             Ok(WorkerCommand::InvokeChildSessionSkill {
@@ -966,6 +1035,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let run_id = next_run_id;
                 next_run_id += 1;
+                let (
+                    cancellation_owner,
+                    cancellation_recorder,
+                    cancellation_handle,
+                    cancellation_task_guard,
+                ) = match prepare_run_cancellation(&run_session) {
+                    Ok(cancellation) => cancellation,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
 
                 let handle = spawn_skill_child_run(
                     &runtime,
@@ -988,6 +1070,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
+                        cancellation_handle,
+                        cancellation_task_guard,
                     },
                 );
 
@@ -996,6 +1080,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
                 });
             }
             Ok(WorkerCommand::SubmitTask { prompt }) => {
@@ -1049,6 +1135,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let run_id = next_run_id;
                 next_run_id += 1;
+                let (
+                    cancellation_owner,
+                    cancellation_recorder,
+                    cancellation_handle,
+                    cancellation_task_guard,
+                ) = match prepare_run_cancellation(&run_session) {
+                    Ok(cancellation) => cancellation,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
 
                 let handle = spawn_task_run(
                     &runtime,
@@ -1068,6 +1167,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
+                        cancellation_handle,
+                        cancellation_task_guard,
                     },
                 );
 
@@ -1076,6 +1177,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
                 });
             }
             Ok(WorkerCommand::ContinueTask { task_id, guidance }) => {
@@ -1128,6 +1231,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let run_id = next_run_id;
                 next_run_id += 1;
+                let (
+                    cancellation_owner,
+                    cancellation_recorder,
+                    cancellation_handle,
+                    cancellation_task_guard,
+                ) = match prepare_run_cancellation(&run_session) {
+                    Ok(cancellation) => cancellation,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
 
                 let handle = spawn_task_continue(
                     &runtime,
@@ -1148,6 +1264,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
+                        cancellation_handle,
+                        cancellation_task_guard,
                     },
                 );
 
@@ -1156,6 +1274,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
                 });
             }
             Ok(WorkerCommand::ApprovalDecision { call_id, approved }) => {
@@ -1271,6 +1391,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 if let Some(active_run) = active_run.take() {
                     cancel_active_run(
                         active_run,
+                        &runtime,
                         &root_config,
                         &current_session_log_path,
                         &mut current_session,
@@ -1382,6 +1503,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let run_id = next_run_id;
                 next_run_id += 1;
+                let (
+                    cancellation_owner,
+                    cancellation_recorder,
+                    cancellation_handle,
+                    cancellation_task_guard,
+                ) = match prepare_run_cancellation(&run_session) {
+                    Ok(cancellation) => cancellation,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
                 let handle = spawn_task_run(
                     &runtime,
                     TaskRunSpawn {
@@ -1400,6 +1534,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
+                        cancellation_handle,
+                        cancellation_task_guard,
                     },
                 );
                 active_run = Some(ActiveRun {
@@ -1407,6 +1543,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
                 });
             }
             Ok(WorkerCommand::RejectPlan {
@@ -1953,10 +2091,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             Ok(WorkerCommand::Shutdown) => {
                 if let Some(active_run) = active_run.take() {
-                    elicitation_handler.set_audit_buffer(None);
-                    discarded_run_ids.insert(active_run.run_id);
-                    let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
-                    active_run.handle.abort();
+                    cancel_active_run(
+                        active_run,
+                        &runtime,
+                        &root_config,
+                        &current_session_log_path,
+                        &mut current_session,
+                        &message_tx,
+                        &elicitation_handler,
+                        &agent_supervisor,
+                        &mut discarded_run_ids,
+                        "run interrupted by TUI shutdown",
+                    );
                 }
                 provider_status_tasks.abort_all();
                 break;

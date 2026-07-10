@@ -361,7 +361,7 @@ impl AgentToolRuntime {
         )
     }
 
-    pub(super) fn cancel_agent(
+    pub(super) async fn cancel_agent(
         &self,
         session: &mut Session,
         call: &ToolCall,
@@ -403,8 +403,70 @@ impl AgentToolRuntime {
                 ),
             );
         }
-        let record = match self.background_runs.cancel(&thread_id) {
-            Ok(Some(record)) => record,
+        const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
+        let recorder = match session.run_cancellation_recorder() {
+            Ok(recorder) => recorder,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        let run_scope_id = match self.background_runs.reserve_cancellation_scope(&thread_id) {
+            Ok(Some(run_scope_id)) => run_scope_id,
+            Ok(None) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Unsupported,
+                    format!(
+                        "agent thread {} has no cancellable runtime handle",
+                        thread_id.as_str()
+                    ),
+                );
+            }
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        let request_id = format!("cancel-{run_scope_id}");
+        let requested_at_ms = unix_time_ms();
+        if let Err(error) = recorder.append_requested(&RunCancellationRequestedEntry {
+            request_id: request_id.clone(),
+            run_scope_id: run_scope_id.clone(),
+            target: RunCancellationTarget::AgentThread {
+                thread_id: thread_id.as_str().to_owned(),
+            },
+            reason: reason.clone(),
+            requested_at_ms,
+            quiescence_deadline_ms: requested_at_ms
+                .saturating_add(QUIESCENCE_TIMEOUT.as_millis() as u64),
+        }) {
+            let _ = self
+                .background_runs
+                .cancel(&thread_id, QUIESCENCE_TIMEOUT)
+                .await;
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
+        let cancellation = match self
+            .background_runs
+            .cancel(&thread_id, QUIESCENCE_TIMEOUT)
+            .await
+        {
+            Ok(Some(cancellation)) => cancellation,
             Ok(None) => {
                 return ToolResult::error(
                     call.id.clone(),
@@ -426,18 +488,45 @@ impl AgentToolRuntime {
             }
         };
         self.supervisor.release_runtime_thread(&thread_id);
+        let (thread_status, status_label, terminal_reason) = match cancellation.outcome {
+            RunCancellationTerminalOutcome::Cancelled => {
+                (AgentThreadStatus::Cancelled, "cancelled", reason.clone())
+            }
+            RunCancellationTerminalOutcome::Interrupted => (
+                AgentThreadStatus::Interrupted,
+                "interrupted",
+                "cancellation deadline exceeded; cleanup could not be confirmed".to_owned(),
+            ),
+        };
+        if let Err(error) = recorder.append_finalized(&RunCancellationFinalizedEntry {
+            request_id,
+            run_scope_id: cancellation.run_scope_id,
+            outcome: cancellation.outcome,
+            cleanup_complete: cancellation.cleanup_complete,
+            active_effects: cancellation.active_effects,
+            active_tasks: cancellation.active_tasks,
+            reason: terminal_reason.clone(),
+            finalized_at_ms: unix_time_ms(),
+        }) {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
         let interrupted = ControlEntry::AgentRunInterrupted(AgentRunInterruptedEntry {
             thread_id: thread_id.clone(),
-            attempt_id: record.attempt_id,
-            reason: reason.clone(),
+            attempt_id: cancellation.thread.attempt_id,
+            reason: terminal_reason.clone(),
         });
-        let cancelled = ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+        let terminal = ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
             thread_id: thread_id.clone(),
-            status: AgentThreadStatus::Cancelled,
-            reason: Some(reason.clone()),
+            status: thread_status,
+            reason: Some(terminal_reason.clone()),
             updated_at_ms: Some(unix_time_ms()),
         });
-        for control in [cancelled, interrupted] {
+        for control in [terminal, interrupted] {
             if let Err(error) = session
                 .append_control(control.clone())
                 .and_then(|()| handler.handle(RunEvent::Control(control)))
@@ -456,18 +545,18 @@ impl AgentToolRuntime {
             serde_json::to_string(&json!({
                 "thread_id": thread_id.as_str(),
                 "previous_status": thread_status_label(previous_status),
-                "status": "cancelled",
-                "reason": reason,
-                "handle_cancelled": true,
-                "next_action": "do not wait for this agent; report it as cancelled or close it if the user wants to hide it"
+                "status": status_label,
+                "reason": terminal_reason,
+                "cleanup_complete": cancellation.cleanup_complete,
+                "next_action": "do not wait for this agent; report the durable terminal status"
             }))
             .unwrap_or_else(|error| format!("failed to serialize agent cancel result: {error}")),
             ToolResultMeta {
                 details: json!({
                     "thread_id": thread_id.as_str(),
                     "previous_status": thread_status_label(previous_status),
-                    "status": "cancelled",
-                    "handle_cancelled": true,
+                    "status": status_label,
+                    "cleanup_complete": cancellation.cleanup_complete,
                 }),
                 ..ToolResultMeta::default()
             },

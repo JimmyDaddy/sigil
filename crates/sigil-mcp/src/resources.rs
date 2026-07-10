@@ -172,6 +172,7 @@ impl Tool for McpResourceTool {
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let _transport_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Socket)?;
         if !self.trust.allow_secrets && self.client.secret_redactor.value_contains_secret(&args) {
             return Ok(ToolResult::error(
                 call_id,
@@ -191,15 +192,41 @@ impl Tool for McpResourceTool {
                 ));
             }
         };
-        let response = match self
-            .client
-            .send_request_response(
+        let cancellation = ctx.cancellation_handle();
+        let operation = {
+            let operation = self.client.send_request_response(
                 self.kind.method(),
                 params,
                 McpOperationDeadline::from_secs(ctx.timeout_secs),
-            )
-            .await
-        {
+            );
+            tokio::pin!(operation);
+            match cancellation.as_ref() {
+                Some(cancellation) => tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => None,
+                    response = &mut operation => Some(response),
+                },
+                None => Some(operation.await),
+            }
+        };
+        let Some(operation) = operation else {
+            let cleanup = self
+                .client
+                .close_connection("MCP resource request interrupted by run cancellation".to_owned())
+                .await;
+            if !cleanup.completed
+                && let Some(cancellation) = cancellation
+            {
+                cancellation.mark_cleanup_incomplete();
+            }
+            return Ok(ToolResult::error(
+                call_id,
+                self.spec.name.clone(),
+                ToolErrorKind::Interrupted,
+                "MCP resource request interrupted by run cancellation",
+            ));
+        };
+        let response = match operation {
             Ok(response) => response,
             Err(error) => {
                 return Ok(error.to_tool_result(

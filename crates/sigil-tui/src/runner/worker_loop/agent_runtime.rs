@@ -253,8 +253,18 @@ where
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
     let continuation_prompt = agent_result_continuation_prompt(&completed_thread_ids);
+    let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
+        match prepare_run_cancellation(&run_session) {
+            Ok(cancellation) => cancellation,
+            Err(error) => {
+                *current_session = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                return None;
+            }
+        };
 
     let handle = runtime.spawn(async move {
+        let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
         let result = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
@@ -263,7 +273,8 @@ where
                     &mut run_session,
                     AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
                         continuation_prompt,
-                    )]),
+                    )])
+                    .with_cancellation(cancellation_handle),
                     options,
                     &mut handler,
                     &mut approval_handler,
@@ -295,6 +306,8 @@ where
         handle,
         approval_tx,
         elicitation_audit_buffer,
+        cancellation_owner,
+        cancellation_recorder,
     })
 }
 
@@ -399,8 +412,18 @@ where
     let task_result_tx = task_result_tx.clone();
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
+    let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
+        match prepare_run_cancellation(&run_session) {
+            Ok(cancellation) => cancellation,
+            Err(error) => {
+                *current_session = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                return None;
+            }
+        };
 
     let handle = runtime.spawn(async move {
+        let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
         let result = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
@@ -409,7 +432,8 @@ where
                 prompt,
                 plan_mode,
                 background_ready_context,
-            );
+            )
+            .with_cancellation(cancellation_handle);
             if let Some(tools) = plan_tools {
                 agent
                     .run_with_approval_input_tool_registry_and_agent_delegate(
@@ -459,6 +483,8 @@ where
         handle,
         approval_tx,
         elicitation_audit_buffer,
+        cancellation_owner,
+        cancellation_recorder,
     })
 }
 

@@ -520,6 +520,7 @@ async fn bounded_preflight_command_output(
         OutputCollectionLimits::preflight(),
         reader_fault,
         None,
+        None,
     )
     .await
 }
@@ -593,16 +594,18 @@ pub(super) async fn bounded_short_path_command_output_with_environment(
         OutputCollectionLimits::preflight(),
         PreflightReaderFault::None,
         None,
+        None,
     )
     .await
 }
 
-pub(crate) async fn command_output_to_receipt(
+pub(crate) async fn command_output_to_receipt_with_cancellation(
     backend: ExecutionBackendKind,
     capabilities: ExecutionBackendCapabilities,
     network: ExecutionNetworkReceipt,
     command: Command,
     request: &ExecutionRequest,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     command_output_to_receipt_with_limits(
         backend,
@@ -613,6 +616,7 @@ pub(crate) async fn command_output_to_receipt(
         OutputCollectionLimits::execution(),
         PreflightReaderFault::None,
         None,
+        cancellation,
     )
     .await
 }
@@ -624,6 +628,7 @@ async fn command_output_to_receipt_with_docker_cleanup(
     command: Command,
     request: &ExecutionRequest,
     docker_cleanup: docker::DockerContainerCleanup,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     command_output_to_receipt_with_limits(
         backend,
@@ -634,6 +639,7 @@ async fn command_output_to_receipt_with_docker_cleanup(
         OutputCollectionLimits::execution(),
         PreflightReaderFault::None,
         Some(docker_cleanup),
+        cancellation,
     )
     .await
 }
@@ -647,6 +653,7 @@ async fn command_output_to_receipt_with_limits(
     output_limits: OutputCollectionLimits,
     reader_fault: PreflightReaderFault,
     docker_cleanup: Option<docker::DockerContainerCleanup>,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
 ) -> Result<ExecutionReceipt> {
     #[cfg(not(test))]
     let _ = reader_fault;
@@ -743,6 +750,7 @@ async fn command_output_to_receipt_with_limits(
         deadline,
         &mut stdout_task,
         &mut stderr_task,
+        cancellation.as_ref(),
     )
     .await;
     let mut exit_code = None;
@@ -775,6 +783,11 @@ async fn command_output_to_receipt_with_limits(
         }
         SupervisorEvent::Timeout => {
             termination = ExecutionTerminationCause::TimedOut;
+            cleanup =
+                cleanup_execution_child(&mut child, process_id, docker_cleanup.as_ref()).await;
+        }
+        SupervisorEvent::Cancelled => {
+            termination = ExecutionTerminationCause::Cancelled;
             cleanup =
                 cleanup_execution_child(&mut child, process_id, docker_cleanup.as_ref()).await;
         }
@@ -880,6 +893,7 @@ enum SupervisorEvent {
     Child(std::io::Result<std::process::ExitStatus>),
     Alert(OutputAlert),
     Timeout,
+    Cancelled,
     ReaderFailed(ExecutionTerminationCause),
 }
 
@@ -887,6 +901,7 @@ enum SupervisorWake {
     Child(std::io::Result<std::process::ExitStatus>),
     Alert(OutputAlert),
     Timeout,
+    Cancelled,
     StdoutTask(std::result::Result<CollectedPipe, tokio::task::JoinError>),
     StderrTask(std::result::Result<CollectedPipe, tokio::task::JoinError>),
 }
@@ -897,6 +912,7 @@ async fn wait_for_child_or_output_alert(
     deadline: Option<TokioInstant>,
     stdout_task: &mut PipeTaskState,
     stderr_task: &mut PipeTaskState,
+    cancellation: Option<&sigil_kernel::RunCancellationHandle>,
 ) -> SupervisorEvent {
     loop {
         let wake = match deadline {
@@ -910,6 +926,7 @@ async fn wait_for_child_or_output_alert(
                     SupervisorWake::StderrTask(result)
                 }
                 status = child.wait() => SupervisorWake::Child(status),
+                _ = wait_for_execution_cancellation(cancellation) => SupervisorWake::Cancelled,
                 () = tokio::time::sleep_until(deadline) => SupervisorWake::Timeout,
             },
             None => tokio::select! {
@@ -922,12 +939,14 @@ async fn wait_for_child_or_output_alert(
                     SupervisorWake::StderrTask(result)
                 }
                 status = child.wait() => SupervisorWake::Child(status),
+                _ = wait_for_execution_cancellation(cancellation) => SupervisorWake::Cancelled,
             },
         };
         match wake {
             SupervisorWake::Child(status) => return SupervisorEvent::Child(status),
             SupervisorWake::Alert(alert) => return SupervisorEvent::Alert(alert),
             SupervisorWake::Timeout => return SupervisorEvent::Timeout,
+            SupervisorWake::Cancelled => return SupervisorEvent::Cancelled,
             SupervisorWake::StdoutTask(result) => {
                 if let Some(failure) = stdout_task.record_completion(result) {
                     return SupervisorEvent::ReaderFailed(failure);
@@ -939,6 +958,15 @@ async fn wait_for_child_or_output_alert(
                 }
             }
         }
+    }
+}
+
+async fn wait_for_execution_cancellation(
+    cancellation: Option<&sigil_kernel::RunCancellationHandle>,
+) {
+    match cancellation {
+        Some(cancellation) => cancellation.cancelled().await,
+        None => std::future::pending::<()>().await,
     }
 }
 

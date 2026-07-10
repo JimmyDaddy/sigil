@@ -449,7 +449,7 @@ pub fn terminal_cleanup_receipt_for_status(
         TerminalTaskStatus::Starting | TerminalTaskStatus::Running => None,
         TerminalTaskStatus::Exited { .. } => Some(ExecutionCleanupReceipt::not_needed()),
         TerminalTaskStatus::Cancelled => Some(ExecutionCleanupReceipt::completed(
-            "terminal process was cancelled and reaped",
+            "terminal process tree cancellation and reap were confirmed",
         )),
         TerminalTaskStatus::Interrupted => Some(ExecutionCleanupReceipt::unknown(
             "terminal process disappeared before cleanup could be proven",

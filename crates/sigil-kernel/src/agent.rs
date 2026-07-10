@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use crate::{
     RuntimeContextCandidates,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
+    cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
     config::{CompactionConfig, MemoryConfig},
     event::{EventHandler, RunEvent},
     permission::{
@@ -145,6 +146,8 @@ pub struct AgentRunInput {
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
+    cancellation: Option<RunCancellationHandle>,
+    cancellation_terminal_authority: bool,
 }
 
 impl AgentRunInput {
@@ -155,6 +158,8 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            cancellation: None,
+            cancellation_terminal_authority: true,
         }
     }
 
@@ -165,6 +170,8 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            cancellation: None,
+            cancellation_terminal_authority: true,
         }
     }
 
@@ -175,6 +182,8 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            cancellation: None,
+            cancellation_terminal_authority: true,
         }
     }
 
@@ -195,6 +204,41 @@ impl AgentRunInput {
         self.agent_delegation = Some(requirement);
         self
     }
+
+    /// Binds this run and all effects admitted by its agent loop to one cancellation owner.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: RunCancellationHandle) -> Self {
+        self.cancellation = Some(cancellation);
+        self.cancellation_terminal_authority = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_child_cancellation(mut self, cancellation: RunCancellationHandle) -> Self {
+        self.cancellation = Some(cancellation);
+        self.cancellation_terminal_authority = false;
+        self
+    }
+}
+
+fn begin_run_effect(
+    cancellation: Option<&RunCancellationHandle>,
+    kind: RunEffectKind,
+) -> Result<Option<RunEffectGuard>> {
+    cancellation
+        .map(|handle| handle.begin_effect(RunEffectClass::Forward, kind))
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn claim_natural_run_terminal(
+    cancellation: Option<&RunCancellationHandle>,
+    terminal_authority: bool,
+) -> Result<()> {
+    if terminal_authority && cancellation.is_some_and(|handle| !handle.try_finalize_naturally()) {
+        return Err(anyhow!("run cancellation won the terminal-state race"));
+    }
+    Ok(())
 }
 
 /// Model-visible context that should be injected before accepting a final answer.
@@ -270,6 +314,9 @@ impl AgentRunTerminalReason {
 /// agent supervisor without making kernel depend on runtime.
 #[async_trait]
 pub trait AgentToolDelegate: Send {
+    /// Binds the current root run cancellation scope before delegated child work is admitted.
+    fn set_run_cancellation(&mut self, _cancellation: Option<RunCancellationHandle>) {}
+
     /// Handles one agent tool call after normal permission approval has resolved.
     ///
     /// Return `Ok(None)` when the call is not an agent-thread tool and should continue through the
@@ -558,7 +605,16 @@ where
             runtime_context,
             task_plan_update,
             agent_delegation,
+            cancellation,
+            cancellation_terminal_authority,
         } = input;
+
+        if cancellation
+            .as_ref()
+            .is_some_and(RunCancellationHandle::is_cancel_requested)
+        {
+            return Err(anyhow!("run cancellation requested before agent start"));
+        }
 
         session.reconcile_prepared_mutations(&options.workspace_root)?;
         session.reconcile_unfinished_write_tool_executions(&options.workspace_root)?;
@@ -584,6 +640,12 @@ where
 
         let mut model_turns = 0usize;
         loop {
+            if cancellation
+                .as_ref()
+                .is_some_and(RunCancellationHandle::is_cancel_requested)
+            {
+                return Err(anyhow!("run cancellation requested before next model turn"));
+            }
             if let Some(max_turns) = options.max_turns
                 && model_turns >= max_turns
             {
@@ -592,6 +654,7 @@ where
                 )))?;
                 outcome.terminal_reason = AgentRunTerminalReason::MaxTurns;
                 outcome.tool_calls = total_tool_calls;
+                claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
                 append_run_lifecycle_events(
                     session,
                     "interrupted",
@@ -625,6 +688,8 @@ where
                 runtime_context.clone(),
             )?;
 
+            let provider_effect =
+                begin_run_effect(cancellation.as_ref(), RunEffectKind::ProviderRequest)?;
             let provider_turn = collect_provider_turn(
                 &self.provider,
                 session,
@@ -632,8 +697,10 @@ where
                 &mut previous_response_handle,
                 total_tool_calls,
                 handler,
+                cancellation.as_ref(),
             )
             .await?;
+            drop(provider_effect);
             let assistant_text = provider_turn.assistant_text;
             let completed_calls = provider_turn.completed_calls;
             let pending_states = provider_turn.pending_states;
@@ -653,6 +720,9 @@ where
 
                 let mut tool_ctx =
                     ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs);
+                if let Some(cancellation) = cancellation.as_ref() {
+                    tool_ctx = tool_ctx.with_cancellation(cancellation.clone());
+                }
                 if let Some(recorder) = session.mutation_event_recorder() {
                     tool_ctx = tool_ctx.with_mutation_recorder(recorder);
                 }
@@ -702,6 +772,8 @@ where
                         accepted_task_plan = accepted_task_plan || accepted;
                         continue;
                     }
+                    let _tool_effect =
+                        begin_run_effect(cancellation.as_ref(), RunEffectKind::Tool)?;
                     let mut execution_subjects = Vec::new();
                     let mut prepared_tool_call = None;
                     let mut tool_registered = false;
@@ -1289,40 +1361,43 @@ where
                             .as_deref_mut()
                             .filter(|_| tool_registered && tool_is_agent_category)
                         {
-                            Some(delegate) => match delegate
-                                .handle_agent_tool_call(
-                                    session,
-                                    &call,
-                                    &options,
-                                    handler,
-                                    approval_handler,
-                                )
-                                .await
-                            {
-                                Ok(Some(result)) => result,
-                                Ok(None) => match execute_after_started_audit_with_progress(
-                                    tools,
-                                    execution_tool_ctx.clone(),
-                                    call.clone(),
-                                    handler,
-                                )
-                                .await
+                            Some(delegate) => {
+                                delegate.set_run_cancellation(cancellation.clone());
+                                match delegate
+                                    .handle_agent_tool_call(
+                                        session,
+                                        &call,
+                                        &options,
+                                        handler,
+                                        approval_handler,
+                                    )
+                                    .await
                                 {
-                                    Ok(result) => result,
+                                    Ok(Some(result)) => result,
+                                    Ok(None) => match execute_after_started_audit_with_progress(
+                                        tools,
+                                        execution_tool_ctx.clone(),
+                                        call.clone(),
+                                        handler,
+                                    )
+                                    .await
+                                    {
+                                        Ok(result) => result,
+                                        Err(error) => ToolResult::error(
+                                            call.id.clone(),
+                                            call.name.clone(),
+                                            ToolErrorKind::Internal,
+                                            error.to_string(),
+                                        ),
+                                    },
                                     Err(error) => ToolResult::error(
                                         call.id.clone(),
                                         call.name.clone(),
                                         ToolErrorKind::Internal,
                                         error.to_string(),
                                     ),
-                                },
-                                Err(error) => ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::Internal,
-                                    error.to_string(),
-                                ),
-                            },
+                                }
+                            }
                             None => match execute_after_started_audit_with_progress(
                                 tools,
                                 execution_tool_ctx,
@@ -1379,6 +1454,10 @@ where
                 }
                 if accepted_task_plan {
                     outcome.tool_calls = total_tool_calls;
+                    claim_natural_run_terminal(
+                        cancellation.as_ref(),
+                        cancellation_terminal_authority,
+                    )?;
                     append_run_lifecycle_events(
                         session,
                         "completed",
@@ -1417,6 +1496,7 @@ where
                 ))?;
                 outcome.terminal_reason = AgentRunTerminalReason::DelegationUnsatisfied;
                 outcome.tool_calls = total_tool_calls;
+                claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
                 append_run_lifecycle_events(
                     session,
                     "blocked",
@@ -1461,6 +1541,7 @@ where
                 continue;
             }
 
+            claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
             let final_message_id =
                 append_final_answer_message(session, handler, &assistant_text, pending_states)?;
 

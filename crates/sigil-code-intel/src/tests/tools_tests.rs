@@ -1501,7 +1501,9 @@ async fn approved_mutation_records_residual_revision_when_rollback_fails() {
         workspace.path().to_path_buf(),
     )
     .expect("code intelligence should register");
-    let ctx = mutation_context(workspace.path(), state.path());
+    let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
+    let ctx = mutation_context(workspace.path(), state.path())
+        .with_cancellation(cancellation_owner.handle());
     let recorder = ctx
         .mutation_recorder
         .clone()
@@ -1531,6 +1533,7 @@ async fn approved_mutation_records_residual_revision_when_rollback_fails() {
         result.metadata.details["prepared_mutation_result"]["status"],
         "rollback_failed"
     );
+    assert!(!cancellation_owner.cleanup_complete());
     assert_eq!(
         fs::read_to_string(&first_path).expect("first source should read"),
         "pub fn hello() {}\n"

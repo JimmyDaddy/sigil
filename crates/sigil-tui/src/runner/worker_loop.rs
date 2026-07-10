@@ -20,7 +20,10 @@ use sigil_kernel::{
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
     PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
-    PlanSourceRef, PlanTaskStartMode, ProviderCapabilities, ReasoningEffort, RootConfig, RunEvent,
+    PlanSourceRef, PlanTaskStartMode, ProviderCapabilities, ReasoningEffort, RootConfig,
+    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
+    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard,
     SandboxProfileRequirement, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
     SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskRouteId, TaskRouteStatus,
@@ -63,7 +66,7 @@ mod task_runtime;
 mod terminal_refresh;
 
 pub(in crate::runner) use active_run::{
-    ActiveRun, RunTaskPayload, RunTaskResult, cancel_active_run,
+    ActiveRun, RunTaskPayload, RunTaskResult, cancel_active_run, prepare_run_cancellation,
 };
 pub(in crate::runner) use agent_runtime::{
     WorkerAgentEventSink, agent_result_continuation_new_thread_ids, cancel_agent_thread,
@@ -107,8 +110,10 @@ pub(in crate::runner) use agent_runtime::{
     append_mcp_elicitation_audits, partition_agent_result_continuations,
     pending_agent_result_continuations_from_session,
 };
-pub(in crate::runner) use task_runtime::append_cancelled_task_state;
 pub(in crate::runner) use task_runtime::{RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder};
+pub(in crate::runner) use task_runtime::{
+    append_cancelled_task_state, append_interrupted_task_state,
+};
 #[cfg(test)]
 pub(in crate::runner) use task_runtime::{
     materialize_task_verification_config, skill_child_agent_role,

@@ -8,6 +8,7 @@ pub struct AgentToolRuntime {
     pub(super) provider_factory: Arc<dyn AgentToolProviderFactory>,
     pub(super) background_runs: AgentToolBackgroundRuns,
     pub(super) pending_waits: BTreeMap<AgentThreadId, Instant>,
+    pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
 }
 
 /// Result of a user-directed foreground agent invocation.
@@ -31,6 +32,7 @@ impl AgentToolRuntime {
             provider_factory: Arc::new(DefaultAgentToolProviderFactory),
             background_runs: AgentToolBackgroundRuns::default(),
             pending_waits: BTreeMap::new(),
+            run_cancellation: None,
         }
     }
 
@@ -48,6 +50,7 @@ impl AgentToolRuntime {
             provider_factory,
             background_runs: AgentToolBackgroundRuns::default(),
             pending_waits: BTreeMap::new(),
+            run_cancellation: None,
         }
     }
 
@@ -273,6 +276,10 @@ impl AgentToolProviderFactory for DefaultAgentToolProviderFactory {
 
 #[async_trait]
 impl AgentToolDelegate for AgentToolRuntime {
+    fn set_run_cancellation(&mut self, cancellation: Option<sigil_kernel::RunCancellationHandle>) {
+        self.run_cancellation = cancellation;
+    }
+
     async fn handle_agent_tool_call(
         &mut self,
         session: &mut Session,
@@ -295,7 +302,7 @@ impl AgentToolDelegate for AgentToolRuntime {
             AgentToolKind::Wait => self.wait_agent(session, call, &args, handler).await,
             AgentToolKind::ReadResult => self.read_agent_result(session, call, &args, handler),
             AgentToolKind::List => self.list_agents(session, call),
-            AgentToolKind::Cancel => self.cancel_agent(session, call, &args, handler),
+            AgentToolKind::Cancel => self.cancel_agent(session, call, &args, handler).await,
             AgentToolKind::Message => self.message_agent(session, call, &args),
             AgentToolKind::Close => self.close_agent(session, call, &args),
         };

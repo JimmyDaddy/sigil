@@ -217,6 +217,7 @@ impl TerminalProcessManager {
             killer: pty_runtime.killer,
             process_id: pty_runtime.process_id,
             capture_ledger: pty_runtime.capture_ledger,
+            cancel_requested: pty_runtime.cancel_requested,
             capture_failure_rx: pty_runtime.capture_failure_rx,
             child_exit_rx: pty_runtime.child_exit_rx,
             preview_limit_bytes: self.preview_limit_bytes,
@@ -364,7 +365,17 @@ impl TerminalProcessManager {
                     })?;
                 match response.await {
                     Ok(entry) => Ok(entry),
-                    Err(_) => Ok(task.summary.lock().await.clone()),
+                    Err(_) => {
+                        let entry = task.summary.lock().await.clone();
+                        if entry.status.is_terminal() {
+                            Ok(entry)
+                        } else {
+                            Err(anyhow!(
+                                "terminal cancellation response was lost before cleanup could be confirmed: {}",
+                                task_id.as_str()
+                            ))
+                        }
+                    }
                 }
             }
             TerminalTaskControl::Pty {

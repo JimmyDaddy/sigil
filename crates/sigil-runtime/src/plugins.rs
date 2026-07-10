@@ -372,6 +372,7 @@ impl PluginHookExecutionRunner {
                 PluginHookExecutionStatus::Succeeded
             }
             ExecutionTerminationCause::Exited
+            | ExecutionTerminationCause::Cancelled
             | ExecutionTerminationCause::OutputLimit { .. }
             | ExecutionTerminationCause::ReaderFailed { .. } => PluginHookExecutionStatus::Failed,
         };

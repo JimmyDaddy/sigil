@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::Result;
-use sigil_kernel::{ToolCall, ToolErrorKind, ToolRegistry, ToolResultStatus};
+use sigil_kernel::{RunCancellationOwner, ToolCall, ToolErrorKind, ToolRegistry, ToolResultStatus};
 use tokio::io::{AsyncRead, ReadBuf};
 
 use super::*;
@@ -1256,5 +1256,63 @@ async fn mcp_desync_queued_deadline_interrupts_lock_holder_without_second_write(
         .expect("lock holder must be interrupted by teardown")??;
     assert!(first.is_error());
     assert_eq!(fs::read_to_string(request_log)?.lines().count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_run_cancellation_retires_generation_before_followup_request() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let request_log = temp.path().join("cancel-generation.log");
+    let script = temp.path().join("cancel-generation.py");
+    write_server(
+        &script,
+        &basic_probe_server("        time.sleep(30)", &request_log),
+    )?;
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(&mut registry, &[server_config("cancelgen", &script, 5)]).await?;
+    let owner = RunCancellationOwner::new();
+    let cancellation = owner.handle();
+    let first_registry = registry.clone();
+    let root = temp.path().to_path_buf();
+    let first = tokio::spawn(async move {
+        first_registry
+            .execute(
+                ToolContext::new(root, 20).with_cancellation(cancellation),
+                ToolCall {
+                    id: "cancel-generation-first".to_owned(),
+                    name: "mcp__cancelgen__probe".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+            )
+            .await
+    });
+    for _ in 0..100 {
+        if request_log.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        request_log.exists(),
+        "request must reach the MCP generation"
+    );
+    assert!(owner.request_cancel());
+    let result = first.await??;
+    let ToolResultStatus::Error(error) = result.status else {
+        anyhow::bail!("cancelled MCP call must return an interrupted result");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Interrupted);
+    assert!(owner.cleanup_complete());
+
+    let followup = execute_tool(
+        &registry,
+        temp.path(),
+        1,
+        "mcp__cancelgen__probe",
+        "cancel-generation-followup",
+    )
+    .await?;
+    assert!(matches!(followup.status, ToolResultStatus::Error(_)));
+    assert_eq!(fs::read_to_string(&request_log)?.lines().count(), 1);
     Ok(())
 }

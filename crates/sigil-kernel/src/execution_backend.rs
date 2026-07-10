@@ -381,6 +381,8 @@ pub enum ExecutionTerminationCause {
     Exited,
     /// The configured absolute wall-clock deadline elapsed.
     TimedOut,
+    /// Cooperative run cancellation selected process-tree cleanup.
+    Cancelled,
     /// A per-stream or combined hard output limit was exceeded.
     OutputLimit {
         /// Stream whose limit was exceeded.
@@ -406,6 +408,7 @@ impl ExecutionTerminationCause {
         match self {
             Self::Exited => "exited",
             Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
             Self::OutputLimit { .. } => "output_limit",
             Self::ReaderFailed { .. } => "reader_failed",
         }
@@ -1286,6 +1289,15 @@ pub trait ExecutionBackend: Send + Sync {
     /// output termination evidence, so callers can map them into tool errors without losing
     /// backend and cleanup metadata.
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_>;
+
+    /// Executes with an optional cooperative cancellation signal.
+    fn execute_with_cancellation(
+        &self,
+        request: ExecutionRequest,
+        _cancellation: Option<crate::RunCancellationHandle>,
+    ) -> ExecutionFuture<'_> {
+        self.execute(request)
+    }
 }
 
 #[cfg(test)]

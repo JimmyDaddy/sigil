@@ -1,4 +1,5 @@
 use super::*;
+use crate::{RunCancellationHandle, RunEffectClass, RunEffectKind};
 
 /// Sequential planner/executor task orchestrator.
 pub struct SequentialTaskOrchestrator<R> {
@@ -6,6 +7,7 @@ pub struct SequentialTaskOrchestrator<R> {
     executor: BoxedAgent,
     child_runner: R,
     execution_backend: Option<Arc<dyn ExecutionBackend>>,
+    cancellation: Option<RunCancellationHandle>,
 }
 
 impl<R> SequentialTaskOrchestrator<R>
@@ -22,7 +24,20 @@ where
             executor,
             child_runner,
             execution_backend: None,
+            cancellation: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: RunCancellationHandle) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    fn bind_cancellation(&self, input: AgentRunInput) -> AgentRunInput {
+        self.cancellation.as_ref().map_or(input.clone(), |handle| {
+            input.with_child_cancellation(handle.clone())
+        })
     }
 
     /// Returns an orchestrator that uses the provided backend for verification check execution.
@@ -61,12 +76,15 @@ where
             TaskRunStatus::Started,
             Some("planning started".to_owned()),
         )?;
-        let planner_input = AgentRunInput::user(planner_prompt(&request.objective))
-            .with_task_plan_update(TaskPlanUpdateContext {
-                task_id: request.task_id.clone(),
-                max_plan_steps,
-                max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
-            });
+        let planner_input = self.bind_cancellation(
+            AgentRunInput::user(planner_prompt(&request.objective)).with_task_plan_update(
+                TaskPlanUpdateContext {
+                    task_id: request.task_id.clone(),
+                    max_plan_steps,
+                    max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
+                },
+            ),
+        );
         if let Err(error) = self
             .planner
             .run_with_approval_input(
@@ -671,9 +689,14 @@ where
         A: ApprovalHandler + Send,
     {
         let executor_input =
-            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                executor_step_prompt(&request.objective, plan_version, step, guidance),
-            )]);
+            self.bind_cancellation(AgentRunInput::without_persisted_user_message(vec![
+                ModelMessage::user(executor_step_prompt(
+                    &request.objective,
+                    plan_version,
+                    step,
+                    guidance,
+                )),
+            ]));
         let output = self
             .executor
             .run_with_approval_input(session, executor_input, options, handler, approval_handler)
@@ -751,6 +774,12 @@ where
         } else {
             child_input
         };
+        let child_input = self.bind_cancellation(child_input);
+        let _child_effect = self
+            .cancellation
+            .as_ref()
+            .map(|handle| handle.begin_effect(RunEffectClass::Forward, RunEffectKind::ChildWork))
+            .transpose()?;
         let output = self
             .child_runner
             .run_child_session(

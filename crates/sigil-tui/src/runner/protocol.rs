@@ -276,10 +276,18 @@ pub enum WorkerMessage {
         status: TaskRunStatus,
         entries: Vec<SessionLogEntry>,
     },
+    RunCancellationRequested,
     RunCancelled {
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
+        entries: Vec<SessionLogEntry>,
+    },
+    RunInterrupted {
+        session_log_path: PathBuf,
+        provider_name: String,
+        model_name: String,
+        reason: String,
         entries: Vec<SessionLogEntry>,
     },
     TerminalTaskUpdated {

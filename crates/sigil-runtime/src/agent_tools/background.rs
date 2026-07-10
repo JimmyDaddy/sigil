@@ -24,6 +24,16 @@ pub trait AgentToolBackgroundEventSink: Send + Sync {
 pub(super) struct BackgroundChatAgentHandle {
     pub(super) thread: BackgroundChatAgentThreadRecord,
     pub(super) handle: tokio::task::JoinHandle<Result<BackgroundChatAgentResult>>,
+    pub(super) cancellation_owner: RunCancellationOwner,
+}
+
+pub(super) struct BackgroundCancellationOutcome {
+    pub(super) thread: BackgroundChatAgentThreadRecord,
+    pub(super) run_scope_id: String,
+    pub(super) outcome: RunCancellationTerminalOutcome,
+    pub(super) cleanup_complete: bool,
+    pub(super) active_effects: usize,
+    pub(super) active_tasks: usize,
 }
 
 pub(super) struct BackgroundChatAgentThreadRecord {
@@ -154,19 +164,88 @@ impl AgentToolBackgroundRuns {
             .collect()
     }
 
-    pub(super) fn cancel(
+    pub(super) fn reserve_cancellation_scope(
         &self,
         thread_id: &AgentThreadId,
-    ) -> Result<Option<BackgroundChatAgentThreadRecord>> {
-        let mut handles = self
+    ) -> Result<Option<String>> {
+        let handles = self
             .handles
             .lock()
             .map_err(|_| anyhow!("agent background run lock poisoned"))?;
-        let Some(background) = handles.remove(thread_id) else {
+        let Some(background) = handles.get(thread_id) else {
             return Ok(None);
         };
-        background.handle.abort();
-        Ok(Some(background.thread))
+        if !background.cancellation_owner.reserve_cancel() {
+            return Ok(None);
+        }
+        Ok(Some(
+            background.cancellation_owner.handle().scope_id().to_owned(),
+        ))
+    }
+
+    pub(super) async fn cancel(
+        &self,
+        thread_id: &AgentThreadId,
+        timeout: Duration,
+    ) -> Result<Option<BackgroundCancellationOutcome>> {
+        let Some(mut background) = self
+            .handles
+            .lock()
+            .map_err(|_| anyhow!("agent background run lock poisoned"))?
+            .remove(thread_id)
+        else {
+            return Ok(None);
+        };
+        let run_scope_id = background.cancellation_owner.handle().scope_id().to_owned();
+        let activated = background.cancellation_owner.activate_reserved_cancel();
+        debug_assert!(
+            activated,
+            "reserved background cancellation must activate once"
+        );
+        let joined = matches!(
+            tokio::time::timeout(timeout, &mut background.handle).await,
+            Ok(Ok(_))
+        );
+        let quiescence = if joined {
+            background
+                .cancellation_owner
+                .wait_for_quiescence(Duration::ZERO)
+                .await
+        } else {
+            background.handle.abort();
+            let _ = background.handle.await;
+            RunQuiescenceOutcome::TimedOut {
+                active_effects: background.cancellation_owner.handle().active_effects(),
+                active_tasks: background.cancellation_owner.handle().active_tasks(),
+            }
+        };
+        let (outcome, cleanup_complete, active_effects, active_tasks) = match quiescence {
+            RunQuiescenceOutcome::Quiescent
+                if joined && background.cancellation_owner.cleanup_complete() =>
+            {
+                (RunCancellationTerminalOutcome::Cancelled, true, 0, 0)
+            }
+            RunQuiescenceOutcome::Quiescent => {
+                (RunCancellationTerminalOutcome::Interrupted, false, 0, 0)
+            }
+            RunQuiescenceOutcome::TimedOut {
+                active_effects,
+                active_tasks,
+            } => (
+                RunCancellationTerminalOutcome::Interrupted,
+                false,
+                active_effects,
+                active_tasks,
+            ),
+        };
+        Ok(Some(BackgroundCancellationOutcome {
+            thread: background.thread,
+            run_scope_id,
+            outcome,
+            cleanup_complete,
+            active_effects,
+            active_tasks,
+        }))
     }
 }
 

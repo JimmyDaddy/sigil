@@ -225,6 +225,7 @@ impl PreparedMutation {
         recorder: &MutationEventRecorder,
         binding: &PreparedToolAuditBinding,
         tool_call_id: &str,
+        cancellation: Option<&sigil_kernel::RunCancellationHandle>,
     ) -> Result<PreparedMutationOutcome> {
         if binding.content_digest != self.content_digest {
             return Ok(self.stale("prepared_digest_mismatch"));
@@ -351,6 +352,22 @@ impl PreparedMutation {
             let Some(prepared) = prepared else {
                 continue;
             };
+            let forward_effect = cancellation
+                .map(|handle| {
+                    handle.begin_effect(
+                        sigil_kernel::RunEffectClass::Forward,
+                        sigil_kernel::RunEffectKind::Tool,
+                    )
+                })
+                .transpose();
+            let _forward_effect = match forward_effect {
+                Ok(effect) => effect,
+                Err(_) => {
+                    failed_operations.push(prepared.operation_id.clone());
+                    failed_index = Some(index);
+                    break;
+                }
+            };
             match coordinator.commit_write(prepared, self.files[index].proposed_content.as_bytes())
             {
                 Ok(committed) => committed_operations.push(committed.operation_id),
@@ -407,6 +424,14 @@ impl PreparedMutation {
         let mut rollback_failed_operations = Vec::new();
         let mut residual_files = Vec::new();
         for index in (0..=failed_index).rev() {
+            let _cleanup_effect = cancellation
+                .map(|handle| {
+                    handle.begin_effect(
+                        sigil_kernel::RunEffectClass::Cleanup,
+                        sigil_kernel::RunEffectKind::Tool,
+                    )
+                })
+                .transpose()?;
             let file = &self.files[index];
             let Some(original_prepared) = prepared_files[index].as_ref() else {
                 continue;
@@ -488,6 +513,11 @@ impl PreparedMutation {
                 MutationBatchStatus::RollbackFailed,
             )
         };
+        if matches!(status, PreparedMutationStatus::RollbackFailed)
+            && let Some(cancellation) = cancellation
+        {
+            cancellation.mark_cleanup_incomplete();
+        }
         recorder.append_bound_batch_finished(
             &batch_id,
             batch_status,

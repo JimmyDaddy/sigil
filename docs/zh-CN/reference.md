@@ -20,7 +20,7 @@
 | 删除 composer 文本 | `Backspace/Delete`、`Ctrl-H`、`Ctrl-W`、`Ctrl/Alt-Backspace`、`Ctrl/Alt-Delete` |
 | kill/yank composer 行尾 | `Ctrl-K/Y` |
 | 恢复最近一次被 Esc 清空的 draft | `Ctrl-Z` |
-| 取消当前 run | `Ctrl-C` |
+| 请求协作式取消当前 run | `Ctrl-C` |
 | 离开 overlay 或清除 activity focus | `Esc` |
 | 聚焦最新 activity | `Ctrl-G` |
 | 在 activities 间移动 | `Alt-J` / `Alt-K` |
@@ -137,6 +137,7 @@ Provider 与 model 选择、`[providers.*]` block 和认证环境变量统一由
 - Session logs 是 append-only JSONL。
 - 重启会恢复可见 session state。
 - Started tools 没有 terminal records 时会恢复为 interrupted。
+- 取消按 run scope durable 且终态唯一：`cancel requested` 后只能进入清理已确认的 `cancelled`，或清理未确认的 `interrupted`；恢复流程不会把未确认的取消升级成 `cancelled`。
 - 恢复不会静默重放未完成工具。
 - `/new` 会开始一条新的 append-only session log。
 - `/resume` 选择历史 session。

@@ -20,7 +20,7 @@ This page collects user-facing commands, keys, paths, shared config sections, ap
 | Delete composer text | `Backspace/Delete`, `Ctrl-H`, `Ctrl-W`, `Ctrl/Alt-Backspace`, `Ctrl/Alt-Delete` |
 | Kill/yank composer line tail | `Ctrl-K/Y` |
 | Restore last draft cleared with Esc | `Ctrl-Z` |
-| Cancel current run | `Ctrl-C` |
+| Request cooperative cancellation of the current run | `Ctrl-C` |
 | Leave overlay or clear activity focus | `Esc` |
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
@@ -137,6 +137,7 @@ Provider and model selection, `[providers.*]` blocks, and authentication variabl
 - Session logs are append-only JSONL.
 - Restarting restores visible session state.
 - Started tools without terminal records are restored as interrupted.
+- Cancellation is durable and exact-once per run scope: `cancel requested` is followed by either cleanup-confirmed `cancelled` or cleanup-unconfirmed `interrupted`; recovery never upgrades an unconfirmed cancellation to `cancelled`.
 - Restore does not silently replay unfinished tools.
 - `/new` starts a fresh append-only session log.
 - `/resume` selects older sessions.
