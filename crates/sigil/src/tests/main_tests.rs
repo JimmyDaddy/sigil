@@ -852,7 +852,11 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     let paths =
         sigil_runtime::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
     let session_dir = paths.session_log_dir;
-    let entries = fs::read_dir(&session_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    let entries = fs::read_dir(&session_dir)?
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .collect::<Vec<_>>();
     assert_eq!(
         entries.len(),
         1,
