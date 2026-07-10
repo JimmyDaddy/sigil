@@ -85,6 +85,7 @@ enum DurableDomainEvent {
     ContextSourceCaptured(ContextSourceCaptured),
     EgressDecisionRecorded(EgressDecisionRecorded),
     ExtensionTrustDecision(ExtensionTrustDecision),
+    ExtensionProcessLifecycleRecorded(ExtensionProcessLifecycleRecorded),
     SandboxDecisionRecorded(SandboxDecisionRecorded),
     LogTailRecovered(LogTailRecovered),
     Legacy(LegacyEvent),
@@ -310,7 +311,7 @@ Initial event-to-sync mapping:
 | `VerificationRecorded` / `VerificationPolicyChanged` / `VerificationCheckRun` / `EnvironmentFingerprintRecorded` / `ReadinessEvaluated` | `RecoveryCritical` |
 | `TaskStatusChanged` / `RunStatusChanged` / `RunFinalized` | `RecoveryCritical` |
 | `ChildVerificationReceiptLinked` / `ChildChangesetMerged` / `AgentMergeApplied` | `RecoveryCritical` |
-| `WorkspaceTrustDecision` / `EgressDecisionRecorded` / `ExtensionTrustDecision` / `SandboxDecisionRecorded` | `RecoveryCritical` |
+| `WorkspaceTrustDecision` / `EgressDecisionRecorded` / `ExtensionTrustDecision` / `ExtensionProcessLifecycleRecorded` / `SandboxDecisionRecorded` | `RecoveryCritical` |
 | `ContextSourceCaptured` | `NormalEvent`, unless it grants trust or secret/egress access |
 | `LogTailRecovered` | `TailRecovery` |
 

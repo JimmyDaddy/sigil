@@ -16,6 +16,8 @@ args = ["/absolute/path/to/server.js"]
 startup_timeout_secs = 5
 required = true
 startup = "eager"
+# Add only the parent variables this server actually needs.
+# inherit_env = ["MY_MCP_API_KEY"]
 
 [mcp_servers.trust]
 trust_class = "self_hosted"
@@ -33,6 +35,33 @@ mcp__filesystem__read_file
 
 Name conflicts or overly long names get a stable hash suffix.
 
+## Process Environment and Credentials
+
+Local stdio MCP processes do not inherit Sigil's full environment. Sigil clears the parent environment before spawn, adds a small allowlisted runtime baseline such as `PATH`, locale, temporary-directory, and required Windows system variables, and then injects only names explicitly listed in the user root config:
+
+```toml
+[[mcp_servers]]
+name = "credentialed-search"
+command = "/absolute/path/to/search-mcp"
+args = ["--stdio"]
+inherit_env = ["MY_MCP_API_KEY"]
+startup = "lazy"
+
+[mcp_servers.trust]
+approval_default = "ask"
+allow_secrets = false
+```
+
+`inherit_env` entries must match `[A-Za-z_][A-Za-z0-9_]*`; Sigil de-duplicates and sorts them. Every listed variable must exist when the server is activated. A missing or non-UTF-8 value is a pre-spawn `configuration_invalid` error, so no child process receives a partial credential set.
+
+Variables such as `HOME`, `SSH_AUTH_SOCK`, proxy settings, provider keys, and cloud credentials are not inherited automatically. Prefer an absolute `command` path for executables outside the baseline `PATH`.
+
+Only user root `[[mcp_servers]]` entries may use `inherit_env`. Plugin manifests cannot request environment or credential grants; discovery rejects that field with `plugin_mcp_environment_grant_not_supported`. Move a credentialed plugin-declared server into the user root config instead.
+
+Sigil stores and displays grant names, source metadata, and static/live fingerprint status, never the resolved value. The live fingerprint uses a process-random key and cannot be used as an offline secret verifier. If a granted value changes or disappears, the old MCP process binding is invalidated and the server must be restarted or refreshed.
+
+`inherit_env` and `allow_secrets` are independent controls. The first authorizes a value only for child-process startup. The second controls whether later MCP tool/resource/prompt payloads may contain recognized secrets. Enabling either one does not enable the other.
+
 ## Startup Modes
 
 `startup` supports:
@@ -47,7 +76,7 @@ Name conflicts or overly long names get a stable hash suffix.
 
 In the TUI, eager MCP servers are activated in the background after the core agent worker starts. If one MCP server is slow, missing, or times out, normal chat and `/plan` runs continue with built-in and code-intelligence tools; only that MCP server is marked `failed` until it is fixed or refreshed.
 
-A lazy server can be activated manually from the TUI `/config` MCP section. The model can also call `mcp_activate_server` to start a named lazy server on demand. After activation succeeds, real MCP tools are added to the current agent registry.
+A lazy server can be activated manually from the TUI `/config` MCP section. The `Server` row follows the same cycle interaction as theme choices: `Enter` selects the next server for lifecycle inspection without modifying the config. `Down` moves to the footer; select `activate` and press `Enter` to activate or refresh that server. `PageUp/PageDown` remain compatibility aliases for cycling the inspected server. The model can also call `mcp_activate_server` to start a named lazy server on demand. After activation succeeds, real MCP tools are added to the current agent registry.
 
 The TUI shows lifecycle states:
 
@@ -75,7 +104,7 @@ Fields:
 - `approval_default`: default approval mode for tools from this server; explicit tool/rule overrides still win.
 - `egress_logging`: after approval and before execution, append a safe summary of server, trust class, remote tool, and argument shape to control state.
 - `allow_secrets`: when `false`, blocks MCP tool/resource/prompt arguments, `roots/list` payloads, or elicitation responses that contain resolved secrets or secret-like fields.
-- `pin_version`: when `true`, validates the pinned server identity at startup.
+- `pin_version`: when `true`, validates the command/args/environment-grant fingerprint before spawn, then validates protocol and server identity after initialize. For a credentialed server, the pre-spawn fingerprint also binds the canonical execution base and the bytes of the executable resolved through the isolated baseline `PATH`.
 
 MCP tool permission subjects include `mcp_trust_class:<class>`, so permission rules can match trust class.
 
@@ -104,7 +133,11 @@ server_name = "filesystem"
 server_version = "1.0.0"
 ```
 
-If pinned identity is missing, startup fails and prints the observed pin so you can write it into config.
+If pinned identity is missing or the command fingerprint is stale, startup fails before the server receives environment grants and prints the pre-spawn command fingerprint. After that fingerprint matches, Sigil initializes the server and validates the remaining protocol/name/version fields. Existing pins for servers with no `inherit_env` keep their previous command fingerprint; adding or changing grant names intentionally requires a new pin.
+
+For a server with `inherit_env`, replacing the resolved executable at the same path changes the pre-spawn fingerprint. Command arguments are bound as exact text, but Sigil does not interpret them or attest files named inside them. In particular, `command = "python3"` with a script path in `args` pins the Python executable and the argument string, not the script contents. Prefer a dedicated executable for credentialed servers, or separately review and protect interpreter scripts and modules.
+
+This fingerprint detects the executable bytes observed during pre-spawn validation; it is not a hostile same-user host attestation. Sigil ultimately starts the executable by path, so another process that can rewrite that file concurrently may race validation and launch. Keep credentialed MCP executables and their parent directories outside untrusted write scope. A future OS-specific handle-bound execution primitive would be required to remove that host-level race.
 
 ## Roots
 

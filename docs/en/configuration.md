@@ -73,7 +73,7 @@ tool_timeout_secs = 30
 
 [terminal]
 keyboard_enhancement = "auto"
-mouse_capture = false
+mouse_capture = true
 osc52_clipboard = true
 scroll_sensitivity = 3
 
@@ -189,9 +189,11 @@ profile = "workspace_write"
 fallback = "deny"
 ```
 
-`macos_seatbelt` runs commands through `/usr/bin/sandbox-exec` with full filesystem reads, writes limited to the command working directory, and network access omitted from the profile. Supported local paths include non-interactive shell execution and the current PTY/MCP/plugin-hook handoff surfaces that report sandbox coverage receipts. It remains macOS-only, does not make remote tools or every container/daemon scenario sandboxed, and fails closed if `sandbox-exec` is unavailable. `sandbox-exec` is deprecated by Apple, so this backend is an enforcement MVP rather than the final cross-platform sandbox strategy.
+`macos_seatbelt` runs commands through `/usr/bin/sandbox-exec` with full filesystem reads and writes limited to the command working directory. It cannot prove network isolation. User shell paths report that limitation truthfully; extension processes such as MCP/plugin hooks fail before spawn when the selected profile denies network, and may use this backend only with a network-allowed profile. Supported local paths include non-interactive shell execution and the current PTY/MCP/plugin-hook handoff surfaces that report sandbox coverage receipts. It remains macOS-only, does not make remote tools or every container/daemon scenario sandboxed, and fails closed if `sandbox-exec` is unavailable. `sandbox-exec` is deprecated by Apple, so this backend is an enforcement MVP rather than the final cross-platform sandbox strategy.
 
 Legal combinations are intentionally narrow: `strategy = "local"` must not include `[execution.sandbox]`; `strategy = "sandbox"` requires `[execution.sandbox]`; sandbox backends are `macos_seatbelt`, `linux_bubblewrap`, or `docker`; Docker requires `container_image`; non-Docker backends must not set `container_image`. `isolation` is derived from the strategy and is not a user-facing key.
+
+Sandbox capability and network receipts assume the locally installed enforcement executable or daemon is trusted. Sigil currently discovers `bwrap` and `docker` through its startup `PATH` and verifies availability/conformance, but does not attest the binary supply chain, owner, or mode. Use an administrator-controlled installation and a trusted startup `PATH`; a hostile wrapper can invalidate the receipt model.
 
 ## Verification
 
@@ -488,14 +490,14 @@ trust_required = true
 ```toml
 [terminal]
 keyboard_enhancement = "auto"
-mouse_capture = false
+mouse_capture = true
 osc52_clipboard = true
 scroll_sensitivity = 3
 ```
 
 `keyboard_enhancement` controls crossterm keyboard enhancement. The default `auto` probes the current terminal at TUI startup and requests enhanced key reporting only when supported. Use `on` to force the request, or `off` if the terminal, multiplexer, SSH layer, or embedded PTY mishandles the enhanced protocol.
 
-`mouse_capture` lets the TUI request terminal mouse events for clicks, scrolling, approval controls, setup/config/session selection, and transcript drag selection. It defaults off so terminal keyboard input remains reliable across multiplexers and embedded PTYs. Turn it on only if you want mouse support and your terminal handles mouse mode well; keyboard controls remain available.
+`mouse_capture` lets the TUI request terminal mouse events for clicks, scrolling, approval controls, setup/config/session selection, and transcript drag selection. It defaults on for the normal interactive TUI. Set it to `false` explicitly if a terminal, multiplexer, SSH layer, or embedded PTY mishandles mouse mode; keyboard controls remain available.
 
 `osc52_clipboard` lets `Ctrl-C` copy selected transcript text by writing an OSC52 clipboard sequence. Turn it off if your terminal blocks OSC52 or shows the sequence as text. When disabled, Sigil reports `clipboard unavailable` instead of writing to the terminal.
 
@@ -557,8 +559,8 @@ Use `SIGIL_GEMINI_API_KEY` for Gemini auth. Generic Google/Gemini environment va
 
 Workspace plugin manifests are discovered from `.sigil/plugins/<id>/plugin.toml`. They are reviewed from the TUI rather than edited in `sigil.toml`.
 
-Open `/config`, move to `Plugins`, and use `PgUp/PgDn` to select a discovered manifest. The detail view shows the trust state, relative manifest path, full manifest hash, skill paths, hook commands with args and approval mode, and MCP server commands with args, startup, and required status. Footer `approve` trusts only the displayed manifest hash; footer `deny` disables that hash. Sigil reloads the manifest before recording the decision, so a changed hash must be reviewed again.
+Open `/config`, move to `Plugins`, and use `PgUp/PgDn` to select a discovered manifest. The detail view shows the trust state, relative manifest path, full manifest hash, skill paths, hook commands with args and approval mode, and MCP server commands with args, startup, and required status. Footer `approve` trusts only the displayed manifest hash; footer `deny` disables that hash. Sigil reloads the manifest before recording the decision, so a changed hash must be reviewed again. Plugin MCP entries cannot declare `inherit_env`; credentialed stdio servers belong in the user root config.
 
 ## MCP
 
-MCP servers are configured with `[[mcp_servers]]`. See [Sigil MCP Guide](mcp.md).
+MCP servers are configured with `[[mcp_servers]]`. Local stdio servers start with a cleared environment; use the additive root-only `inherit_env = ["ENV_NAME"]` field for explicit credential grants. `/doctor` and `/config` show grant names, missing status, and live-fingerprint readiness without displaying values. See [Sigil MCP Guide](mcp.md).

@@ -28,6 +28,7 @@
 | 展开或折叠 thinking / activity | `Ctrl-T` |
 | 对 changed source files 运行 code diagnostics | `Alt-D` |
 | 取消聚焦的运行中 terminal task | `Alt-X` |
+| 在 `/config` 中选择或启动 MCP server | `Enter` 循环切换当前查看的 server；`Down` 进入 footer actions；选择 `activate` 后按 `Enter` 启动或刷新 |
 
 当 composer 聚焦时，`Up/Down` 会优先处理 prompt history 或 multiline input 内的光标移动。如果存在 child agent，输入光标位于 composer 最后一行时按 `Down` 会聚焦 composer agent 面板。`Ctrl-Z` 只恢复被 `Esc` 清空的单个 draft，不是通用 undo 栈。
 

@@ -23,13 +23,13 @@ scripts/tui-mouse-smoke.sh
 1. 确认 `/doctor` 输出 `terminal`、`terminal:config`、`terminal:mouse` 和 `terminal:clipboard`。
 2. 打开 `/config`，查看 `Terminal` 区块。
 3. 默认保持 `keyboard_enhancement = "auto"`；只有已确认某个 profile 稳定时才强制 `on`，遇到异常终端层时强制 `off`。
-4. 除非你需要鼠标支持且终端或 multiplexer 能稳定处理 mouse mode，否则保持 `mouse_capture = false`。
+4. 默认保持 `mouse_capture = true` 以启用鼠标支持；如果终端或 multiplexer 不能稳定处理 mouse mode，再显式设为 `false`。
 5. 除非复制序列被拦截或被可见打印出来，否则保持 `osc52_clipboard = true`。
 6. 除非 transcript 和 approval diff 的滚轮速度过快或过慢，否则保持 `scroll_sensitivity = 3`。
 
 ## 鼠标 Smoke
 
-先在 `sigil.toml` 中临时设置 `[terminal].mouse_capture = true` 并重启 TUI，再在 iTerm2、Terminal.app、WezTerm、kitty 和你需要支持的终端 profile 里分别检查：
+先确认 `/doctor` 报告 `mouse_capture=true`（或者移除显式的 `false` 覆盖）并重启 TUI，再在 iTerm2、Terminal.app、WezTerm、kitty 和你需要支持的终端 profile 里分别检查：
 
 1. 点击 composer，输入一个短 prompt。
 2. 打开 `/`，点击一个 slash command 候选，然后按 `Esc`。

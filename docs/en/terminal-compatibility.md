@@ -23,13 +23,13 @@ scripts/tui-mouse-smoke.sh
 1. Confirm `/doctor` reports `terminal`, `terminal:config`, `terminal:mouse`, and `terminal:clipboard`.
 2. Open `/config` and review the `Terminal` section.
 3. Keep `keyboard_enhancement = "auto"` unless you need to force `on` for a known-good profile or force `off` for a broken terminal layer.
-4. Keep `mouse_capture = false` unless you need mouse support and the terminal or multiplexer handles mouse mode well.
+4. Keep the default `mouse_capture = true` for mouse support; set it to `false` if the terminal or multiplexer mishandles mouse mode.
 5. Keep `osc52_clipboard = true` unless copy sequences are blocked or printed visibly.
 6. Keep `scroll_sensitivity = 3` unless the mouse wheel feels too fast or too slow in transcript and approval diff views.
 
 ## Mouse Smoke
 
-Temporarily set `[terminal].mouse_capture = true` in `sigil.toml`, restart the TUI, then run these checks in iTerm2, Terminal.app, WezTerm, kitty, and any terminal profile you support:
+Confirm `/doctor` reports `mouse_capture=true` (or remove an explicit `false` override), restart the TUI, then run these checks in iTerm2, Terminal.app, WezTerm, kitty, and any terminal profile you support:
 
 1. Click the composer and type a short prompt.
 2. Open `/`, click a slash command candidate, then press `Esc`.

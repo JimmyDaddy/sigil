@@ -122,6 +122,14 @@ pub trait ExecutionBackend {
   - `/doctor`、`/config` MCP detail 和 TUI MCP activation status 会显示 coarse boundary summary，例如 `local stdio outside local sandbox`。
   - macOS Seatbelt MCP stdio launcher conformance 已验证 sandboxed launch receipt、workspace 内写入允许和 workspace 外写入拒绝。
   - 远端 MCP、Docker/container MCP lifecycle 和 per-server user config matrix 仍不在本切片范围；如需推进应另拆 productization 切片。
+- 2026-07-10 E21.1 extension process hardening follow-up：
+  - `ExecutionRequest` 现在显式区分 user `inherit_parent` 与 extension `isolated_extension`；bash/terminal/verification 保持既有环境继承，plugin hook 与 MCP stdio 固定使用 replacement environment。
+  - extension process 在 spawn 前执行 `env_clear`，只注入固定非敏感 baseline；用户根 stdio MCP 可用 additive `inherit_env` 显式授予变量名，plugin manifest 同字段会在 snapshot/trust/registration 前得到 typed rejection。
+  - resolved grant 使用不可序列化、redacted-debug、zeroizing `SecretString`；每个 MCP client 会把 grant value 合入自己的 secret redactor，safe receipt/audit 只保存变量名、source kind、static fingerprint 与 process-keyed live fingerprint。
+  - 带 grant 的 MCP static fingerprint 在 spawn 前绑定 command/args 文本、canonical execution base、grant name 和 resolved executable 的 canonical path/content digest；它不解释 interpreter args，也不证明 args 所引用脚本的内容。该检查检测校验阶段观察到的字节，仍复用 RFC-0005 的可信本机/同用户非恶意并发边界，不宣称 path-based spawn 已具备 handle-bound attestation。每次 operation 在持有串行 connection 临界区后重验 live environment binding，变化或缺失时先失效旧 child，再拒绝发送 MCP bytes。
+  - extension network deny intent 复用现有 `ExecutionSandboxProfileSpec.network_allowed`。deny 时在 spawn 前同时要求 backend 的 network/process isolation capability 与当前 backend instance 的实际 denied launch plan；plugin hook 执行后再校验 denied receipt。不引入 E21.6 的独立 network permission lattice。
+  - lazy activation 会把获批的 exact process subject 透传到 launcher；审批等待期间 static/live binding 变化会在 spawn 前拒绝。MCP child 已 spawn 但 initialize、protocol 或 identity pin 失败时，`ExtensionProcessLifecycleRecorded` 仍记录不含 secret value 的 launch receipt；pre-spawn failure 以同一事件记录 `phase = pre_spawn` 且不携带 launch receipt metadata，clean launch 不会被误记为 workspace dirty。
+  - 因 macOS Seatbelt 不能证明 network isolation，MCP/plugin hook 的 `workspace_write`/offline deny profile 会 fail closed；其 MCP filesystem conformance 改用明确 network-allowed profile，只证明 filesystem/process sandbox 事实。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已完成 E05.6 capability truthfulness 修正：macOS Seatbelt backend 不再声明 `network_isolation`，`build_offline` 会拒绝该 backend，sandbox conformance tests 不再把 loopback `nc` 行为当成网络隔离证明。
 - 已完成 E05.7 capability matrix / selection contract：
@@ -162,6 +170,8 @@ pub trait ExecutionBackend {
 
 - 增加 Windows backend，并明确后续平台 capability 差异。
 - 扩展 sandbox conformance tests 到 Windows 和后续 backend-specific profile enforcement。
+- 若威胁模型扩展到恶意同用户 host process，为 credentialed executable 增加 OS-specific handle-bound exec/attested staging，消除 content hash 与 path-based exec 之间的竞态。
+- 为 `bwrap`、Docker CLI/daemon 等 enforcement dependency 增加显式路径与 owner/mode/content supply-chain attestation；当前 receipt 继续遵循 RFC-0005 的可信本机 backend 前提。
 - 为 Docker/container persistent terminal 增加真正 `exec -it` / attach / resize / cleanup productization（如果后续产品需要）。当前 macOS Seatbelt 与 Linux Bubblewrap 已支持 PTY wrapper；Docker 仍 fail closed。
 - 将 execution coverage labels 接入更完整的 TUI/runtime detail views；当前已提供 kernel/plugin summary API 和测试覆盖。
 

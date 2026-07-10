@@ -28,6 +28,7 @@ This page collects the user-facing commands, keys, paths, and environment variab
 | Expand or collapse thinking / activity | `Ctrl-T` |
 | Run code diagnostics for changed source files | `Alt-D` |
 | Cancel focused running terminal task | `Alt-X` |
+| Select or activate an MCP server in `/config` | `Enter` cycles the inspected server; `Down` enters footer actions; choose `activate` and press `Enter` to activate or refresh |
 
 When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. If child agents exist, `Down` from the last composer input row focuses the composer agent panel. `Ctrl-Z` is a single draft restore for text cleared by `Esc`, not a general undo stack.
 
