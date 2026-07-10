@@ -445,6 +445,8 @@ fn preferred_config_path_uses_explicit_or_user_config_file() {
 
 #[test]
 fn root_config_save_roundtrips() {
+    let _guard = ENV_LOCK.lock().expect("env lock should acquire");
+    let _clear = EnvScope::clear_model_request();
     let temp = tempfile::tempdir().expect("tempdir should build");
     let path = temp.path().join("nested").join("sigil.toml");
     let config = RootConfig {
