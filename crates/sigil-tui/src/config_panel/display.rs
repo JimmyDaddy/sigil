@@ -152,6 +152,19 @@ impl ConfigState {
                     .map(|plugin| plugin.plugin_id.clone())
                     .unwrap_or_else(|| "none".to_owned());
             }
+            ConfigField::McpName => {
+                return self
+                    .selected_mcp_server()
+                    .map(|server| {
+                        format!(
+                            "{} ({}/{})",
+                            server.name,
+                            self.selected_mcp_server_index + 1,
+                            self.draft.mcp_servers.len()
+                        )
+                    })
+                    .unwrap_or_else(|| "none".to_owned());
+            }
             ConfigField::PermissionMode => {
                 return permission_mode_label(self.draft.permission_mode).to_owned();
             }
@@ -273,7 +286,6 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         ConfigField::ProviderModel
         | ConfigField::ProviderBaseUrl
         | ConfigField::ProviderFimModel
-        | ConfigField::McpName
         | ConfigField::McpCommand
         | ConfigField::McpArgsCsv => !character.is_control(),
         ConfigField::AppearanceColorOverride => character == '#' || character.is_ascii_hexdigit(),
@@ -291,7 +303,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::TerminalMouseCapture
         | ConfigField::TerminalOsc52Clipboard
         | ConfigField::AppearanceTheme
-        | ConfigField::AppearanceSyntaxTheme => false,
+        | ConfigField::AppearanceSyntaxTheme
+        | ConfigField::McpName => false,
         ConfigField::AppearanceUsageCostCurrency => false,
         ConfigField::AppearanceColorGroup | ConfigField::AppearanceColorToken => false,
     }

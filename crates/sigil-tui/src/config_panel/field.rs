@@ -53,9 +53,8 @@ pub(crate) enum ConfigField {
     AppearanceColorOverride,
     SkillId,
     PluginId,
-    // MCP server editing stays in sigil.toml; these variants remain for
-    // config-file draft validation coverage, not the default TUI field list.
-    #[allow(dead_code)]
+    // McpName is the read-only server selector in the default TUI. Remaining
+    // MCP server editing stays in sigil.toml.
     McpName,
     #[allow(dead_code)]
     McpCommand,
@@ -93,7 +92,7 @@ impl ConfigField {
     ];
     const SKILL_FIELDS: [Self; 1] = [Self::SkillId];
     const PLUGIN_FIELDS: [Self; 1] = [Self::PluginId];
-    const MCP_FIELDS: [Self; 0] = [];
+    const MCP_FIELDS: [Self; 1] = [Self::McpName];
 
     pub(crate) fn fields_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
@@ -148,7 +147,7 @@ impl ConfigField {
             Self::AppearanceColorOverride => "color_override",
             Self::SkillId => "skill",
             Self::PluginId => "plugin",
-            Self::McpName => "name",
+            Self::McpName => "server",
             Self::McpCommand => "command",
             Self::McpArgsCsv => "args_csv",
             Self::McpStartupTimeoutSecs => "startup_timeout_secs",
@@ -187,7 +186,7 @@ impl ConfigField {
             Self::AppearanceColorOverride => "Override",
             Self::SkillId => "Skill",
             Self::PluginId => "Plugin",
-            Self::McpName => "Name",
+            Self::McpName => "Server",
             Self::McpCommand => "Command",
             Self::McpArgsCsv => "Arguments",
             Self::McpStartupTimeoutSecs => "Startup timeout",
@@ -286,7 +285,9 @@ impl ConfigField {
             Self::PluginId => {
                 "Selected plugin manifest. Up/Down moves through plugins; footer actions approve or deny the manifest hash."
             }
-            Self::McpName => "Stable local name for this MCP server.",
+            Self::McpName => {
+                "Selected MCP server for lifecycle inspection. Press Enter to view the next server; this does not modify the config."
+            }
             Self::McpCommand => "Executable used to start the MCP server process.",
             Self::McpArgsCsv => "Comma-separated startup arguments for the MCP server.",
             Self::McpStartupTimeoutSecs => "Seconds to wait for initialize/tools before failing.",
@@ -307,7 +308,6 @@ impl ConfigField {
                 | Self::CompactionTailMessages
                 | Self::TerminalScrollSensitivity
                 | Self::AppearanceColorOverride
-                | Self::McpName
                 | Self::McpCommand
                 | Self::McpArgsCsv
                 | Self::McpStartupTimeoutSecs
@@ -326,6 +326,7 @@ impl ConfigField {
             | Self::AppearanceSyntaxTheme => "Enter cycle",
             Self::AppearanceUsageCostCurrency => "Enter cycle",
             Self::AppearanceColorGroup | Self::AppearanceColorToken => "Enter cycle",
+            Self::McpName => "Enter cycle",
             Self::MemoryEnabled
             | Self::CompactionEnabled
             | Self::CodeIntelEnabled

@@ -326,6 +326,43 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 }
 
 #[test]
+fn render_config_mcp_selector_keeps_lifecycle_visible_at_120x32() -> anyhow::Result<()> {
+    let mut config = test_config();
+    for index in 0..8 {
+        config.mcp_servers.push(sigil_kernel::McpServerConfig {
+            name: format!("mcp-{index}"),
+            command: "mcp-probe".to_owned(),
+            startup: sigil_kernel::McpServerStartup::Lazy,
+            ..Default::default()
+        });
+    }
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    open_config_panel_for_test(&mut app)?;
+    select_config_section_for_test(&mut app, ConfigSection::Mcp);
+    let backend = TestBackend::new(120, 32);
+    let mut terminal = Terminal::new(backend)?;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    terminal.draw(|frame| render(frame, &app))?;
+    let front = rendered_content(&terminal);
+    assert!(front.contains("mcp-1"));
+    assert!(front.contains("Live fingerprint"));
+    assert!(front.contains("Secrets"));
+    assert!(front.contains("Boundary"));
+
+    for _ in 0..5 {
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    }
+    terminal.draw(|frame| render(frame, &app))?;
+    let back = rendered_content(&terminal);
+    assert!(back.contains("mcp-6"));
+    assert!(back.contains("Live fingerprint"));
+    assert!(back.contains("Secrets"));
+    assert!(back.contains("Boundary"));
+    Ok(())
+}
+
+#[test]
 fn render_config_storage_paths_use_wider_main_panel_on_wide_terminals() -> anyhow::Result<()> {
     let mut config = test_config();
     config.workspace.root = "/Users/example/study/turbods".to_owned();

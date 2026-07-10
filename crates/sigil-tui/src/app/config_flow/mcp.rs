@@ -12,20 +12,8 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
             "Add MCP servers in ~/.sigil/sigil.toml or your explicit config file",
         ));
     } else {
-        lines.push(render_config_readonly_row(
-            "Selected",
-            &format!(
-                "{} of {}",
-                config_state.selected_mcp_server_index + 1,
-                config_state.draft.mcp_servers.len()
-            ),
-        ));
+        lines.push(render_config_value_row(config_state, ConfigField::McpName));
         if config_state.selected_mcp_server().is_some() {
-            lines.push(String::new());
-            lines.push("[server]".to_owned());
-            if let Some(server) = config_state.selected_mcp_server() {
-                lines.push(render_config_readonly_row("Name", &server.name));
-            }
             lines.push(String::new());
             lines.push("[lifecycle]".to_owned());
             lines.extend(render_mcp_lifecycle_summary(
@@ -38,7 +26,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         }
     }
     lines.push(String::new());
-    lines.push("PgUp/PgDn server  footer activate/refresh".to_owned());
+    lines.push("Enter next server · Down actions · footer activate/refresh".to_owned());
     lines.push(render_config_hint_row(
         "MCP command, args, and timeout are edited in the config file",
     ));

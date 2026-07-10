@@ -32,15 +32,16 @@ pub(super) fn render_config_detail_header(config_state: &ConfigState) -> Vec<Str
 
 pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     let Some(field) = config_state.selected_field else {
-        let mut lines = vec![
-            String::new(),
-            "[details]".to_owned(),
-            CONFIG_CONTROLS_HINT.to_owned(),
-            CONFIG_ACTIONS_HINT.to_owned(),
-        ];
+        let mut lines = vec![String::new(), "[details]".to_owned()];
         if config_state.selected_section == ConfigSection::Mcp {
-            lines.push("mcp: PgUp/PgDn server · footer activate/refresh".to_owned());
-        } else if config_state.selected_section == ConfigSection::Agents {
+            lines.push("controls: Tab section · Down actions".to_owned());
+            lines.push("actions: Left/Right action · Ctrl-S save · Esc close".to_owned());
+            lines.push("mcp: no configured server to inspect".to_owned());
+            return lines;
+        }
+        lines.push(CONFIG_CONTROLS_HINT.to_owned());
+        lines.push(CONFIG_ACTIONS_HINT.to_owned());
+        if config_state.selected_section == ConfigSection::Agents {
             lines.push("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/disable".to_owned());
         } else if config_state.selected_section == ConfigSection::Skills {
             lines.push("skills: Up/Down skill · PgUp/PgDn wrap · footer use".to_owned());
@@ -85,7 +86,7 @@ pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec
         lines.push("advanced: color overrides are edited in sigil.toml".to_owned());
     }
     if config_state.selected_section == ConfigSection::Mcp {
-        lines.push("mcp: PgUp/PgDn server · footer activate/refresh".to_owned());
+        lines.push("mcp: Enter next server · footer activate/refresh".to_owned());
     } else if config_state.selected_section == ConfigSection::Agents {
         lines.push("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/disable".to_owned());
     } else if config_state.selected_section == ConfigSection::Skills {

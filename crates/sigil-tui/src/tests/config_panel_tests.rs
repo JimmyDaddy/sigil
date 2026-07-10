@@ -477,7 +477,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             ConfigField::AppearanceUsageCostCurrency,
         ]
     );
-    assert_eq!(ConfigField::fields_for_section(ConfigSection::Mcp), &[]);
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Mcp),
+        &[ConfigField::McpName]
+    );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Agents),
         &[ConfigField::SkillId]
@@ -888,6 +891,7 @@ fn config_state_handles_mcp_collection_navigation_and_mutation() {
     assert_eq!(state.selected_mcp_server_index, 1);
     assert!(state.cycle_mcp_server(true));
     assert_eq!(state.selected_mcp_server_index, 0);
+    assert_eq!(state.selected_field, Some(ConfigField::McpName));
     assert!(state.cycle_mcp_server(false));
     assert_eq!(state.selected_mcp_server_index, 1);
     assert!(state.remove_selected_mcp_server());
@@ -1090,6 +1094,8 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
         command: "node".to_owned(),
         args_csv: "server.js, --stdio, ".to_owned(),
         startup_timeout_secs: "15".to_owned(),
+        inherit_env: Vec::new(),
+        base_config: sigil_kernel::McpServerConfig::default(),
     }];
 
     let config = draft.to_root_config()?;
@@ -1113,6 +1119,44 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers[0].args, vec!["server.js", "--stdio"]);
     assert_eq!(config.mcp_servers[0].startup_timeout_secs, 15);
+    Ok(())
+}
+
+#[test]
+fn config_draft_preserves_complete_mcp_config_and_environment_grants() -> anyhow::Result<()> {
+    let mut root = test_root_config();
+    let original = sigil_kernel::McpServerConfig {
+        name: "credentialed".to_owned(),
+        command: "/usr/local/bin/mcp-server".to_owned(),
+        args: vec![
+            "--stdio".to_owned(),
+            "--label=alpha,beta".to_owned(),
+            "literal,with,commas".to_owned(),
+        ],
+        inherit_env: vec!["MCP_REGION".to_owned(), "MCP_TOKEN".to_owned()],
+        startup_timeout_secs: 23,
+        required: false,
+        startup: sigil_kernel::McpServerStartup::Lazy,
+        trust: sigil_kernel::McpServerTrustPolicy {
+            trust_class: sigil_kernel::McpTrustClass::ThirdParty,
+            approval_default: sigil_kernel::ApprovalMode::Deny,
+            egress_logging: false,
+            allow_secrets: true,
+            pin_version: true,
+            pinned: Some(sigil_kernel::McpServerPinnedIdentity {
+                command_fingerprint: "sha256:pinned".to_owned(),
+                protocol_version: "2025-06-18".to_owned(),
+                server_name: "credentialed".to_owned(),
+                server_version: "1.2.3".to_owned(),
+            }),
+        },
+    };
+    root.mcp_servers = vec![original.clone()];
+
+    let draft = ConfigDraft::from_root_config(&root);
+    let round_trip = draft.to_root_config()?;
+
+    assert_eq!(round_trip.mcp_servers, vec![original]);
     Ok(())
 }
 
@@ -1389,6 +1433,8 @@ fn config_draft_validates_mcp_server_values() {
                 command: "node".to_owned(),
                 args_csv: String::new(),
                 startup_timeout_secs: "10".to_owned(),
+                inherit_env: Vec::new(),
+                base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (draft, "mcp server 1 name cannot be empty")
         },
@@ -1399,6 +1445,8 @@ fn config_draft_validates_mcp_server_values() {
                 command: " ".to_owned(),
                 args_csv: String::new(),
                 startup_timeout_secs: "10".to_owned(),
+                inherit_env: Vec::new(),
+                base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (draft, "mcp server 1 command cannot be empty")
         },
@@ -1409,6 +1457,8 @@ fn config_draft_validates_mcp_server_values() {
                 command: "node".to_owned(),
                 args_csv: String::new(),
                 startup_timeout_secs: "abc".to_owned(),
+                inherit_env: Vec::new(),
+                base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (
                 draft,
@@ -1422,6 +1472,8 @@ fn config_draft_validates_mcp_server_values() {
                 command: "node".to_owned(),
                 args_csv: String::new(),
                 startup_timeout_secs: "0".to_owned(),
+                inherit_env: Vec::new(),
+                base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (
                 draft,
@@ -1497,7 +1549,10 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
         state.display_value(ConfigField::CompactionContextWindowTokens),
         "64000 tokens"
     );
-    assert_eq!(state.display_value(ConfigField::TerminalMouseCapture), "no");
+    assert_eq!(
+        state.display_value(ConfigField::TerminalMouseCapture),
+        "yes"
+    );
     assert_eq!(
         state.display_value(ConfigField::TerminalOsc52Clipboard),
         "yes"

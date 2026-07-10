@@ -152,17 +152,18 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             truncate_session_view_text(&entry.manifest_hash, 16)
         ),
         ControlEntry::PluginHookExecutionStarted(entry) => format!(
-            "[ctl] plugin hook {}:{} started kind={} effect={} backend={} profile={} coverage={}",
+            "[ctl] plugin hook {}:{} started kind={} effect={} backend={} profile={} coverage={} env={}",
             truncate_session_view_text(&entry.plugin_id, 32),
             truncate_session_view_text(&entry.hook_id, 32),
             format!("{:?}", entry.hook_kind).to_ascii_lowercase(),
             entry.declared_effect.as_str(),
             entry.backend.as_str(),
             entry.sandbox_profile.as_str(),
-            entry.execution_coverage.as_str()
+            entry.execution_coverage.as_str(),
+            entry.environment_policy.as_str()
         ),
         ControlEntry::PluginHookExecutionFinished(entry) => format!(
-            "[ctl] plugin hook {}:{} finished status={} exit={} stdout={} stderr={} backend={} network={}",
+            "[ctl] plugin hook {}:{} finished status={} exit={} stdout={} stderr={} backend={} network={} env={}",
             truncate_session_view_text(&entry.plugin_id, 32),
             truncate_session_view_text(&entry.hook_id, 32),
             plugin_hook_execution_status_label(entry.status),
@@ -173,7 +174,8 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.stdout_bytes,
             entry.stderr_bytes,
             entry.backend.as_str(),
-            entry.network.policy.as_str()
+            entry.network.policy.as_str(),
+            entry.environment_policy.as_str()
         ),
         ControlEntry::ChangeSetProposed(change_set) => format!(
             "[ctl] changeset {} proposed risk={} files={} {}",

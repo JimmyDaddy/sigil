@@ -83,7 +83,8 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     state.selected_section = ConfigSection::Mcp;
     state.selected_field = None;
     let mcp_details = render_config_selection_details(&state).join("\n");
-    assert!(mcp_details.contains("mcp: PgUp/PgDn server"));
+    assert!(mcp_details.contains("controls: Tab section · Down actions"));
+    assert!(mcp_details.contains("mcp: no configured server to inspect"));
 
     state.selected_section = ConfigSection::Agents;
     state.selected_field = None;
@@ -799,6 +800,7 @@ fn detail_helpers_cover_permission_rule_and_mcp_summaries() {
     root_config.mcp_servers.push(sigil_kernel::McpServerConfig {
         name: "filesystem".to_owned(),
         command: "mcp-filesystem".to_owned(),
+        inherit_env: vec!["SIGIL_E21_TUI_MISSING_8A51".to_owned()],
         required: false,
         trust: sigil_kernel::McpServerTrustPolicy {
             allow_secrets: true,
@@ -827,6 +829,9 @@ fn detail_helpers_cover_permission_rule_and_mcp_summaries() {
     assert!(lifecycle.contains("- Runtime: ready"));
     assert!(lifecycle.contains("- Required: no"));
     assert!(lifecycle.contains("- Pin: pinned"));
+    assert!(lifecycle.contains("- Environment: isolated (env_clear)"));
+    assert!(lifecycle.contains("- Inherited env: SIGIL_E21_TUI_MISSING_8A51"));
+    assert!(lifecycle.contains("- Live fingerprint: missing (configuration_invalid)"));
     assert!(lifecycle.contains("- Secrets: allowed"));
     assert_eq!(
         mcp_pin_summary(&sigil_kernel::McpServerConfig::default()),

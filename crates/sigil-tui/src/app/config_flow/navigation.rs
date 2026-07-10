@@ -27,14 +27,16 @@ pub(super) fn render_config_nav_lines(config_state: Option<&ConfigState>) -> Vec
     }
     lines.push(String::new());
     lines.push(CONFIG_SECTION_NAV_HINT.to_owned());
-    lines.push(CONFIG_FIELD_NAV_HINT.to_owned());
-    lines.push(CONFIG_EDIT_OR_TOGGLE_HINT.to_owned());
+    if state.selected_section != ConfigSection::Mcp {
+        lines.push(CONFIG_FIELD_NAV_HINT.to_owned());
+        lines.push(CONFIG_EDIT_OR_TOGGLE_HINT.to_owned());
+    }
     lines.push(format!("{CONFIG_SAVE_HINT}  Ctrl-A advanced  Esc close"));
     if state.selected_section == ConfigSection::Storage {
         lines.push("Storage: footer clean artifacts".to_owned());
     } else if state.selected_section == ConfigSection::Mcp {
-        lines.push("MCP: PgUp/PgDn switch".to_owned());
-        lines.push("MCP: footer activate/refresh".to_owned());
+        lines.push("MCP: Enter next server".to_owned());
+        lines.push("MCP: Down -> footer activate/refresh".to_owned());
         lines.push("MCP: edit servers in sigil.toml".to_owned());
     } else if state.selected_section == ConfigSection::Agents {
         lines.push("Agents: Up/Down select".to_owned());

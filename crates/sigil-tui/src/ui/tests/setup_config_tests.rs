@@ -365,7 +365,7 @@ fn config_status_helpers_cover_empty_numeric_and_tight_widths() {
 fn render_config_context_pair_handles_special_and_default_labels() {
     let selected = render_config_context_pair("selected", "Model", 24);
     let actions = render_config_context_pair("actions", "Enter save · Esc close", 28);
-    let mcp = render_config_context_pair("mcp", "PgUp/PgDn server", 22);
+    let mcp = render_config_context_pair("mcp", "Enter activate", 22);
     let advanced = render_config_context_pair("advanced", "provider.beta", 28);
     let override_line = render_config_context_pair("override", "env", 20);
     let status = render_config_context_pair("status", "unsaved - save before close", 28);
@@ -373,7 +373,7 @@ fn render_config_context_pair_handles_special_and_default_labels() {
 
     assert!(line_text(&selected).contains("▸ Model"));
     assert!(line_text(&actions).contains("actions Enter save"));
-    assert!(line_text(&mcp).contains("mcp PgUp"));
+    assert!(line_text(&mcp).contains("mcp Enter"));
     assert!(line_text(&advanced).contains("advanced provider.beta"));
     assert!(line_text(&override_line).contains("source env"));
     assert!(line_text(&status).contains("△ unsaved"));

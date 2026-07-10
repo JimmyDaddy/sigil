@@ -270,12 +270,9 @@ impl ConfigState {
     #[allow(dead_code)]
     pub(crate) fn add_mcp_server(&mut self) {
         let next_index = self.draft.mcp_servers.len() + 1;
-        self.draft.mcp_servers.push(McpServerDraft {
-            name: format!("server-{next_index}"),
-            command: "npx".to_owned(),
-            args_csv: String::new(),
-            startup_timeout_secs: "10".to_owned(),
-        });
+        self.draft
+            .mcp_servers
+            .push(McpServerDraft::new_default(format!("server-{next_index}")));
         self.selected_mcp_server_index = self.draft.mcp_servers.len() - 1;
         if self.selected_section == ConfigSection::Mcp {
             self.footer_selected = false;
@@ -312,6 +309,8 @@ impl ConfigState {
         } else {
             self.selected_mcp_server_index -= 1;
         }
+        self.selected_field = Some(ConfigField::McpName);
+        self.footer_selected = false;
         true
     }
 }

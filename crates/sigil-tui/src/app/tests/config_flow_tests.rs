@@ -503,7 +503,7 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
 }
 
 #[test]
-fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
+fn config_empty_mcp_reports_no_selection_and_preserves_explicit_footer_navigation() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     app.config_state
@@ -514,6 +514,21 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
+    assert_eq!(app.last_notice(), Some("action activate_mcp"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("close"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), None);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("no MCP server selected"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ActivateMcp);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("MCP"));
@@ -533,7 +548,10 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
         .as_mut()
         .expect("config state should still exist")
         .set_section(ConfigSection::Mcp);
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ActivateMcp);
     assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("MCP"));
@@ -543,7 +561,10 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
         .as_mut()
         .expect("config state should still exist")
         .set_section(ConfigSection::Mcp);
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ActivateMcp);
     assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
@@ -652,7 +673,7 @@ fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
 }
 
 #[test]
-fn config_mcp_footer_activate_refreshes_saved_eager_server() -> Result<()> {
+fn config_mcp_footer_refreshes_saved_eager_server() -> Result<()> {
     let mut config = test_config();
     config.mcp_servers.push(sigil_kernel::McpServerConfig {
         name: "eager".to_owned(),
@@ -668,6 +689,13 @@ fn config_mcp_footer_activate_refreshes_saved_eager_server() -> Result<()> {
         .expect("config state should still exist");
     state.set_section(ConfigSection::Mcp);
     state.focus_footer(ConfigFooterAction::ActivateMcp);
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("eager".to_owned()),
+        status: McpActivationStatus::Ready {
+            added_tools: 1,
+            process_coverage: None,
+        },
+    })?;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
@@ -680,13 +708,15 @@ fn config_mcp_footer_activate_refreshes_saved_eager_server() -> Result<()> {
         app.mcp_server_runtime_status_label("eager").as_deref(),
         Some("refreshing")
     );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("MCP eager is already refreshing"));
 
     let state = app
         .config_state
         .as_mut()
         .expect("config state should still exist");
     state.dirty = true;
-    state.focus_footer(ConfigFooterAction::ActivateMcp);
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
@@ -1142,14 +1172,17 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     assert!(detail.contains("0 servers"));
     assert!(detail.contains("i No MCP servers configured"));
     assert!(detail.contains("i Add MCP servers in ~/.sigil/sigil.toml"));
-    assert!(detail.contains("mcp: PgUp/PgDn server · footer activate/refresh"));
+    assert!(detail.contains("controls: Tab section · Down actions"));
+    assert!(detail.contains("mcp: no configured server to inspect"));
     assert!(!detail.contains("servers:"));
     assert!(!detail.contains("args_csv:"));
 
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("MCP: PgUp/PgDn switch"));
-    assert!(nav.contains("MCP: footer activate/refresh"));
+    assert!(nav.contains("MCP: Enter next server"));
+    assert!(nav.contains("MCP: Down -> footer activate/refresh"));
     assert!(nav.contains("MCP: edit servers in sigil.toml"));
+    assert!(!nav.contains("Up/Down field"));
+    assert!(!nav.contains("Enter edit/toggle"));
 }
 
 #[test]
@@ -1253,7 +1286,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
     assert!(detail.contains("Terminal 7/12 · terminal integration"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("- Keyboard enhancement: auto"));
-    assert!(detail.contains("- Mouse capture: no"));
+    assert!(detail.contains("- Mouse capture: yes"));
     assert!(detail.contains("- OSC52 clipboard: yes"));
     assert!(detail.contains("- Scroll sensitivity: 3 rows"));
     assert!(detail.contains("[compatibility]"));
@@ -3815,6 +3848,43 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
         .as_mut()
         .expect("config state should exist")
         .set_section(ConfigSection::Mcp);
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .focus_footer(ConfigFooterAction::ActivateMcp);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_mcp_server_index,
+        1
+    );
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .footer_selected
+    );
+    assert_eq!(app.config_selected_field_label(), Some("Server"));
+    assert_eq!(app.last_notice(), Some("mcp server 2/2"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_mcp_server_index,
+        0
+    );
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .footer_selected
+    );
+    assert_eq!(app.last_notice(), Some("mcp server 1/2"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     assert_eq!(
@@ -3824,7 +3894,7 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
             .selected_mcp_server_index,
         1
     );
-    assert_eq!(app.last_notice(), Some("mcp server 2/2"));
+    assert_eq!(app.config_selected_field_label(), Some("Server"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
     assert_eq!(
@@ -3834,7 +3904,12 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
             .selected_mcp_server_index,
         0
     );
-    assert_eq!(app.last_notice(), Some("mcp server 1/2"));
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .footer_selected
+    );
 
     let mut empty_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     empty_app.open_config_panel();
@@ -3845,8 +3920,148 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
         .set_section(ConfigSection::Mcp);
 
     let _ = empty_app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(empty_app.config_selected_field_label(), None);
     assert_eq!(empty_app.last_notice(), Some("no MCP server to select"));
     Ok(())
+}
+
+#[test]
+fn config_mcp_enter_cycles_server_and_footer_activates_selected_server() -> Result<()> {
+    let mut config = test_config();
+    for name in ["env-ready", "env-missing"] {
+        config.mcp_servers.push(sigil_kernel::McpServerConfig {
+            name: name.to_owned(),
+            command: "mcp-probe".to_owned(),
+            startup: McpServerStartup::Lazy,
+            ..Default::default()
+        });
+    }
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Mcp);
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("> Server: env-ready (1/2)  [Enter cycle]"));
+    assert!(detail.contains("Runtime"));
+    assert!(detail.contains("deferred"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(state.selected_mcp_server_index, 0);
+    assert!(!state.footer_selected);
+    assert_eq!(state.selected_field, Some(ConfigField::McpName));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(state.selected_mcp_server_index, 0);
+    assert!(state.footer_selected);
+    assert_eq!(
+        state.selected_footer_action,
+        ConfigFooterAction::ActivateMcp
+    );
+    assert_eq!(app.last_notice(), Some("action activate_mcp"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(state.selected_mcp_server_index, 0);
+    assert!(!state.footer_selected);
+    assert_eq!(state.selected_field, Some(ConfigField::McpName));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(state.selected_mcp_server_index, 1);
+    assert!(!state.dirty);
+    assert_eq!(app.last_notice(), Some("mcp server 2/2"));
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("> Server: env-missing (2/2)  [Enter cycle]"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_mcp_server_index,
+        0
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::ActivateLazyMcp {
+            server_name: Some(ref server_name)
+        }) if server_name == "env-missing"
+    ));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("MCP env-missing is already activating")
+    );
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(state.selected_mcp_server_index, 1);
+    assert!(state.footer_selected);
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("Server: env-missing (2/2)"));
+    assert!(detail.contains("activating"));
+    Ok(())
+}
+
+#[test]
+fn config_mcp_server_selector_renders_selected_position() {
+    let mut config = test_config();
+    for index in 0..8 {
+        config.mcp_servers.push(sigil_kernel::McpServerConfig {
+            name: format!("mcp-{index}"),
+            command: "mcp-probe".to_owned(),
+            startup: McpServerStartup::Lazy,
+            ..Default::default()
+        });
+    }
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Mcp);
+    state.selected_mcp_server_index = 6;
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("> Server: mcp-6 (7/8)  [Enter cycle]"));
+    assert!(!detail.contains("Server window"));
+    assert!(!detail.contains("mcp-0"));
+    assert!(detail.contains("deferred"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_mcp_server_index = 1;
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("> Server: mcp-1 (2/8)  [Enter cycle]"));
+    assert!(!detail.contains("mcp-7"));
 }
 
 #[test]
@@ -3976,7 +4191,7 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(
-        !app.config_state
+        app.config_state
             .as_ref()
             .expect("config state should exist")
             .draft
@@ -4100,7 +4315,12 @@ fn config_mcp_paging_without_servers_reports_empty_state() -> Result<()> {
     assert_eq!(app.last_notice(), Some("no MCP server to select"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), None);
     assert_eq!(app.last_notice(), Some("no MCP server to select"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
+    assert_eq!(app.last_notice(), Some("action activate_mcp"));
     Ok(())
 }
 

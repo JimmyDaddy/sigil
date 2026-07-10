@@ -1931,13 +1931,14 @@ fn render_session_control_entries_cover_remaining_labels() {
             backend_capabilities: ExecutionBackendCapabilities::default(),
             execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
             sandbox_profile: ExecutionSandboxProfile::Unconfined,
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
             egress_logging: true,
             allow_secrets: false,
         }),
     ));
     assert_eq!(
         plugin_hook_started,
-        "[ctl] plugin hook repo-review:verify-repo started kind=verification effect=workspace_write backend=local profile=unconfined coverage=local_backend_enforced"
+        "[ctl] plugin hook repo-review:verify-repo started kind=verification effect=workspace_write backend=local profile=unconfined coverage=local_backend_enforced env=isolated_extension"
     );
 
     let plugin_hook_finished = render_session_log_entry(&SessionLogEntry::Control(
@@ -1957,6 +1958,7 @@ fn render_session_control_entries_cover_remaining_labels() {
             backend_capabilities: ExecutionBackendCapabilities::default(),
             execution_coverage: ExecutionCoverageLabel::LocalBackendEnforced,
             sandbox_profile: ExecutionSandboxProfile::Unconfined,
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension,
             egress_logging: true,
             allow_secrets: false,
             network: ExecutionNetworkReceipt::unknown("local backend"),
@@ -1965,7 +1967,7 @@ fn render_session_control_entries_cover_remaining_labels() {
     ));
     assert_eq!(
         plugin_hook_finished,
-        "[ctl] plugin hook repo-review:verify-repo finished status=succeeded exit=0 stdout=12 stderr=0 backend=local network=unknown"
+        "[ctl] plugin hook repo-review:verify-repo finished status=succeeded exit=0 stdout=12 stderr=0 backend=local network=unknown env=isolated_extension"
     );
 
     let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1").expect("valid queue id");

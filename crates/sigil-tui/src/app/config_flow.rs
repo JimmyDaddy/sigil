@@ -409,19 +409,14 @@ impl AppState {
                 }
             }
             KeyCode::PageUp => {
-                if let Some(config_state) = self.config_state.as_mut() {
+                if self
+                    .config_state
+                    .as_ref()
+                    .is_some_and(|config_state| config_state.selected_section == ConfigSection::Mcp)
+                {
+                    self.cycle_selected_mcp_server(false);
+                } else if let Some(config_state) = self.config_state.as_mut() {
                     match config_state.selected_section {
-                        ConfigSection::Mcp => {
-                            if config_state.cycle_mcp_server(false) {
-                                self.last_notice = Some(format!(
-                                    "mcp server {}/{}",
-                                    config_state.selected_mcp_server_index + 1,
-                                    config_state.draft.mcp_servers.len()
-                                ));
-                            } else {
-                                self.last_notice = Some("no MCP server to select".to_owned());
-                            }
-                        }
                         ConfigSection::Agents => {
                             if config_state.cycle_agent(false) {
                                 self.last_notice = Some(selected_agent_summary(config_state));
@@ -450,24 +445,20 @@ impl AppState {
                                 self.last_notice = Some("no plugin to select".to_owned());
                             }
                         }
+                        ConfigSection::Mcp => {}
                         _ => {}
                     }
                 }
             }
             KeyCode::PageDown => {
-                if let Some(config_state) = self.config_state.as_mut() {
+                if self
+                    .config_state
+                    .as_ref()
+                    .is_some_and(|config_state| config_state.selected_section == ConfigSection::Mcp)
+                {
+                    self.cycle_selected_mcp_server(true);
+                } else if let Some(config_state) = self.config_state.as_mut() {
                     match config_state.selected_section {
-                        ConfigSection::Mcp => {
-                            if config_state.cycle_mcp_server(true) {
-                                self.last_notice = Some(format!(
-                                    "mcp server {}/{}",
-                                    config_state.selected_mcp_server_index + 1,
-                                    config_state.draft.mcp_servers.len()
-                                ));
-                            } else {
-                                self.last_notice = Some("no MCP server to select".to_owned());
-                            }
-                        }
                         ConfigSection::Agents => {
                             if config_state.cycle_agent(true) {
                                 self.last_notice = Some(selected_agent_summary(config_state));
@@ -496,6 +487,7 @@ impl AppState {
                                 self.last_notice = Some("no plugin to select".to_owned());
                             }
                         }
+                        ConfigSection::Mcp => {}
                         _ => {}
                     }
                 }
@@ -614,6 +606,16 @@ impl AppState {
                         }
                         ConfigFooterAction::Close => self.attempt_close_config(),
                     };
+                }
+                if let Some(config_state) = self.config_state.as_ref()
+                    && config_state.selected_section == ConfigSection::Mcp
+                {
+                    if config_state.selected_field == Some(ConfigField::McpName) {
+                        self.cycle_selected_mcp_server(true);
+                    } else {
+                        self.last_notice = Some("no MCP server selected".to_owned());
+                    }
+                    return Ok(None);
                 }
                 let mut open_model_picker = None;
                 let mut open_secret_input = None;
@@ -835,6 +837,21 @@ impl AppState {
         }
 
         Ok(None)
+    }
+
+    fn cycle_selected_mcp_server(&mut self, forward: bool) {
+        let Some(config_state) = self.config_state.as_mut() else {
+            return;
+        };
+        if config_state.cycle_mcp_server(forward) {
+            self.last_notice = Some(format!(
+                "mcp server {}/{}",
+                config_state.selected_mcp_server_index + 1,
+                config_state.draft.mcp_servers.len()
+            ));
+        } else {
+            self.last_notice = Some("no MCP server to select".to_owned());
+        }
     }
 
     pub(super) fn reset_selected_appearance_color_selection(&mut self) {
@@ -1091,7 +1108,20 @@ impl AppState {
                 let warnings = report
                     .warnings
                     .into_iter()
-                    .map(|warning| format!("{}: {}", warning.path.display(), warning.message))
+                    .map(|warning| {
+                        let remediation = warning
+                            .remediation
+                            .as_deref()
+                            .map(|value| format!("; fix: {value}"))
+                            .unwrap_or_default();
+                        format!(
+                            "{} [{}]: {}{}",
+                            warning.path.display(),
+                            warning.kind.code(),
+                            warning.message,
+                            remediation
+                        )
+                    })
                     .collect();
                 (report.manifests, warnings)
             }
@@ -1634,17 +1664,29 @@ impl AppState {
             .get(&server_name)
             .cloned()
             .unwrap_or_else(|| initial_mcp_server_status(server));
-        if server.startup == McpServerStartup::Lazy
-            && matches!(current_status, McpServerRuntimeStatus::Deferred)
-        {
-            self.runtime
-                .mcp_server_statuses
-                .insert(server_name.clone(), McpServerRuntimeStatus::Activating);
-            self.last_notice = Some(format!("activating MCP {server_name}"));
-            self.push_event("mcp", format!("activate {server_name}"));
-            return Ok(Some(AppAction::ActivateLazyMcp {
-                server_name: Some(server_name),
-            }));
+        match current_status {
+            McpServerRuntimeStatus::Deferred if server.startup == McpServerStartup::Lazy => {
+                self.runtime
+                    .mcp_server_statuses
+                    .insert(server_name.clone(), McpServerRuntimeStatus::Activating);
+                self.last_notice = Some(format!("activating MCP {server_name}"));
+                self.push_event("mcp", format!("activate {server_name}"));
+                return Ok(Some(AppAction::ActivateLazyMcp {
+                    server_name: Some(server_name),
+                }));
+            }
+            McpServerRuntimeStatus::Activating => {
+                self.last_notice = Some(format!("MCP {server_name} is already activating"));
+                return Ok(None);
+            }
+            McpServerRuntimeStatus::Refreshing => {
+                self.last_notice = Some(format!("MCP {server_name} is already refreshing"));
+                return Ok(None);
+            }
+            McpServerRuntimeStatus::Deferred
+            | McpServerRuntimeStatus::Stale { .. }
+            | McpServerRuntimeStatus::Ready { .. }
+            | McpServerRuntimeStatus::Failed { .. } => {}
         }
 
         self.runtime
@@ -1718,20 +1760,17 @@ impl AppState {
         root_config
             .mcp_servers
             .iter()
-            .map(|server| {
-                let status = self
-                    .runtime
-                    .mcp_server_statuses
-                    .get(&server.name)
-                    .cloned()
-                    .unwrap_or_else(|| initial_mcp_server_status(server));
-                format!(
-                    "{}: {}",
-                    server.name,
-                    status.label_for_server(Some(&server.name))
-                )
-            })
+            .map(|server| format!("{}: {}", server.name, self.mcp_runtime_status_label(server)))
             .collect()
+    }
+
+    fn mcp_runtime_status_label(&self, server: &McpServerConfig) -> String {
+        self.runtime
+            .mcp_server_statuses
+            .get(&server.name)
+            .cloned()
+            .unwrap_or_else(|| initial_mcp_server_status(server))
+            .label_for_server(Some(&server.name))
     }
 
     fn selected_mcp_runtime_status_label(&self, config_state: &ConfigState) -> String {
@@ -1743,12 +1782,7 @@ impl AppState {
         else {
             return "unsaved".to_owned();
         };
-        self.runtime
-            .mcp_server_statuses
-            .get(&config.name)
-            .cloned()
-            .unwrap_or_else(|| initial_mcp_server_status(config))
-            .label_for_server(Some(&config.name))
+        self.mcp_runtime_status_label(config)
     }
 
     pub(super) fn selected_mcp_boundary_label(&self, config_state: &ConfigState) -> Option<String> {
