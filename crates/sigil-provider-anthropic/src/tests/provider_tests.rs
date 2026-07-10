@@ -151,6 +151,32 @@ async fn provider_stream_surfaces_sse_events_and_headers() -> anyhow::Result<()>
 }
 
 #[tokio::test]
+async fn provider_stream_decodes_multibyte_text_split_across_http_chunks() -> anyhow::Result<()> {
+    let body = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"é你🙂\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n";
+    let server = TinySseServer::start_chunked_body(multibyte_split_chunks(body)).await?;
+    let provider = anthropic_provider(AnthropicProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..AnthropicProviderConfig::default()
+    })?;
+
+    let chunks = provider
+        .stream(test_request())
+        .await?
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        matches!(chunks[0].as_ref().expect("text"), ProviderChunk::TextDelta(text) if text == "é你🙂")
+    );
+    assert!(matches!(
+        chunks[1].as_ref().expect("done"),
+        ProviderChunk::Done
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_stream_emits_done_when_http_stream_ends_without_message_stop()
 -> anyhow::Result<()> {
     let server = TinySseServer::start(
@@ -215,7 +241,11 @@ async fn provider_stream_reports_invalid_json_and_utf8_chunks() -> anyhow::Resul
         .await
         .expect("stream item")
         .expect_err("invalid utf8 should fail");
-    assert!(error.to_string().contains("invalid UTF-8 SSE chunk"));
+    assert!(
+        error
+            .to_string()
+            .contains("invalid UTF-8 SSE byte sequence")
+    );
     assert!(stream.next().await.is_none());
     Ok(())
 }
@@ -300,6 +330,40 @@ async fn provider_stream_retries_retryable_status_once() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn provider_retries_retryable_status_when_error_body_times_out() -> anyhow::Result<()> {
+    let server = TinySseServer::start_hanging_error_then_success(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+         data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"after-timeout\"}}\n\n\
+         data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await?;
+    let provider = anthropic_provider_with_timeouts(
+        AnthropicProviderConfig {
+            base_url: server.base_url(),
+            api_key: Some("test-key".to_owned()),
+            ..AnthropicProviderConfig::default()
+        },
+        retry_test_timeouts(),
+    )?;
+
+    let chunks = provider
+        .stream(test_request())
+        .await?
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(server.request_count(), 2);
+    assert!(
+        matches!(chunks[0].as_ref().expect("text"), ProviderChunk::TextDelta(text) if text == "after-timeout")
+    );
+    assert!(matches!(
+        chunks[1].as_ref().expect("done"),
+        ProviderChunk::Done
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_stream_maps_http_error_status_after_retry() -> anyhow::Result<()> {
     let server = TinySseServer::start_sequence(vec![
         "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 7\r\n\r\nlimited".as_bytes(),
@@ -324,15 +388,9 @@ async fn provider_stream_maps_http_error_status_after_retry() -> anyhow::Result<
 
 #[test]
 fn provider_private_helpers_cover_retry_and_beta_header_edges() -> anyhow::Result<()> {
-    assert!(super::is_retryable_status(
-        &AnthropicProviderError::RateLimited
-    ));
-    assert!(super::is_retryable_status(
-        &AnthropicProviderError::RetryableStatus(503)
-    ));
-    assert!(!super::is_retryable_status(
-        &AnthropicProviderError::Authentication(401)
-    ));
+    assert!(super::is_retryable_status(429));
+    assert!(super::is_retryable_status(503));
+    assert!(!super::is_retryable_status(401));
     assert!(super::beta_header(&[" ".to_owned()])?.is_none());
     let error = super::beta_header(&["bad\nheader".to_owned()])
         .expect_err("invalid beta header should fail");
@@ -354,9 +412,16 @@ fn provider_private_helpers_cover_retry_and_beta_header_edges() -> anyhow::Resul
 }
 
 fn anthropic_provider(config: AnthropicProviderConfig) -> anyhow::Result<AnthropicProvider> {
+    anthropic_provider_with_timeouts(config, ModelRequestTimeouts::default())
+}
+
+fn anthropic_provider_with_timeouts(
+    config: AnthropicProviderConfig,
+    timeouts: ModelRequestTimeouts,
+) -> anyhow::Result<AnthropicProvider> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::clear();
-    new_anthropic_provider(config)
+    AnthropicProvider::new(config, timeouts)
 }
 
 fn test_request() -> CompletionRequest {
@@ -374,6 +439,14 @@ fn test_request() -> CompletionRequest {
         background: false,
         store: false,
         deterministic_materialization: true,
+    }
+}
+
+fn retry_test_timeouts() -> ModelRequestTimeouts {
+    ModelRequestTimeouts {
+        request_timeout: std::time::Duration::from_millis(200),
+        stream_idle_timeout: std::time::Duration::from_secs(1),
+        stream_total_timeout: None,
     }
 }
 
@@ -438,6 +511,102 @@ impl TinySseServer {
         })
     }
 
+    async fn start_chunked_body(chunks: Vec<Vec<u8>>) -> anyhow::Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let request_capture = Arc::new(Mutex::new(Vec::new()));
+        let task_request_capture = Arc::clone(&request_capture);
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let Ok(read) = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            task_request_capture
+                .lock()
+                .expect("request capture mutex should not be poisoned")
+                .push(request);
+            let header = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            if tokio::io::AsyncWriteExt::write_all(&mut socket, header.as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            for chunk in chunks {
+                let prefix = format!("{:x}\r\n", chunk.len());
+                if tokio::io::AsyncWriteExt::write_all(&mut socket, prefix.as_bytes())
+                    .await
+                    .is_err()
+                    || tokio::io::AsyncWriteExt::write_all(&mut socket, &chunk)
+                        .await
+                        .is_err()
+                    || tokio::io::AsyncWriteExt::write_all(&mut socket, b"\r\n")
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+                let _ = tokio::io::AsyncWriteExt::flush(&mut socket).await;
+                tokio::task::yield_now().await;
+            }
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, b"0\r\n\r\n").await;
+        });
+        Ok(Self {
+            address,
+            requests: request_capture,
+        })
+    }
+
+    async fn start_hanging_error_then_success(success: &'static str) -> anyhow::Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let request_capture = Arc::new(Mutex::new(Vec::new()));
+        let task_request_capture = Arc::clone(&request_capture);
+        tokio::spawn(async move {
+            for attempt in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let requests = Arc::clone(&task_request_capture);
+                tokio::spawn(async move {
+                    let request = read_request_head(&mut socket).await;
+                    requests
+                        .lock()
+                        .expect("request capture mutex should not be poisoned")
+                        .push(request);
+                    if attempt == 0 {
+                        let header = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, header.as_bytes())
+                            .await;
+                        let _ = tokio::io::AsyncWriteExt::flush(&mut socket).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    } else {
+                        let _ =
+                            tokio::io::AsyncWriteExt::write_all(&mut socket, success.as_bytes())
+                                .await;
+                    }
+                });
+            }
+        });
+        Ok(Self {
+            address,
+            requests: request_capture,
+        })
+    }
+
     fn base_url(&self) -> String {
         format!("http://{}", self.address)
     }
@@ -457,4 +626,40 @@ impl TinySseServer {
             .expect("request capture mutex should not be poisoned")
             .len()
     }
+}
+
+async fn read_request_head(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let Ok(read) = tokio::io::AsyncReadExt::read(socket, &mut buffer).await else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    request
+}
+
+fn multibyte_split_chunks(body: &str) -> Vec<Vec<u8>> {
+    let accented = body.find('é').expect("fixture contains two-byte character");
+    let chinese = body
+        .find('你')
+        .expect("fixture contains three-byte character");
+    let emoji = body
+        .find('🙂')
+        .expect("fixture contains four-byte character");
+    let boundaries = [accented + 1, chinese + 2, emoji + 3];
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    for end in boundaries.into_iter().chain([body.len()]) {
+        chunks.push(body.as_bytes()[start..end].to_vec());
+        start = end;
+    }
+    chunks
 }

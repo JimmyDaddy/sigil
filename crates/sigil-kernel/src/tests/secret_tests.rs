@@ -74,6 +74,25 @@ fn secret_redactor_ignores_short_duplicates_and_empty_inputs() {
 }
 
 #[test]
+fn truncated_byte_redaction_removes_every_non_ascii_secret_prefix() {
+    let secret = "密钥🙂终";
+    let prefix = b"diagnostic ";
+    let redactor = SecretRedactor::from_values([secret]);
+    let mut body = prefix.to_vec();
+    body.extend_from_slice(secret.as_bytes());
+    body.extend_from_slice(b" trailing");
+
+    for secret_prefix_len in 1..=secret.len() {
+        let captured = &body[..prefix.len() + secret_prefix_len];
+        assert_eq!(
+            redactor.redact_truncated_bytes(captured),
+            "diagnostic [redacted]",
+            "secret prefix length {secret_prefix_len} must be removed before UTF-8 decoding"
+        );
+    }
+}
+
+#[test]
 fn secret_helpers_cover_boundaries_empty_values_and_passthrough_cases() {
     assert!(super::secret_like_key("API-Key"));
     assert!(!super::secret_like_key("username"));

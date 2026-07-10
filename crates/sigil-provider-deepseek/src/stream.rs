@@ -9,8 +9,13 @@ pub struct DeepSeekSseDecoder {
 }
 
 impl DeepSeekSseDecoder {
+    #[cfg(test)]
     pub fn push(&mut self, raw: &str) -> Result<Vec<DeepSeekSseFrame>> {
         self.buffer.push(raw, parse_sse_chunk)
+    }
+
+    pub fn push_bytes(&mut self, raw: &[u8]) -> Result<Vec<DeepSeekSseFrame>> {
+        self.buffer.push_bytes(raw, parse_sse_chunk)
     }
 
     pub fn finish(&mut self) -> Result<Vec<DeepSeekSseFrame>> {

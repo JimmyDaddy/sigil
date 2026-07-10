@@ -9,9 +9,10 @@ use tokio::time::{Duration, sleep};
 use tracing::{debug, warn};
 
 use sigil_kernel::{
-    CompletionRequest, ModelRequestTimeouts, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
-    timeout_provider_request, timeout_provider_stream_next,
+    CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
+    ProviderTimeoutPhase, SecretRedactor, read_provider_error_body, timeout_provider_request,
+    timeout_provider_stream_next,
 };
 
 use crate::{
@@ -192,23 +193,41 @@ impl DeepSeekProvider {
             let status = response.status();
 
             if !status.is_success() {
-                let error_body = response.text().await.unwrap_or_default();
-                let classified = classify_status(status.as_u16(), &error_body);
-                let retryable = matches!(
-                    classified,
-                    DeepSeekProviderError::RateLimited | DeepSeekProviderError::RetryableStatus(_)
-                ) || (retry_on_reasoning_400
-                    && status.as_u16() == 400
-                    && error_body.contains("reasoning_content"));
+                let status_code = status.as_u16();
+                let error_body = read_error_response_body(
+                    response,
+                    self.timeouts.request_timeout,
+                    &SecretRedactor::from_values([self.api_key()?]),
+                    self.name(),
+                    model_name,
+                    status_code,
+                )
+                .await;
+                let retryable = is_retryable_status(status_code)
+                    || (retry_on_reasoning_400
+                        && status_code == 400
+                        && error_body
+                            .as_ref()
+                            .is_ok_and(|body| body.text().contains("reasoning_content")));
                 if retryable && attempts < 2 {
-                    warn!(
-                        "retrying deepseek request after status {} body {}",
-                        status.as_u16(),
-                        error_body
-                    );
+                    match &error_body {
+                        Ok(error_body) => warn!(
+                            status = status_code,
+                            error_body_bytes = error_body.captured_bytes(),
+                            error_body_truncated = error_body.truncated(),
+                            "retrying deepseek request after retryable status"
+                        ),
+                        Err(error) => warn!(
+                            status = status_code,
+                            error = %error,
+                            "retrying deepseek request after retryable status and bounded body read failure"
+                        ),
+                    }
                     sleep(Duration::from_millis(100)).await;
                     continue;
                 }
+                let error_body = error_body?;
+                let classified = classify_status(status_code, error_body.text());
                 return Err(classified.into());
             }
 
@@ -234,8 +253,16 @@ impl DeepSeekProvider {
             .context("deepseek completion request failed")?;
         let status = response.status();
         if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(classify_status(status.as_u16(), &error_body).into());
+            let error_body = read_error_response_body(
+                response,
+                self.timeouts.request_timeout,
+                &SecretRedactor::from_values([self.api_key()?]),
+                self.name(),
+                model_name,
+                status.as_u16(),
+            )
+            .await?;
+            return Err(classify_status(status.as_u16(), error_body.text()).into());
         }
         Ok(completion_response_stream(
             response,
@@ -261,6 +288,10 @@ impl DeepSeekProvider {
             .await
             .context("failed to send DeepSeek request")
     }
+}
+
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
 }
 
 fn truncate_event_payload(payload: &str) -> String {
@@ -336,14 +367,7 @@ fn chat_response_stream(
 
             match timeout_provider_stream_next(&mut state.0, state.7, &mut state.6).await {
                 Ok(Some(Ok(bytes))) => {
-                    let raw = match String::from_utf8(bytes.to_vec()) {
-                        Ok(raw) => raw,
-                        Err(error) => {
-                            state.4 = true;
-                            return Some((Err(error).context("invalid UTF-8 SSE chunk"), state));
-                        }
-                    };
-                    match enqueue_chat_frames(&mut state.1, &mut state.2, &mut state.3, &raw) {
+                    match enqueue_chat_frames(&mut state.1, &mut state.2, &mut state.3, &bytes) {
                         Ok(done_seen) => {
                             state.5 |= done_seen;
                             if done_seen {
@@ -421,17 +445,7 @@ fn completion_response_stream(
 
             match timeout_provider_stream_next(&mut state.0, state.7, &mut state.6).await {
                 Ok(Some(Ok(bytes))) => {
-                    let raw = match String::from_utf8(bytes.to_vec()) {
-                        Ok(raw) => raw,
-                        Err(error) => {
-                            state.3 = true;
-                            return Some((
-                                Err(error).context("invalid UTF-8 completion chunk"),
-                                state,
-                            ));
-                        }
-                    };
-                    match enqueue_completion_frames(&mut state.1, &mut state.2, &raw, &state.5) {
+                    match enqueue_completion_frames(&mut state.1, &mut state.2, &bytes, &state.5) {
                         Ok(done_seen) => {
                             state.4 |= done_seen;
                             if done_seen {
@@ -480,10 +494,10 @@ fn enqueue_chat_frames(
     decoder: &mut DeepSeekSseDecoder,
     mapper: &mut StreamMapper,
     pending: &mut VecDeque<ProviderChunk>,
-    raw: &str,
+    raw: impl AsRef<[u8]>,
 ) -> Result<bool> {
     let mut done_seen = false;
-    for frame in decoder.push(raw)? {
+    for frame in decoder.push_bytes(raw.as_ref())? {
         done_seen |= enqueue_chat_frame(mapper, pending, frame)?;
     }
     Ok(done_seen)
@@ -528,17 +542,39 @@ fn enqueue_chat_frame(
 fn enqueue_completion_frames(
     decoder: &mut DeepSeekSseDecoder,
     pending: &mut VecDeque<ProviderChunk>,
-    raw: &str,
+    raw: impl AsRef<[u8]>,
     model_name: &str,
 ) -> Result<bool> {
     let mut done_seen = false;
-    for frame in decoder.push(raw)? {
+    for frame in decoder.push_bytes(raw.as_ref())? {
         done_seen |= enqueue_completion_frame(pending, frame, model_name)?;
         if done_seen {
             break;
         }
     }
     Ok(done_seen)
+}
+
+async fn read_error_response_body(
+    response: reqwest::Response,
+    timeout: Duration,
+    redactor: &SecretRedactor,
+    provider: &str,
+    model: &str,
+    status: u16,
+) -> Result<sigil_kernel::ProviderErrorBody> {
+    read_provider_error_body(
+        response.bytes_stream(),
+        timeout,
+        PROVIDER_ERROR_BODY_LIMIT_BYTES,
+        redactor,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to read {provider} error response body for model {model} with status {status}"
+        )
+    })
 }
 
 fn enqueue_finished_completion_frames(

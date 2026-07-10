@@ -6,8 +6,8 @@ use std::{
 use anyhow::Result;
 use futures::StreamExt;
 use sigil_kernel::{
-    ModelRequestTimeouts, Provider, ProviderChunk, ReasoningStreamSupport, ToolAccess, ToolCall,
-    ToolCategory, ToolPreviewCapability, ToolSpec,
+    ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderChunk,
+    ReasoningStreamSupport, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -773,6 +773,50 @@ async fn provider_retries_rate_limited_status_once() -> Result<()> {
 }
 
 #[tokio::test]
+async fn provider_retries_retryable_status_when_error_body_times_out() -> Result<()> {
+    let server = spawn_hanging_error_then_success_server(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+         data: {\"choices\":[{\"delta\":{\"content\":\"after-timeout\"},\"finish_reason\":null}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await?;
+    let provider = {
+        let _guard = crate::test_env::lock();
+        DeepSeekProvider::new(
+            crate::DeepSeekProviderConfig {
+                base_url: server.clone(),
+                beta_base_url: server.clone(),
+                anthropic_base_url: server,
+                model: "deepseek-v4-flash".to_owned(),
+                fim_model: "deepseek-v4-pro".to_owned(),
+                api_key: Some("test".to_owned()),
+                user_id_strategy: None,
+                strict_tools_mode: crate::StrictToolsMode::Auto,
+            },
+            ModelRequestTimeouts {
+                request_timeout: Duration::from_millis(200),
+                stream_idle_timeout: Duration::from_secs(1),
+                stream_total_timeout: None,
+            },
+        )?
+    };
+
+    let chunks = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(matches!(
+        chunks.as_slice(),
+        [ProviderChunk::TextDelta(text), ProviderChunk::Done] if text == "after-timeout"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_returns_invalid_request_after_reasoning_retry_is_exhausted() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
         http_response(
@@ -812,6 +856,83 @@ async fn provider_returns_invalid_request_after_reasoning_retry_is_exhausted() -
             .chain()
             .any(|cause| cause.to_string().contains("reasoning_content again"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_bounds_and_redacts_non_success_response_body() -> Result<()> {
+    let api_key = "sk-provider-secret";
+    let body = format!("token=visible {api_key} {}", "x".repeat(32 * 1024));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        400,
+        "text/plain",
+        &body,
+    )])));
+    let server = spawn_mock_server(responses).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some(api_key.to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+    })?;
+
+    let error = match provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await
+    {
+        Ok(_) => panic!("400 response should fail"),
+        Err(error) => error,
+    };
+    let root = error.root_cause().to_string();
+
+    assert!(!root.contains(api_key));
+    assert!(!root.contains("visible"));
+    assert!(root.contains("[redacted]"));
+    assert!(root.len() <= PROVIDER_ERROR_BODY_LIMIT_BYTES + 64);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_times_out_while_reading_non_success_response_body() -> Result<()> {
+    let server = spawn_hanging_error_body_server().await?;
+    let provider = {
+        let _guard = crate::test_env::lock();
+        DeepSeekProvider::new(
+            crate::DeepSeekProviderConfig {
+                base_url: server.clone(),
+                beta_base_url: server.clone(),
+                anthropic_base_url: server,
+                model: "deepseek-v4-flash".to_owned(),
+                fim_model: "deepseek-v4-pro".to_owned(),
+                api_key: Some("test".to_owned()),
+                user_id_strategy: None,
+                strict_tools_mode: crate::StrictToolsMode::Auto,
+            },
+            ModelRequestTimeouts {
+                request_timeout: Duration::from_millis(200),
+                stream_idle_timeout: Duration::from_secs(1),
+                stream_total_timeout: None,
+            },
+        )?
+    };
+
+    let error = match provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await
+    {
+        Ok(_) => panic!("hanging error body should time out"),
+        Err(error) => error,
+    };
+    let chain = format!("{error:#}");
+
+    assert!(chain.contains("failed to read deepseek error response body"));
+    assert!(chain.contains("model deepseek-v4-flash"));
+    assert!(chain.contains("status 400"));
+    assert!(chain.contains("provider error response body timed out after 200 ms"));
     Ok(())
 }
 
@@ -876,6 +997,36 @@ async fn provider_surfaces_invalid_utf8_chat_chunks() -> Result<()> {
 }
 
 #[tokio::test]
+async fn provider_decodes_multibyte_chat_text_split_across_http_chunks() -> Result<()> {
+    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"é你🙂\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
+    let server = spawn_chunked_streaming_server(multibyte_split_chunks(body)).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+    })?;
+
+    let chunks = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(matches!(
+        chunks.as_slice(),
+        [ProviderChunk::TextDelta(text), ProviderChunk::Done] if text == "é你🙂"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn fim_completion_surfaces_invalid_utf8_chunks() -> Result<()> {
     let server = spawn_invalid_utf8_completion_streaming_server().await?;
     let provider = deepseek_provider(crate::DeepSeekProviderConfig {
@@ -909,6 +1060,43 @@ async fn fim_completion_surfaces_invalid_utf8_chunks() -> Result<()> {
             .chain()
             .any(|cause| cause.to_string().to_lowercase().contains("utf-8"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fim_completion_decodes_multibyte_text_split_across_http_chunks() -> Result<()> {
+    let body =
+        "data: {\"choices\":[{\"text\":\"é你🙂\",\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
+    let server = spawn_chunked_streaming_server(multibyte_split_chunks(body)).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+    })?;
+
+    let chunks = provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(32),
+            stop: Vec::new(),
+        })
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(matches!(
+        chunks.as_slice(),
+        [ProviderChunk::TextDelta(text), ProviderChunk::Done] if text == "é你🙂"
+    ));
     Ok(())
 }
 
@@ -1363,6 +1551,77 @@ async fn spawn_malformed_chunked_streaming_server() -> Result<String> {
     Ok(format!("http://{}", address))
 }
 
+async fn spawn_chunked_streaming_server(chunks: Vec<Vec<u8>>) -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        if socket.write_all(header.as_bytes()).await.is_err() {
+            return;
+        }
+        for chunk in chunks {
+            let prefix = format!("{:x}\r\n", chunk.len());
+            if socket.write_all(prefix.as_bytes()).await.is_err()
+                || socket.write_all(&chunk).await.is_err()
+                || socket.write_all(b"\r\n").await.is_err()
+            {
+                return;
+            }
+            let _ = socket.flush().await;
+            tokio::task::yield_now().await;
+        }
+        let _ = socket.write_all(b"0\r\n\r\n").await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_hanging_error_body_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let header = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        let _ = socket.write_all(header.as_bytes()).await;
+        let _ = socket.flush().await;
+        sleep(Duration::from_secs(1)).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_hanging_error_then_success_server(success: &'static str) -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        for attempt in 0..2 {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 8192];
+                let _ = socket.read(&mut buffer).await;
+                if attempt == 0 {
+                    let header = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    sleep(Duration::from_secs(1)).await;
+                } else {
+                    let _ = socket.write_all(success.as_bytes()).await;
+                }
+            });
+        }
+    });
+    Ok(format!("http://{}", address))
+}
+
 async fn spawn_unterminated_sse_streaming_server(body: &'static str) -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -1395,4 +1654,22 @@ fn http_response(status: u16, content_type: &str, body: &str) -> Vec<u8> {
         body
     )
     .into_bytes()
+}
+
+fn multibyte_split_chunks(body: &str) -> Vec<Vec<u8>> {
+    let accented = body.find('é').expect("fixture contains two-byte character");
+    let chinese = body
+        .find('你')
+        .expect("fixture contains three-byte character");
+    let emoji = body
+        .find('🙂')
+        .expect("fixture contains four-byte character");
+    let boundaries = [accented + 1, chinese + 2, emoji + 3];
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    for end in boundaries.into_iter().chain([body.len()]) {
+        chunks.push(body.as_bytes()[start..end].to_vec());
+        start = end;
+    }
+    chunks
 }

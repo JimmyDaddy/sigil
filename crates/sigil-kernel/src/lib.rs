@@ -15,6 +15,7 @@ pub mod plan;
 pub mod plugin;
 pub mod projection;
 pub mod provider;
+pub mod provider_error;
 pub mod provider_timeout;
 pub mod resume;
 pub mod secret;
@@ -193,6 +194,9 @@ pub use provider::{
     ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
     ResponseHandle, SessionStats, ToolCall, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator,
     UsageStats,
+};
+pub use provider_error::{
+    PROVIDER_ERROR_BODY_LIMIT_BYTES, ProviderErrorBody, read_provider_error_body,
 };
 pub use provider_timeout::{
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,

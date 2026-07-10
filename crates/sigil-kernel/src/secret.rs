@@ -62,6 +62,25 @@ impl SecretRedactor {
         redact_secret_assignments(&redacted)
     }
 
+    /// Redacts bytes captured from a body that ended at a hard byte boundary.
+    ///
+    /// The trailing prefix check runs before UTF-8 decoding, so a cap inside a multi-byte secret
+    /// cannot turn the final character into a replacement marker and bypass known-value redaction.
+    #[must_use]
+    pub fn redact_truncated_bytes(&self, bytes: &[u8]) -> String {
+        for secret in &self.secrets {
+            let secret = secret.as_bytes();
+            for prefix_len in (1..=secret.len()).rev() {
+                if bytes.ends_with(&secret[..prefix_len]) {
+                    let mut redacted = bytes[..bytes.len() - prefix_len].to_vec();
+                    redacted.extend_from_slice(REDACTED_SECRET.as_bytes());
+                    return self.redact_text(&String::from_utf8_lossy(&redacted));
+                }
+            }
+        }
+        self.redact_text(&String::from_utf8_lossy(bytes))
+    }
+
     #[must_use]
     pub fn redact_value(&self, value: &Value) -> Value {
         match value {

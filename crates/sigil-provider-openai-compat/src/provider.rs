@@ -6,9 +6,10 @@ use futures::{Stream, stream};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 
 use sigil_kernel::{
-    CompletionRequest, ModelRequestTimeouts, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
-    timeout_provider_request, timeout_provider_stream_next,
+    CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
+    ProviderTimeoutPhase, SecretRedactor, read_provider_error_body, timeout_provider_request,
+    timeout_provider_stream_next,
 };
 
 use crate::{
@@ -101,22 +102,28 @@ impl Provider for OpenAiCompatibleProvider {
                     self.timeouts,
                 ));
             }
-            let error_body = response.text().await.unwrap_or_default();
-            let error = classify_status(status.as_u16(), &error_body);
-            if attempt < OPENAI_COMPAT_MAX_ATTEMPTS && is_retryable_status(&error) {
+            let status_code = status.as_u16();
+            let error_body = read_error_response_body(
+                response,
+                self.timeouts.request_timeout,
+                &SecretRedactor::from_values([self.api_key()?]),
+                self.name(),
+                &request.model_name,
+                status_code,
+            )
+            .await;
+            if attempt < OPENAI_COMPAT_MAX_ATTEMPTS && is_retryable_status(status_code) {
                 continue;
             }
+            let error_body = error_body?;
+            let error = classify_status(status_code, error_body.text());
             return Err(error.into());
         }
     }
 }
 
-fn is_retryable_status(error: &OpenAiCompatibleProviderError) -> bool {
-    matches!(
-        error,
-        OpenAiCompatibleProviderError::RateLimited
-            | OpenAiCompatibleProviderError::RetryableStatus(_)
-    )
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
 }
 
 impl OpenAiCompatibleProvider {
@@ -193,14 +200,7 @@ fn response_stream(
 
             match timeout_provider_stream_next(&mut state.0, state.7, &mut state.6).await {
                 Ok(Some(Ok(bytes))) => {
-                    let raw = match String::from_utf8(bytes.to_vec()) {
-                        Ok(raw) => raw,
-                        Err(error) => {
-                            state.4 = true;
-                            return Some((Err(error).context("invalid UTF-8 SSE chunk"), state));
-                        }
-                    };
-                    match enqueue_frames(&mut state.1, &mut state.2, &mut state.3, &raw) {
+                    match enqueue_frames(&mut state.1, &mut state.2, &mut state.3, &bytes) {
                         Ok(done_seen) => {
                             state.5 |= done_seen;
                             if done_seen {
@@ -280,10 +280,32 @@ fn enqueue_frames(
     decoder: &mut OpenAiSseDecoder,
     mapper: &mut StreamMapper,
     pending: &mut VecDeque<ProviderChunk>,
-    raw: &str,
+    raw: impl AsRef<[u8]>,
 ) -> Result<bool> {
-    let frames = decoder.push(raw)?;
+    let frames = decoder.push_bytes(raw.as_ref())?;
     enqueue_decoded_frames(mapper, pending, frames)
+}
+
+async fn read_error_response_body(
+    response: reqwest::Response,
+    timeout: Duration,
+    redactor: &SecretRedactor,
+    provider: &str,
+    model: &str,
+    status: u16,
+) -> Result<sigil_kernel::ProviderErrorBody> {
+    read_provider_error_body(
+        response.bytes_stream(),
+        timeout,
+        PROVIDER_ERROR_BODY_LIMIT_BYTES,
+        redactor,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to read {provider} error response body for model {model} with status {status}"
+        )
+    })
 }
 
 fn enqueue_finished_frames(
