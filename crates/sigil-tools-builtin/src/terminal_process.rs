@@ -2,11 +2,12 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     io::{Read, Write},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
     thread::JoinHandle as ThreadJoinHandle,
@@ -18,10 +19,11 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_s
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
-    ExecutionRequest, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, terminal_cleanup_receipt_for_status,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupReceipt,
+    ExecutionConfig, ExecutionRequest, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
+    TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, terminal_cleanup_receipt_for_status,
 };
 use tokio::{
     fs::{self, File, OpenOptions},
@@ -32,6 +34,7 @@ use tokio::{
     time::{Duration, sleep, timeout},
 };
 
+use crate::constants::HARD_TERMINAL_READ_LIMIT_BYTES;
 use crate::execution_backends::{
     LinuxBubblewrapExecutionBackend, MacosSeatbeltExecutionBackend,
     ensure_linux_bubblewrap_available, ensure_macos_seatbelt_available, find_executable_on_path,
@@ -48,17 +51,17 @@ mod worker; // process/PTY worker loops, cancellation, and finalization.
 use config::{
     DEFAULT_CANCEL_GRACE_MS, DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES, PTY_CANCEL_POLL_INTERVAL_MS,
     TERMINAL_PTY_INPUT_QUEUE_BOUND, TERMINAL_TASK_META_FILE, TERMINAL_TASK_OUTPUT_FILE,
-    TERMINAL_TASK_STDERR_FILE, TERMINAL_TASK_STDOUT_FILE, TerminalPtyCommandSpec,
-    TerminalPtyExecution,
+    TERMINAL_TASK_STDERR_FILE, TERMINAL_TASK_STDOUT_FILE, TerminalArtifactLimits,
+    TerminalPtyCommandSpec, TerminalPtyExecution,
 };
 use cwd::{
     ResolvedTerminalCwd, absolute_path_from, canonical_workspace_root, lexically_normalize_path,
     resolve_existing_prefix, resolve_terminal_cwd,
 };
 use io::{
-    configure_process_group, create_empty_log_files, join_capture_task, join_pty_read_thread,
-    open_append_file, spawn_capture_task, spawn_pty_input_thread, spawn_pty_read_thread,
-    write_task_meta,
+    CombinedOutputWriter, TerminalCaptureFailure, TerminalCaptureLedger, TerminalOutputStream,
+    configure_process_group, create_empty_log_files, join_pty_read_thread, open_append_file,
+    spawn_capture_task, spawn_pty_input_thread, spawn_pty_read_thread, write_task_meta,
 };
 use manager::{CancelCommand, TerminalTaskStartPlan};
 use output::{LogSummary, current_epoch_ms, read_terminal_output_log, summarize_log};
@@ -67,12 +70,13 @@ use worker::{
     spawn_pty_runtime,
 };
 
+const TERMINAL_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+const TERMINAL_CLEANUP_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
+
 #[cfg(test)]
 use io::{capture_pty_reader, capture_stream, is_pty_eof_error};
 #[cfg(test)]
 use manager::{ManagedTerminalTask, TerminalTaskControl};
-#[cfg(test)]
-use output::limit_output_bytes;
 #[cfg(test)]
 use worker::{
     PtyWaitOutcome, cancel_child, finalize_terminal_task, send_terminate_signal,

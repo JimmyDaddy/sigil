@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,20 +18,23 @@ use sigil_kernel::{
     McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, MutationEventRecorder,
     ProcessEnvironmentPolicy, ProviderCapabilities, ResolvedProcessEnvironment, SecretRedactor,
     Tool, ToolAccess, ToolCategory, ToolContext, ToolEffect, ToolEgressAudit, ToolErrorKind,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
+    ToolLifecycleOwner, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, BufReader},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::Mutex,
     task::JoinHandle,
 };
 use tracing::warn;
+use uuid::Uuid;
 
 mod client; // JSON-RPC connection state and request/response flow.
 mod elicitation; // client-mediated elicitation request/response mapping.
+mod error; // typed connection, framing, and deadline failures.
 mod events; // runtime progress and list-change event shapes.
+mod framing; // bounded newline-delimited JSON stdio framing.
 mod lifecycle; // server startup, activation, and registry reporting.
 mod name; // provider-visible MCP tool name normalization.
 mod output; // bounded MCP tool output and egress summaries.
@@ -42,14 +46,34 @@ mod tools; // remote tool adapter and command fingerprinting.
 
 const DEFAULT_PROVIDER_TOOL_NAME_MAX_CHARS: usize = 64;
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-const MCP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+// Keep MCP ToolResult content at or below the kernel's model-visible content ceiling. Truncation
+// is carried only in structured metadata, so no post-redaction free-text marker is introduced.
+const MCP_OUTPUT_LIMIT_BYTES: usize = 32 * 1024;
 const MCP_OUTPUT_LIMIT_LINES: usize = 2_000;
+const DEFAULT_MCP_OPERATION_TIMEOUT_SECS: u64 = 30;
+const MAX_MCP_OPERATION_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+const MCP_OPERATION_MESSAGE_LIMIT: usize = 256;
+const MCP_OPERATION_CUMULATIVE_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 
-use client::{McpClient, McpServerObservedIdentity};
+use client::{McpClient, McpOperationDeadline, McpServerObservedIdentity};
 use elicitation::mcp_elicitation_request;
+use error::{McpCleanupEvidence, McpClientError, McpTerminalCause};
 use events::{mcp_list_changed_kind, mcp_progress_notification};
-use output::{bounded_mcp_tool_result, summarize_egress_json};
-use process::drain_mcp_stderr;
+#[cfg(test)]
+use framing::read_ndjson_message;
+use framing::{
+    McpFrame, McpFramingError, read_ndjson_message_with_wire_limit, write_ndjson_message,
+};
+use output::{
+    bounded_mcp_destination, bounded_mcp_identity_projection, bounded_mcp_json,
+    bounded_mcp_metadata_text, bounded_mcp_protocol_error, bounded_mcp_text,
+    bounded_mcp_text_segments, bounded_mcp_tool_result, secret_safe_mcp_metadata,
+    summarize_egress_json,
+};
+use process::{
+    McpProcessCleanupSummary, McpStderrFault, McpStderrSummary, drain_mcp_stderr,
+    terminate_mcp_process,
+};
 use prompts::{McpPromptTool, McpPromptToolKind};
 use resources::{McpResourceTool, McpResourceToolKind};
 use roots::{canonical_root, file_uri, root_name};
@@ -78,8 +102,9 @@ pub use events::{
     McpRuntimeEventHandler, unsupported_mcp_runtime_event_handler,
 };
 pub use lifecycle::{
-    McpToolRegistrationOptions, McpToolRegistrationReport, activate_lazy_mcp_tools,
-    register_mcp_tools, register_mcp_tools_with_options, register_mcp_tools_with_report,
+    MCP_TOOL_LIFECYCLE_NAMESPACE, McpToolRegistrationOptions, McpToolRegistrationReport,
+    activate_lazy_mcp_tools, register_mcp_tools, register_mcp_tools_with_options,
+    register_mcp_tools_with_report,
 };
 pub use name::{McpToolName, mcp_provider_tool_name_prefix};
 pub use process::{

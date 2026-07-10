@@ -819,6 +819,8 @@ pub enum ToolErrorKind {
     ExternalDirectoryRequired,
     NotFound,
     Timeout,
+    /// Execution exceeded a bounded runtime resource such as captured output.
+    ResourceLimit,
     Interrupted,
     ExitStatus,
     Io,
@@ -840,6 +842,7 @@ impl ToolErrorKind {
             Self::ExternalDirectoryRequired => "external_directory_required",
             Self::NotFound => "not_found",
             Self::Timeout => "timeout",
+            Self::ResourceLimit => "resource_limit",
             Self::Interrupted => "interrupted",
             Self::ExitStatus => "exit_status",
             Self::Io => "io",
@@ -1324,10 +1327,79 @@ fn value_is_empty(value: &Value) -> bool {
     }
 }
 
+/// Exact provider-neutral identity for resources owned by one registered tool lifecycle.
+///
+/// The namespace identifies the owning subsystem, `scope` retains its exact resource identity, and
+/// `generation` distinguishes concurrent or replacement lifecycles inside that scope.
+/// Provider-visible tool names must not be used as lifecycle identities because they may be
+/// sanitized, truncated, or hashed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ToolLifecycleOwner {
+    namespace: String,
+    scope: String,
+    generation: String,
+}
+
+impl ToolLifecycleOwner {
+    #[must_use]
+    pub fn new(
+        namespace: impl Into<String>,
+        scope: impl Into<String>,
+        generation: impl Into<String>,
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            scope: scope.into(),
+            generation: generation.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+
+    #[must_use]
+    pub fn belongs_to(&self, namespace: &str, scope: &str) -> bool {
+        self.namespace == namespace && self.scope == scope
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Returns the tool's stable contract and JSON Schema surface.
     fn spec(&self) -> ToolSpec;
+
+    /// Shuts down lifecycle resources owned by this registered tool generation.
+    ///
+    /// Stateless tools use the default no-op. Long-lived process or transport tools override this
+    /// hook so registry replacement can prove the retired generation has stopped before reporting
+    /// success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when owned lifecycle resources cannot be shut down completely.
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Returns the exact lifecycle owner for long-lived resources held by this tool.
+    ///
+    /// Stateless tools return `None`. All tools backed by the same process or transport generation
+    /// return the same lossless owner so registry replacement can retire them atomically.
+    fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
+        None
+    }
 
     /// Returns stable permission subjects for one tool call.
     ///
@@ -1516,6 +1588,42 @@ impl ToolRegistry {
         names
             .into_iter()
             .filter_map(|name| tools.remove(&name))
+            .collect()
+    }
+
+    /// Removes and returns tools belonging to one exact, opaque lifecycle owner.
+    pub fn drain_by_lifecycle_owner(&mut self, owner: &ToolLifecycleOwner) -> Vec<Arc<dyn Tool>> {
+        let mut tools = match self.tools.write() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let names = tools
+            .iter()
+            .filter(|(_, tool)| tool.lifecycle_owner().as_ref() == Some(owner))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        names
+            .into_iter()
+            .filter_map(|name| tools.remove(&name))
+            .collect()
+    }
+
+    /// Returns distinct lifecycle generations registered for one exact opaque scope.
+    pub fn lifecycle_owners_by_scope(
+        &self,
+        namespace: &str,
+        scope: &str,
+    ) -> Vec<ToolLifecycleOwner> {
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools
+            .values()
+            .filter_map(|tool| tool.lifecycle_owner())
+            .filter(|owner| owner.belongs_to(namespace, scope))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 

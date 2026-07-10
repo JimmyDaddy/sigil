@@ -119,16 +119,17 @@ pub use event::{
     stable_event_uuid,
 };
 pub use execution_backend::{
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
-    ExecutionBackendSelectionDecision, ExecutionBackendSelectionDiagnostic, ExecutionCapability,
-    ExecutionCapabilityRequirements, ExecutionCleanupReceipt, ExecutionCleanupStatus,
-    ExecutionConfig, ExecutionCoverageLabel, ExecutionCoverageSummary, ExecutionFuture,
-    ExecutionIsolationPolicy, ExecutionNetworkPolicy, ExecutionNetworkReceipt, ExecutionReceipt,
-    ExecutionRequest, ExecutionResourceLimitKind, ExecutionResourceLimitReceipt,
-    ExecutionResourceReceipt, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    ExecutionSandboxProfileSpec, ExecutionSandboxStrategyConfig, ExecutionStrategyConfig,
-    ExecutionStrategyMode, ExecutionTimeoutSource, validate_extension_process_isolation,
-    validate_extension_process_network_receipt,
+    EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION, ExecutionBackend, ExecutionBackendCapabilities,
+    ExecutionBackendKind, ExecutionBackendSelectionDecision, ExecutionBackendSelectionDiagnostic,
+    ExecutionCapability, ExecutionCapabilityRequirements, ExecutionCleanupReceipt,
+    ExecutionCleanupStatus, ExecutionConfig, ExecutionCoverageLabel, ExecutionCoverageSummary,
+    ExecutionFuture, ExecutionIsolationPolicy, ExecutionNetworkPolicy, ExecutionNetworkReceipt,
+    ExecutionOutputReceipt, ExecutionOutputStream, ExecutionReceipt, ExecutionRequest,
+    ExecutionResourceLimitKind, ExecutionResourceLimitReceipt, ExecutionResourceReceipt,
+    ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxProfileSpec,
+    ExecutionSandboxStrategyConfig, ExecutionStrategyConfig, ExecutionStrategyMode,
+    ExecutionStreamCapture, ExecutionTerminationCause, ExecutionTimeoutSource,
+    validate_extension_process_isolation, validate_extension_process_network_receipt,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
@@ -256,18 +257,19 @@ pub use task_orchestrator::{
     decode_changeset_only_child_output, validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus,
-    TerminalTaskSummary, terminal_cleanup_receipt_for_status,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
+    TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskProjection, TerminalTaskStatus, TerminalTaskSummary,
+    terminal_cleanup_receipt_for_status,
 };
 pub use time::saturating_elapsed;
 pub use tool::{
     ScopedToolRegistry, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats,
-    ToolEgressAudit, ToolError, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolProgressEvent,
-    ToolProgressSink, ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolResultStatus,
-    ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    ToolEgressAudit, ToolError, ToolErrorKind, ToolExecutionId, ToolLifecycleOwner, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolPreviewFileSnapshot, ToolPreviewSnapshot,
+    ToolProgressEvent, ToolProgressSink, ToolReceiptMetadata, ToolReceiptReplayDecision,
+    ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
+    ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };
 pub use verification::{
     ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,

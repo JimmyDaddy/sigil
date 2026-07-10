@@ -10,8 +10,8 @@ use sigil_kernel::{
     ApprovalMode, DurableEventType, ExtensionProcessLaunchPhase, ExtensionProcessLifecycleAudit,
     ExtensionProcessLifecycleStatus, JsonlSessionStore, McpServerConfig, McpServerStartup,
     McpServerTrustPolicy, McpTrustClass, MutationEventRecorder, ProviderCapabilities,
-    ReasoningStreamSupport, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
-    ToolRegistry, ToolResultStatus, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    ReasoningStreamSupport, SecretRedactor, SecretString, ToolAccess, ToolCategory, ToolContext,
+    ToolErrorKind, ToolRegistry, ToolResultStatus, ToolSubject, ToolSubjectKind, ToolSubjectScope,
     WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
 };
 use tokio::{
@@ -163,6 +163,24 @@ fn write_fake_server_script(path: &std::path::Path, body: &str) -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn registration_rejects_duplicate_exact_server_names_before_launch() -> Result<()> {
+    let duplicate = McpServerConfig {
+        name: "duplicate".to_owned(),
+        command: "/must/not/be/launched".to_owned(),
+        ..McpServerConfig::default()
+    };
+    let mut registry = ToolRegistry::new();
+
+    let error = register_mcp_tools(&mut registry, &[duplicate.clone(), duplicate])
+        .await
+        .expect_err("duplicate exact MCP server names must fail before process launch");
+
+    assert!(error.to_string().contains("duplicate MCP server name"));
+    assert!(registry.specs().is_empty());
+    Ok(())
+}
+
 fn write_identity_server_script(
     path: &std::path::Path,
     server_name: &str,
@@ -176,23 +194,14 @@ SERVER_NAME = {server_name:?}
 SERVER_VERSION = {server_version:?}
 
 def read_message():
-    headers = {{}}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {{len(body)}}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -477,22 +486,14 @@ SECRET = os.environ["HOME"]
 MARKER = pathlib.Path(sys.argv[1])
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    return json.loads(sys.stdin.buffer.read(length).decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -637,21 +638,14 @@ import json, os, sys
 SECRET = os.environ["HOME"]
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])).decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -660,7 +654,7 @@ while True:
         break
     method = message.get("method")
     if method == "initialize":
-        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"version-fixture","version":"1.0.0"}}})
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
@@ -710,11 +704,25 @@ async fn stale_environment_binding_rejects_inbound_notification_before_handler()
         None,
     )
     .await?;
-    client._process_receipt.environment_live_fingerprint = "hmac-sha256:stale".to_owned();
-    let mut connection = client.connection.lock().await;
+    let monitor = client
+        ._stderr_monitor_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("spawn should start the stderr fault monitor");
+    monitor.abort();
+    let _ = monitor.await;
+    Arc::get_mut(&mut client)
+        .expect("aborted monitor should release its weak client reference")
+        ._process_receipt
+        .environment_live_fingerprint = "hmac-sha256:stale".to_owned();
+    let mut state = client.connection.lock().await;
+    let super::client::McpConnectionState::Ready(connection) = &mut *state else {
+        panic!("newly spawned client should be ready");
+    };
     let error = client
         .handle_inbound_message(
-            &mut connection,
+            connection,
             &json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/progress",
@@ -743,23 +751,14 @@ async fn registers_and_calls_fake_stdio_tool() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -905,23 +904,14 @@ async fn registration_with_mutation_recorder_does_not_dirty_clean_startup() -> R
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -990,6 +980,80 @@ while True:
 }
 
 #[tokio::test]
+async fn strict_zero_surface_registration_records_failure_not_registered() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let script = temp.path().join("zero_surface_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        break
+    message = json.loads(line.decode())
+    method = message.get("method")
+    if method == "initialize":
+        response = {"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}}
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        response = {"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}}
+    else:
+        continue
+    sys.stdout.buffer.write(json.dumps(response).encode() + b"\n")
+    sys.stdout.buffer.flush()
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_options(
+        &mut registry,
+        &[McpServerConfig {
+            name: "zero-surface".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().into_owned()],
+            startup_timeout_secs: 5,
+            required: false,
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_strict_registration()
+            .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone())),
+    )
+    .await
+    .expect_err("strict registration must reject a server with no callable surfaces");
+
+    assert!(registry.specs().is_empty());
+    let lifecycle = JsonlSessionStore::read_event_records(session_store.path())?
+        .into_iter()
+        .map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event) => event,
+        })
+        .filter(|event| {
+            event.event_type == DurableEventType::ExtensionProcessLifecycleRecorded.as_str()
+        })
+        .map(|event| serde_json::from_value::<ExtensionProcessLifecycleAudit>(event.payload))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(lifecycle[0].subject, "zero-surface");
+    assert_eq!(lifecycle[0].phase, ExtensionProcessLaunchPhase::PostSpawn);
+    assert_eq!(
+        lifecycle[0].status,
+        ExtensionProcessLifecycleStatus::StartupFailed
+    );
+    assert_eq!(
+        lifecycle[0].safe_metadata["mcp_startup_result"],
+        "zero_surface"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcp_lifecycle_mutation_failure_adds_server_context() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -1010,6 +1074,86 @@ async fn mcp_lifecycle_mutation_failure_adds_server_context() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn post_spawn_lifecycle_append_failure_reaps_mcp_process_group() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store_path = temp.path().join("post-spawn-session.jsonl");
+    let descendant_pid_path = temp.path().join("post-spawn-descendant.pid");
+    let script = temp.path().join("post_spawn_lifecycle_failure.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, pathlib, subprocess, sys
+STORE_PATH = pathlib.Path(sys.argv[1])
+PID_PATH = pathlib.Path(sys.argv[2])
+child = subprocess.Popen(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"])
+PID_PATH.write_text(str(child.pid))
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
+def write_message(message):
+    sys.stdout.buffer.write(json.dumps(message).encode() + b"\n")
+    sys.stdout.buffer.flush()
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        STORE_PATH.mkdir()
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+    let session_store = JsonlSessionStore::new(&store_path)?;
+    let options = McpToolRegistrationOptions::eager()?
+        .with_working_dir(temp.path().to_path_buf())
+        .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone()));
+    let error = register_mcp_tools_with_options(
+        &mut ToolRegistry::new(),
+        &[McpServerConfig {
+            name: "post-spawn-audit-failure".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![
+                script.to_string_lossy().into_owned(),
+                store_path.to_string_lossy().into_owned(),
+                descendant_pid_path.to_string_lossy().into_owned(),
+            ],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        options,
+    )
+    .await
+    .expect_err("post-spawn lifecycle append failure must fail registration");
+    let error_text = format!("{error:#}");
+    assert!(error_text.contains("lifecycle evidence failed after spawn"));
+    assert!(error_text.contains("cleanup_completed=true"));
+
+    let descendant_pid = fs::read_to_string(descendant_pid_path)?
+        .trim()
+        .parse::<u32>()?;
+    let status = Command::new("kill")
+        .args(["-0", &descendant_pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await?;
+    assert!(
+        !status.success(),
+        "post-spawn lifecycle append failure must not orphan descendants"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn mcp_initialize_uses_crate_version_for_client_info() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -1023,23 +1167,14 @@ import json, sys
 PARAMS_PATH = sys.argv[1]
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1054,7 +1189,7 @@ while True:
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
-        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"probe","description":"Probe","inputSchema":{"type":"object"}}]}})
 "#,
     )?;
 
@@ -1266,23 +1401,14 @@ if os.path.realpath(os.getcwd()) != expected_cwd:
     sys.exit(2)
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1332,23 +1458,14 @@ async fn mcp_resources_register_and_execute_when_server_declares_capability() ->
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1508,23 +1625,14 @@ async fn mcp_resource_tools_validate_arguments_and_missing_results() -> Result<(
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1614,9 +1722,12 @@ while True:
                 args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
             },
         )
-        .await
-        .expect_err("missing resource result should bubble up");
-    assert!(missing_result.to_string().contains("missing result"));
+        .await?;
+    let ToolResultStatus::Error(error) = missing_result.status else {
+        panic!("missing resource result must be a structured protocol error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Protocol);
+    assert_eq!(error.details["mcp"]["code"], "invalid_jsonrpc_envelope");
     Ok(())
 }
 
@@ -1630,23 +1741,14 @@ async fn mcp_resource_read_blocks_secret_uri_when_trust_disallows_secrets() -> R
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1731,23 +1833,14 @@ async fn registers_and_calls_mcp_prompt_surface_tools() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1961,23 +2054,14 @@ async fn mcp_prompt_tools_validate_arguments_and_block_secret_values() -> Result
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -2067,23 +2151,14 @@ async fn mcp_prompt_tools_surface_protocol_errors_and_missing_results() -> Resul
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -2167,9 +2242,12 @@ while True:
                 args_json: r#"{"name":"missing"}"#.to_owned(),
             },
         )
-        .await
-        .expect_err("missing prompt result should bubble up");
-    assert!(missing_result.to_string().contains("missing result"));
+        .await?;
+    let ToolResultStatus::Error(error) = missing_result.status else {
+        panic!("missing prompt result must be a structured protocol error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Protocol);
+    assert_eq!(error.details["mcp"]["code"], "invalid_jsonrpc_envelope");
     Ok(())
 }
 
@@ -2179,7 +2257,18 @@ fn mcp_text_budget_truncates_by_lines_and_utf8_boundaries() {
     assert!(by_lines.truncated);
     assert_eq!(by_lines.total_lines, 3);
     assert_eq!(by_lines.returned_lines, 2);
-    assert!(by_lines.content.contains("[MCP output truncated]"));
+    assert_eq!(by_lines.content, "one\ntwo\n");
+    assert_eq!(
+        by_lines.returned_bytes + by_lines.omitted_bytes,
+        by_lines.total_bytes
+    );
+    assert!(!by_lines.content.contains("MCP output truncated"));
+
+    let by_bytes = super::truncate_text_budget("abcdef", 4, 10);
+    assert_eq!(by_bytes.content, "abcd");
+    assert_eq!(by_bytes.returned_bytes, 4);
+    assert_eq!(by_bytes.omitted_bytes, 2);
+    assert_eq!(by_bytes.returned_bytes + by_bytes.omitted_bytes, 6);
 
     let mut utf8 = String::new();
     super::append_utf8_prefix(&mut utf8, "éx", 1);
@@ -2187,6 +2276,105 @@ fn mcp_text_budget_truncates_by_lines_and_utf8_boundaries() {
     super::append_utf8_prefix(&mut utf8, "éx", 2);
     assert_eq!(utf8, "é");
     assert_eq!(super::to_u64(7), 7);
+}
+
+#[test]
+fn bounded_mcp_json_streams_large_deep_values_and_preserves_small_pretty_output() -> Result<()> {
+    let small = super::bounded_mcp_json(&SecretRedactor::empty(), &json!({"answer": 42}))?;
+    assert_eq!(small.content, "{\n  \"answer\": 42\n}");
+
+    let mut deep = json!({"payload": "x".repeat(128 * 1024)});
+    for _ in 0..64 {
+        deep = json!([deep]);
+    }
+    let compact_bytes = serde_json::to_vec(&deep)?.len();
+    let bounded = super::bounded_mcp_json(&SecretRedactor::empty(), &deep)?;
+
+    assert!(bounded.truncated);
+    assert_eq!(bounded.total_bytes, compact_bytes);
+    assert_eq!(
+        bounded.returned_bytes + bounded.omitted_bytes,
+        bounded.total_bytes
+    );
+    assert!(bounded.content.len() <= super::MCP_OUTPUT_LIMIT_BYTES);
+    assert!(!bounded.content.contains("MCP output truncated"));
+    Ok(())
+}
+
+#[test]
+fn bounded_mcp_json_redacts_secrets_before_json_escaping() -> Result<()> {
+    let secret = "line-one\n\"quoted-secret\"";
+    let redactor = SecretRedactor::from_values([secret]);
+    let escaped = serde_json::to_string(secret)?;
+
+    let bounded = super::bounded_mcp_json(&redactor, &json!({"value": secret}))?;
+
+    assert!(!bounded.content.contains(secret));
+    assert!(!bounded.content.contains(&escaped[1..escaped.len() - 1]));
+    assert!(bounded.content.contains("[redacted]"));
+    Ok(())
+}
+
+#[test]
+fn bounded_mcp_output_never_adds_a_secret_bearing_truncation_marker() {
+    let mut redactor = SecretRedactor::empty();
+    redactor.add_secret_carrier(SecretString::new("MCP"));
+
+    let bounded = super::bounded_mcp_text(&redactor, &"x".repeat(64 * 1024));
+    assert!(bounded.content.len() <= super::MCP_OUTPUT_LIMIT_BYTES);
+    assert!(!bounded.content.contains("MCP"));
+
+    let protocol = super::bounded_mcp_protocol_error(
+        &redactor,
+        &json!({"code": -32000, "message": "ordinary remote failure"}),
+        "MCP tools/call failed",
+    );
+    assert!(!protocol.summary.contains("MCP"));
+}
+
+#[test]
+fn mcp_output_metadata_bounds_remote_names_and_identity_arrays() {
+    let redactor = SecretRedactor::empty();
+    let long = "x".repeat(1024 * 1024);
+    let identity = super::McpServerObservedIdentity {
+        command_fingerprint: long.clone(),
+        environment_grant_names: (0..1_000)
+            .map(|index| format!("{}-{index}", "G".repeat(256)))
+            .collect(),
+        environment_static_fingerprint: long.clone(),
+        environment_live_fingerprint: long.clone(),
+        protocol_version: long.clone(),
+        server_name: long.clone(),
+        server_version: long.clone(),
+    };
+    let tool_name = super::McpToolName {
+        provider_name: "mcp__bounded__tool".to_owned(),
+        server_name: long.clone(),
+        original_name: long,
+    };
+    let budget = super::bounded_mcp_text(&redactor, "ok");
+    let (_, metadata) = super::bounded_mcp_tool_result(
+        &redactor,
+        &tool_name,
+        &McpServerTrustPolicy::default(),
+        &identity,
+        "tool",
+        "tools/call",
+        budget,
+    );
+    let encoded = serde_json::to_vec(&metadata.details).expect("metadata should serialize");
+
+    assert!(encoded.len() < 32 * 1024);
+    assert_eq!(metadata.details["mcp"]["server"], "");
+    assert_eq!(metadata.details["mcp"]["tool"], "");
+    assert_eq!(
+        metadata.details["mcp"]["server_identity"]["environment_grant_name_count"],
+        1_000
+    );
+    assert_eq!(
+        metadata.details["mcp"]["server_identity"]["environment_grant_names_omitted"],
+        1_000
+    );
 }
 
 #[tokio::test]
@@ -2199,23 +2387,14 @@ async fn mcp_tool_output_is_bounded_and_reports_truncation_metadata() -> Result<
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -2259,10 +2438,13 @@ while True:
         .await?;
 
     assert!(result.metadata.truncated);
-    assert_eq!(result.metadata.limit_bytes, Some(64 * 1024));
+    assert_eq!(
+        result.metadata.limit_bytes,
+        Some(super::MCP_OUTPUT_LIMIT_BYTES as u64)
+    );
     assert_eq!(result.metadata.details["mcp"]["tool"], "large");
     assert_eq!(result.metadata.details["mcp"]["operation"], "tools/call");
-    assert!(result.content.len() <= 64 * 1024);
+    assert!(result.content.len() <= super::MCP_OUTPUT_LIMIT_BYTES);
     Ok(())
 }
 
@@ -2282,23 +2464,14 @@ import json, os, sys
 SECRET = os.environ["HOME"]
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -2785,23 +2958,14 @@ async fn mcp_tool_blocks_secret_args_when_trust_disallows_secrets() -> Result<()
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -2892,6 +3056,25 @@ fn mcp_egress_json_summary_does_not_include_values() {
     assert!(!rendered.contains("src/main.rs"));
 }
 
+#[test]
+fn mcp_egress_json_summary_bounds_field_names_and_counts_without_copying_values() {
+    let mut object = serde_json::Map::new();
+    for index in 0..1_000 {
+        object.insert(format!("field_{index:04}"), json!("v".repeat(128)));
+    }
+    object.insert("L".repeat(1024 * 1024), json!("must-not-be-copied"));
+
+    let summary = super::summarize_egress_json(&Value::Object(object));
+    let encoded = serde_json::to_vec(&summary).expect("summary should serialize");
+
+    assert_eq!(summary["top_level_key_count"], 1_001);
+    assert_eq!(summary["top_level_keys"].as_array().map_or(0, Vec::len), 64);
+    assert_eq!(summary["omitted_top_level_keys"], 937);
+    assert_eq!(summary["truncated"], true);
+    assert!(encoded.len() < 32 * 1024);
+    assert!(!String::from_utf8_lossy(&encoded).contains("must-not-be-copied"));
+}
+
 #[tokio::test]
 async fn mcp_tool_redacts_secret_echo_when_trust_allows_secrets() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -2902,23 +3085,14 @@ async fn mcp_tool_redacts_secret_echo_when_trust_allows_secrets() -> Result<()> 
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -2984,18 +3158,10 @@ async fn register_mcp_tools_errors_when_initialize_times_out() -> Result<()> {
 import json, sys, time
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 message = read_message()
 time.sleep(2)
@@ -3021,7 +3187,7 @@ if message and message.get("method") == "initialize":
     assert!(
         error
             .to_string()
-            .contains("MCP server slow initialize timed out")
+            .contains("MCP operation initialize timed out")
     );
     Ok(())
 }
@@ -3091,23 +3257,14 @@ async fn lazy_mcp_server_activation_registers_and_calls_real_tools() -> Result<(
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3188,23 +3345,14 @@ async fn optional_eager_mcp_server_start_failure_does_not_block_other_servers() 
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3260,23 +3408,14 @@ sys.stderr.write("x" * (256 * 1024))
 sys.stderr.flush()
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3322,23 +3461,14 @@ async fn register_mcp_tools_errors_when_tools_list_payload_is_invalid() -> Resul
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3387,23 +3517,14 @@ async fn mcp_tool_execute_surfaces_remote_call_errors() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3464,23 +3585,14 @@ async fn mcp_tool_execute_falls_back_for_non_text_content() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3540,23 +3652,14 @@ async fn mcp_client_answers_roots_list_while_waiting_for_tools_list() -> Result<
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3618,23 +3721,14 @@ async fn mcp_roots_list_blocks_secret_when_trust_disallows_secrets() -> Result<(
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3692,23 +3786,14 @@ async fn mcp_client_rejects_elicitation_requests_without_hanging() -> Result<()>
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3787,23 +3872,14 @@ import json, os, sys
 SECRET = os.environ["HOME"]
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -3864,23 +3940,14 @@ async fn mcp_provider_visible_names_are_sanitized_truncated_and_unique() -> Resu
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 tools = [
@@ -3957,23 +4024,14 @@ async fn same_tool_names_from_different_mcp_servers_stay_isolated() -> Result<()
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4028,23 +4086,14 @@ async fn capability_and_lazy_wrapper_apis_register_expected_tools() -> Result<()
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4351,23 +4400,14 @@ async fn mcp_tool_without_description_uses_default_description() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4414,23 +4454,14 @@ async fn optional_mcp_server_tools_list_failure_is_skipped() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4495,23 +4526,14 @@ async fn mcp_tool_execute_errors_when_call_result_is_missing() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4543,7 +4565,7 @@ while True:
     )
     .await?;
 
-    let error = registry
+    let result = registry
         .execute(
             ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
@@ -4552,9 +4574,12 @@ while True:
                 args_json: "{}".to_owned(),
             },
         )
-        .await
-        .expect_err("missing result payload should bubble up");
-    assert!(error.to_string().contains("missing result"));
+        .await?;
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("missing result payload must be a structured protocol error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Protocol);
+    assert_eq!(error.details["mcp"]["code"], "invalid_jsonrpc_envelope");
     Ok(())
 }
 
@@ -4568,23 +4593,14 @@ async fn mcp_tool_execute_supports_string_content_results() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4641,23 +4657,14 @@ async fn mcp_client_returns_unknown_method_errors_to_server() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4707,23 +4714,14 @@ async fn mcp_client_returns_handler_errors_to_server() -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4778,23 +4776,14 @@ async fn mcp_client_blocks_secret_elicitation_response_when_trust_disallows_secr
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -4884,31 +4873,30 @@ fn validate_mcp_pin_reports_all_supported_mismatch_fields() {
 }
 
 #[tokio::test]
-async fn read_message_reports_stream_close_and_invalid_headers() -> Result<()> {
+async fn read_message_reports_stream_close_and_invalid_frames() -> Result<()> {
     let mut closed = python_stdout_reader("import sys")?;
     let closed_error = super::read_message(&mut closed)
         .await
         .expect_err("closed stdout should fail");
-    assert!(closed_error.to_string().contains("closed stdout"));
+    assert!(closed_error.to_string().contains("stream closed"));
 
-    let mut missing_header =
-        python_stdout_reader("import sys; sys.stdout.write('\\r\\n{}'); sys.stdout.flush()")?;
-    let missing_header_error = super::read_message(&mut missing_header)
+    let mut missing_newline =
+        python_stdout_reader("import sys; sys.stdout.write('{}'); sys.stdout.flush()")?;
+    let missing_newline_error = super::read_message(&mut missing_newline)
         .await
-        .expect_err("missing content length should fail");
+        .expect_err("missing newline should fail");
     assert!(
-        missing_header_error
+        missing_newline_error
             .to_string()
-            .contains("missing Content-Length")
+            .contains("newline delimiter")
     );
 
-    let mut invalid_header = python_stdout_reader(
-        "import sys; sys.stdout.write('Content-Length: nope\\r\\n\\r\\n{}'); sys.stdout.flush()",
-    )?;
-    let invalid_header_error = super::read_message(&mut invalid_header)
+    let mut invalid_json =
+        python_stdout_reader("import sys; sys.stdout.write('not-json\\n'); sys.stdout.flush()")?;
+    let invalid_json_error = super::read_message(&mut invalid_json)
         .await
-        .expect_err("invalid content length should fail");
-    assert!(invalid_header_error.to_string().contains("invalid digit"));
+        .expect_err("invalid JSON should fail");
+    assert!(invalid_json_error.to_string().contains("not valid JSON"));
     Ok(())
 }
 

@@ -21,6 +21,7 @@ license = "MIT"
 version = "0.0.1-alpha.1"
 
 [workspace.dependencies]
+aho-corasick = "1.1.4"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 clap = { version = "4.5.53", features = ["derive"] }

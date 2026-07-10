@@ -321,6 +321,174 @@ pub struct ExecutionResourceReceipt {
     pub cleanup: ExecutionCleanupReceipt,
 }
 
+/// Current schema version for bounded process-output evidence embedded in an execution receipt.
+pub const EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION: u8 = 1;
+
+/// Process output stream that caused a collection or framing terminal condition.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionOutputStream {
+    /// Standard output (`stdout`).
+    Stdout,
+    /// Standard error (`stderr`).
+    Stderr,
+    /// Aggregate limit or failure shared by both output streams.
+    Combined,
+}
+
+impl ExecutionOutputStream {
+    /// Returns the stable serialized label used by diagnostics and tool-result metadata.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Combined => "combined",
+        }
+    }
+}
+
+/// Bounded capture statistics for one process output stream.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionStreamCapture {
+    /// Bytes observed from the pipe before it closed or the reader failed.
+    pub total_bytes: u64,
+    /// Bytes retained in the receipt head/tail buffer.
+    pub returned_bytes: u64,
+    /// Observed bytes not retained in the receipt.
+    pub omitted_bytes: u64,
+    /// Prefix bytes retained before any omitted region.
+    pub retained_head_bytes: u64,
+    /// Suffix bytes retained after any omitted region.
+    pub retained_tail_bytes: u64,
+    /// Maximum bytes retained in memory for this stream.
+    pub retained_limit_bytes: u64,
+    /// Maximum observed bytes allowed before forced process-tree cleanup.
+    pub hard_limit_bytes: u64,
+    /// Lines observed in the original byte stream.
+    pub total_lines: u64,
+    /// Whether observed bytes were omitted from the receipt.
+    pub truncated: bool,
+}
+
+/// Terminal reason selected once by the process supervisor.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutionTerminationCause {
+    /// The supervised process exited without an output-supervisor terminal condition.
+    #[default]
+    Exited,
+    /// The configured absolute wall-clock deadline elapsed.
+    TimedOut,
+    /// A per-stream or combined hard output limit was exceeded.
+    OutputLimit {
+        /// Stream whose limit was exceeded.
+        stream: ExecutionOutputStream,
+        /// Configured hard ceiling in bytes.
+        limit_bytes: u64,
+        /// Bytes observed when the supervisor selected this terminal condition.
+        observed_bytes: u64,
+    },
+    /// A pipe reader failed before the stream reached EOF.
+    ReaderFailed {
+        /// Stream whose reader failed.
+        stream: ExecutionOutputStream,
+        /// Sanitized diagnostic reason supplied by the collector.
+        reason: String,
+    },
+}
+
+impl ExecutionTerminationCause {
+    /// Returns the stable diagnostic label for this terminal cause.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Exited => "exited",
+            Self::TimedOut => "timed_out",
+            Self::OutputLimit { .. } => "output_limit",
+            Self::ReaderFailed { .. } => "reader_failed",
+        }
+    }
+}
+
+/// Provider-neutral evidence for bounded stdout/stderr collection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionOutputReceipt {
+    /// Schema version for this evidence. Zero identifies a legacy receipt without evidence.
+    #[serde(default)]
+    pub schema_version: u8,
+    /// Stdout collection evidence.
+    #[serde(default)]
+    pub stdout: ExecutionStreamCapture,
+    /// Stderr collection evidence.
+    #[serde(default)]
+    pub stderr: ExecutionStreamCapture,
+    /// Total bytes observed across stdout and stderr.
+    #[serde(default)]
+    pub combined_total_bytes: u64,
+    /// Combined hard ceiling applied across stdout and stderr.
+    #[serde(default)]
+    pub combined_hard_limit_bytes: u64,
+    /// Single terminal cause selected by the process supervisor.
+    #[serde(default)]
+    pub termination: ExecutionTerminationCause,
+}
+
+impl ExecutionOutputReceipt {
+    /// Returns whether this receipt contains structured bounded-output evidence.
+    ///
+    /// Schema zero is the only legacy representation. Unknown non-zero versions retain the
+    /// fields understood by this binary instead of being silently reconstructed from raw bytes.
+    #[must_use]
+    pub fn is_recorded(&self) -> bool {
+        self.schema_version != 0
+    }
+
+    /// Returns whether this receipt uses the schema version emitted by this binary.
+    #[must_use]
+    pub fn uses_current_schema(&self) -> bool {
+        self.schema_version == EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION
+    }
+
+    /// Builds normalized evidence for a legacy receipt that only stored raw output vectors.
+    #[must_use]
+    pub fn legacy(stdout: &[u8], stderr: &[u8], timed_out: bool) -> Self {
+        let stdout_bytes = stdout.len() as u64;
+        let stderr_bytes = stderr.len() as u64;
+        Self {
+            schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+            stdout: ExecutionStreamCapture {
+                total_bytes: stdout_bytes,
+                returned_bytes: stdout_bytes,
+                retained_head_bytes: stdout_bytes,
+                total_lines: byte_line_count(stdout),
+                ..ExecutionStreamCapture::default()
+            },
+            stderr: ExecutionStreamCapture {
+                total_bytes: stderr_bytes,
+                returned_bytes: stderr_bytes,
+                retained_head_bytes: stderr_bytes,
+                total_lines: byte_line_count(stderr),
+                ..ExecutionStreamCapture::default()
+            },
+            combined_total_bytes: stdout_bytes.saturating_add(stderr_bytes),
+            combined_hard_limit_bytes: 0,
+            termination: if timed_out {
+                ExecutionTerminationCause::TimedOut
+            } else {
+                ExecutionTerminationCause::Exited
+            },
+        }
+    }
+}
+
+fn byte_line_count(bytes: &[u8]) -> u64 {
+    let newline_count = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+    newline_count.saturating_add(u64::from(!bytes.is_empty() && !bytes.ends_with(b"\n")))
+}
+
 /// User-configurable execution policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionConfig {
@@ -1070,7 +1238,25 @@ pub struct ExecutionReceipt {
     pub stdout: Vec<u8>,
     #[serde(default)]
     pub stderr: Vec<u8>,
+    /// Bounded collection statistics and the single supervisor-selected terminal cause.
+    #[serde(default)]
+    pub output: ExecutionOutputReceipt,
     pub timed_out: bool,
+}
+
+impl ExecutionReceipt {
+    /// Returns structured output evidence, deriving accurate totals only for schema-zero receipts.
+    ///
+    /// Unknown non-zero schema versions preserve every field understood by this binary, including
+    /// their terminal cause and byte totals.
+    #[must_use]
+    pub fn effective_output(&self) -> ExecutionOutputReceipt {
+        if self.output.is_recorded() {
+            self.output.clone()
+        } else {
+            ExecutionOutputReceipt::legacy(&self.stdout, &self.stderr, self.timed_out)
+        }
+    }
 }
 
 /// Execution backend for non-interactive commands.
@@ -1095,8 +1281,13 @@ pub trait ExecutionBackend: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error when process spawning, waiting, or output collection fails. Timeouts are
-    /// represented as successful receipts with `timed_out = true`, so callers can map them into
-    /// structured tool errors without losing backend metadata.
+    /// Returns an error when process spawning or supervisor setup fails. Timeouts, output limits,
+    /// and pipe reader failures after spawn are represented as successful receipts with structured
+    /// output termination evidence, so callers can map them into tool errors without losing
+    /// backend and cleanup metadata.
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_>;
 }
+
+#[cfg(test)]
+#[path = "tests/execution_backend_tests.rs"]
+mod tests;

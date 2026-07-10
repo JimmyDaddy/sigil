@@ -157,7 +157,9 @@ pub use run_options::{
 use run_options::canonical_workspace_root;
 
 #[cfg(test)]
-use mcp_registry::{ConfiguredMcpProcessLauncher, register_lazy_mcp_activation_tool};
+use mcp_registry::{
+    ConfiguredMcpProcessLauncher, register_lazy_mcp_activation_tool, shutdown_registered_tools,
+};
 
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]

@@ -130,6 +130,11 @@ pub trait ExecutionBackend {
   - extension network deny intent 复用现有 `ExecutionSandboxProfileSpec.network_allowed`。deny 时在 spawn 前同时要求 backend 的 network/process isolation capability 与当前 backend instance 的实际 denied launch plan；plugin hook 执行后再校验 denied receipt。不引入 E21.6 的独立 network permission lattice。
   - lazy activation 会把获批的 exact process subject 透传到 launcher；审批等待期间 static/live binding 变化会在 spawn 前拒绝。MCP child 已 spawn 但 initialize、protocol 或 identity pin 失败时，`ExtensionProcessLifecycleRecorded` 仍记录不含 secret value 的 launch receipt；pre-spawn failure 以同一事件记录 `phase = pre_spawn` 且不携带 launch receipt metadata，clean launch 不会被误记为 workspace dirty。
   - 因 macOS Seatbelt 不能证明 network isolation，MCP/plugin hook 的 `workspace_write`/offline deny profile 会 fail closed；其 MCP filesystem conformance 改用明确 network-allowed profile，只证明 filesystem/process sandbox 事实。
+- 2026-07-10 E21.2 bounded process/MCP I/O follow-up：
+  - `ExecutionReceipt` additive 增加 versioned stdout/stderr capture evidence 与唯一 termination cause；只有 `schema_version = 0` 的旧 receipt 通过 accessor 以原始 vectors 回填 totals，未知非零 future schema 保留当前 binary 可识别的 totals 与 termination，不静默降级为 legacy。stdout/stderr 各保留 64 KiB head/tail，每流 hard 8 MiB、combined hard 16 MiB；超限、timeout 或 reader failure 返回结构化 receipt，并由 shell 映射为 `resource_limit`、`timeout` 或 `io`。
+  - non-interactive backend、Docker/Bubblewrap preflight 与 short-command helper 都改为 bounded concurrent drain；异常只由一个 supervisor 执行 process-group/tree cleanup。Unix 使用 TERM、bounded grace、KILL、direct-child reap 与 group liveness 验证；Windows 使用 `taskkill /T /F`，其他平台不会把 direct-child kill 误报为完整 tree cleanup。Docker 额外使用私有唯一 `--cidfile` 绑定 daemon-owned container；异常或 CLI 提前退出时执行 bounded `docker rm --force` 与 running-state query，只有 container 已停止且本地 CLI 已回收时才记录 cleanup completed，缺失 cid 或无法验证时 fail truthful。
+  - persistent terminal artifact 使用每流 64 MiB、combined 128 MiB 的内部硬配额，输出摘要以固定块流式计算 SHA-256 与 bounded head/tail，不再整文件读回；capture limit/failure 与 child-exit reader drain 都有 bounded cleanup path，task entry 持久化 observed total、limit 和 termination reason。
+  - MCP stdio 与声明的 `2025-06-18` 对齐为 bounded NDJSON；4 MiB frame、256 messages/8 MiB aggregate operation budget、8 MiB stderr、默认 30 秒/最高 24 小时 absolute startup/call deadline 与 fail-closed client generation teardown 已接入。tool/resource/prompt content 在 kernel 前做 32 KiB/2,000 lines secret-safe projection；旧 client 不透明重连，完整 refresh 创建新 generation。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已完成 E05.6 capability truthfulness 修正：macOS Seatbelt backend 不再声明 `network_isolation`，`build_offline` 会拒绝该 backend，sandbox conformance tests 不再把 loopback `nc` 行为当成网络隔离证明。
 - 已完成 E05.7 capability matrix / selection contract：
@@ -141,7 +146,7 @@ pub trait ExecutionBackend {
   - 新增 `[execution.sandbox].backend = "docker"`。
   - Docker backend 必须显式配置 `[execution.sandbox].container_image`，不会隐式选择或拉取镜像。
   - backend selection 会先检查 Docker daemon 和 configured image；missing daemon / missing image 会 fail closed。
-  - command 通过 `docker run --rm --workdir <cwd> --mount type=bind,src=<cwd>,dst=<cwd>` 执行。
+  - command 通过 `docker run --rm --cidfile <private-path> --workdir <cwd> --mount type=bind,src=<cwd>,dst=<cwd>` 执行；cleanup control command 复用 launch 的环境策略，避免切换 Docker daemon/context。
   - `network_allowed = false` 的 profile 会添加 `--network none`。
   - Unix 平台会传递当前 `uid:gid`，降低 root-owned workspace artifact 风险。
   - 该 backend 不覆盖 persistent terminal、MCP stdio server、plugin hook process 或 remote tool。

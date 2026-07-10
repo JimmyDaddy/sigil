@@ -7,9 +7,9 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus,
-    terminal_cleanup_receipt_for_status,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
+    TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskProjection, TerminalTaskStatus, terminal_cleanup_receipt_for_status,
 };
 use crate::{
     ControlEntry, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
@@ -33,10 +33,12 @@ fn terminal_task_id_accepts_stable_values_and_rejects_path_unsafe_values() {
 
 #[test]
 fn terminal_task_control_entry_roundtrips_with_snake_case_payload() -> Result<()> {
-    let entry = SessionLogEntry::Control(ControlEntry::TerminalTask(sample_entry(
-        TerminalTaskStatus::Running,
-        110,
-    )));
+    let mut task_entry = sample_entry(TerminalTaskStatus::Running, 110);
+    task_entry.output_total_bytes = 129;
+    task_entry.output_limit_bytes = Some(128);
+    task_entry.output_termination_reason =
+        Some(TerminalOutputTerminationReason::OutputLimitExceeded);
+    let entry = SessionLogEntry::Control(ControlEntry::TerminalTask(task_entry));
 
     let json = serde_json::to_string(&entry)?;
     let restored: SessionLogEntry = serde_json::from_str(&json)?;
@@ -45,13 +47,37 @@ fn terminal_task_control_entry_roundtrips_with_snake_case_payload() -> Result<()
     assert!(json.contains("task_id"));
     assert!(json.contains("\"state\":\"running\""));
     assert!(json.contains("output_truncated"));
+    assert!(json.contains("output_total_bytes"));
+    assert!(json.contains("output_limit_exceeded"));
     assert!(matches!(
         restored,
         SessionLogEntry::Control(ControlEntry::TerminalTask(entry))
             if entry.handle.task_id.as_str() == "terminal-1"
                 && matches!(entry.status, TerminalTaskStatus::Running)
                 && entry.output_truncated
+                && entry.output_total_bytes == 129
+                && entry.output_limit_bytes == Some(128)
+                && entry.output_termination_reason
+                    == Some(TerminalOutputTerminationReason::OutputLimitExceeded)
     ));
+    Ok(())
+}
+
+#[test]
+fn terminal_task_entry_legacy_payload_defaults_output_evidence() -> Result<()> {
+    let mut value = serde_json::to_value(sample_entry(TerminalTaskStatus::Running, 110))?;
+    let object = value
+        .as_object_mut()
+        .expect("terminal entry should serialize as an object");
+    object.remove("output_total_bytes");
+    object.remove("output_limit_bytes");
+    object.remove("output_termination_reason");
+
+    let restored: TerminalTaskEntry = serde_json::from_value(value)?;
+
+    assert_eq!(restored.output_total_bytes, 0);
+    assert_eq!(restored.output_limit_bytes, None);
+    assert_eq!(restored.output_termination_reason, None);
     Ok(())
 }
 
@@ -133,6 +159,7 @@ fn terminal_task_projection_builds_interrupted_entries_for_missing_running_tasks
     ));
     assert_eq!(interrupted[0].updated_at_ms, 200);
     assert_eq!(interrupted[0].output_preview.as_deref(), Some("tail"));
+    assert_eq!(interrupted[0].output_total_bytes, 128);
 }
 
 #[test]
@@ -179,6 +206,10 @@ fn terminal_task_status_labels_and_terminal_state_are_stable() {
     );
     assert_eq!(TerminalTaskStatus::Cancelled.as_str(), "cancelled");
     assert_eq!(TerminalTaskStatus::Interrupted.as_str(), "interrupted");
+    assert_eq!(
+        TerminalOutputTerminationReason::OutputLimitExceeded.as_str(),
+        "output_limit_exceeded"
+    );
     assert!(TerminalTaskStatus::Running.is_active());
     assert!(TerminalTaskStatus::Exited { exit_code: None }.is_terminal());
 }
@@ -219,7 +250,10 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
         "updated_at_ms": 140,
         "output_preview": "final tail",
         "output_hash": "sha256:def",
-        "output_truncated": true
+        "output_truncated": true,
+        "output_total_bytes": 65537,
+        "output_limit_bytes": 65536,
+        "output_termination_reason": "output_limit_exceeded"
     });
 
     let entry = TerminalTaskEntry::from_tool_result_details(&details)?
@@ -255,6 +289,12 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
     assert_eq!(entry.output_preview.as_deref(), Some("final tail"));
     assert_eq!(entry.output_hash.as_deref(), Some("sha256:def"));
     assert!(entry.output_truncated);
+    assert_eq!(entry.output_total_bytes, 65537);
+    assert_eq!(entry.output_limit_bytes, Some(65536));
+    assert_eq!(
+        entry.output_termination_reason,
+        Some(TerminalOutputTerminationReason::OutputLimitExceeded)
+    );
     assert_eq!(entry.updated_at_ms, 140);
     Ok(())
 }
@@ -348,6 +388,9 @@ fn sample_entry_for_id(
         output_preview: Some("tail".to_owned()),
         output_hash: Some("sha256:abc".to_owned()),
         output_truncated: true,
+        output_total_bytes: 128,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms,
     }

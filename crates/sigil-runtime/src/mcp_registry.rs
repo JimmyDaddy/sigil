@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::bail;
 
 /// Builds the complete runtime tool registry from built-ins and configured MCP servers.
 ///
@@ -337,6 +338,9 @@ async fn activate_lazy_mcp_tools_detailed_inner(
     if let Some(subject) = expected_process_subject {
         registration_options = registration_options.with_expected_process_subject(subject);
     }
+    if server_name.is_some() {
+        registration_options = registration_options.with_strict_registration();
+    }
     let report =
         sigil_mcp::register_mcp_tools_with_report(registry, &servers, registration_options).await?;
     Ok(LazyMcpActivationResult {
@@ -433,6 +437,8 @@ impl McpProcessLauncher for ConfiguredMcpProcessLauncher {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
         command.env_clear();
         for (name, value) in plan.environment.variables() {
             command.env(name, value.expose_secret());
@@ -528,8 +534,12 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
         });
     };
 
-    let prefix = sigil_mcp::mcp_provider_tool_name_prefix(server_name);
-    let removed = registry.drain_by_name_prefix(&prefix);
+    let retired_owners =
+        registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name);
+    let removed = retired_owners
+        .iter()
+        .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+        .collect::<Vec<_>>();
     let removed_tools = removed.len();
     let before = registry.specs().len();
     let mut registration_options =
@@ -540,7 +550,8 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(elicitation_handler)
             .with_runtime_event_handler(runtime_event_handler)
-            .with_process_launcher(configured_mcp_process_launcher(root_config));
+            .with_process_launcher(configured_mcp_process_launcher(root_config))
+            .with_strict_registration();
     if let Some(recorder) = mutation_recorder {
         registration_options =
             registration_options.with_mutation_recorder(workspace_root.clone(), recorder);
@@ -557,12 +568,49 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
                 return Err(error);
             }
         };
+    if let Err(retirement_error) = shutdown_registered_tools(&removed).await {
+        let replacement = report
+            .lifecycle_owners
+            .iter()
+            .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+            .collect::<Vec<_>>();
+        let rollback_error = shutdown_registered_tools(&replacement).await.err();
+        return Err(anyhow!(
+            "failed to retire previous MCP server {server_name} generation: {retirement_error:#}{}",
+            rollback_error
+                .map(|error| format!("; replacement generation rollback was incomplete: {error:#}"))
+                .unwrap_or_default()
+        ));
+    }
     Ok(McpRefreshResult {
         matched_servers: servers.len(),
         removed_tools,
         added_tools: registry.specs().len().saturating_sub(before),
         process_launch_receipts: report.process_launch_receipts,
     })
+}
+
+pub(super) async fn shutdown_registered_tools(tools: &[Arc<dyn Tool>]) -> Result<()> {
+    let mut attempted_owners = Vec::new();
+    let mut failures = Vec::new();
+    for tool in tools {
+        if let Some(owner) = tool.lifecycle_owner() {
+            if attempted_owners.contains(&owner) {
+                continue;
+            }
+            attempted_owners.push(owner);
+        }
+        if let Err(error) = tool.shutdown().await {
+            failures.push(format!(
+                "failed to shut down registered tool {}: {error:#}",
+                tool.spec().name
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        bail!(failures.join("; "));
+    }
+    Ok(())
 }
 
 pub(super) fn register_lazy_mcp_activation_tool(
@@ -738,12 +786,9 @@ impl McpActivateServerTool {
     }
 
     fn registered_tool_count(&self, server_name: &str) -> usize {
-        let prefix = sigil_mcp::mcp_provider_tool_name_prefix(server_name);
         self.registry
-            .specs()
-            .into_iter()
-            .filter(|spec| spec.name.starts_with(&prefix))
-            .count()
+            .lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name)
+            .len()
     }
 }
 

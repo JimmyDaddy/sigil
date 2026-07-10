@@ -4,7 +4,10 @@ use std::{
     ffi::OsString,
     path::Path,
     process::Command,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::Result;
@@ -17,9 +20,9 @@ use sigil_kernel::{
     McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ProviderCapabilities,
     ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionConfig,
     SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool,
-    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
-    ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind,
-    WorkspaceConfig,
+    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolLifecycleOwner,
+    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubjectKind, WorkspaceConfig,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -38,6 +41,7 @@ use super::{
     resolve_deepseek_api_key_with_session, resolve_gemini_api_key,
     resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
+    shutdown_registered_tools,
 };
 
 fn sandbox_execution_config(
@@ -204,6 +208,14 @@ impl Tool for ExistingMcpTool {
         }
     }
 
+    fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
+        Some(ToolLifecycleOwner::new(
+            sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+            "lazy",
+            "existing-fixture-generation",
+        ))
+    }
+
     async fn execute(
         &self,
         _ctx: ToolContext,
@@ -214,6 +226,91 @@ impl Tool for ExistingMcpTool {
             call_id,
             "mcp__lazy__echo",
             "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+struct ShutdownFailingMcpTool;
+
+struct CountingShutdownTool {
+    name: &'static str,
+    owner: ToolLifecycleOwner,
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for CountingShutdownTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.to_owned(),
+            description: "counting cleanup fixture".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Mcp,
+            access: ToolAccess::Network,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        self.attempts.fetch_add(1, Ordering::AcqRel);
+        Err(anyhow::anyhow!("injected cleanup failure"))
+    }
+
+    fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
+        Some(self.owner.clone())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.name,
+            "unused",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for ShutdownFailingMcpTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "mcp__rollback__echo".to_owned(),
+            description: "MCP tool with injected retirement failure".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Mcp,
+            access: ToolAccess::Network,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        Err(anyhow::anyhow!("injected old generation cleanup failure"))
+    }
+
+    fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
+        Some(ToolLifecycleOwner::new(
+            sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+            "rollback",
+            "shutdown-failing-fixture-generation",
+        ))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "mcp__rollback__echo",
+            "old",
             ToolResultMeta::default(),
         ))
     }
@@ -1001,6 +1098,44 @@ async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Resu
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn configured_mcp_process_launcher_creates_killable_process_group() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let launcher = super::ConfiguredMcpProcessLauncher {
+        execution: sigil_kernel::ExecutionConfig::default(),
+    };
+    let launch = launcher.launch(McpProcessLaunchRequest {
+        server_name: "process-group".to_owned(),
+        command: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "sleep 30".to_owned()],
+        working_dir: Some(temp.path().to_path_buf()),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:test-process-group".to_owned(),
+        startup_timeout_secs: 1,
+        classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+    })?;
+    let mut child = launch.child;
+    let process_id = child.id().expect("configured MCP child should have a pid");
+    let process_group = tokio::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &process_id.to_string()])
+        .output()
+        .await?;
+    let observed_group = String::from_utf8_lossy(&process_group.stdout)
+        .trim()
+        .parse::<u32>();
+
+    let _ = tokio::process::Command::new("kill")
+        .args(["-KILL", &format!("-{process_id}")])
+        .status()
+        .await;
+    let _ = child.wait().await;
+
+    assert!(process_group.status.success());
+    assert_eq!(observed_group?, process_id);
+    Ok(())
+}
+
 #[test]
 fn configured_mcp_process_launcher_local_required_sandbox_fails_closed() {
     let launcher = super::ConfiguredMcpProcessLauncher {
@@ -1218,21 +1353,14 @@ import json
 import sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            sys.exit(0)
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    body = sys.stdin.buffer.read(int(headers["content-length"]))
-    return json.loads(body)
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line.decode())
 
 def write_message(message):
     data = json.dumps(message).encode()
-    sys.stdout.buffer.write(b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data)
+    sys.stdout.buffer.write(data + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1310,6 +1438,34 @@ while True:
 }
 
 #[tokio::test]
+async fn explicit_optional_lazy_activation_fails_instead_of_reporting_empty_ready() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "optional-missing".to_owned(),
+        command: "/definitely/missing/optional-lazy-mcp".to_owned(),
+        startup: McpServerStartup::Lazy,
+        required: false,
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    });
+    let mut registry = ToolRegistry::new();
+
+    activate_lazy_mcp_tools_detailed(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        std::env::current_dir()?,
+        Some("optional-missing"),
+    )
+    .await
+    .expect_err("explicit optional activation must require a callable generation");
+
+    assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn refresh_mcp_server_tools_replaces_existing_server_tool_surface() -> Result<()> {
     if Command::new("python3").arg("--version").output().is_err() {
         return Ok(());
@@ -1323,21 +1479,14 @@ import json
 import sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            sys.exit(0)
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    body = sys.stdin.buffer.read(int(headers["content-length"]))
-    return json.loads(body)
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line.decode())
 
 def write_message(message):
     data = json.dumps(message).encode()
-    sys.stdout.buffer.write(b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data)
+    sys.stdout.buffer.write(data + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -1387,6 +1536,450 @@ while True:
 }
 
 #[tokio::test]
+async fn refresh_mcp_server_tools_uses_exact_server_scope_and_stable_hashed_names() -> Result<()> {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("scoped_refresh_mcp.py");
+    std::fs::write(
+        &script,
+        r#"
+import json
+import sys
+
+label = sys.argv[1]
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    message = json.loads(line.decode())
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion":"2025-06-18","serverInfo":{"name":label,"version":"1.0.0"},"capabilities":{}}
+    elif method == "tools/list":
+        result = {"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}
+    elif method == "tools/call":
+        result = {"content":[{"type":"text","text":label}]}
+    else:
+        continue
+    sys.stdout.buffer.write(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}).encode() + b"\n")
+    sys.stdout.buffer.flush()
+"#,
+    )?;
+
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let long_name = format!("long-{}", "server".repeat(40));
+    let servers = ["a-b".to_owned(), "a_b".to_owned(), long_name.clone()]
+        .into_iter()
+        .map(|name| McpServerConfig {
+            args: vec![script.display().to_string(), name.clone()],
+            name,
+            command: "python3".to_owned(),
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        })
+        .collect::<Vec<_>>();
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers = servers.clone();
+    let mut registry = ToolRegistry::new();
+    sigil_mcp::register_mcp_tools_with_options(
+        &mut registry,
+        &servers,
+        sigil_mcp::McpToolRegistrationOptions::eager()?
+            .with_capabilities(&provider.capabilities())
+            .with_working_dir(temp.path().to_path_buf()),
+    )
+    .await?;
+
+    let mut initial_names = registry
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    initial_names.sort();
+    let initial_contents = mcp_tool_contents(&registry, temp.path()).await?;
+    assert_eq!(
+        initial_contents
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["a-b".to_owned(), "a_b".to_owned(), long_name.clone()])
+    );
+    assert!(
+        initial_names
+            .iter()
+            .all(|name| name.chars().count() <= provider.capabilities().tool_name_max_chars)
+    );
+    assert_eq!(
+        registry
+            .lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, "a-b")
+            .len(),
+        1
+    );
+    assert_eq!(
+        registry
+            .lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, "a_b")
+            .len(),
+        1
+    );
+
+    for server_name in ["a-b", "a_b", long_name.as_str()] {
+        let refreshed = refresh_mcp_server_tools_with_mcp_handlers(
+            &mut registry,
+            &config,
+            &provider.capabilities(),
+            temp.path().to_path_buf(),
+            server_name,
+            sigil_mcp::unsupported_mcp_elicitation_handler(),
+            sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        )
+        .await?;
+        assert_eq!(refreshed.removed_tools, 1);
+        assert_eq!(refreshed.added_tools, 1);
+    }
+
+    let mut refreshed_names = registry
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    refreshed_names.sort();
+    assert_eq!(refreshed_names, initial_names);
+    assert_eq!(
+        mcp_tool_contents(&registry, temp.path()).await?,
+        initial_contents
+    );
+    Ok(())
+}
+
+async fn mcp_tool_contents(
+    registry: &ToolRegistry,
+    workspace_root: &Path,
+) -> Result<BTreeMap<String, String>> {
+    let mut contents = BTreeMap::new();
+    for spec in registry.specs() {
+        let result = registry
+            .execute(
+                ToolContext::new(workspace_root.to_path_buf(), 5),
+                ToolCall {
+                    id: format!("call-{}", spec.name),
+                    name: spec.name.clone(),
+                    args_json: "{}".to_owned(),
+                },
+            )
+            .await?;
+        contents.insert(spec.name, result.content);
+    }
+    Ok(contents)
+}
+
+#[tokio::test]
+async fn refresh_mcp_server_tools_replaces_poisoned_generation_before_first_new_call() -> Result<()>
+{
+    if Command::new("python3").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let generation_file = temp.path().join("generation.txt");
+    let script = temp.path().join("refresh_poisoned_mcp.py");
+    let generation_path = serde_json::to_string(&generation_file.to_string_lossy())?;
+    let script_body = r#"
+import json
+import pathlib
+import sys
+
+generation_file = pathlib.Path(__GENERATION_FILE__)
+generation = int(generation_file.read_text()) + 1 if generation_file.exists() else 1
+generation_file.write_text(str(generation))
+
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line.decode())
+
+def write_message(message):
+    sys.stdout.buffer.write(json.dumps(message).encode() + b"\n")
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"refresh-poisoned","version":"1.0.0"},"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}})
+    elif method == "tools/call" and generation == 1:
+        write_message({"jsonrpc":"2.0","id":message["id"]})
+    elif method == "tools/call":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":"fresh-generation"}]}})
+"#
+    .replace("__GENERATION_FILE__", &generation_path);
+    std::fs::write(&script, script_body)?;
+
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    let server = McpServerConfig {
+        name: "poisoned".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.display().to_string()],
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    };
+    config.mcp_servers.push(server.clone());
+    let mut registry = ToolRegistry::new();
+    sigil_mcp::register_mcp_tools(&mut registry, &[server]).await?;
+
+    let poisoned = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            ToolCall {
+                id: "poison-old-generation".to_owned(),
+                name: "mcp__poisoned__echo".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert!(poisoned.is_error());
+
+    let refresh = refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        "poisoned",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await?;
+    assert_eq!(refresh.removed_tools, 1);
+    assert_eq!(refresh.added_tools, 1);
+
+    let fresh = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            ToolCall {
+                id: "fresh-generation-first-call".to_owned(),
+                name: "mcp__poisoned__echo".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert!(!fresh.is_error());
+    assert_eq!(fresh.content, "fresh-generation");
+    assert_eq!(std::fs::read_to_string(generation_file)?.trim(), "2");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refresh_mcp_server_tools_reaps_healthy_retired_generation_process_group() -> Result<()> {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let generation_file = temp.path().join("healthy-generation.txt");
+    let descendant_pid_file = temp.path().join("retired-descendant.pid");
+    let script = temp.path().join("refresh_healthy_mcp.py");
+    let generation_path = serde_json::to_string(&generation_file.to_string_lossy())?;
+    let descendant_path = serde_json::to_string(&descendant_pid_file.to_string_lossy())?;
+    let script_body = r#"
+import json
+import pathlib
+import subprocess
+import sys
+
+generation_file = pathlib.Path(__GENERATION_FILE__)
+generation = int(generation_file.read_text()) + 1 if generation_file.exists() else 1
+generation_file.write_text(str(generation))
+if generation == 1:
+    child = subprocess.Popen(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"])
+    pathlib.Path(__DESCENDANT_PID_FILE__).write_text(str(child.pid))
+
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line.decode())
+
+def write_message(message):
+    sys.stdout.buffer.write(json.dumps(message).encode() + b"\n")
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
+    elif method == "tools/call":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[]}})
+"#
+    .replace("__GENERATION_FILE__", &generation_path)
+    .replace("__DESCENDANT_PID_FILE__", &descendant_path);
+    std::fs::write(&script, script_body)?;
+
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    let server = McpServerConfig {
+        name: "healthy-retired".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.display().to_string()],
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    };
+    config.mcp_servers.push(server.clone());
+    let mut registry = ToolRegistry::new();
+    sigil_mcp::register_mcp_tools(&mut registry, &[server]).await?;
+    let descendant_pid = std::fs::read_to_string(&descendant_pid_file)?
+        .trim()
+        .parse::<u32>()?;
+
+    let refresh = refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        "healthy-retired",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await?;
+    assert_eq!(refresh.removed_tools, 1);
+    assert_eq!(refresh.added_tools, 1);
+
+    let mut descendant_gone = false;
+    for _ in 0..40 {
+        let status = Command::new("kill")
+            .args(["-0", &descendant_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            descendant_gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        descendant_gone,
+        "refresh must reap descendants owned by the healthy retired generation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_mcp_server_tools_rolls_back_new_generation_when_old_shutdown_fails() -> Result<()>
+{
+    if Command::new("python3").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("refresh_rollback_mcp.py");
+    std::fs::write(
+        &script,
+        r#"
+import json
+import sys
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line.decode())
+def write_message(message):
+    sys.stdout.buffer.write(json.dumps(message).encode() + b"\n")
+    sys.stdout.buffer.flush()
+while True:
+    message = read_message()
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "rollback".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.display().to_string()],
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ShutdownFailingMcpTool));
+
+    let error = refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        "rollback",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await
+    .expect_err("old generation cleanup failure must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to retire previous MCP server")
+    );
+    assert!(registry.spec_for("mcp__rollback__echo").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn generation_shutdown_attempts_every_distinct_owner_after_failure() {
+    let first_attempts = Arc::new(AtomicUsize::new(0));
+    let second_attempts = Arc::new(AtomicUsize::new(0));
+    let first_owner = ToolLifecycleOwner::new(
+        sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+        "shared-scope",
+        "generation-1",
+    );
+    let second_owner = ToolLifecycleOwner::new(
+        sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE,
+        "shared-scope",
+        "generation-2",
+    );
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(CountingShutdownTool {
+            name: "first-surface",
+            owner: first_owner.clone(),
+            attempts: Arc::clone(&first_attempts),
+        }),
+        Arc::new(CountingShutdownTool {
+            name: "duplicate-first-surface",
+            owner: first_owner,
+            attempts: Arc::clone(&first_attempts),
+        }),
+        Arc::new(CountingShutdownTool {
+            name: "second-surface",
+            owner: second_owner,
+            attempts: Arc::clone(&second_attempts),
+        }),
+    ];
+
+    shutdown_registered_tools(&tools)
+        .await
+        .expect_err("all injected generation shutdowns fail");
+
+    assert_eq!(first_attempts.load(Ordering::Acquire), 1);
+    assert_eq!(second_attempts.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
 async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
@@ -1413,6 +2006,80 @@ async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -
 
     assert!(error.to_string().contains("failed to spawn MCP server"));
     assert!(registry.spec_for("mcp__lazy__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_optional_mcp_server_failure_preserves_healthy_old_generation() -> Result<()> {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("optional_refresh_old_mcp.py");
+    std::fs::write(
+        &script,
+        r#"
+import json
+import sys
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    message = json.loads(line.decode())
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion":"2025-06-18","serverInfo":{"name":"optional-refresh","version":"1.0.0"},"capabilities":{}}
+    elif method == "tools/list":
+        result = {"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}
+    elif method == "tools/call":
+        result = {"content":[{"type":"text","text":"healthy-old-generation"}]}
+    else:
+        continue
+    sys.stdout.buffer.write(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}).encode() + b"\n")
+    sys.stdout.buffer.flush()
+"#,
+    )?;
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let healthy = McpServerConfig {
+        name: "optional-refresh".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.display().to_string()],
+        required: false,
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    };
+    let mut registry = ToolRegistry::new();
+    sigil_mcp::register_mcp_tools(&mut registry, std::slice::from_ref(&healthy)).await?;
+
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        command: "/definitely/missing/optional-mcp-server".to_owned(),
+        ..healthy
+    });
+    refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        "optional-refresh",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await
+    .expect_err("explicit refresh must not downgrade optional replacement failure to success");
+
+    let old = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            ToolCall {
+                id: "optional-old-still-ready".to_owned(),
+                name: "mcp__optional_refresh__echo".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert!(!old.is_error());
+    assert_eq!(old.content, "healthy-old-generation");
     Ok(())
 }
 
@@ -1485,7 +2152,7 @@ async fn activate_lazy_mcp_tools_returns_zero_when_optional_server_is_skipped() 
         &config,
         &provider.capabilities(),
         std::env::current_dir()?,
-        Some("optional-lazy"),
+        None,
     )
     .await?;
 
@@ -1512,7 +2179,7 @@ async fn activate_lazy_mcp_tools_detailed_reports_matched_servers() -> Result<()
         &config,
         &provider.capabilities(),
         std::env::current_dir()?,
-        Some("optional-lazy"),
+        None,
     )
     .await?;
 

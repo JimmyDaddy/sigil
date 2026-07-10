@@ -143,6 +143,27 @@ pub enum TerminalTaskStatus {
     Interrupted,
 }
 
+/// Stable reason why terminal output capture ended before a complete artifact was available.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalOutputTerminationReason {
+    OutputLimitExceeded,
+    OutputCaptureFailed,
+    OutputDrainTimeout,
+}
+
+impl TerminalOutputTerminationReason {
+    /// Returns the stable wire and diagnostic code for this termination reason.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OutputLimitExceeded => "output_limit_exceeded",
+            Self::OutputCaptureFailed => "output_capture_failed",
+            Self::OutputDrainTimeout => "output_drain_timeout",
+        }
+    }
+}
+
 impl TerminalTaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -179,6 +200,17 @@ pub struct TerminalTaskEntry {
     pub output_hash: Option<String>,
     #[serde(default)]
     pub output_truncated: bool,
+    /// Bytes observed by the streaming collectors before EOF or a terminal capture failure.
+    ///
+    /// This can exceed the retained artifact size when a hard limit terminates the process tree.
+    #[serde(default)]
+    pub output_total_bytes: u64,
+    /// Hard artifact limit that caused termination, if output collection crossed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limit_bytes: Option<u64>,
+    /// Stable reason why output collection ended before a complete artifact was available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_termination_reason: Option<TerminalOutputTerminationReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<ExecutionCleanupReceipt>,
     pub updated_at_ms: u64,
@@ -259,6 +291,17 @@ impl TerminalTaskEntry {
                 .get("output_truncated")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            output_total_bytes: details
+                .get("output_total_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            output_limit_bytes: details.get("output_limit_bytes").and_then(Value::as_u64),
+            output_termination_reason: optional_value(details, "output_termination_reason")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| {
+                    anyhow!("invalid terminal task output_termination_reason: {error}")
+                })?,
             cleanup: optional_value(details, "cleanup")
                 .map(|value| serde_json::from_value(value.clone()))
                 .transpose()
@@ -352,6 +395,12 @@ pub struct TerminalTaskSummary {
     pub output_preview: Option<String>,
     pub output_hash: Option<String>,
     pub output_truncated: bool,
+    /// Latest observed byte total reconstructed from the append-only terminal entry.
+    pub output_total_bytes: u64,
+    /// Hard artifact limit that caused termination, when applicable.
+    pub output_limit_bytes: Option<u64>,
+    /// Stable output termination reason, when collection did not complete normally.
+    pub output_termination_reason: Option<TerminalOutputTerminationReason>,
     pub cleanup: Option<ExecutionCleanupReceipt>,
     pub updated_at_ms: u64,
 }
@@ -364,6 +413,9 @@ impl TerminalTaskSummary {
             output_preview: self.output_preview.clone(),
             output_hash: self.output_hash.clone(),
             output_truncated: self.output_truncated,
+            output_total_bytes: self.output_total_bytes,
+            output_limit_bytes: self.output_limit_bytes,
+            output_termination_reason: self.output_termination_reason,
             cleanup: Some(ExecutionCleanupReceipt::unknown(
                 "terminal task was interrupted before cleanup could be proven",
             )),
@@ -380,6 +432,9 @@ impl From<&TerminalTaskEntry> for TerminalTaskSummary {
             output_preview: entry.output_preview.clone(),
             output_hash: entry.output_hash.clone(),
             output_truncated: entry.output_truncated,
+            output_total_bytes: entry.output_total_bytes,
+            output_limit_bytes: entry.output_limit_bytes,
+            output_termination_reason: entry.output_termination_reason,
             cleanup: entry.cleanup.clone(),
             updated_at_ms: entry.updated_at_ms,
         }

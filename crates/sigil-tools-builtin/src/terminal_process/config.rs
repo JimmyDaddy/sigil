@@ -6,12 +6,29 @@ pub(super) const TERMINAL_TASK_OUTPUT_FILE: &str = "output.log";
 pub(super) const TERMINAL_TASK_STDOUT_FILE: &str = "stdout.log";
 pub(super) const TERMINAL_TASK_STDERR_FILE: &str = "stderr.log";
 pub(super) const DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES: usize = 16 * 1024;
+pub(super) const DEFAULT_TERMINAL_STREAM_ARTIFACT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const DEFAULT_TERMINAL_COMBINED_ARTIFACT_LIMIT_BYTES: u64 = 128 * 1024 * 1024;
 pub(super) const DEFAULT_CANCEL_GRACE_MS: u64 = 500;
 const DEFAULT_TERMINAL_PTY_ROWS: u16 = 24;
 const DEFAULT_TERMINAL_PTY_COLS: u16 = 80;
 pub const MAX_TERMINAL_INPUT_BYTES: usize = 8 * 1024;
 pub(super) const TERMINAL_PTY_INPUT_QUEUE_BOUND: usize = 8;
 pub(super) const PTY_CANCEL_POLL_INTERVAL_MS: u64 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TerminalArtifactLimits {
+    pub(super) stream_bytes: u64,
+    pub(super) combined_bytes: u64,
+}
+
+impl Default for TerminalArtifactLimits {
+    fn default() -> Self {
+        Self {
+            stream_bytes: DEFAULT_TERMINAL_STREAM_ARTIFACT_LIMIT_BYTES,
+            combined_bytes: DEFAULT_TERMINAL_COMBINED_ARTIFACT_LIMIT_BYTES,
+        }
+    }
+}
 
 /// Terminal backend implementation used for one running task.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

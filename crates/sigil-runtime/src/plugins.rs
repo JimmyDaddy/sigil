@@ -10,13 +10,14 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackend,
     ExecutionCoverageLabel, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
-    MAX_PLUGIN_HOOK_ARTIFACT_REFS, MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig,
-    MutationEventRecorder, PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef,
-    PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
-    PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef,
-    PluginManifest, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState,
-    SecretRedactor, SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope,
-    WorkspaceMutationScan, validate_plugin_id,
+    ExecutionStreamCapture, ExecutionTerminationCause, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
+    MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig, MutationEventRecorder,
+    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginHookExecutionFinishedEntry,
+    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookOutputArtifactRef,
+    PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef, PluginManifest,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState, SecretRedactor,
+    SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope, WorkspaceMutationScan,
+    validate_plugin_id,
 };
 use uuid::Uuid;
 
@@ -364,12 +365,15 @@ impl PluginHookExecutionRunner {
             tool_name,
             declared_effect,
         )?;
-        let status = if receipt.timed_out {
-            PluginHookExecutionStatus::TimedOut
-        } else if receipt.exit_code == Some(0) {
-            PluginHookExecutionStatus::Succeeded
-        } else {
-            PluginHookExecutionStatus::Failed
+        let output_receipt = receipt.effective_output();
+        let status = match output_receipt.termination {
+            ExecutionTerminationCause::TimedOut => PluginHookExecutionStatus::TimedOut,
+            ExecutionTerminationCause::Exited if receipt.exit_code == Some(0) => {
+                PluginHookExecutionStatus::Succeeded
+            }
+            ExecutionTerminationCause::Exited
+            | ExecutionTerminationCause::OutputLimit { .. }
+            | ExecutionTerminationCause::ReaderFailed { .. } => PluginHookExecutionStatus::Failed,
         };
         let finished = PluginHookExecutionFinishedEntry {
             execution_id,
@@ -380,9 +384,12 @@ impl PluginHookExecutionRunner {
             hook_kind: registration.hook.kind,
             status,
             exit_code: receipt.exit_code,
-            stdout_bytes: receipt.stdout.len() as u64,
-            stderr_bytes: receipt.stderr.len() as u64,
-            timed_out: receipt.timed_out,
+            stdout_bytes: output_receipt.stdout.total_bytes,
+            stderr_bytes: output_receipt.stderr.total_bytes,
+            timed_out: matches!(
+                output_receipt.termination,
+                ExecutionTerminationCause::TimedOut
+            ),
             backend: receipt.backend,
             backend_capabilities: receipt.capabilities,
             execution_coverage,
@@ -494,8 +501,19 @@ fn plugin_hook_output_envelope(
     redactor: &SecretRedactor,
     artifact_refs: Vec<PluginHookOutputArtifactRef>,
 ) -> PluginHookOutputEnvelope {
-    let stdout = bounded_hook_output_stream(&receipt.stdout, output_limit_bytes, redactor);
-    let stderr = bounded_hook_output_stream(&receipt.stderr, output_limit_bytes, redactor);
+    let output_receipt = receipt.effective_output();
+    let stdout = bounded_hook_output_stream(
+        &receipt.stdout,
+        &output_receipt.stdout,
+        output_limit_bytes,
+        redactor,
+    );
+    let stderr = bounded_hook_output_stream(
+        &receipt.stderr,
+        &output_receipt.stderr,
+        output_limit_bytes,
+        redactor,
+    );
     let redaction_state = combined_redaction_state(stdout.redaction_state, stderr.redaction_state);
     let artifact_refs_truncated = artifact_refs.len() > MAX_PLUGIN_HOOK_ARTIFACT_REFS;
     let artifact_refs = artifact_refs
@@ -533,27 +551,89 @@ fn plugin_hook_output_envelope(
 
 fn bounded_hook_output_stream(
     bytes: &[u8],
+    capture: &ExecutionStreamCapture,
     output_limit_bytes: usize,
     redactor: &SecretRedactor,
 ) -> PluginHookOutputStream {
-    let original = String::from_utf8_lossy(bytes);
-    let redacted = redactor.redact_text(&original);
+    let original = captured_hook_output(bytes, capture);
+    let redacted = if capture.truncated {
+        redacted_captured_hook_output(bytes, capture, redactor)
+    } else {
+        redactor.redact_text(&original)
+    };
     let redaction_state = if redacted == original {
         RedactionState::None
     } else {
         RedactionState::Redacted
     };
     let limited = limit_plugin_hook_text_head_tail(&redacted, output_limit_bytes);
+    let captured_original_bytes = capture
+        .returned_bytes
+        .min(capture.total_bytes)
+        .min(bytes.len() as u64);
+    let returned_bytes = captured_original_bytes.min(output_limit_bytes as u64);
+    let omitted_bytes = capture.total_bytes.saturating_sub(returned_bytes);
     PluginHookOutputStream {
         content: limited.content,
-        total_bytes: bytes.len() as u64,
-        returned_bytes: limited.returned_bytes,
-        omitted_bytes: limited.omitted_bytes,
-        total_lines: redacted.lines().count() as u64,
-        returned_lines: limited.returned_lines,
-        truncated: limited.truncated,
+        total_bytes: capture.total_bytes,
+        returned_bytes,
+        omitted_bytes,
+        total_lines: capture.total_lines,
+        returned_lines: limited.returned_lines.min(capture.total_lines),
+        truncated: capture.truncated || limited.truncated || omitted_bytes > 0,
         redaction_state,
     }
+}
+
+fn captured_hook_output(bytes: &[u8], capture: &ExecutionStreamCapture) -> String {
+    if !capture.truncated {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let head_len = usize::try_from(capture.retained_head_bytes)
+        .unwrap_or(bytes.len())
+        .min(bytes.len());
+    let tail_len = usize::try_from(capture.retained_tail_bytes)
+        .unwrap_or(bytes.len().saturating_sub(head_len))
+        .min(bytes.len().saturating_sub(head_len));
+    let mut output = String::from_utf8_lossy(&bytes[..head_len]).into_owned();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "[sigil: hook process output truncated, omitted {} bytes]\n",
+        capture.omitted_bytes
+    ));
+    output.push_str(&String::from_utf8_lossy(
+        &bytes[bytes.len().saturating_sub(tail_len)..],
+    ));
+    output
+}
+
+fn redacted_captured_hook_output(
+    bytes: &[u8],
+    capture: &ExecutionStreamCapture,
+    redactor: &SecretRedactor,
+) -> String {
+    let head_len = usize::try_from(capture.retained_head_bytes)
+        .unwrap_or(bytes.len())
+        .min(bytes.len());
+    let tail_len = usize::try_from(capture.retained_tail_bytes)
+        .unwrap_or(bytes.len().saturating_sub(head_len))
+        .min(bytes.len().saturating_sub(head_len));
+    let (head, tail) = redactor.redact_truncated_head_tail_bytes(
+        &bytes[..head_len],
+        &bytes[bytes.len().saturating_sub(tail_len)..],
+    );
+    let mut output = head;
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "[sigil: hook process output truncated, omitted {} bytes]\n",
+        capture.omitted_bytes
+    ));
+    output.push_str(&tail);
+    output
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

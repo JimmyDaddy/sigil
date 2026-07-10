@@ -10,6 +10,7 @@ pub struct TerminalProcessManager {
     permission_contexts: Arc<StdMutex<BTreeMap<TerminalTaskId, TerminalTaskPermissionContext>>>,
     next_counter: Arc<AtomicU64>,
     preview_limit_bytes: usize,
+    artifact_limits: TerminalArtifactLimits,
     cancel_grace: Duration,
 }
 
@@ -70,12 +71,23 @@ impl TerminalProcessManager {
             permission_contexts: Arc::new(StdMutex::new(BTreeMap::new())),
             next_counter: Arc::new(AtomicU64::new(1)),
             preview_limit_bytes: DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES,
+            artifact_limits: TerminalArtifactLimits::default(),
             cancel_grace: Duration::from_millis(DEFAULT_CANCEL_GRACE_MS),
         })
     }
 
     pub fn with_preview_limit_bytes(mut self, preview_limit_bytes: usize) -> Self {
-        self.preview_limit_bytes = preview_limit_bytes.max(1);
+        self.preview_limit_bytes =
+            preview_limit_bytes.clamp(1, DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_artifact_limits(mut self, stream_bytes: u64, combined_bytes: u64) -> Self {
+        self.artifact_limits = TerminalArtifactLimits {
+            stream_bytes: stream_bytes.max(1),
+            combined_bytes: combined_bytes.max(1),
+        };
         self
     }
 
@@ -110,18 +122,29 @@ impl TerminalProcessManager {
             .spawn()
             .with_context(|| format!("failed to start terminal command: {}", plan.command))?;
         let process_id = child.id();
-        let output_file = Arc::new(Mutex::new(
+        let output_file = Arc::new(Mutex::new(CombinedOutputWriter::new(
             open_append_file(&plan.artifacts.absolute_output).await?,
-        ));
+            self.artifact_limits.combined_bytes,
+        )));
+        let capture_ledger = Arc::new(TerminalCaptureLedger::default());
+        let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
         let stdout_task = spawn_capture_task(
             child.stdout.take(),
+            TerminalOutputStream::Stdout,
             plan.artifacts.absolute_stdout.clone(),
             Arc::clone(&output_file),
+            self.artifact_limits,
+            Arc::clone(&capture_ledger),
+            capture_failure_tx.clone(),
         );
         let stderr_task = spawn_capture_task(
             child.stderr.take(),
+            TerminalOutputStream::Stderr,
             plan.artifacts.absolute_stderr.clone(),
             Arc::clone(&output_file),
+            self.artifact_limits,
+            Arc::clone(&capture_ledger),
+            capture_failure_tx,
         );
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let (cancel_tx, cancel_rx) = mpsc::channel(1);
@@ -142,6 +165,8 @@ impl TerminalProcessManager {
             artifacts: plan.artifacts,
             stdout_task,
             stderr_task,
+            capture_ledger,
+            capture_failure_rx,
             cancel_rx,
             preview_limit_bytes: self.preview_limit_bytes,
             cancel_grace: self.cancel_grace,
@@ -162,7 +187,8 @@ impl TerminalProcessManager {
         pty_size: Option<TerminalPtySize>,
     ) -> Result<TerminalTaskEntry> {
         let plan = self.prepare_start(request, TerminalStartMode::Pty).await?;
-        let pty_runtime = spawn_pty_runtime(&plan, pty_size.unwrap_or_default())?;
+        let pty_runtime =
+            spawn_pty_runtime(&plan, pty_size.unwrap_or_default(), self.artifact_limits)?;
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let managed = ManagedTerminalTask {
             summary: Arc::clone(&summary),
@@ -171,6 +197,7 @@ impl TerminalProcessManager {
                 master: Arc::clone(&pty_runtime.master),
                 killer: Arc::clone(&pty_runtime.killer),
                 process_id: pty_runtime.process_id,
+                capture_ledger: Arc::clone(&pty_runtime.capture_ledger),
                 cancel_requested: Arc::clone(&pty_runtime.cancel_requested),
                 cancel_grace: self.cancel_grace,
                 artifacts: Arc::new(plan.artifacts.clone()),
@@ -187,7 +214,13 @@ impl TerminalProcessManager {
             summary,
             artifacts: plan.artifacts,
             wait_task: pty_runtime.wait_task,
+            killer: pty_runtime.killer,
+            process_id: pty_runtime.process_id,
+            capture_ledger: pty_runtime.capture_ledger,
+            capture_failure_rx: pty_runtime.capture_failure_rx,
+            child_exit_rx: pty_runtime.child_exit_rx,
             preview_limit_bytes: self.preview_limit_bytes,
+            cancel_grace: self.cancel_grace,
         }));
 
         Ok(plan.initial_entry)
@@ -217,8 +250,9 @@ impl TerminalProcessManager {
         let task = self.managed_task(task_id).await?;
         let entry = task.summary.lock().await.clone();
         let path = self.stored_artifact_path(&entry.handle.log_path)?;
+        let limit_bytes = limit_bytes.clamp(1, HARD_TERMINAL_READ_LIMIT_BYTES);
         let mut read =
-            read_terminal_output_log(task_id.clone(), &path, offset, limit_bytes.max(1)).await?;
+            read_terminal_output_log(task_id.clone(), &path, offset, limit_bytes).await?;
         read.latest_entry = Some(entry);
         Ok(read)
     }
@@ -336,6 +370,7 @@ impl TerminalProcessManager {
             TerminalTaskControl::Pty {
                 killer,
                 process_id,
+                capture_ledger,
                 cancel_requested,
                 cancel_grace,
                 artifacts,
@@ -346,6 +381,7 @@ impl TerminalProcessManager {
                     &task.summary,
                     Arc::clone(killer),
                     *process_id,
+                    Arc::clone(capture_ledger),
                     Arc::clone(cancel_requested),
                     *cancel_grace,
                     artifacts.clone(),
@@ -516,6 +552,9 @@ impl TerminalProcessManager {
             output_preview: None,
             output_hash: None,
             output_truncated: false,
+            output_total_bytes: 0,
+            output_limit_bytes: None,
+            output_termination_reason: None,
             cleanup: None,
             updated_at_ms: created_at_ms,
         };
@@ -589,6 +628,7 @@ pub(super) enum TerminalTaskControl {
         master: Arc<StdMutex<Box<dyn MasterPty + Send>>>,
         killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
         process_id: Option<u32>,
+        capture_ledger: Arc<TerminalCaptureLedger>,
         cancel_requested: Arc<AtomicBool>,
         cancel_grace: Duration,
         artifacts: Arc<TerminalTaskArtifacts>,

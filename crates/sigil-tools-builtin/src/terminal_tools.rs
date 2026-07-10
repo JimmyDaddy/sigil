@@ -853,6 +853,8 @@ pub(crate) fn terminal_entry_result_with_shell_analysis(
         content,
         ToolResultMeta {
             truncated: entry.output_truncated,
+            total_bytes: Some(entry.output_total_bytes),
+            limit_bytes: entry.output_limit_bytes,
             details: terminal_entry_details(&entry, analysis),
             ..ToolResultMeta::default()
         },
@@ -1086,13 +1088,15 @@ fn terminal_foreground_result(
         duration_ms: Some(duration_ms),
         exit_code,
         truncated: entry.output_truncated,
+        total_bytes: Some(entry.output_total_bytes),
+        limit_bytes: entry.output_limit_bytes,
         returned_bytes: Some(content.len() as u64),
         returned_lines: Some(content.lines().count() as u64),
         details: details.clone(),
         ..ToolResultMeta::default()
     };
 
-    if let Some(error_kind) = error_kind_override.or_else(|| terminal_error_kind(&entry.status)) {
+    if let Some(error_kind) = error_kind_override.or_else(|| terminal_error_kind(&entry)) {
         let mut result = ToolResult::error(call_id, tool_name, error_kind, content)
             .with_error_details(false, details);
         result.metadata = metadata;
@@ -1159,8 +1163,13 @@ fn terminal_verdict(status: &TerminalTaskStatus) -> &'static str {
     }
 }
 
-fn terminal_error_kind(status: &TerminalTaskStatus) -> Option<ToolErrorKind> {
-    match status {
+fn terminal_error_kind(entry: &TerminalTaskEntry) -> Option<ToolErrorKind> {
+    if entry.output_termination_reason
+        == Some(sigil_kernel::TerminalOutputTerminationReason::OutputLimitExceeded)
+    {
+        return Some(ToolErrorKind::ResourceLimit);
+    }
+    match &entry.status {
         TerminalTaskStatus::Exited { exit_code: Some(0) } => None,
         TerminalTaskStatus::Exited { .. } => Some(ToolErrorKind::ExitStatus),
         TerminalTaskStatus::Failed { .. } => Some(ToolErrorKind::Internal),
@@ -1186,7 +1195,10 @@ pub(crate) fn terminal_entry_details(
         "updated_at_ms": entry.updated_at_ms,
         "output_preview": &entry.output_preview,
         "output_hash": &entry.output_hash,
-        "output_truncated": entry.output_truncated
+        "output_truncated": entry.output_truncated,
+        "output_total_bytes": entry.output_total_bytes,
+        "output_limit_bytes": entry.output_limit_bytes,
+        "output_termination_reason": entry.output_termination_reason
     });
     let details_object = details
         .as_object_mut()

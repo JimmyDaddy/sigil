@@ -1182,6 +1182,9 @@ fn edge_terminal_entry(task_id: &str, status: TerminalTaskStatus) -> Result<Term
         output_preview: Some("old preview".to_owned()),
         output_hash: Some("sha256:old".to_owned()),
         output_truncated: false,
+        output_total_bytes: 0,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms: 20,
     })

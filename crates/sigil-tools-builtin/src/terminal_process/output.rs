@@ -40,16 +40,95 @@ pub(super) async fn read_terminal_output_log(
 }
 
 pub(super) async fn summarize_log(path: &Path, limit_bytes: usize) -> Result<LogSummary> {
-    let bytes = fs::read(path)
+    let mut file = File::open(path)
         .await
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let sha256 = sha256_hex(&bytes);
-    let limited = limit_output_bytes(&bytes, limit_bytes.max(1));
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let limit_bytes = limit_bytes.max(1);
+    let head_limit = limit_bytes / 2;
+    let tail_limit = limit_bytes.saturating_sub(head_limit);
+    let mut head = Vec::with_capacity(head_limit);
+    let mut tail = Vec::with_capacity(tail_limit);
+    let mut hasher = Sha256::new();
+    let mut total_bytes = 0u64;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &buffer[..read];
+        hasher.update(chunk);
+        total_bytes = total_bytes.saturating_add(read as u64);
+
+        let head_remaining = head_limit.saturating_sub(head.len());
+        let head_bytes = head_remaining.min(chunk.len());
+        head.extend_from_slice(&chunk[..head_bytes]);
+        push_bounded_tail(&mut tail, tail_limit, &chunk[head_bytes..]);
+    }
+
+    let raw_truncated = total_bytes > limit_bytes as u64;
+    let (preview, display_truncated) =
+        bounded_log_preview(&head, &tail, total_bytes, limit_bytes, raw_truncated);
     Ok(LogSummary {
-        preview: limited.content,
-        sha256,
-        truncated: limited.truncated,
+        preview,
+        sha256: format!("{:x}", hasher.finalize()),
+        truncated: raw_truncated || display_truncated,
+        total_bytes,
     })
+}
+
+fn bounded_log_preview(
+    head: &[u8],
+    tail: &[u8],
+    total_bytes: u64,
+    limit_bytes: usize,
+    force_notice: bool,
+) -> (String, bool) {
+    let head = String::from_utf8_lossy(head);
+    let tail = String::from_utf8_lossy(tail);
+    let combined_len = head.len().saturating_add(tail.len());
+    if !force_notice && combined_len <= limit_bytes {
+        return (format!("{head}{tail}"), false);
+    }
+
+    let notice = format!("[sigil: terminal output truncated; total {total_bytes} bytes]");
+    if limit_bytes <= notice.len() {
+        let end = crate::support::floor_char_boundary(&notice, limit_bytes);
+        return (notice[..end].to_owned(), true);
+    }
+    let raw_budget = limit_bytes.saturating_sub(notice.len() + 2);
+    let head_budget = raw_budget / 2;
+    let tail_budget = raw_budget.saturating_sub(head_budget);
+    let head_end = crate::support::floor_char_boundary(&head, head_budget.min(head.len()));
+    let tail_start =
+        crate::support::ceil_char_boundary(&tail, tail.len().saturating_sub(tail_budget));
+    (
+        format!("{}\n{notice}\n{}", &head[..head_end], &tail[tail_start..]),
+        true,
+    )
+}
+
+fn push_bounded_tail(tail: &mut Vec<u8>, limit_bytes: usize, bytes: &[u8]) {
+    if limit_bytes == 0 || bytes.is_empty() {
+        return;
+    }
+    if bytes.len() >= limit_bytes {
+        tail.clear();
+        tail.extend_from_slice(&bytes[bytes.len() - limit_bytes..]);
+        return;
+    }
+    let overflow = tail
+        .len()
+        .saturating_add(bytes.len())
+        .saturating_sub(limit_bytes);
+    if overflow > 0 {
+        tail.drain(..overflow);
+    }
+    tail.extend_from_slice(bytes);
 }
 
 #[derive(Debug, Clone)]
@@ -57,39 +136,7 @@ pub(super) struct LogSummary {
     pub(super) preview: String,
     pub(super) sha256: String,
     pub(super) truncated: bool,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct LimitedOutput {
-    pub(super) content: String,
-    pub(super) truncated: bool,
-}
-
-pub(super) fn limit_output_bytes(bytes: &[u8], limit_bytes: usize) -> LimitedOutput {
-    if bytes.len() <= limit_bytes {
-        return LimitedOutput {
-            content: String::from_utf8_lossy(bytes).to_string(),
-            truncated: false,
-        };
-    }
-
-    let head_len = limit_bytes / 2;
-    let tail_len = limit_bytes.saturating_sub(head_len);
-    let omitted = bytes.len().saturating_sub(head_len + tail_len);
-    let mut content = String::new();
-    content.push_str(&String::from_utf8_lossy(&bytes[..head_len]));
-    content.push_str(&format!("\n... truncated {omitted} bytes ...\n"));
-    content.push_str(&String::from_utf8_lossy(&bytes[bytes.len() - tail_len..]));
-    LimitedOutput {
-        content,
-        truncated: true,
-    }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    pub(super) total_bytes: u64,
 }
 
 pub(super) fn current_epoch_ms() -> u64 {

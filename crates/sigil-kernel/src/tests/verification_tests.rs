@@ -73,6 +73,7 @@ impl ExecutionBackend for FakeVerificationBackend {
                 } else {
                     Vec::new()
                 },
+                output: Default::default(),
                 timed_out,
             })
         })
@@ -110,6 +111,7 @@ impl ExecutionBackend for FakeSandboxVerificationBackend {
                 exit_code: Some(0),
                 stdout: format!("fake sandbox executed {}\n", request.program).into_bytes(),
                 stderr: Vec::new(),
+                output: Default::default(),
                 timed_out: false,
             })
         })
@@ -1581,6 +1583,7 @@ fn check_failure_reason_covers_timeout_and_signal_edges() {
         stdout: String::new(),
         stderr: String::new(),
         timed_out: true,
+        termination: crate::ExecutionTerminationCause::TimedOut,
     };
     assert_eq!(
         super::check_failure_reason(&timeout_without_configured_ms, None).as_deref(),
@@ -1596,6 +1599,7 @@ fn check_failure_reason_covers_timeout_and_signal_edges() {
         stdout: String::new(),
         stderr: String::new(),
         timed_out: false,
+        termination: crate::ExecutionTerminationCause::Exited,
     };
     assert_eq!(
         super::check_failure_reason(&terminated_without_exit_code, None).as_deref(),

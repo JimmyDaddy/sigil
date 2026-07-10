@@ -69,23 +69,14 @@ fn write_fake_server_script(path: &std::path::Path) -> Result<()> {
 import json, sys
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if not line:
-            return None
-        if line in (b"\r\n", b"\n"):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode())
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
 
 def write_message(obj):
     body = json.dumps(obj).encode()
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 while True:
@@ -94,7 +85,7 @@ while True:
         break
     method = message.get("method")
     if method == "initialize":
-        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"fake","version":"1.0.0"},"capabilities":{}}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"fake","version":"1.0.0"},"capabilities":{}}})
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":

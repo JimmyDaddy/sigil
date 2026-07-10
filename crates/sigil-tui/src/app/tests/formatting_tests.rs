@@ -447,6 +447,9 @@ fn format_terminal_entry(
         output_preview: Some("line 1\nline 2".to_owned()),
         output_hash: Some("hash".to_owned()),
         output_truncated: false,
+        output_total_bytes: 0,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: Some(sigil_kernel::ExecutionCleanupReceipt::not_needed()),
         updated_at_ms: 20,
     })

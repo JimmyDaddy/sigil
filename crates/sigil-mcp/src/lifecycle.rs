@@ -1,5 +1,7 @@
 use super::*;
 
+pub const MCP_TOOL_LIFECYCLE_NAMESPACE: &str = "sigil.mcp.server";
+
 pub struct McpToolRegistrationOptions {
     pub provider_tool_name_max_chars: usize,
     pub roots: Vec<PathBuf>,
@@ -12,11 +14,13 @@ pub struct McpToolRegistrationOptions {
     pub mutation_workspace_root: Option<PathBuf>,
     pub process_launcher: Arc<dyn McpProcessLauncher>,
     pub expected_process_subject: Option<ToolSubject>,
+    pub strict_registration: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpToolRegistrationReport {
     pub process_launch_receipts: Vec<McpProcessLaunchReceipt>,
+    pub lifecycle_owners: Vec<ToolLifecycleOwner>,
 }
 
 impl McpToolRegistrationOptions {
@@ -41,6 +45,7 @@ impl McpToolRegistrationOptions {
             mutation_workspace_root: None,
             process_launcher: Arc::new(LocalMcpProcessLauncher),
             expected_process_subject: None,
+            strict_registration: false,
         })
     }
 
@@ -101,6 +106,13 @@ impl McpToolRegistrationOptions {
         self.expected_process_subject = Some(subject);
         self
     }
+
+    /// Requires each selected server to produce a live callable replacement generation.
+    #[must_use]
+    pub fn with_strict_registration(mut self) -> Self {
+        self.strict_registration = true;
+        self
+    }
 }
 
 pub async fn register_mcp_tools(
@@ -140,6 +152,34 @@ pub(super) async fn register_mcp_tools_for_startup(
     servers: &[McpServerConfig],
     options: McpToolRegistrationOptions,
 ) -> Result<McpToolRegistrationReport> {
+    let mut registered_owners = Vec::new();
+    let result =
+        register_mcp_tools_for_startup_inner(registry, servers, options, &mut registered_owners)
+            .await;
+    match result {
+        Ok(report) => Ok(report),
+        Err(error) => match rollback_registered_mcp_generations(registry, &registered_owners).await
+        {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(error.context(format!(
+                "MCP registration rollback was incomplete: {rollback_error:#}"
+            ))),
+        },
+    }
+}
+
+async fn register_mcp_tools_for_startup_inner(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    options: McpToolRegistrationOptions,
+    registered_owners: &mut Vec<ToolLifecycleOwner>,
+) -> Result<McpToolRegistrationReport> {
+    let mut unique_server_names = BTreeSet::new();
+    for server in servers {
+        if !unique_server_names.insert(server.name.as_str()) {
+            bail!("duplicate MCP server name is not allowed: {}", server.name);
+        }
+    }
     let mut used_provider_names = registry
         .specs()
         .into_iter()
@@ -174,10 +214,13 @@ pub(super) async fn register_mcp_tools_for_startup(
         .await
         {
             Ok(client) => client,
-            Err(error) if !server.required => {
+            Err(error) if !server.required && !options.strict_registration => {
                 let receipt = error
                     .downcast_ref::<super::client::McpPostSpawnStartupError>()
                     .map(super::client::McpPostSpawnStartupError::receipt);
+                let cleanup_incomplete = error
+                    .downcast_ref::<super::client::McpPostSpawnStartupError>()
+                    .is_some_and(|error| !error.cleanup_completed());
                 record_mcp_server_lifecycle_scan_result(
                     &options,
                     &server.name,
@@ -185,6 +228,12 @@ pub(super) async fn register_mcp_tools_for_startup(
                     receipt,
                     "startup_failed",
                 )?;
+                if cleanup_incomplete {
+                    return Err(error.context(format!(
+                        "optional MCP server {} startup cleanup was incomplete",
+                        server.name
+                    )));
+                }
                 warn!(
                     server = %server.name,
                     trust_class = server.trust.trust_class.as_str(),
@@ -208,19 +257,12 @@ pub(super) async fn register_mcp_tools_for_startup(
             }
         };
         let process_receipt = client.process_receipt().clone();
-        let client = Arc::new(client);
         let tools = match client.list_tools().await {
-            Ok(tools) => {
-                record_mcp_server_lifecycle_scan_result(
-                    &options,
-                    &server.name,
-                    lifecycle_scan.as_ref(),
-                    Some(&process_receipt),
-                    "registered",
-                )?;
-                tools
-            }
-            Err(error) if !server.required => {
+            Ok(tools) => tools,
+            Err(error) if !server.required && !options.strict_registration => {
+                let cleanup = client
+                    .close_connection(format!("tools/list failed: {error:#}"))
+                    .await;
                 record_mcp_server_lifecycle_scan_result(
                     &options,
                     &server.name,
@@ -228,15 +270,26 @@ pub(super) async fn register_mcp_tools_for_startup(
                     Some(&process_receipt),
                     "tools_list_failed",
                 )?;
+                if !cleanup.completed {
+                    bail!(
+                        "optional MCP server {} tools/list failed and cleanup was incomplete: {error:#}; transport cleanup: {}",
+                        server.name,
+                        cleanup.summary()
+                    );
+                }
                 warn!(
                     server = %server.name,
                     trust_class = server.trust.trust_class.as_str(),
                     error = %error,
+                    cleanup = %cleanup.summary(),
                     "optional MCP server tools/list failed and will be skipped"
                 );
                 continue;
             }
             Err(error) => {
+                let cleanup = client
+                    .close_connection(format!("tools/list failed: {error:#}"))
+                    .await;
                 record_mcp_server_lifecycle_scan_result(
                     &options,
                     &server.name,
@@ -244,10 +297,14 @@ pub(super) async fn register_mcp_tools_for_startup(
                     Some(&process_receipt),
                     "tools_list_failed",
                 )?;
-                bail!("MCP server {} tools/list failed: {error:#}", server.name);
+                bail!(
+                    "MCP server {} tools/list failed: {error:#}; transport cleanup: {}",
+                    server.name,
+                    cleanup.summary()
+                );
             }
         };
-        report.process_launch_receipts.push(process_receipt);
+        let mut registered_surface_count = 0usize;
         for tool in tools {
             let tool_name = McpToolName::new(
                 &server.name,
@@ -268,6 +325,7 @@ pub(super) async fn register_mcp_tools_for_startup(
                 tool_name,
                 trust: server.trust.clone(),
             }));
+            registered_surface_count = registered_surface_count.saturating_add(1);
         }
         if client.supports_resources() {
             for resource_kind in McpResourceToolKind::all() {
@@ -292,6 +350,7 @@ pub(super) async fn register_mcp_tools_for_startup(
                     kind: resource_kind,
                     trust: server.trust.clone(),
                 }));
+                registered_surface_count = registered_surface_count.saturating_add(1);
             }
         }
         if client.supports_prompts() {
@@ -317,10 +376,93 @@ pub(super) async fn register_mcp_tools_for_startup(
                     kind: prompt_kind,
                     trust: server.trust.clone(),
                 }));
+                registered_surface_count = registered_surface_count.saturating_add(1);
             }
+        }
+        if registered_surface_count == 0 {
+            let cleanup = client
+                .close_connection("MCP server registered no callable surfaces".to_owned())
+                .await;
+            if let Err(error) = record_mcp_server_lifecycle_scan_result(
+                &options,
+                &server.name,
+                lifecycle_scan.as_ref(),
+                Some(&process_receipt),
+                "zero_surface",
+            ) {
+                return Err(error.context(format!(
+                    "MCP server {} zero-surface lifecycle evidence failed; transport cleanup: {}",
+                    server.name,
+                    cleanup.summary()
+                )));
+            }
+            if !cleanup.completed || options.strict_registration || server.required {
+                bail!(
+                    "MCP server {} registered no callable surfaces{}: {}",
+                    server.name,
+                    if !cleanup.completed {
+                        " and cleanup was incomplete"
+                    } else if options.strict_registration {
+                        " during strict replacement"
+                    } else {
+                        " although the server is required"
+                    },
+                    cleanup.summary()
+                );
+            }
+            warn!(
+                server = %server.name,
+                cleanup = %cleanup.summary(),
+                "optional MCP server registered no callable surfaces and will be skipped"
+            );
+        } else {
+            let owner = client.lifecycle_owner();
+            registered_owners.push(owner.clone());
+            if let Err(error) = record_mcp_server_lifecycle_scan_result(
+                &options,
+                &server.name,
+                lifecycle_scan.as_ref(),
+                Some(&process_receipt),
+                "registered",
+            ) {
+                let cleanup = client
+                    .close_connection(format!("registered lifecycle evidence failed: {error:#}"))
+                    .await;
+                return Err(error.context(format!(
+                    "MCP server {} lifecycle evidence failed after spawn and callable owner registration; transport cleanup: {}",
+                    server.name,
+                    cleanup.summary()
+                )));
+            }
+            report.process_launch_receipts.push(process_receipt);
+            report.lifecycle_owners.push(owner);
         }
     }
     Ok(report)
+}
+
+async fn rollback_registered_mcp_generations(
+    registry: &mut ToolRegistry,
+    owners: &[ToolLifecycleOwner],
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for owner in owners.iter().rev() {
+        let tools = registry.drain_by_lifecycle_owner(owner);
+        let Some(tool) = tools.first() else {
+            continue;
+        };
+        if let Err(error) = tool.shutdown().await {
+            failures.push(format!(
+                "failed to shut down MCP generation {} for scope {}: {error:#}",
+                owner.generation(),
+                owner.scope()
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        bail!(failures.join("; "));
+    }
+    Ok(())
 }
 
 pub(super) fn capture_mcp_server_lifecycle_scan(
@@ -377,6 +519,7 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
     let status = match startup_result {
         "registered" => ExtensionProcessLifecycleStatus::Registered,
         "startup_failed" => ExtensionProcessLifecycleStatus::StartupFailed,
+        "zero_surface" => ExtensionProcessLifecycleStatus::StartupFailed,
         "tools_list_failed" => ExtensionProcessLifecycleStatus::ToolsListFailed,
         _ => {
             bail!("unsupported MCP lifecycle result {startup_result}");

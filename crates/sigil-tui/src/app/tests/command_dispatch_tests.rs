@@ -159,6 +159,9 @@ fn dispatch_terminal_entry(
         output_preview: Some("running output".to_owned()),
         output_hash: Some("hash".to_owned()),
         output_truncated: false,
+        output_total_bytes: 0,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms: 20,
     })

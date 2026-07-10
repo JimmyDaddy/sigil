@@ -8,10 +8,11 @@ use crate::{
     ApprovalMode, DurableEventType, ExecutionCoverageLabel, ExecutionCoverageSummary,
     JsonlSessionStore, MessageRole, MutationEventRecorder, SessionStreamRecord, Tool, ToolAccess,
     ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolReceiptMetadata,
-    ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope, VerificationScope,
-    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan, provider::ToolCall,
+    ToolLifecycleOwner, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
+    ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope,
+    VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan,
+    provider::ToolCall,
 };
 
 #[test]
@@ -229,6 +230,43 @@ impl Tool for NamedRegistryTool {
         Ok(ToolResult::ok(
             call_id,
             self.0,
+            "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+struct OwnedRegistryTool {
+    name: &'static str,
+    owner: ToolLifecycleOwner,
+}
+
+#[async_trait]
+impl Tool for OwnedRegistryTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.to_owned(),
+            description: "owned registry fixture".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Mcp,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
+        Some(self.owner.clone())
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.name,
             "ok",
             ToolResultMeta::default(),
         ))
@@ -710,6 +748,32 @@ fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     assert!(registry.spec_for("read_file").is_some());
 }
 
+#[test]
+fn tool_registry_drains_only_one_exact_lifecycle_generation() {
+    let first = ToolLifecycleOwner::new("mcp", "a-b", "generation-1");
+    let second = ToolLifecycleOwner::new("mcp", "a_b", "generation-2");
+    let replacement = ToolLifecycleOwner::new("mcp", "a-b", "generation-3");
+    let mut registry = ToolRegistry::new();
+    for (name, owner) in [
+        ("mcp__a_b__one", first.clone()),
+        ("mcp__a_b__two", first.clone()),
+        ("mcp__a_b__collision", second.clone()),
+        ("mcp__a_b__replacement", replacement.clone()),
+    ] {
+        registry.register(Arc::new(OwnedRegistryTool { name, owner }));
+    }
+
+    assert_eq!(
+        registry.lifecycle_owners_by_scope("mcp", "a-b"),
+        vec![first.clone(), replacement]
+    );
+    assert_eq!(registry.drain_by_lifecycle_owner(&first).len(), 2);
+    assert!(registry.spec_for("mcp__a_b__one").is_none());
+    assert!(registry.spec_for("mcp__a_b__two").is_none());
+    assert!(registry.spec_for("mcp__a_b__collision").is_some());
+    assert!(registry.spec_for("mcp__a_b__replacement").is_some());
+}
+
 #[tokio::test]
 async fn scoped_tool_registry_denies_matching_names_after_allow_scope() -> Result<()> {
     let mut registry = ToolRegistry::new();
@@ -1011,6 +1075,11 @@ fn tool_labels_are_stable() {
     );
     assert_eq!(ToolErrorKind::NotFound.as_str(), "not_found");
     assert_eq!(ToolErrorKind::Timeout.as_str(), "timeout");
+    assert_eq!(ToolErrorKind::ResourceLimit.as_str(), "resource_limit");
+    assert_eq!(
+        serde_json::to_value(ToolErrorKind::ResourceLimit).expect("error kind should serialize"),
+        serde_json::json!("resource_limit")
+    );
     assert_eq!(ToolErrorKind::Interrupted.as_str(), "interrupted");
     assert_eq!(ToolErrorKind::ExitStatus.as_str(), "exit_status");
     assert_eq!(ToolErrorKind::Io.as_str(), "io");

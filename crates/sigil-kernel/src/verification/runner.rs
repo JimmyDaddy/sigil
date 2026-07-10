@@ -402,11 +402,12 @@ pub(super) struct CheckCommandOutput {
     pub(super) stdout: String,
     pub(super) stderr: String,
     pub(super) timed_out: bool,
+    pub(super) termination: ExecutionTerminationCause,
 }
 
 impl CheckCommandOutput {
     fn succeeded(&self) -> bool {
-        self.exit_code == Some(0) && !self.timed_out
+        self.exit_code == Some(0) && matches!(self.termination, ExecutionTerminationCause::Exited)
     }
 }
 
@@ -442,15 +443,17 @@ async fn execute_check_command(
             cwd.display()
         )
     })?;
+    let output = receipt.effective_output();
     Ok(CheckCommandOutput {
         backend: receipt.backend,
         backend_capabilities: receipt.capabilities,
         network: receipt.network,
         resources: receipt.resources,
         exit_code: receipt.exit_code,
-        stdout: truncated_lossy(&receipt.stdout),
-        stderr: truncated_lossy(&receipt.stderr),
-        timed_out: receipt.timed_out,
+        stdout: truncated_captured_lossy(&receipt.stdout, &output.stdout),
+        stderr: truncated_captured_lossy(&receipt.stderr, &output.stderr),
+        timed_out: matches!(output.termination, ExecutionTerminationCause::TimedOut),
+        termination: output.termination,
     })
 }
 
@@ -476,11 +479,30 @@ pub(super) fn check_failure_reason(
     if command_output.succeeded() {
         return None;
     }
-    if command_output.timed_out {
-        return Some(match timeout_ms {
-            Some(timeout_ms) => format!("check timed out after {timeout_ms} ms"),
-            None => "check timed out".to_owned(),
-        });
+    match &command_output.termination {
+        ExecutionTerminationCause::TimedOut => {
+            return Some(match timeout_ms {
+                Some(timeout_ms) => format!("check timed out after {timeout_ms} ms"),
+                None => "check timed out".to_owned(),
+            });
+        }
+        ExecutionTerminationCause::OutputLimit {
+            stream,
+            limit_bytes,
+            observed_bytes,
+        } => {
+            return Some(format!(
+                "check exceeded the {} output limit of {limit_bytes} bytes after observing {observed_bytes} bytes",
+                stream.as_str()
+            ));
+        }
+        ExecutionTerminationCause::ReaderFailed { stream, reason } => {
+            return Some(format!(
+                "check {} output reader failed: {reason}",
+                stream.as_str()
+            ));
+        }
+        ExecutionTerminationCause::Exited => {}
     }
     Some(match command_output.exit_code {
         Some(code) => format!("check exited with code {code}"),
@@ -507,6 +529,7 @@ fn append_command_finished_event(
             "cwd": check.command.cwd,
             "exit_code": command_output.exit_code,
             "timed_out": command_output.timed_out,
+            "termination": command_output.termination,
             "elapsed_ms": elapsed_ms,
             "execution_backend": command_output.backend,
             "execution_backend_capabilities": command_output.backend_capabilities,
@@ -747,5 +770,26 @@ pub(super) fn truncated_lossy(bytes: &[u8]) -> String {
         value.truncate(MAX_PREVIEW_BYTES);
         value.push_str("\n[truncated]");
     }
+    value
+}
+
+pub(super) fn truncated_captured_lossy(bytes: &[u8], capture: &ExecutionStreamCapture) -> String {
+    if !capture.truncated {
+        return truncated_lossy(bytes);
+    }
+    const HALF_PREVIEW_BYTES: usize = 2048;
+    let head_len = HALF_PREVIEW_BYTES.min(bytes.len());
+    let tail_len = HALF_PREVIEW_BYTES.min(bytes.len().saturating_sub(head_len));
+    let mut value = String::from_utf8_lossy(&bytes[..head_len]).into_owned();
+    if !value.ends_with('\n') {
+        value.push('\n');
+    }
+    value.push_str(&format!(
+        "[truncated, omitted {} bytes]\n",
+        capture.omitted_bytes
+    ));
+    value.push_str(&String::from_utf8_lossy(
+        &bytes[bytes.len().saturating_sub(tail_len)..],
+    ));
     value
 }

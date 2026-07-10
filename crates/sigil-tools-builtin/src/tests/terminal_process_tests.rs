@@ -10,18 +10,20 @@ use std::{
 use std::os::unix::fs::{PermissionsExt, symlink};
 
 use anyhow::{Result, anyhow};
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus, ExecutionConfig,
     ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
+    TerminalOutputTerminationReason, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus,
 };
 use tokio::{
     fs::OpenOptions,
     io::AsyncWriteExt,
     process::Command,
     sync::{Mutex, mpsc},
-    time::sleep,
+    time::{sleep, timeout},
 };
 
 use super::{
@@ -215,6 +217,217 @@ async fn terminal_process_manager_read_is_bounded_by_offset_and_limit() -> Resul
     Ok(())
 }
 
+#[cfg(unix)]
+#[serial]
+#[tokio::test]
+async fn terminal_process_manager_read_clamps_public_limit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let entry = manager
+        .start(TerminalStartRequest {
+            task_id: Some(TerminalTaskId::new("terminal-read-hard-clamp")?),
+            command: "dd if=/dev/zero bs=1024 count=200 2>/dev/null | tr '\\000' x".to_owned(),
+            cwd: None,
+            shell: Some(shell),
+            env: Default::default(),
+        })
+        .await?;
+    wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+
+    let read = manager.read(&entry.handle.task_id, 0, usize::MAX).await?;
+
+    assert_eq!(
+        read.returned_bytes,
+        crate::constants::HARD_TERMINAL_READ_LIMIT_BYTES as u64
+    );
+    assert!(read.truncated);
+    assert_eq!(read.next_offset, Some(read.returned_bytes));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[tokio::test]
+async fn terminal_output_limit_kills_term_ignoring_descendant_and_records_evidence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let descendant_pid_file = temp.path().join("descendant.pid");
+    let manager = TerminalProcessManager::new(temp.path())?
+        .with_artifact_limits(1024, 2048)
+        .with_cancel_grace(Duration::from_millis(50));
+    let entry = manager
+        .start(TerminalStartRequest {
+            task_id: Some(TerminalTaskId::new("terminal-output-limit")?),
+            command: concat!(
+                "sh -c 'trap \"\" TERM; echo $$ > \"$DESCENDANT_PID_FILE\"; ",
+                "while :; do sleep 1; done' & ",
+                "while [ ! -s \"$DESCENDANT_PID_FILE\" ]; do sleep 0.01; done; ",
+                "trap '' TERM; while :; do printf 0123456789abcdef; done"
+            )
+            .to_owned(),
+            cwd: None,
+            shell: Some(shell),
+            env: BTreeMap::from([(
+                "DESCENDANT_PID_FILE".to_owned(),
+                descendant_pid_file.display().to_string(),
+            )]),
+        })
+        .await?;
+
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+
+    assert!(matches!(
+        final_entry.status,
+        TerminalTaskStatus::Failed { .. }
+    ));
+    assert_eq!(final_entry.output_limit_bytes, Some(1024));
+    assert_eq!(
+        final_entry.output_termination_reason,
+        Some(TerminalOutputTerminationReason::OutputLimitExceeded)
+    );
+    assert!(final_entry.output_truncated);
+    assert!(final_entry.output_total_bytes > 1024);
+    assert_eq!(
+        final_entry
+            .cleanup
+            .as_ref()
+            .expect("output-limit cleanup receipt")
+            .status,
+        ExecutionCleanupStatus::Completed
+    );
+    let artifacts = manager.artifacts_for(&entry.handle.task_id)?;
+    assert!(std::fs::metadata(&artifacts.absolute_stdout)?.len() <= 1024);
+    assert!(std::fs::metadata(&artifacts.absolute_output)?.len() <= 2048);
+
+    let descendant_pid = std::fs::read_to_string(&descendant_pid_file)?
+        .trim()
+        .parse::<u32>()?;
+    assert!(!process_is_alive(descendant_pid).await);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[tokio::test]
+async fn terminal_fast_exit_dual_stream_limits_preserve_observed_total() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?
+        .with_artifact_limits(1024, 2048)
+        .with_cancel_grace(Duration::from_millis(50));
+    let entry = manager
+        .start(TerminalStartRequest {
+            task_id: Some(TerminalTaskId::new("terminal-fast-dual-limit")?),
+            command: "head -c 4096 /dev/zero; head -c 4096 /dev/zero >&2".to_owned(),
+            cwd: None,
+            shell: Some(shell),
+            env: Default::default(),
+        })
+        .await?;
+
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+    let artifacts = manager.artifacts_for(&entry.handle.task_id)?;
+    let stdout_bytes = std::fs::metadata(&artifacts.absolute_stdout)?.len();
+    let stderr_bytes = std::fs::metadata(&artifacts.absolute_stderr)?.len();
+    let combined_bytes = std::fs::metadata(&artifacts.absolute_output)?.len();
+
+    assert!(matches!(
+        final_entry.status,
+        TerminalTaskStatus::Failed { .. }
+    ));
+    assert_eq!(
+        final_entry.output_termination_reason,
+        Some(TerminalOutputTerminationReason::OutputLimitExceeded)
+    );
+    assert_eq!(final_entry.output_total_bytes, 8192);
+    assert_eq!(stdout_bytes, 1024);
+    assert_eq!(stderr_bytes, 1024);
+    assert_eq!(combined_bytes, 2048);
+    assert!(final_entry.output_total_bytes >= combined_bytes);
+    assert!(final_entry.output_truncated);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[tokio::test]
+async fn terminal_pty_output_limit_is_structured_and_bounded() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?
+        .with_artifact_limits(1024, 2048)
+        .with_cancel_grace(Duration::from_millis(50));
+    let entry = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-pty-output-limit")?),
+                command: "trap '' TERM; while :; do printf 0123456789abcdef; done".to_owned(),
+                cwd: None,
+                shell: Some(shell),
+                env: Default::default(),
+            },
+            None,
+        )
+        .await?;
+
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+
+    assert!(matches!(
+        final_entry.status,
+        TerminalTaskStatus::Failed { .. }
+    ));
+    assert_eq!(final_entry.output_limit_bytes, Some(1024));
+    assert_eq!(
+        final_entry.output_termination_reason,
+        Some(TerminalOutputTerminationReason::OutputLimitExceeded)
+    );
+    assert!(final_entry.output_total_bytes > 1024);
+    let artifacts = manager.artifacts_for(&entry.handle.task_id)?;
+    assert!(std::fs::metadata(artifacts.absolute_stdout)?.len() <= 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_streaming_summary_hashes_and_retains_only_head_tail() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("streaming-summary.log");
+    let mut bytes = vec![b'x'; 32 * 1024];
+    bytes[..5].copy_from_slice(b"HEAD!");
+    let tail = bytes.len() - 5;
+    bytes[tail..].copy_from_slice(b"TAIL!");
+    tokio::fs::write(&path, &bytes).await?;
+
+    let summary = super::summarize_log(&path, 96).await?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+
+    assert_eq!(summary.total_bytes, bytes.len() as u64);
+    assert_eq!(summary.sha256, format!("{:x}", hasher.finalize()));
+    assert!(summary.truncated);
+    assert!(summary.preview.starts_with("HEAD!"));
+    assert!(summary.preview.ends_with("TAIL!"));
+    assert!(summary.preview.len() <= 96);
+    assert!(summary.preview.contains("total 32768 bytes"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_streaming_summary_bounds_lossy_utf8_expansion() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("invalid-utf8.log");
+    tokio::fs::write(&path, vec![0xff; 32 * 1024]).await?;
+
+    let summary = super::summarize_log(&path, 1024).await?;
+
+    assert!(summary.truncated);
+    assert!(summary.preview.len() <= 1024);
+    assert!(summary.preview.contains("terminal output truncated"));
+    assert!(summary.preview.contains("total 32768 bytes"));
+    assert_eq!(summary.total_bytes, 32 * 1024);
+    Ok(())
+}
+
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
@@ -367,13 +580,9 @@ async fn terminal_process_manager_preview_and_reads_use_bounded_offsets() -> Res
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
 
     assert!(final_entry.output_truncated);
-    assert!(
-        final_entry
-            .output_preview
-            .as_deref()
-            .unwrap_or_default()
-            .contains("truncated")
-    );
+    let preview = final_entry.output_preview.as_deref().unwrap_or_default();
+    assert!(!preview.is_empty());
+    assert!(preview.len() <= 4);
 
     let one_byte = manager.read(&entry.handle.task_id, 0, 0).await?;
     let past_end = manager.read(&entry.handle.task_id, 99, 10).await?;
@@ -858,43 +1067,46 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
         TerminalTaskStatus::Failed { .. }
     ));
 
-    let limited = super::limit_output_bytes(b"abcdef", 4);
-    assert!(limited.truncated);
-    assert!(limited.content.contains("truncated"));
-    let empty = super::limit_output_bytes(b"", 4);
-    assert_eq!(empty.content, "");
-    assert!(!empty.truncated);
-
     let output = temp.path().join("combined.log");
-    let output_file = Arc::new(Mutex::new(
+    let output_file = Arc::new(Mutex::new(super::CombinedOutputWriter::new(
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(&output)
             .await?,
-    ));
+        1024,
+    )));
     let stream_path = temp.path().join("stream.log");
-    let empty_capture =
-        super::capture_stream::<tokio::io::Empty>(None, stream_path, output_file).await?;
-    assert_eq!(empty_capture, 0);
+    let (capture_failure_tx, _capture_failure_rx) = mpsc::unbounded_channel();
+    let empty_capture = super::capture_stream::<tokio::io::Empty>(
+        None,
+        super::TerminalOutputStream::Stdout,
+        stream_path,
+        output_file,
+        super::TerminalArtifactLimits::default(),
+        Arc::new(super::TerminalCaptureLedger::default()),
+        capture_failure_tx,
+    )
+    .await?;
+    assert_eq!(empty_capture.observed_bytes, 0);
 
     assert!(super::is_pty_eof_error(&std::io::Error::new(
         std::io::ErrorKind::BrokenPipe,
         "closed"
     )));
     assert!(!super::is_pty_eof_error(&std::io::Error::other("boom")));
+    let (capture_failure_tx, _capture_failure_rx) = mpsc::unbounded_channel();
     let pty_error = super::capture_pty_reader(
         Box::new(ErrorReader),
         temp.path().join("pty-stream.log"),
         temp.path().join("pty-output.log"),
+        super::TerminalArtifactLimits::default(),
+        Arc::new(super::TerminalCaptureLedger::default()),
+        capture_failure_tx,
     )
     .expect_err("pty reader error should be reported");
-    assert!(
-        pty_error
-            .to_string()
-            .contains("failed to read terminal pty stream")
-    );
-    let pty_panic_thread = std::thread::spawn(|| -> Result<u64> {
+    assert!(pty_error.to_string().contains("read pty stream failed"));
+    let pty_panic_thread = std::thread::spawn(|| -> Result<super::io::CaptureOutcome> {
         panic!("pty reader panicked");
     });
     assert!(
@@ -902,7 +1114,8 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
             .unwrap_or_default()
             .contains("panicked")
     );
-    let pty_error_thread = std::thread::spawn(|| Err::<u64, anyhow::Error>(anyhow!("pty read")));
+    let pty_error_thread =
+        std::thread::spawn(|| Err::<super::io::CaptureOutcome, anyhow::Error>(anyhow!("pty read")));
     assert!(
         super::join_pty_read_thread(pty_error_thread)
             .unwrap_or_default()
@@ -911,10 +1124,126 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
 
     let aborted_task = tokio::spawn(async {
         sleep(Duration::from_secs(60)).await;
-        Ok::<u64, anyhow::Error>(0)
+        Ok::<super::io::CaptureOutcome, anyhow::Error>(capture_outcome(0))
     });
     aborted_task.abort();
-    assert!(super::join_capture_task(aborted_task).await.is_err());
+    assert!(aborted_task.await.is_err());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[tokio::test]
+async fn terminal_reader_task_panic_triggers_live_cleanup_without_failure_signal() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let task_id = TerminalTaskId::new("terminal-reader-panic")?;
+    let artifacts = manager.artifacts_for(&task_id)?;
+    tokio::fs::create_dir_all(&artifacts.absolute_dir).await?;
+    super::create_empty_log_files(&artifacts).await?;
+    let summary = Arc::new(Mutex::new(test_entry(task_id)));
+    let pid_file = temp.path().join("reader-panic-child.pid");
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("trap '' TERM; sleep 30 & echo $! > \"$1\"; wait")
+        .arg("sh")
+        .arg(&pid_file)
+        .kill_on_drop(true);
+    super::configure_process_group(&mut command);
+    let child = command.spawn()?;
+    let process_id = child.id();
+    let panic_pid_file = pid_file.clone();
+    let stdout_task = tokio::spawn(async move {
+        for _ in 0..200 {
+            if tokio::fs::metadata(&panic_pid_file).await.is_ok() {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        panic!("spontaneous terminal stdout reader panic");
+        #[allow(unreachable_code)]
+        Ok::<super::io::CaptureOutcome, anyhow::Error>(capture_outcome(0))
+    });
+    let stderr_task =
+        tokio::spawn(async { Ok::<super::io::CaptureOutcome, anyhow::Error>(capture_outcome(0)) });
+    let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
+    drop(capture_failure_tx);
+    let (_cancel_tx, cancel_rx) = mpsc::channel(1);
+    let started = std::time::Instant::now();
+
+    super::run_terminal_worker(super::TerminalWorker {
+        child,
+        process_id,
+        summary: Arc::clone(&summary),
+        artifacts,
+        stdout_task,
+        stderr_task,
+        capture_ledger: Arc::new(super::TerminalCaptureLedger::default()),
+        capture_failure_rx,
+        cancel_rx,
+        preview_limit_bytes: 8,
+        cancel_grace: Duration::from_millis(50),
+    })
+    .await;
+
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let entry = summary.lock().await.clone();
+    let TerminalTaskStatus::Failed { reason } = &entry.status else {
+        panic!("spontaneous reader panic should fail the task: {entry:?}");
+    };
+    assert!(reason.contains("terminal stdout capture task failed"));
+    assert!(reason.contains("panicked"));
+    assert_eq!(
+        entry.output_termination_reason,
+        Some(TerminalOutputTerminationReason::OutputCaptureFailed)
+    );
+    assert_eq!(
+        entry.cleanup.as_ref().map(|cleanup| cleanup.status),
+        Some(ExecutionCleanupStatus::Completed)
+    );
+    let pid = std::fs::read_to_string(pid_file)?;
+    for _ in 0..20 {
+        let running = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.trim())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !running {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "child process {} should be gone after reader-panic cleanup",
+        pid.trim()
+    );
+}
+
+#[tokio::test]
+async fn terminal_pty_reader_panic_is_reported_live_after_the_panic() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (capture_failure_tx, mut capture_failure_rx) = mpsc::unbounded_channel();
+    let read_thread = super::spawn_pty_read_thread(
+        Box::new(PanicReader),
+        temp.path().join("pty-panic-stdout.log"),
+        temp.path().join("pty-panic-output.log"),
+        super::TerminalArtifactLimits::default(),
+        Arc::new(super::TerminalCaptureLedger::default()),
+        capture_failure_tx,
+    );
+
+    let failure = timeout(Duration::from_secs(1), capture_failure_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow!("pty panic fixture closed without a failure"))?;
+    assert!(failure.to_string().contains("pty output reader panicked"));
+    assert!(
+        super::join_pty_read_thread(read_thread)
+            .unwrap_or_default()
+            .contains("pty output reader panicked")
+    );
     Ok(())
 }
 
@@ -938,24 +1267,37 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     );
 
     let output = temp.path().join("combined-with-data.log");
-    let output_file = Arc::new(Mutex::new(
+    let output_file = Arc::new(Mutex::new(super::CombinedOutputWriter::new(
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(&output)
             .await?,
-    ));
+        1024,
+    )));
     let stream_path = temp.path().join("stream-with-data.log");
     let (mut writer, reader) = tokio::io::duplex(64);
     writer.write_all(b"chunk").await?;
     drop(writer);
-    let captured = super::capture_stream(Some(reader), stream_path.clone(), output_file).await?;
-    assert_eq!(captured, 5);
+    let (capture_failure_tx, _capture_failure_rx) = mpsc::unbounded_channel();
+    let captured = super::capture_stream(
+        Some(reader),
+        super::TerminalOutputStream::Stdout,
+        stream_path.clone(),
+        output_file,
+        super::TerminalArtifactLimits::default(),
+        Arc::new(super::TerminalCaptureLedger::default()),
+        capture_failure_tx,
+    )
+    .await?;
+    assert_eq!(captured.observed_bytes, 5);
     assert_eq!(std::fs::read_to_string(stream_path)?, "chunk");
     assert_eq!(std::fs::read_to_string(output)?, "chunk");
 
-    let failed_task = tokio::spawn(async { Err::<u64, anyhow::Error>(anyhow!("capture failed")) });
-    assert!(super::join_capture_task(failed_task).await.is_err());
+    let failed_task = tokio::spawn(async {
+        Err::<super::io::CaptureOutcome, anyhow::Error>(anyhow!("capture failed"))
+    });
+    assert!(failed_task.await?.is_err());
 
     let quick_child = Command::new("/bin/sh").arg("-c").arg("exit 0").spawn()?;
     let mut quick_child = quick_child;
@@ -985,6 +1327,8 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     super::create_empty_log_files(&worker_artifacts).await?;
     let worker_summary = Arc::new(Mutex::new(test_entry(worker_task_id)));
     let (closed_cancel_tx, closed_cancel_rx) = mpsc::channel::<super::CancelCommand>(1);
+    let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
+    drop(capture_failure_tx);
     drop(closed_cancel_tx);
     let worker_child = Command::new("/bin/sh")
         .arg("-c")
@@ -995,8 +1339,14 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         process_id: None,
         summary: Arc::clone(&worker_summary),
         artifacts: worker_artifacts,
-        stdout_task: tokio::spawn(async { Ok::<u64, anyhow::Error>(0) }),
-        stderr_task: tokio::spawn(async { Ok::<u64, anyhow::Error>(0) }),
+        stdout_task: tokio::spawn(async {
+            Ok::<super::io::CaptureOutcome, anyhow::Error>(capture_outcome(0))
+        }),
+        stderr_task: tokio::spawn(async {
+            Ok::<super::io::CaptureOutcome, anyhow::Error>(capture_outcome(0))
+        }),
+        capture_ledger: Arc::new(super::TerminalCaptureLedger::default()),
+        capture_failure_rx,
         cancel_rx: closed_cancel_rx,
         preview_limit_bytes: 8,
         cancel_grace: Duration::from_millis(1),
@@ -1073,6 +1423,7 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
             Box::new(SuccessfulKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
         )),
         None,
+        Arc::new(super::TerminalCaptureLedger::default()),
         Arc::new(AtomicBool::new(false)),
         Duration::ZERO,
         Arc::new(pty_cancel_artifacts),
@@ -1092,6 +1443,7 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
             Box::new(FailingKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
         )),
         None,
+        Arc::new(super::TerminalCaptureLedger::default()),
         Arc::new(AtomicBool::new(false)),
         Duration::ZERO,
         Arc::new(pty_cancel_error_artifacts),
@@ -1116,8 +1468,11 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
     let task_id = TerminalTaskId::new("terminal-finalize-error")?;
     let artifacts = manager.artifacts_for(&task_id)?;
     let summary = Arc::new(Mutex::new(test_entry(task_id)));
-    let stdout_task = tokio::spawn(async { Err::<u64, anyhow::Error>(anyhow!("capture failed")) });
-    let stderr_task = tokio::spawn(async { Ok::<u64, anyhow::Error>(0) });
+    let stdout_task = tokio::spawn(async {
+        Err::<super::io::CaptureOutcome, anyhow::Error>(anyhow!("capture failed"))
+    });
+    let stderr_task =
+        tokio::spawn(async { Ok::<super::io::CaptureOutcome, anyhow::Error>(capture_outcome(0)) });
 
     let entry = super::finalize_terminal_task(
         &summary,
@@ -1125,11 +1480,16 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
         TerminalTaskStatus::Exited { exit_code: Some(0) },
         stdout_task,
         stderr_task,
+        Arc::new(super::TerminalCaptureLedger::default()),
         8,
     )
     .await;
 
     assert!(matches!(entry.status, TerminalTaskStatus::Failed { .. }));
+    assert_eq!(
+        entry.output_termination_reason,
+        Some(TerminalOutputTerminationReason::OutputCaptureFailed)
+    );
     assert!(
         entry
             .output_preview
@@ -1143,6 +1503,8 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
     tokio::fs::create_dir_all(&worker_artifacts.absolute_dir).await?;
     super::create_empty_log_files(&worker_artifacts).await?;
     let worker_summary = Arc::new(Mutex::new(test_entry(worker_task_id)));
+    let (_capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
+    let (_child_exit_tx, child_exit_rx) = mpsc::unbounded_channel();
     let aborted_wait_task = tokio::spawn(async {
         sleep(Duration::from_secs(60)).await;
         super::PtyWaitOutcome {
@@ -1155,7 +1517,15 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
         summary: Arc::clone(&worker_summary),
         artifacts: worker_artifacts,
         wait_task: aborted_wait_task,
+        killer: Arc::new(StdMutex::new(
+            Box::new(SuccessfulKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
+        )),
+        process_id: None,
+        capture_ledger: Arc::new(super::TerminalCaptureLedger::default()),
+        capture_failure_rx,
+        child_exit_rx,
         preview_limit_bytes: 8,
+        cancel_grace: Duration::from_millis(1),
     })
     .await;
     assert!(matches!(
@@ -1200,8 +1570,18 @@ fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
         output_preview: None,
         output_hash: None,
         output_truncated: false,
+        output_total_bytes: 0,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms: 1,
+    }
+}
+
+fn capture_outcome(bytes: u64) -> super::io::CaptureOutcome {
+    super::io::CaptureOutcome {
+        observed_bytes: bytes,
+        written_bytes: bytes,
     }
 }
 
@@ -1210,6 +1590,14 @@ struct ErrorReader;
 impl Read for ErrorReader {
     fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
         Err(std::io::Error::other("pty read failed"))
+    }
+}
+
+struct PanicReader;
+
+impl Read for PanicReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        panic!("spontaneous pty reader panic")
     }
 }
 
@@ -1255,6 +1643,17 @@ fn test_shell(dir: &Path) -> Result<String> {
 #[cfg(not(unix))]
 fn test_shell(_dir: &Path) -> Result<String> {
     Ok("sh".to_owned())
+}
+
+#[cfg(unix)]
+async fn process_is_alive(process_id: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &process_id.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
 }
 
 async fn wait_for_terminal_status(

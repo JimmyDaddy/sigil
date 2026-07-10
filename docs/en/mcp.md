@@ -87,6 +87,16 @@ The TUI shows lifecycle states:
 - `ready`
 - `failed`
 
+## Stdio Compatibility And Deadlines
+
+Sigil speaks the newline-delimited JSON stdio transport defined by MCP `2025-06-18`. MCP servers that use LSP-style `Content-Length` headers are not compatible and must be updated or wrapped with a standards-compliant adapter. Sigil does not sniff or switch framing on a live stream.
+
+Startup has one absolute budget covering `initialize`, `initialized`, and the first `tools/list`. Each tool, resource, or prompt call uses the active tool timeout. A zero timeout uses the finite 30-second project default, and larger configured values are clamped to a 24-hour hard maximum. A timeout or invalid/oversized frame permanently closes that client generation, attempts to terminate its process group/tree, and reaps the direct child; incomplete cleanup is reported rather than presented as successful. On Windows, Sigil keeps the stdio connection open while it runs bounded `taskkill /T /F`, so a cooperative stdin-EOF exit cannot race ahead of tree cleanup; if the leader was already gone before teardown began, tree cleanup is reported as unconfirmed. Limit failures use structured resource-limit details, including the applicable limit and observed lower bound.
+
+Each NDJSON frame is limited to 4 MiB; one operation may consume at most 256 inbound messages and 8 MiB of framed input, while MCP stderr has an 8 MiB hard limit. Tool, resource, and prompt content is redacted before JSON escaping and bounded to 32 KiB or 2,000 lines before it reaches the kernel model-content cap. Truncation is reported only through structured metadata, so no generated marker can accidentally reintroduce a configured secret carrier.
+
+Use `/config` → MCP → `activate` to refresh the server. Registry ownership uses the exact unsanitized server identity plus a unique process-generation id, never a provider-visible name prefix, so sanitized or hashed name collisions cannot retire another server. Explicit activation and refresh require a callable replacement even when the server is optional. Refresh reports success only after the replacement is registered and every distinct retired generation has been explicitly shut down; if replacement startup fails, the old generation is restored, and if retirement cleanup fails, the replacement is removed and shut down as a fail-closed rollback. Multi-server registration is transactional and rolls back generations started earlier in the same failed operation. Duplicate exact server names are rejected before launch. The closed generation is never reused, so a late response cannot become the next call's response.
+
 ## Trust Policy
 
 ```toml

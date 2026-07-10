@@ -93,6 +93,64 @@ fn secret_carrier_redacts_short_values_keys_and_debug_output() {
 }
 
 #[test]
+fn short_carriers_never_rescan_or_survive_the_selected_replacement() {
+    let carriers = ["[", "r", "e", "d", "a", "c", "t", "]"];
+    let mut redactor = SecretRedactor::empty();
+    for carrier in carriers {
+        redactor.add_secret_carrier(SecretString::new(carrier));
+    }
+
+    let input = "[redacted]".repeat((4 * 1024 * 1024) / "[redacted]".len());
+    let output = redactor.redact_text(&input);
+
+    assert!(output.len() <= input.len() + REDACTED_SECRET.len());
+    for carrier in carriers {
+        assert!(!output.contains(carrier));
+    }
+}
+
+#[test]
+fn unavailable_safe_marker_cannot_create_structural_credentials() {
+    let mut redactor = SecretRedactor::empty();
+    for carrier in ["[", "<", "*"] {
+        redactor.add_secret_carrier(SecretString::new(carrier));
+    }
+
+    assert_eq!(redactor.redact_text("Bearer[ raw-token"), "");
+    assert_eq!(redactor.redact_text("token[=raw-token"), "");
+}
+
+#[test]
+fn high_density_structural_credentials_have_bounded_output() {
+    let input = "Bearer x token=y ".repeat(200_000);
+
+    let output = SecretRedactor::empty().redact_text(&input);
+
+    assert!(output.len() <= input.len() + REDACTED_SECRET.len());
+    assert!(!output.contains("Bearer x"));
+    assert!(!output.contains("token=y"));
+}
+
+#[test]
+fn carrier_budget_overflow_fails_closed_without_leaking_unknown_values() {
+    let mut count_limited = SecretRedactor::empty();
+    for index in 0..=super::MAX_SECRET_CARRIERS {
+        count_limited.add_secret_carrier(SecretString::new(format!("carrier-{index}")));
+    }
+    assert_eq!(count_limited.redact_text("ordinary-visible-text"), "");
+    assert_eq!(
+        count_limited.redact_value(&json!({"normal": 42})),
+        json!({"": ""})
+    );
+
+    let mut byte_limited = SecretRedactor::empty();
+    byte_limited.add_secret_carrier(SecretString::new(
+        "x".repeat(super::MAX_SECRET_CARRIER_BYTES + 1),
+    ));
+    assert_eq!(byte_limited.redact_text("anything"), "");
+}
+
+#[test]
 fn truncated_byte_redaction_removes_every_non_ascii_secret_prefix() {
     let secret = "密钥🙂终";
     let prefix = b"diagnostic ";
@@ -109,6 +167,38 @@ fn truncated_byte_redaction_removes_every_non_ascii_secret_prefix() {
             "secret prefix length {secret_prefix_len} must be removed before UTF-8 decoding"
         );
     }
+}
+
+#[test]
+fn truncated_head_tail_redaction_removes_split_and_longest_overlapping_secrets() {
+    let redactor = SecretRedactor::from_values(["token-alpha-long", "token-beta"]);
+    let (head, tail) =
+        redactor.redact_truncated_head_tail_bytes(b"before token-alpha-lo", b"ng after");
+    assert_eq!(head, "before [redacted]");
+    assert_eq!(tail, "[redacted] after");
+
+    let overlapping = SecretRedactor::from_values(["abcd", "axyz"]);
+    assert_eq!(
+        overlapping.redact_truncated_bytes(b"prefix ax"),
+        "prefix [redacted]"
+    );
+}
+
+#[test]
+fn truncated_boundary_overlap_is_linear_for_long_repeated_secrets() {
+    let prefix_secret = format!("{}b", "a".repeat(30_000));
+    let suffix_secret = format!("b{}", "a".repeat(30_000));
+    let redactor = SecretRedactor::from_values([prefix_secret, suffix_secret]);
+    let repeated = "a".repeat(30_000);
+
+    assert_eq!(
+        redactor.redact_truncated_bytes(format!("prefix {repeated}").as_bytes()),
+        "prefix [redacted]"
+    );
+    let (head, tail) = redactor
+        .redact_truncated_head_tail_bytes(b"ordinary head", format!("{repeated} tail").as_bytes());
+    assert_eq!(head, "ordinary head");
+    assert_eq!(tail, "[redacted] tail");
 }
 
 #[test]
@@ -135,6 +225,18 @@ fn secret_helpers_cover_boundaries_empty_values_and_passthrough_cases() {
     assert_eq!(
         super::redact_secret_assignments("token='value' api_key = plain"),
         format!("token='{REDACTED_SECRET}' api_key = {REDACTED_SECRET}")
+    );
+    assert_eq!(
+        super::redact_secret_assignments(r#"token="prefix\"RAW_SECRET" trailing"#),
+        format!(r#"token="{REDACTED_SECRET}" trailing"#)
+    );
+    assert_eq!(
+        super::redact_secret_assignments(r"token='prefix\'RAW_SECRET' trailing"),
+        format!("token='{REDACTED_SECRET}' trailing")
+    );
+    assert_eq!(
+        super::redact_secret_assignments(r#"token="prefix\\" trailing"#),
+        format!(r#"token="{REDACTED_SECRET}" trailing"#)
     );
 
     let redactor = SecretRedactor::empty();

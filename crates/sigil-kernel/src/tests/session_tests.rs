@@ -3338,6 +3338,9 @@ fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
         output_preview: Some("running tests".to_owned()),
         output_hash: Some("sha256:abc".to_owned()),
         output_truncated: false,
+        output_total_bytes: 13,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms: 120,
     }))?;
@@ -3375,6 +3378,9 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
         output_preview: Some("running tests".to_owned()),
         output_hash: Some("sha256:abc".to_owned()),
         output_truncated: false,
+        output_total_bytes: 13,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms: 120,
     }));
@@ -3398,6 +3404,9 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
             output_preview: Some("ok".to_owned()),
             output_hash: Some("sha256:def".to_owned()),
             output_truncated: false,
+            output_total_bytes: 2,
+            output_limit_bytes: None,
+            output_termination_reason: None,
             cleanup: None,
             updated_at_ms: 180,
         },
@@ -3416,6 +3425,7 @@ fn terminal_task_projection_replays_durable_stream_records() -> Result<()> {
         TerminalTaskStatus::Exited { exit_code: Some(0) }
     ));
     assert_eq!(latest.output_preview.as_deref(), Some("ok"));
+    assert_eq!(latest.output_total_bytes, 2);
     Ok(())
 }
 

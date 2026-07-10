@@ -1,11 +1,238 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerminalOutputStream {
+    Stdout,
+    Stderr,
+}
+
+const CAPTURE_TERMINATION_FAILED: u8 = 1;
+const CAPTURE_TERMINATION_OUTPUT_LIMIT: u8 = 2;
+
+#[derive(Debug, Default)]
+pub(super) struct TerminalCaptureLedger {
+    stdout_observed_bytes: AtomicU64,
+    stdout_written_bytes: AtomicU64,
+    stderr_observed_bytes: AtomicU64,
+    stderr_written_bytes: AtomicU64,
+    termination: AtomicU8,
+    limit_bytes: AtomicU64,
+}
+
+impl TerminalCaptureLedger {
+    fn record_observed(&self, stream: TerminalOutputStream, bytes: u64) {
+        let observed = match stream {
+            TerminalOutputStream::Stdout => &self.stdout_observed_bytes,
+            TerminalOutputStream::Stderr => &self.stderr_observed_bytes,
+        };
+        let _ = observed.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(current.saturating_add(bytes))
+        });
+    }
+
+    fn record_written(&self, stream: TerminalOutputStream, bytes: u64) {
+        let written = match stream {
+            TerminalOutputStream::Stdout => &self.stdout_written_bytes,
+            TerminalOutputStream::Stderr => &self.stderr_written_bytes,
+        };
+        let _ = written.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(current.saturating_add(bytes))
+        });
+    }
+
+    fn record_failure(&self, failure: &TerminalCaptureFailure) {
+        let termination = match failure.termination_reason() {
+            TerminalOutputTerminationReason::OutputLimitExceeded => {
+                CAPTURE_TERMINATION_OUTPUT_LIMIT
+            }
+            TerminalOutputTerminationReason::OutputCaptureFailed
+            | TerminalOutputTerminationReason::OutputDrainTimeout => CAPTURE_TERMINATION_FAILED,
+        };
+        self.termination.fetch_max(termination, Ordering::AcqRel);
+        if let Some(limit_bytes) = failure.limit_bytes() {
+            let _ = self
+                .limit_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    Some(if current == 0 {
+                        limit_bytes
+                    } else {
+                        current.min(limit_bytes)
+                    })
+                });
+        }
+    }
+
+    pub(super) fn omitted_observed_bytes(&self) -> u64 {
+        let stdout = self
+            .stdout_observed_bytes
+            .load(Ordering::Acquire)
+            .saturating_sub(self.stdout_written_bytes.load(Ordering::Acquire));
+        let stderr = self
+            .stderr_observed_bytes
+            .load(Ordering::Acquire)
+            .saturating_sub(self.stderr_written_bytes.load(Ordering::Acquire));
+        stdout.saturating_add(stderr)
+    }
+
+    pub(super) fn total_observed_bytes(&self) -> u64 {
+        self.stdout_observed_bytes
+            .load(Ordering::Acquire)
+            .saturating_add(self.stderr_observed_bytes.load(Ordering::Acquire))
+    }
+
+    pub(super) fn limit_bytes(&self) -> Option<u64> {
+        let limit = self.limit_bytes.load(Ordering::Acquire);
+        (limit > 0).then_some(limit)
+    }
+
+    pub(super) fn termination_reason(&self) -> Option<TerminalOutputTerminationReason> {
+        match self.termination.load(Ordering::Acquire) {
+            CAPTURE_TERMINATION_OUTPUT_LIMIT => {
+                Some(TerminalOutputTerminationReason::OutputLimitExceeded)
+            }
+            CAPTURE_TERMINATION_FAILED => {
+                Some(TerminalOutputTerminationReason::OutputCaptureFailed)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl TerminalOutputStream {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TerminalCaptureFailure {
+    stream: TerminalOutputStream,
+    reason: String,
+    observed_bytes: u64,
+    written_bytes: u64,
+    limit_bytes: Option<u64>,
+    termination_reason: TerminalOutputTerminationReason,
+}
+
+impl TerminalCaptureFailure {
+    fn output_limit(
+        stream: TerminalOutputStream,
+        limit_name: &str,
+        limit_bytes: u64,
+        observed_bytes: u64,
+        written_bytes: u64,
+    ) -> Self {
+        Self {
+            stream,
+            reason: format!(
+                "terminal {limit_name} output limit exceeded: limit_bytes={limit_bytes}, observed_bytes={observed_bytes}, written_bytes={written_bytes}"
+            ),
+            observed_bytes,
+            written_bytes,
+            limit_bytes: Some(limit_bytes),
+            termination_reason: TerminalOutputTerminationReason::OutputLimitExceeded,
+        }
+    }
+
+    fn io(stream: TerminalOutputStream, operation: &str, error: impl std::fmt::Display) -> Self {
+        Self {
+            stream,
+            reason: format!("terminal output {operation} failed: {error}"),
+            observed_bytes: 0,
+            written_bytes: 0,
+            limit_bytes: None,
+            termination_reason: TerminalOutputTerminationReason::OutputCaptureFailed,
+        }
+    }
+
+    fn reader_panicked(stream: TerminalOutputStream, reader_kind: &str) -> Self {
+        Self {
+            stream,
+            reason: format!("terminal {reader_kind} reader panicked"),
+            observed_bytes: 0,
+            written_bytes: 0,
+            limit_bytes: None,
+            termination_reason: TerminalOutputTerminationReason::OutputCaptureFailed,
+        }
+    }
+
+    fn with_counts(mut self, observed_bytes: u64, written_bytes: u64) -> Self {
+        self.observed_bytes = observed_bytes;
+        self.written_bytes = written_bytes;
+        self
+    }
+
+    pub(super) fn limit_bytes(&self) -> Option<u64> {
+        self.limit_bytes
+    }
+
+    pub(super) fn termination_reason(&self) -> TerminalOutputTerminationReason {
+        self.termination_reason
+    }
+}
+
+impl std::fmt::Display for TerminalCaptureFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.stream.as_str(), self.reason)
+    }
+}
+
+impl std::error::Error for TerminalCaptureFailure {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CaptureOutcome {
+    pub(super) observed_bytes: u64,
+    pub(super) written_bytes: u64,
+}
+
+pub(super) struct CombinedOutputWriter {
+    file: File,
+    written_bytes: u64,
+    limit_bytes: u64,
+}
+
+impl CombinedOutputWriter {
+    pub(super) fn new(file: File, limit_bytes: u64) -> Self {
+        Self {
+            file,
+            written_bytes: 0,
+            limit_bytes,
+        }
+    }
+}
+
 pub(super) fn spawn_pty_read_thread(
     reader: Box<dyn Read + Send>,
     stream_path: PathBuf,
     output_path: PathBuf,
-) -> ThreadJoinHandle<Result<u64>> {
-    std::thread::spawn(move || capture_pty_reader(reader, stream_path, output_path))
+    limits: TerminalArtifactLimits,
+    capture_ledger: Arc<TerminalCaptureLedger>,
+    capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
+) -> ThreadJoinHandle<Result<CaptureOutcome>> {
+    let panic_capture_ledger = Arc::clone(&capture_ledger);
+    let panic_failure_tx = capture_failure_tx.clone();
+    std::thread::spawn(move || {
+        match catch_unwind(AssertUnwindSafe(|| {
+            capture_pty_reader(
+                reader,
+                stream_path,
+                output_path,
+                limits,
+                capture_ledger,
+                capture_failure_tx,
+            )
+        })) {
+            Ok(result) => result,
+            Err(_) => report_capture_failure(
+                &panic_failure_tx,
+                &panic_capture_ledger,
+                TerminalCaptureFailure::reader_panicked(TerminalOutputStream::Stdout, "pty output"),
+            ),
+        }
+    })
 }
 
 pub(super) fn spawn_pty_input_thread(
@@ -27,7 +254,9 @@ pub(super) fn spawn_pty_input_thread(
     });
 }
 
-pub(super) fn join_pty_read_thread(read_thread: ThreadJoinHandle<Result<u64>>) -> Option<String> {
+pub(super) fn join_pty_read_thread(
+    read_thread: ThreadJoinHandle<Result<CaptureOutcome>>,
+) -> Option<String> {
     match read_thread.join() {
         Ok(Ok(_)) => None,
         Ok(Err(error)) => Some(error.to_string()),
@@ -39,18 +268,41 @@ pub(super) fn capture_pty_reader(
     mut reader: Box<dyn Read + Send>,
     stream_path: PathBuf,
     output_path: PathBuf,
-) -> Result<u64> {
-    let mut stream_file = std::fs::OpenOptions::new()
+    limits: TerminalArtifactLimits,
+    capture_ledger: Arc<TerminalCaptureLedger>,
+    capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
+) -> Result<CaptureOutcome> {
+    let stream = TerminalOutputStream::Stdout;
+    let mut stream_file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&stream_path)
-        .with_context(|| format!("failed to open {}", stream_path.display()))?;
-    let mut output_file = std::fs::OpenOptions::new()
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return report_capture_failure(
+                &capture_failure_tx,
+                &capture_ledger,
+                TerminalCaptureFailure::io(stream, "open stream artifact", error),
+            );
+        }
+    };
+    let mut output_file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&output_path)
-        .with_context(|| format!("failed to open {}", output_path.display()))?;
-    let mut total = 0u64;
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return report_capture_failure(
+                &capture_failure_tx,
+                &capture_ledger,
+                TerminalCaptureFailure::io(stream, "open combined artifact", error),
+            );
+        }
+    };
+    let mut observed_bytes = 0u64;
+    let mut written_bytes = 0u64;
     let mut buffer = vec![0u8; 8192];
     loop {
         let read = match reader.read(&mut buffer) {
@@ -59,29 +311,78 @@ pub(super) fn capture_pty_reader(
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) if is_pty_eof_error(&error) => break,
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to read terminal pty stream for {}",
-                        stream_path.display()
-                    )
-                });
+                return report_capture_failure(
+                    &capture_failure_tx,
+                    &capture_ledger,
+                    TerminalCaptureFailure::io(stream, "read pty stream", error)
+                        .with_counts(observed_bytes, written_bytes),
+                );
             }
         };
-        stream_file
-            .write_all(&buffer[..read])
-            .with_context(|| format!("failed to write {}", stream_path.display()))?;
-        output_file
-            .write_all(&buffer[..read])
-            .context("failed to write terminal pty combined output log")?;
-        total += read as u64;
+        observed_bytes = observed_bytes.saturating_add(read as u64);
+        capture_ledger.record_observed(stream, read as u64);
+        let remaining_stream = limits.stream_bytes.saturating_sub(written_bytes);
+        let remaining_combined = limits.combined_bytes.saturating_sub(written_bytes);
+        let allowed = read.min(remaining_stream.min(remaining_combined) as usize);
+        if allowed > 0 {
+            if let Err(error) = stream_file.write_all(&buffer[..allowed]) {
+                return report_capture_failure(
+                    &capture_failure_tx,
+                    &capture_ledger,
+                    TerminalCaptureFailure::io(stream, "write stream artifact", error)
+                        .with_counts(observed_bytes, written_bytes),
+                );
+            }
+            if let Err(error) = output_file.write_all(&buffer[..allowed]) {
+                return report_capture_failure(
+                    &capture_failure_tx,
+                    &capture_ledger,
+                    TerminalCaptureFailure::io(stream, "write combined artifact", error)
+                        .with_counts(observed_bytes, written_bytes),
+                );
+            }
+            written_bytes = written_bytes.saturating_add(allowed as u64);
+            capture_ledger.record_written(stream, allowed as u64);
+        }
+        if allowed < read {
+            let (limit_name, limit_bytes) = if remaining_stream <= remaining_combined {
+                ("stdout artifact", limits.stream_bytes)
+            } else {
+                ("combined artifact", limits.combined_bytes)
+            };
+            return report_capture_failure(
+                &capture_failure_tx,
+                &capture_ledger,
+                TerminalCaptureFailure::output_limit(
+                    stream,
+                    limit_name,
+                    limit_bytes,
+                    observed_bytes,
+                    written_bytes,
+                ),
+            );
+        }
     }
-    stream_file
-        .flush()
-        .with_context(|| format!("failed to flush {}", stream_path.display()))?;
-    output_file
-        .flush()
-        .context("failed to flush terminal pty combined output log")?;
-    Ok(total)
+    if let Err(error) = stream_file.flush() {
+        return report_capture_failure(
+            &capture_failure_tx,
+            &capture_ledger,
+            TerminalCaptureFailure::io(stream, "flush stream artifact", error)
+                .with_counts(observed_bytes, written_bytes),
+        );
+    }
+    if let Err(error) = output_file.flush() {
+        return report_capture_failure(
+            &capture_failure_tx,
+            &capture_ledger,
+            TerminalCaptureFailure::io(stream, "flush combined artifact", error)
+                .with_counts(observed_bytes, written_bytes),
+        );
+    }
+    Ok(CaptureOutcome {
+        observed_bytes,
+        written_bytes,
+    })
 }
 
 pub(super) fn is_pty_eof_error(error: &std::io::Error) -> bool {
@@ -93,68 +394,151 @@ pub(super) fn is_pty_eof_error(error: &std::io::Error) -> bool {
 
 pub(super) fn spawn_capture_task<R>(
     reader: Option<R>,
+    stream: TerminalOutputStream,
     stream_path: PathBuf,
-    output_file: Arc<Mutex<File>>,
-) -> JoinHandle<Result<u64>>
+    output_file: Arc<Mutex<CombinedOutputWriter>>,
+    limits: TerminalArtifactLimits,
+    capture_ledger: Arc<TerminalCaptureLedger>,
+    capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
+) -> JoinHandle<Result<CaptureOutcome>>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    tokio::spawn(capture_stream(reader, stream_path, output_file))
+    tokio::spawn(capture_stream(
+        reader,
+        stream,
+        stream_path,
+        output_file,
+        limits,
+        capture_ledger,
+        capture_failure_tx,
+    ))
 }
 
 pub(super) async fn capture_stream<R>(
     mut reader: Option<R>,
+    stream: TerminalOutputStream,
     stream_path: PathBuf,
-    output_file: Arc<Mutex<File>>,
-) -> Result<u64>
+    output_file: Arc<Mutex<CombinedOutputWriter>>,
+    limits: TerminalArtifactLimits,
+    capture_ledger: Arc<TerminalCaptureLedger>,
+    capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
+) -> Result<CaptureOutcome>
 where
     R: AsyncRead + Unpin,
 {
-    let mut stream_file = open_append_file(&stream_path).await?;
-    let Some(reader) = reader.as_mut() else {
-        return Ok(0);
+    let mut stream_file = match open_append_file(&stream_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            return report_capture_failure(
+                &capture_failure_tx,
+                &capture_ledger,
+                TerminalCaptureFailure::io(stream, "open stream artifact", error),
+            );
+        }
     };
-    let mut total = 0u64;
+    let Some(reader) = reader.as_mut() else {
+        return Ok(CaptureOutcome {
+            observed_bytes: 0,
+            written_bytes: 0,
+        });
+    };
+    let mut observed_bytes = 0u64;
+    let mut written_bytes = 0u64;
     let mut buffer = vec![0u8; 8192];
     loop {
-        let read = reader.read(&mut buffer).await.with_context(|| {
-            format!(
-                "failed to read terminal stream for {}",
-                stream_path.display()
-            )
-        })?;
+        let read = match reader.read(&mut buffer).await {
+            Ok(read) => read,
+            Err(error) => {
+                return report_capture_failure(
+                    &capture_failure_tx,
+                    &capture_ledger,
+                    TerminalCaptureFailure::io(stream, "read stream", error)
+                        .with_counts(observed_bytes, written_bytes),
+                );
+            }
+        };
         if read == 0 {
             break;
         }
-        stream_file
-            .write_all(&buffer[..read])
-            .await
-            .with_context(|| format!("failed to write {}", stream_path.display()))?;
+        observed_bytes = observed_bytes.saturating_add(read as u64);
+        capture_ledger.record_observed(stream, read as u64);
         let mut combined = output_file.lock().await;
-        combined
-            .write_all(&buffer[..read])
-            .await
-            .context("failed to write terminal combined output log")?;
-        total += read as u64;
+        let remaining_stream = limits.stream_bytes.saturating_sub(written_bytes);
+        let remaining_combined = combined.limit_bytes.saturating_sub(combined.written_bytes);
+        let allowed = read.min(remaining_stream.min(remaining_combined) as usize);
+        if allowed > 0 {
+            if let Err(error) = stream_file.write_all(&buffer[..allowed]).await {
+                return report_capture_failure(
+                    &capture_failure_tx,
+                    &capture_ledger,
+                    TerminalCaptureFailure::io(stream, "write stream artifact", error)
+                        .with_counts(observed_bytes, written_bytes),
+                );
+            }
+            if let Err(error) = combined.file.write_all(&buffer[..allowed]).await {
+                return report_capture_failure(
+                    &capture_failure_tx,
+                    &capture_ledger,
+                    TerminalCaptureFailure::io(stream, "write combined artifact", error)
+                        .with_counts(observed_bytes, written_bytes),
+                );
+            }
+            written_bytes = written_bytes.saturating_add(allowed as u64);
+            combined.written_bytes = combined.written_bytes.saturating_add(allowed as u64);
+            capture_ledger.record_written(stream, allowed as u64);
+        }
+        if allowed < read {
+            let (limit_name, limit_bytes) = if remaining_stream <= remaining_combined {
+                ("stream artifact", limits.stream_bytes)
+            } else {
+                ("combined artifact", combined.limit_bytes)
+            };
+            drop(combined);
+            return report_capture_failure(
+                &capture_failure_tx,
+                &capture_ledger,
+                TerminalCaptureFailure::output_limit(
+                    stream,
+                    limit_name,
+                    limit_bytes,
+                    observed_bytes,
+                    written_bytes,
+                ),
+            );
+        }
     }
-    stream_file
-        .flush()
-        .await
-        .with_context(|| format!("failed to flush {}", stream_path.display()))?;
-    output_file
-        .lock()
-        .await
-        .flush()
-        .await
-        .context("failed to flush terminal combined output log")?;
-    Ok(total)
+    if let Err(error) = stream_file.flush().await {
+        return report_capture_failure(
+            &capture_failure_tx,
+            &capture_ledger,
+            TerminalCaptureFailure::io(stream, "flush stream artifact", error)
+                .with_counts(observed_bytes, written_bytes),
+        );
+    }
+    let mut combined = output_file.lock().await;
+    if let Err(error) = combined.file.flush().await {
+        return report_capture_failure(
+            &capture_failure_tx,
+            &capture_ledger,
+            TerminalCaptureFailure::io(stream, "flush combined artifact", error)
+                .with_counts(observed_bytes, written_bytes),
+        );
+    }
+    Ok(CaptureOutcome {
+        observed_bytes,
+        written_bytes,
+    })
 }
 
-pub(super) async fn join_capture_task(task: JoinHandle<Result<u64>>) -> Result<u64> {
-    match task.await {
-        Ok(result) => result,
-        Err(error) => Err(anyhow!("terminal capture task failed: {error}")),
-    }
+fn report_capture_failure<T>(
+    capture_failure_tx: &mpsc::UnboundedSender<TerminalCaptureFailure>,
+    capture_ledger: &TerminalCaptureLedger,
+    failure: TerminalCaptureFailure,
+) -> Result<T> {
+    capture_ledger.record_failure(&failure);
+    let _ = capture_failure_tx.send(failure.clone());
+    Err(failure.into())
 }
 
 pub(super) async fn create_empty_log_files(artifacts: &TerminalTaskArtifacts) -> Result<()> {

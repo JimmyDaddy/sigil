@@ -8,9 +8,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ExecutionBackend, ExecutionReceipt, ExecutionRequest, Tool, ToolAccess, ToolCategory,
-    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject, ToolSubjectScope,
+    ExecutionBackend, ExecutionOutputReceipt, ExecutionReceipt, ExecutionRequest,
+    ExecutionStreamCapture, ExecutionTerminationCause, Tool, ToolAccess, ToolCategory, ToolContext,
+    ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, ToolSubjectScope,
 };
 use tree_sitter::{Node, Parser};
 
@@ -19,7 +20,10 @@ use crate::{
     path::{
         ResolvedToolPath, absolute_path_from, canonical_workspace_root, resolve_tool_path_from_base,
     },
-    support::{limit_text_head_tail, required_string},
+    support::{
+        TextLimitResult, ceil_char_boundary, floor_char_boundary, limit_text_head_tail,
+        required_string,
+    },
 };
 
 pub(crate) struct BashTool {
@@ -364,28 +368,10 @@ fn bash_tool_result_from_execution_receipt_inner(
     receipt: ExecutionReceipt,
     analysis: Option<&ShellCommandAnalysis>,
 ) -> Result<ToolResult> {
-    if receipt.timed_out {
-        let mut result = ToolResult::error(
-            call_id,
-            tool_name,
-            ToolErrorKind::Timeout,
-            "bash command timed out",
-        );
-        result.metadata = ToolResultMeta {
-            exit_code: receipt.exit_code,
-            stdout_bytes: Some(receipt.stdout.len() as u64),
-            stderr_bytes: Some(receipt.stderr.len() as u64),
-            total_bytes: Some(receipt.stdout.len() as u64 + receipt.stderr.len() as u64),
-            details: execution_receipt_details(&receipt, analysis, false, false),
-            ..ToolResultMeta::default()
-        };
-        return Ok(result);
-    }
-    let stdout = String::from_utf8_lossy(&receipt.stdout);
-    let stderr = String::from_utf8_lossy(&receipt.stderr);
+    let output = receipt.effective_output();
     let limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
-    let limited_stdout = limit_text_head_tail(&stdout, limit_bytes);
-    let limited_stderr = limit_text_head_tail(&stderr, limit_bytes);
+    let limited_stdout = captured_stream_text(&receipt.stdout, &output.stdout, limit_bytes);
+    let limited_stderr = captured_stream_text(&receipt.stderr, &output.stderr, limit_bytes);
     let mut content = String::new();
     if !limited_stdout.content.is_empty() {
         content.push_str(&limited_stdout.content);
@@ -396,21 +382,50 @@ fn bash_tool_result_from_execution_receipt_inner(
         }
         content.push_str(&limited_stderr.content);
     }
-    let output_truncated = limited_stdout.truncated || limited_stderr.truncated;
+    let output_truncated = output.stdout.truncated
+        || output.stderr.truncated
+        || limited_stdout.truncated
+        || limited_stderr.truncated;
+    let tail_available = output.stdout.retained_tail_bytes > 0
+        || output.stderr.retained_tail_bytes > 0
+        || output_truncated;
     let metadata = ToolResultMeta {
         exit_code: receipt.exit_code,
-        stdout_bytes: Some(receipt.stdout.len() as u64),
-        stderr_bytes: Some(receipt.stderr.len() as u64),
+        stdout_bytes: Some(output.stdout.total_bytes),
+        stderr_bytes: Some(output.stderr.total_bytes),
         truncated: output_truncated,
-        omitted_bytes: Some(limited_stdout.omitted_bytes + limited_stderr.omitted_bytes),
+        omitted_bytes: Some(
+            limited_stdout
+                .omitted_bytes
+                .saturating_add(limited_stderr.omitted_bytes),
+        ),
         limit_bytes: Some(limit_bytes as u64),
-        returned_bytes: Some(limited_stdout.returned_bytes + limited_stderr.returned_bytes),
-        total_bytes: Some(receipt.stdout.len() as u64 + receipt.stderr.len() as u64),
+        returned_bytes: Some(
+            limited_stdout
+                .returned_bytes
+                .saturating_add(limited_stderr.returned_bytes),
+        ),
+        total_bytes: Some(output.combined_total_bytes),
         returned_lines: Some(limited_stdout.returned_lines + limited_stderr.returned_lines),
-        total_lines: Some(limited_stdout.total_lines + limited_stderr.total_lines),
-        details: execution_receipt_details(&receipt, analysis, output_truncated, output_truncated),
+        total_lines: Some(
+            output
+                .stdout
+                .total_lines
+                .saturating_add(output.stderr.total_lines),
+        ),
+        details: execution_receipt_details(&receipt, analysis, output_truncated, tail_available),
         ..ToolResultMeta::default()
     };
+    if let Some((kind, message)) = execution_termination_error(&output.termination) {
+        let details = metadata.details.clone();
+        let mut result =
+            ToolResult::error(call_id, tool_name, kind, message).with_error_details(false, details);
+        if !content.is_empty() {
+            result.content = content;
+        }
+        result.metadata = metadata;
+        return Ok(result);
+    }
     if receipt.exit_code == Some(0) {
         Ok(ToolResult::ok(call_id, tool_name, content, metadata))
     } else {
@@ -430,12 +445,99 @@ fn bash_tool_result_from_execution_receipt_inner(
     }
 }
 
+fn captured_stream_text(
+    bytes: &[u8],
+    capture: &ExecutionStreamCapture,
+    fallback_limit_bytes: usize,
+) -> TextLimitResult {
+    if !capture.truncated {
+        let text = String::from_utf8_lossy(bytes);
+        let mut limited = limit_text_head_tail(&text, fallback_limit_bytes);
+        if limited.content.len() > fallback_limit_bytes {
+            limited.content = bounded_text_projection(
+                &text,
+                fallback_limit_bytes,
+                capture
+                    .total_bytes
+                    .saturating_sub(capture.returned_bytes.min(fallback_limit_bytes as u64)),
+            );
+        }
+        limited.total_bytes = capture.total_bytes;
+        limited.total_lines = capture.total_lines;
+        limited.returned_bytes = limited
+            .returned_bytes
+            .min(capture.returned_bytes)
+            .min(fallback_limit_bytes as u64);
+        limited.omitted_bytes = capture.total_bytes.saturating_sub(limited.returned_bytes);
+        return limited;
+    }
+
+    let head_len = usize::try_from(capture.retained_head_bytes)
+        .unwrap_or(bytes.len())
+        .min(bytes.len());
+    let tail_len = usize::try_from(capture.retained_tail_bytes)
+        .unwrap_or(bytes.len().saturating_sub(head_len))
+        .min(bytes.len().saturating_sub(head_len));
+    let head = String::from_utf8_lossy(&bytes[..head_len]);
+    let tail = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(tail_len)..]);
+    let retained = format!("{head}{tail}");
+    let content = bounded_text_projection(&retained, fallback_limit_bytes, capture.omitted_bytes);
+    let returned_bytes = capture
+        .returned_bytes
+        .min(fallback_limit_bytes as u64)
+        .min(capture.total_bytes);
+    TextLimitResult {
+        returned_bytes,
+        returned_lines: content.lines().count() as u64,
+        total_bytes: capture.total_bytes,
+        total_lines: capture.total_lines,
+        truncated: true,
+        omitted_bytes: capture.total_bytes.saturating_sub(returned_bytes),
+        content,
+    }
+}
+
+fn bounded_text_projection(input: &str, max_bytes: usize, omitted_bytes: u64) -> String {
+    let notice = format!("[sigil: output truncated, omitted {omitted_bytes} bytes]");
+    if max_bytes <= notice.len() {
+        let end = floor_char_boundary(&notice, max_bytes);
+        return notice[..end].to_owned();
+    }
+    let separators = 2usize;
+    let raw_budget = max_bytes.saturating_sub(notice.len() + separators);
+    let head_budget = raw_budget / 2;
+    let tail_budget = raw_budget.saturating_sub(head_budget);
+    let head_end = floor_char_boundary(input, head_budget.min(input.len()));
+    let tail_start =
+        ceil_char_boundary(input, input.len().saturating_sub(tail_budget)).max(head_end);
+    format!("{}\n{notice}\n{}", &input[..head_end], &input[tail_start..])
+}
+
+fn execution_termination_error(
+    termination: &ExecutionTerminationCause,
+) -> Option<(ToolErrorKind, &'static str)> {
+    match termination {
+        ExecutionTerminationCause::Exited => None,
+        ExecutionTerminationCause::TimedOut => {
+            Some((ToolErrorKind::Timeout, "bash command timed out"))
+        }
+        ExecutionTerminationCause::OutputLimit { .. } => Some((
+            ToolErrorKind::ResourceLimit,
+            "bash command exceeded the output limit",
+        )),
+        ExecutionTerminationCause::ReaderFailed { .. } => {
+            Some((ToolErrorKind::Io, "bash command output reader failed"))
+        }
+    }
+}
+
 pub(crate) fn execution_receipt_details(
     receipt: &ExecutionReceipt,
     analysis: Option<&ShellCommandAnalysis>,
     output_truncated: bool,
     tail_available: bool,
 ) -> Value {
+    let output = receipt.effective_output();
     let mut details = json!({
         "execution": {
             "backend": receipt.backend,
@@ -444,6 +546,12 @@ pub(crate) fn execution_receipt_details(
             "resources": receipt.resources,
         }
     });
+    if !matches!(output.termination, ExecutionTerminationCause::Exited)
+        || output.stdout.truncated
+        || output.stderr.truncated
+    {
+        details["execution"]["output"] = execution_output_details(&output);
+    }
     if let Some(analysis) = analysis {
         details["shell"] = json!({
             "command": analysis.command.as_str(),
@@ -463,6 +571,38 @@ pub(crate) fn execution_receipt_details(
     details
 }
 
+fn execution_output_details(output: &ExecutionOutputReceipt) -> Value {
+    let mut details = json!({
+        "termination": output.termination.as_str(),
+        "stdout": &output.stdout,
+        "stderr": &output.stderr,
+        "combined_total_bytes": output.combined_total_bytes,
+        "combined_hard_limit_bytes": output.combined_hard_limit_bytes,
+    });
+    match &output.termination {
+        ExecutionTerminationCause::OutputLimit {
+            stream,
+            limit_bytes,
+            observed_bytes,
+        } => {
+            details["code"] = json!("output_limit_exceeded");
+            details["stream"] = json!(stream.as_str());
+            details["limit_bytes"] = json!(limit_bytes);
+            details["observed_bytes"] = json!(observed_bytes);
+        }
+        ExecutionTerminationCause::ReaderFailed { stream, reason } => {
+            details["code"] = json!("output_reader_failed");
+            details["stream"] = json!(stream.as_str());
+            details["reason"] = json!(reason);
+        }
+        ExecutionTerminationCause::TimedOut => {
+            details["code"] = json!("execution_timeout");
+        }
+        ExecutionTerminationCause::Exited => {}
+    }
+    details
+}
+
 pub(crate) fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Value {
     match scope {
         Some(CommandGrantScope::WorkspaceScript { path, args_family }) => json!({
@@ -474,18 +614,25 @@ pub(crate) fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Val
 }
 
 fn shell_verdict(receipt: &ExecutionReceipt) -> &'static str {
-    match receipt.exit_code {
-        Some(0) if !receipt.timed_out => "passed",
-        Some(_) if !receipt.timed_out => "failed",
-        _ if receipt.timed_out => "timed_out",
-        _ => "unknown",
+    match receipt.effective_output().termination {
+        ExecutionTerminationCause::TimedOut => "timed_out",
+        ExecutionTerminationCause::OutputLimit { .. } => "resource_limited",
+        ExecutionTerminationCause::ReaderFailed { .. } => "output_reader_failed",
+        ExecutionTerminationCause::Exited => match receipt.exit_code {
+            Some(0) => "passed",
+            Some(_) => "failed",
+            None => "unknown",
+        },
     }
 }
 
 fn shell_rerun_not_needed(analysis: &ShellCommandAnalysis, receipt: &ExecutionReceipt) -> bool {
     analysis.command_family.is_workspace_check()
         && receipt.exit_code == Some(0)
-        && !receipt.timed_out
+        && matches!(
+            receipt.effective_output().termination,
+            ExecutionTerminationCause::Exited
+        )
 }
 
 pub(crate) fn command_permission_subject(command: &str) -> String {

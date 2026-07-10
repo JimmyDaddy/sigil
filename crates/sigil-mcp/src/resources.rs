@@ -103,10 +103,20 @@ impl Tool for McpResourceTool {
         self.spec.clone()
     }
 
+    async fn shutdown(&self) -> Result<()> {
+        self.client
+            .shutdown_generation("MCP resource generation was retired".to_owned())
+            .await
+    }
+
+    fn lifecycle_owner(&self) -> Option<ToolLifecycleOwner> {
+        Some(self.client.lifecycle_owner())
+    }
+
     fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
         Ok(vec![
             ToolSubject::mcp_tool(self.spec.name.clone()),
-            self.client.identity.trust_subject(
+            self.client.identity().trust_subject(
                 self.tool_name.server_name.clone(),
                 self.trust.trust_class.as_str(),
             ),
@@ -130,24 +140,38 @@ impl Tool for McpResourceTool {
             .client
             .secret_redactor
             .redact_value(&summarize_egress_json(args));
-        Ok(Some(ToolEgressAudit {
-            destination: format!("mcp:{}", self.tool_name.server_name),
-            operation: self.kind.method().to_owned(),
-            payload: json!({
-                "server": self.tool_name.server_name,
+        let server =
+            bounded_mcp_metadata_text(&self.client.secret_redactor, &self.tool_name.server_name);
+        let provider_tool =
+            bounded_mcp_metadata_text(&self.client.secret_redactor, &self.spec.name);
+        let payload = secret_safe_mcp_metadata(
+            &self.client.secret_redactor,
+            json!({
+                "server": server.value,
                 "trust_class": self.trust.trust_class.as_str(),
-                "provider_tool": self.spec.name,
+                "provider_tool": provider_tool.value,
                 "resource_operation": self.kind.provider_suffix(),
                 "allow_secrets": self.trust.allow_secrets,
                 "secret_detected": secret_detected,
-                "server_identity": self.client.identity.to_json(),
+                "server_identity": bounded_mcp_identity_projection(
+                    &self.client.secret_redactor,
+                    self.client.identity(),
+                ),
                 "arguments": argument_summary,
             }),
+        );
+        Ok(Some(ToolEgressAudit {
+            destination: bounded_mcp_destination(
+                &self.client.secret_redactor,
+                &self.tool_name.server_name,
+            ),
+            operation: self.kind.method().to_owned(),
+            payload,
             redacted: secret_detected,
         }))
     }
 
-    async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         if !self.trust.allow_secrets && self.client.secret_redactor.value_contains_secret(&args) {
             return Ok(ToolResult::error(
                 call_id,
@@ -167,33 +191,50 @@ impl Tool for McpResourceTool {
                 ));
             }
         };
-        let response = self
+        let response = match self
             .client
-            .send_request_response(self.kind.method(), params)
-            .await?;
+            .send_request_response(
+                self.kind.method(),
+                params,
+                McpOperationDeadline::from_secs(ctx.timeout_secs),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(error.to_tool_result(
+                    call_id,
+                    self.spec.name.clone(),
+                    &self.client.server_name,
+                ));
+            }
+        };
         if let Some(error) = response.get("error") {
-            let redacted_error = self.client.secret_redactor.redact_value(error);
+            let projection = bounded_mcp_protocol_error(
+                &self.client.secret_redactor,
+                error,
+                &format!("MCP {} failed", self.kind.method()),
+            );
             return Ok(ToolResult::error(
                 call_id,
                 self.spec.name.clone(),
                 ToolErrorKind::Protocol,
-                format!("MCP {} failed: {redacted_error}", self.kind.method()),
+                projection.summary,
             )
-            .with_error_details(false, redacted_error));
+            .with_error_details(false, projection.details));
         }
         let result = response
             .get("result")
-            .cloned()
             .ok_or_else(|| anyhow!("MCP response missing result"))?;
-        let content = serde_json::to_string_pretty(&result)?;
+        let budget = bounded_mcp_json(&self.client.secret_redactor, result)?;
         let (content, metadata) = bounded_mcp_tool_result(
             &self.client.secret_redactor,
             &self.tool_name,
             &self.trust,
-            &self.client.identity,
+            self.client.identity(),
             "resource",
             self.kind.method(),
-            content,
+            budget,
         );
         Ok(ToolResult::ok(
             call_id,

@@ -1024,9 +1024,39 @@ declared_effect = "read_only"
             .expect("trust should build");
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted plugin discovery should succeed");
+    let stdout = format!("head-{}-tail", "x".repeat(200)).into_bytes();
+    let retained_stdout_bytes = stdout.len() as u64;
     let backend = RecordingExecutionBackend {
-        stdout: format!("head-{}-tail", "x".repeat(200)).into_bytes(),
+        stdout,
         stderr: b"token=super-secret".to_vec(),
+        output: Some(sigil_kernel::ExecutionOutputReceipt {
+            schema_version: sigil_kernel::EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+            stdout: sigil_kernel::ExecutionStreamCapture {
+                total_bytes: 10_000,
+                returned_bytes: retained_stdout_bytes,
+                omitted_bytes: 10_000 - retained_stdout_bytes,
+                retained_head_bytes: retained_stdout_bytes / 2,
+                retained_tail_bytes: retained_stdout_bytes - retained_stdout_bytes / 2,
+                retained_limit_bytes: retained_stdout_bytes,
+                hard_limit_bytes: 16_000,
+                total_lines: 1,
+                truncated: true,
+            },
+            stderr: sigil_kernel::ExecutionStreamCapture {
+                total_bytes: 18,
+                returned_bytes: 18,
+                omitted_bytes: 0,
+                retained_head_bytes: 18,
+                retained_tail_bytes: 0,
+                retained_limit_bytes: 18,
+                hard_limit_bytes: 16_000,
+                total_lines: 1,
+                truncated: false,
+            },
+            combined_total_bytes: 10_018,
+            combined_hard_limit_bytes: 32_000,
+            termination: sigil_kernel::ExecutionTerminationCause::Exited,
+        }),
         ..RecordingExecutionBackend::default()
     };
     let runner = PluginHookExecutionRunner::new(Arc::new(backend));
@@ -1052,6 +1082,11 @@ declared_effect = "read_only"
         .expect("hook execution should succeed");
 
     assert!(outcome.output.stdout.truncated);
+    assert_eq!(
+        outcome.output.stdout.returned_bytes + outcome.output.stdout.omitted_bytes,
+        outcome.output.stdout.total_bytes
+    );
+    assert!(outcome.output.stdout.returned_bytes <= 32);
     assert!(
         outcome
             .output
@@ -1084,6 +1119,40 @@ declared_effect = "read_only"
             .contains(&"x".repeat(16))
     );
     assert_eq!(outcome.output.parse_error, None);
+}
+
+#[test]
+fn plugin_hook_output_redacts_secrets_split_across_head_and_tail_boundaries() {
+    let head = b"before token-alpha-lo";
+    let tail = b"ng after";
+    let mut bytes = head.to_vec();
+    bytes.extend_from_slice(tail);
+    let capture = sigil_kernel::ExecutionStreamCapture {
+        total_bytes: bytes.len() as u64 + 32,
+        returned_bytes: bytes.len() as u64,
+        omitted_bytes: 32,
+        retained_head_bytes: head.len() as u64,
+        retained_tail_bytes: tail.len() as u64,
+        retained_limit_bytes: bytes.len() as u64,
+        hard_limit_bytes: 1024,
+        total_lines: 1,
+        truncated: true,
+    };
+    let stream = super::bounded_hook_output_stream(
+        &bytes,
+        &capture,
+        1024,
+        &SecretRedactor::from_values(["token-alpha-long"]),
+    );
+
+    assert!(stream.content.contains("[redacted]"));
+    assert!(!stream.content.contains("token-alpha-lo"));
+    assert!(!stream.content.contains("ng after"));
+    assert_eq!(stream.redaction_state, RedactionState::Redacted);
+    assert_eq!(
+        stream.returned_bytes + stream.omitted_bytes,
+        stream.total_bytes
+    );
 }
 
 #[tokio::test]
@@ -1836,6 +1905,7 @@ struct RecordingExecutionBackend {
     network: ExecutionNetworkReceipt,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    output: Option<sigil_kernel::ExecutionOutputReceipt>,
     workspace_write: Option<(String, String)>,
 }
 
@@ -1848,6 +1918,7 @@ impl Default for RecordingExecutionBackend {
             network: ExecutionNetworkReceipt::default(),
             stdout: b"ok".to_vec(),
             stderr: Vec::new(),
+            output: None,
             workspace_write: None,
         }
     }
@@ -1870,6 +1941,7 @@ impl ExecutionBackend for RecordingExecutionBackend {
         let requests = self.requests.clone();
         let stdout = self.stdout.clone();
         let stderr = self.stderr.clone();
+        let output = self.output.clone();
         let workspace_write = self.workspace_write.clone();
         let backend_kind = self.backend_kind;
         let capabilities = self.capabilities;
@@ -1897,6 +1969,7 @@ impl ExecutionBackend for RecordingExecutionBackend {
                 exit_code: Some(0),
                 stdout,
                 stderr,
+                output: output.unwrap_or_default(),
                 timed_out: false,
             })
         })

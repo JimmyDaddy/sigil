@@ -97,6 +97,7 @@ impl ExecutionBackend for FakeTaskExecutionBackend {
                 } else {
                     Vec::new()
                 },
+                output: Default::default(),
                 timed_out: false,
             })
         })
@@ -4934,6 +4935,9 @@ fn terminal_task_entry(
         output_preview: None,
         output_hash: None,
         output_truncated: false,
+        output_total_bytes: 0,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms,
     })

@@ -10,14 +10,15 @@ use serde_json::json;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
-    ExecutionConfig, ExecutionNetworkPolicy, ExecutionReceipt, ExecutionRequest,
-    ExecutionResourceLimitKind, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    ExecutionSandboxStrategyConfig, ExecutionTimeoutSource, JsonlSessionStore,
-    MutationEventRecorder, PathTrustZone, PermissionRisk, SessionStreamRecord,
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCall,
-    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
-    ToolProgressSink, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputStream, ExecutionReceipt,
+    ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
+    ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionTerminationCause,
+    ExecutionTimeoutSource, JsonlSessionStore, MutationEventRecorder, PathTrustZone,
+    PermissionRisk, SessionStreamRecord, TerminalExecutionBackendCapabilities,
+    TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
+    ToolPreviewCapability, ToolProgressEvent, ToolProgressSink, ToolRegistry, ToolResultStatus,
+    ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -231,6 +232,9 @@ fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> 
         output_preview: Some("tail".to_owned()),
         output_hash: Some("sha256:terminal".to_owned()),
         output_truncated: false,
+        output_total_bytes: 4,
+        output_limit_bytes: None,
+        output_termination_reason: None,
         cleanup: None,
         updated_at_ms: 120,
     };
@@ -243,6 +247,7 @@ fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> 
     assert_eq!(details["execution_backend"], json!("local_pty"));
     assert_eq!(details["enforcement_backend"], json!("local"));
     assert_eq!(details["sandbox_profile"], json!("unconfined"));
+    assert_eq!(details["output_total_bytes"], json!(4));
     assert_eq!(
         details["execution_backend_capabilities"]["persistent_pty"],
         json!(true)
@@ -602,19 +607,475 @@ fn docker_backend_checks_daemon_and_configured_image_before_selection() -> Resul
     Ok(())
 }
 
+#[cfg(unix)]
+const FAKE_DOCKER_CONTAINER_ID: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[cfg(unix)]
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+struct StatefulDockerCleanupFixture {
+    docker: PathBuf,
+    state_path: PathBuf,
+    calls_path: PathBuf,
+    writes_path: PathBuf,
+    writer_pid_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for StatefulDockerCleanupFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.state_path);
+        let Ok(pid) = fs::read_to_string(&self.writer_pid_path) else {
+            return;
+        };
+        let pid = pid.trim();
+        for _ in 0..50 {
+            if !process_is_running(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(unix)]
+fn python3_is_available() -> bool {
+    std::process::Command::new("python3")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+fn write_stateful_docker_cleanup_fixture(
+    temp: &tempfile::TempDir,
+    run_body: &str,
+    remove_succeeds: bool,
+    spawn_detached_writer: bool,
+) -> Result<StatefulDockerCleanupFixture> {
+    let docker = temp.path().join("docker-cleanup-fixture");
+    let state_path = temp.path().join("container-running.state");
+    let calls_path = temp.path().join("docker-cleanup-calls.txt");
+    let writes_path = temp.path().join("detached-container-writes.bin");
+    let writer_pid_path = temp.path().join("detached-container-writer.pid");
+    let writer_path = temp.path().join("detached-container-writer.py");
+    fs::write(
+        &writer_path,
+        r#"import os
+import pathlib
+import sys
+import time
+
+state = pathlib.Path(sys.argv[1])
+writes = pathlib.Path(sys.argv[2])
+pid_file = pathlib.Path(sys.argv[3])
+os.setsid()
+pid_file.write_text(str(os.getpid()))
+with writes.open("ab", buffering=0) as stream:
+    stream.write(b"started")
+    while state.exists():
+        stream.write(b"x" * 256)
+        time.sleep(0.01)
+"#,
+    )?;
+    let remove_body = if remove_succeeds {
+        "rm -f \"$STATE\"; exit 0"
+    } else {
+        "exit 17"
+    };
+    let writer_start_body = if spawn_detached_writer {
+        r#"python3 "$WRITER" "$STATE" "$WRITES" "$WRITER_PID" >/dev/null 2>&1 &
+    ATTEMPTS=0
+    while [ ! -s "$WRITES" ] && [ "$ATTEMPTS" -lt 500 ]; do
+      sleep 0.01
+      ATTEMPTS=$((ATTEMPTS + 1))
+    done
+    [ -s "$WRITES" ] || exit 15"#
+    } else {
+        "printf started > \"$WRITES\""
+    };
+    let script = format!(
+        r#"#!/bin/sh
+STATE={state}
+CALLS={calls}
+WRITER={writer}
+WRITES={writes}
+WRITER_PID={writer_pid}
+CID={container_id}
+printf '%s\n' "$@" >> "$CALLS"
+printf '%s\n' '---' >> "$CALLS"
+case "$1" in
+  run)
+    shift
+    CIDFILE=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--cidfile" ] && [ "$#" -ge 2 ]; then
+        CIDFILE=$2
+        shift 2
+      else
+        shift
+      fi
+    done
+    [ -n "$CIDFILE" ] || exit 12
+    printf '%s\n' "$CID" > "$CIDFILE"
+    printf running > "$STATE"
+    {writer_start_body}
+    {run_body}
+    ;;
+  container)
+    case "$2" in
+      rm) {remove_body} ;;
+      ls) if [ -f "$STATE" ]; then printf '%s\n' "$CID"; fi ;;
+      *) exit 13 ;;
+    esac
+    ;;
+  *) exit 14 ;;
+esac
+"#,
+        state = shell_quote_path(&state_path),
+        calls = shell_quote_path(&calls_path),
+        writer = shell_quote_path(&writer_path),
+        writes = shell_quote_path(&writes_path),
+        writer_pid = shell_quote_path(&writer_pid_path),
+        container_id = FAKE_DOCKER_CONTAINER_ID,
+        writer_start_body = writer_start_body,
+    );
+    fs::write(&docker, script)?;
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
+    Ok(StatefulDockerCleanupFixture {
+        docker,
+        state_path,
+        calls_path,
+        writes_path,
+        writer_pid_path,
+    })
+}
+
+#[cfg(unix)]
+async fn assert_detached_writer_stopped(fixture: &StatefulDockerCleanupFixture) -> Result<()> {
+    sleep(Duration::from_millis(100)).await;
+    let settled_bytes = fs::metadata(&fixture.writes_path)?.len();
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        fs::metadata(&fixture.writes_path)?.len(),
+        settled_bytes,
+        "detached daemon simulator kept writing after Docker cleanup completed"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn successful_fake_docker_script(args_path: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+ARGS={args_path}
+CID={container_id}
+case "$1" in
+  run)
+    printf '%s\n' "$@" > "$ARGS"
+    shift
+    CIDFILE=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--cidfile" ] && [ "$#" -ge 2 ]; then
+        CIDFILE=$2
+        shift 2
+      else
+        shift
+      fi
+    done
+    [ -n "$CIDFILE" ] || exit 12
+    printf '%s\n' "$CID" > "$CIDFILE"
+    printf fake-docker-ok
+    ;;
+  container)
+    [ "$2" = "ls" ] || exit 13
+    ;;
+  *) exit 14 ;;
+esac
+"#,
+        args_path = shell_quote_path(args_path),
+        container_id = FAKE_DOCKER_CONTAINER_ID,
+    )
+}
+
+#[cfg(unix)]
+fn docker_cleanup_request(workspace: &Path, timeout_ms: u64) -> ExecutionRequest {
+    ExecutionRequest {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "printf ignored".to_owned()],
+        cwd: workspace.to_path_buf(),
+        env: BTreeMap::new(),
+        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+        timeout_ms: Some(timeout_ms),
+        timeout_secs: 0,
+        cpu_time_ms: None,
+        memory_limit_bytes: None,
+        process_count_limit: None,
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn docker_cleanup_timeout_force_removes_and_verifies_daemon_container() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let fixture = write_stateful_docker_cleanup_fixture(
+        &temp,
+        "trap '' TERM; while :; do sleep 1; done",
+        true,
+        false,
+    )?;
+    let backend =
+        DockerExecutionBackend::new(fixture.docker.clone(), "fixture:latest".to_owned(), false);
+
+    let receipt = backend
+        .execute(docker_cleanup_request(temp.path(), 2_000))
+        .await?;
+
+    assert_eq!(
+        receipt.effective_output().termination,
+        ExecutionTerminationCause::TimedOut
+    );
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Completed,
+        "unexpected cleanup evidence: {:?}",
+        receipt.resources.cleanup
+    );
+    assert!(!fixture.state_path.exists());
+    let calls = fs::read_to_string(&fixture.calls_path)?;
+    assert!(calls.contains(&format!(
+        "container\nrm\n--force\n{}\n---",
+        FAKE_DOCKER_CONTAINER_ID
+    )));
+    assert!(calls.contains("container\nls\n--quiet\n--no-trunc\n--filter"));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn docker_cleanup_output_limit_force_removes_and_verifies_daemon_container() -> Result<()> {
+    if !python3_is_available() {
+        eprintln!("skipping detached Docker cleanup fixture: python3 unavailable");
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let fixture = write_stateful_docker_cleanup_fixture(
+        &temp,
+        "dd if=/dev/zero bs=1048576 count=9 2>/dev/null; while :; do sleep 1; done",
+        true,
+        true,
+    )?;
+    let backend =
+        DockerExecutionBackend::new(fixture.docker.clone(), "fixture:latest".to_owned(), false);
+
+    let receipt = backend
+        .execute(docker_cleanup_request(temp.path(), 10_000))
+        .await?;
+    let output = receipt.effective_output();
+
+    assert!(matches!(
+        output.termination,
+        ExecutionTerminationCause::OutputLimit {
+            stream: ExecutionOutputStream::Stdout,
+            ..
+        }
+    ));
+    assert!(output.stdout.total_bytes > 8 * 1024 * 1024);
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Completed
+    );
+    assert!(!fixture.state_path.exists());
+    assert_detached_writer_stopped(&fixture).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn docker_cleanup_reports_failed_when_daemon_container_remains_running() -> Result<()> {
+    if !python3_is_available() {
+        eprintln!("skipping detached Docker cleanup fixture: python3 unavailable");
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let fixture = write_stateful_docker_cleanup_fixture(&temp, "exit 0", false, true)?;
+    let backend =
+        DockerExecutionBackend::new(fixture.docker.clone(), "fixture:latest".to_owned(), false);
+
+    let receipt = backend
+        .execute(docker_cleanup_request(temp.path(), 10_000))
+        .await?;
+
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Failed
+    );
+    let cleanup_reason = receipt
+        .resources
+        .cleanup
+        .reason
+        .as_deref()
+        .unwrap_or_default();
+    assert!(
+        cleanup_reason.contains("still reports the container as running"),
+        "unexpected cleanup evidence: {cleanup_reason}"
+    );
+    assert!(fixture.state_path.exists());
+    let writes_before = fs::metadata(&fixture.writes_path)?.len();
+    sleep(Duration::from_millis(50)).await;
+    assert!(
+        fs::metadata(&fixture.writes_path)?.len() > writes_before,
+        "detached daemon simulator should survive host process-group cleanup when Docker removal fails"
+    );
+    fs::remove_file(&fixture.state_path)?;
+    assert_detached_writer_stopped(&fixture).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn docker_cleanup_reconciles_running_container_after_cli_exit() -> Result<()> {
+    if !python3_is_available() {
+        eprintln!("skipping detached Docker cleanup fixture: python3 unavailable");
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let fixture = write_stateful_docker_cleanup_fixture(&temp, "exit 0", true, true)?;
+    let backend =
+        DockerExecutionBackend::new(fixture.docker.clone(), "fixture:latest".to_owned(), false);
+
+    let receipt = backend
+        .execute(docker_cleanup_request(temp.path(), 10_000))
+        .await?;
+
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(
+        receipt.effective_output().termination,
+        ExecutionTerminationCause::Exited
+    );
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Completed,
+        "unexpected cleanup evidence: {:?}",
+        receipt.resources.cleanup
+    );
+    assert!(!fixture.state_path.exists());
+    assert_detached_writer_stopped(&fixture).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn docker_cleanup_fails_truthfully_when_cli_exits_without_cid() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let docker = temp.path().join("docker-fails-before-container");
+    fs::write(&docker, "#!/bin/sh\nexit 23\n")?;
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
+    let backend = DockerExecutionBackend::new(docker, "fixture:latest".to_owned(), false);
+    let started = std::time::Instant::now();
+
+    let receipt = backend
+        .execute(docker_cleanup_request(temp.path(), 5_000))
+        .await?;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "early Docker CLI failure should not wait for the five-second execution deadline"
+    );
+    assert_eq!(receipt.exit_code, Some(23));
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Failed
+    );
+    assert!(
+        receipt
+            .resources
+            .cleanup
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("daemon create/cidfile race cannot be excluded")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[serial]
+async fn docker_cleanup_fails_truthfully_when_cli_writes_invalid_cid() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let docker = temp.path().join("docker-writes-invalid-cid");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+[ "$1" = "run" ] || exit 14
+shift
+CIDFILE=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--cidfile" ] && [ "$#" -ge 2 ]; then
+    CIDFILE=$2
+    shift 2
+  else
+    shift
+  fi
+done
+[ -n "$CIDFILE" ] || exit 12
+printf 'not-a-full-container-id\n' > "$CIDFILE"
+exit 0
+"#,
+    )?;
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
+    let backend = DockerExecutionBackend::new(docker, "fixture:latest".to_owned(), false);
+    let started = std::time::Instant::now();
+
+    let receipt = backend
+        .execute(docker_cleanup_request(temp.path(), 5_000))
+        .await?;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "invalid Docker cidfile handling should not wait for the five-second execution deadline"
+    );
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Failed
+    );
+    assert!(
+        receipt
+            .resources
+            .cleanup
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("does not contain one full container id")
+    );
+    Ok(())
+}
+
 #[tokio::test]
 #[cfg(unix)]
 async fn docker_execution_backend_builds_offline_container_command() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let docker = temp.path().join("docker");
     let args_path = temp.path().join("args.txt");
-    fs::write(
-        &docker,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf fake-docker-ok\n",
-            args_path.display()
-        ),
-    )?;
+    fs::write(&docker, successful_fake_docker_script(&args_path))?;
     fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
     let backend = DockerExecutionBackend::new(docker, "rust:1.94.1".to_owned(), false);
 
@@ -666,13 +1127,7 @@ async fn docker_execution_backend_networked_receipt_allows_network() -> Result<(
     let temp = tempfile::tempdir()?;
     let docker = temp.path().join("docker");
     let args_path = temp.path().join("args.txt");
-    fs::write(
-        &docker,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf fake-docker-ok\n",
-            args_path.display()
-        ),
-    )?;
+    fs::write(&docker, successful_fake_docker_script(&args_path))?;
     fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
     let backend = DockerExecutionBackend::new(docker, "rust:1.94.1".to_owned(), true);
 
@@ -960,11 +1415,202 @@ async fn execution_backend_timeout_cleans_process_group_children() -> Result<()>
     panic!("child process {pid} should have been cleaned up after timeout");
 }
 
+#[tokio::test]
+#[cfg(unix)]
+async fn bounded_output_execution_preserves_head_tail_and_exact_totals() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let receipt = LocalExecutionBackend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "printf HEAD; dd if=/dev/zero bs=1024 count=128 2>/dev/null; printf TAIL"
+                    .to_owned(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+            timeout_ms: Some(5_000),
+            timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await?;
+
+    let output = receipt.effective_output();
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(output.termination, ExecutionTerminationCause::Exited);
+    assert_eq!(output.stdout.total_bytes, 128 * 1024 + 8);
+    assert_eq!(output.stdout.returned_bytes, 64 * 1024);
+    assert_eq!(output.stdout.omitted_bytes, 64 * 1024 + 8);
+    assert_eq!(output.stdout.retained_head_bytes, 32 * 1024);
+    assert_eq!(output.stdout.retained_tail_bytes, 32 * 1024);
+    assert_eq!(
+        output.combined_total_bytes,
+        output
+            .stdout
+            .total_bytes
+            .saturating_add(output.stderr.total_bytes)
+    );
+    assert_eq!(receipt.stdout.len(), 64 * 1024);
+    assert!(receipt.stdout.starts_with(b"HEAD"));
+    assert!(receipt.stdout.ends_with(b"TAIL"));
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn bounded_output_preflight_rejects_hard_limit() {
+    let error = super::command_output_with_timeout(
+        Path::new("sh"),
+        &["-c", "dd if=/dev/zero bs=1048576 count=2 2>/dev/null"],
+        Duration::from_secs(3),
+    )
+    .expect_err("preflight output above 256 KiB should fail closed");
+
+    assert!(
+        error.to_string().contains("output_limit"),
+        "unexpected preflight error: {error:#}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn bounded_output_preflight_reader_panic_is_cleaned_up_and_joined() {
+    let temp = tempfile::tempdir().expect("reader panic fixture should create tempdir");
+    let pid_file = temp.path().join("reader-panic-child.pid");
+    let pid_path = pid_file.to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
+    let error = super::command_output_with_timeout_with_reader_panic(
+        Path::new("sh"),
+        &[
+            "-c",
+            "trap '' TERM; sleep 30 & echo $! > \"$1\"; printf x; wait",
+            "sh",
+            pid_path.as_str(),
+        ],
+        Duration::from_secs(30),
+    )
+    .expect_err("injected preflight reader panic should fail closed");
+
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(
+        error.to_string().contains("reader_failed"),
+        "unexpected preflight error: {error:#}"
+    );
+    let pid = fs::read_to_string(pid_file).expect("fixture child should publish its pid");
+    for _ in 0..20 {
+        if !process_is_running(pid.trim()) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "child process {} should have been cleaned up after spontaneous reader panic",
+        pid.trim()
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bounded_output_hard_limit_kills_group_and_maps_resource_limit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let pid_file = temp.path().join("output-limit-child.pid");
+    let script = "trap '' TERM; sleep 30 & echo $! > \"$1\"; \
+                  dd if=/dev/zero bs=1048576 count=20 2>/dev/null; wait";
+    let receipt = LocalExecutionBackend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                script.to_owned(),
+                "sh".to_owned(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+            timeout_ms: Some(10_000),
+            timeout_secs: 10,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await?;
+
+    let output = receipt.effective_output();
+    assert!(matches!(
+        output.termination,
+        ExecutionTerminationCause::OutputLimit {
+            stream: ExecutionOutputStream::Stdout,
+            limit_bytes: 8_388_608,
+            observed_bytes,
+        } if observed_bytes > 8_388_608
+    ));
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Completed
+    );
+    assert_eq!(receipt.stdout.len(), 64 * 1024);
+    assert_eq!(output.stdout.returned_bytes, 64 * 1024);
+    assert_eq!(
+        output.stdout.omitted_bytes,
+        output.stdout.total_bytes - output.stdout.returned_bytes
+    );
+    assert_eq!(
+        output.combined_total_bytes,
+        output
+            .stdout
+            .total_bytes
+            .saturating_add(output.stderr.total_bytes)
+    );
+    for stream in [&output.stdout, &output.stderr] {
+        assert_eq!(
+            stream.total_bytes,
+            stream.returned_bytes.saturating_add(stream.omitted_bytes)
+        );
+    }
+
+    let pid = fs::read_to_string(pid_file)?.trim().to_owned();
+    for _ in 0..20 {
+        if !process_is_running(&pid) {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !process_is_running(&pid),
+        "child process {pid} was orphaned"
+    );
+
+    let expected_total = output.stdout.total_bytes;
+    let expected_omitted = output.stdout.omitted_bytes;
+    let result = super::bash_tool_result_from_execution_receipt(
+        "call-output-limit".to_owned(),
+        "bash".to_owned(),
+        receipt,
+    )?;
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("expected output limit error result");
+    };
+    assert_eq!(error.kind, ToolErrorKind::ResourceLimit);
+    assert_eq!(
+        result.metadata.details["execution"]["output"]["code"],
+        "output_limit_exceeded"
+    );
+    assert_eq!(result.metadata.stdout_bytes, Some(expected_total));
+    assert_eq!(result.metadata.omitted_bytes, Some(expected_omitted));
+    Ok(())
+}
+
 #[cfg(unix)]
 fn process_is_running(pid: &str) -> bool {
     std::process::Command::new("kill")
         .arg("-0")
         .arg(pid)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -1173,6 +1819,43 @@ async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn local_execution_backend_rejects_unrepresentable_deadline_before_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("must-not-spawn");
+    let backend = LocalExecutionBackend;
+
+    let error = backend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "printf spawned > \"$1\"".to_owned(),
+                "sh".to_owned(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+            timeout_ms: None,
+            timeout_secs: u64::MAX,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await
+        .expect_err("unrepresentable monotonic deadline must fail before spawn");
+
+    assert!(
+        error
+            .to_string()
+            .contains("execution timeout exceeds the supported monotonic deadline")
+    );
+    assert!(!marker.exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let backend = LocalExecutionBackend;
@@ -1244,6 +1927,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             exit_code: None,
             stdout: Vec::new(),
             stderr: Vec::new(),
+            output: Default::default(),
             timed_out: true,
         },
     )?;
@@ -1264,6 +1948,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             exit_code: Some(0),
             stdout: b"stdout".to_vec(),
             stderr: b"stderr".to_vec(),
+            output: Default::default(),
             timed_out: false,
         },
     )?;
@@ -1285,6 +1970,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             exit_code: Some(7),
             stdout: Vec::new(),
             stderr: b"bad".to_vec(),
+            output: Default::default(),
             timed_out: false,
         },
     )?;
@@ -1294,6 +1980,54 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
     assert_eq!(error.kind, ToolErrorKind::ExitStatus);
     assert_eq!(failed.metadata.exit_code, Some(7));
     assert_eq!(failed.content, "bad");
+    Ok(())
+}
+
+#[test]
+fn bash_truncated_invalid_utf8_stays_within_text_budget() -> Result<()> {
+    let retained_bytes = 64 * 1024;
+    let total_bytes = 96 * 1024;
+    let result = super::bash_tool_result_from_execution_receipt(
+        "call-invalid-utf8".to_owned(),
+        "bash".to_owned(),
+        ExecutionReceipt {
+            backend: ExecutionBackendKind::Local,
+            capabilities: ExecutionBackendCapabilities::default(),
+            network: Default::default(),
+            resources: Default::default(),
+            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+            exit_code: Some(0),
+            stdout: vec![0xff; retained_bytes],
+            stderr: Vec::new(),
+            output: sigil_kernel::ExecutionOutputReceipt {
+                schema_version: sigil_kernel::EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+                stdout: sigil_kernel::ExecutionStreamCapture {
+                    total_bytes: total_bytes as u64,
+                    returned_bytes: retained_bytes as u64,
+                    omitted_bytes: (total_bytes - retained_bytes) as u64,
+                    retained_head_bytes: (retained_bytes / 2) as u64,
+                    retained_tail_bytes: (retained_bytes / 2) as u64,
+                    retained_limit_bytes: retained_bytes as u64,
+                    hard_limit_bytes: 8 * 1024 * 1024,
+                    total_lines: 1,
+                    truncated: true,
+                },
+                stderr: Default::default(),
+                combined_total_bytes: total_bytes as u64,
+                combined_hard_limit_bytes: 16 * 1024 * 1024,
+                termination: ExecutionTerminationCause::Exited,
+            },
+            timed_out: false,
+        },
+    )?;
+
+    assert!(result.content.len() <= super::DEFAULT_TEXT_LIMIT_BYTES);
+    assert!(result.content.contains("output truncated"));
+    assert_eq!(
+        result.metadata.returned_bytes.unwrap_or_default()
+            + result.metadata.omitted_bytes.unwrap_or_default(),
+        total_bytes as u64
+    );
     Ok(())
 }
 
@@ -3271,6 +4005,7 @@ async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
         network: Default::default(),
         resources: Default::default(),
         environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
+        output: Default::default(),
     };
     let workspace = tempfile::tempdir()?;
     let analysis = super::analyze_shell_command(

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aho-corasick.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
