@@ -180,6 +180,7 @@ impl Tool for ApprovalRouteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -452,6 +453,36 @@ fn supervisor_captures_profile_snapshot_before_spawn() -> Result<()> {
             RunEvent::Control(sigil_kernel::ControlEntry::AgentProfileCaptured(_))
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn chat_child_start_projects_sensitive_objective_and_prompt_hash_before_control_append()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let raw = "inspect https://example.com/private?signature=thread-start-secret exactly";
+    let mut start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    start.objective = raw.to_owned();
+    start.prompt = raw.to_owned();
+
+    let thread = supervisor.begin_chat_child_thread(&mut session, &mut handler, start)?;
+
+    let durable = serde_json::to_string(session.entries())?;
+    assert!(!durable.contains("thread-start-secret"));
+    assert!(!durable.contains(raw));
+    let projected = session
+        .agent_thread_state_projection()
+        .threads
+        .get(&thread.thread_id)
+        .cloned()
+        .expect("thread should project");
+    let safe = sigil_kernel::safe_persistence_text(raw);
+    assert_eq!(projected.objective, safe);
+    assert_eq!(projected.prompt_hash, super::hash_text(&safe));
+    assert_ne!(projected.prompt_hash, super::hash_text(raw));
     Ok(())
 }
 

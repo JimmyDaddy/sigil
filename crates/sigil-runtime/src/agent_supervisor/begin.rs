@@ -83,11 +83,15 @@ impl AgentSupervisor {
                 profile_id: profile_id.clone(),
                 profile_snapshot_id: snapshot.snapshot_id.clone(),
                 run_context,
-                objective: start.objective.clone(),
+                objective: sigil_kernel::safe_persistence_text(&start.objective),
                 prompt_hash,
                 invocation_mode: start.invocation_mode,
                 invocation_source: start.invocation_source,
-                display_name: start.step.display_name.clone(),
+                display_name: start
+                    .step
+                    .display_name
+                    .as_deref()
+                    .map(sigil_kernel::safe_persistence_text),
                 created_at_ms: None,
             }),
         )?;
@@ -189,7 +193,7 @@ impl AgentSupervisor {
             .model_visible_index(&AgentProfileIndexContext::default())?;
         let thread_id = chat_agent_thread_id_for_call(&start.call_id, &start.profile_id)?;
         let attempt_id = begin_attempt_id(&thread_id)?;
-        let prompt_hash = hash_text(&start.prompt);
+        let prompt_hash = hash_text(&sigil_kernel::safe_persistence_text(&start.prompt));
         let (provider_name, model_name) = resolved_provider_model(
             session,
             resolved_profile.profile.provider.as_deref(),
@@ -228,11 +232,14 @@ impl AgentSupervisor {
                 profile_id: start.profile_id.clone(),
                 profile_snapshot_id: snapshot.snapshot_id.clone(),
                 run_context,
-                objective: start.objective.clone(),
+                objective: sigil_kernel::safe_persistence_text(&start.objective),
                 prompt_hash,
                 invocation_mode: start.invocation_mode,
                 invocation_source: start.invocation_source,
-                display_name: start.display_name_hint.clone(),
+                display_name: start
+                    .display_name_hint
+                    .as_deref()
+                    .map(sigil_kernel::safe_persistence_text),
                 created_at_ms: None,
             }),
         )?;

@@ -270,6 +270,7 @@ fn approval_handler_denies_when_decision_channel_stays_idle() -> Result<()> {
             input_schema: serde_json::json!({"type":"object"}),
             category: ToolCategory::File,
             access: sigil_kernel::ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
     )?;
@@ -297,6 +298,7 @@ fn approval_handler_with_zero_timeout_denies_immediately() -> Result<()> {
             input_schema: serde_json::json!({"type":"object"}),
             category: ToolCategory::File,
             access: sigil_kernel::ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
     )?;
@@ -335,6 +337,7 @@ fn approval_handler_ignores_other_call_ids_until_matching_decision_arrives() -> 
             input_schema: serde_json::json!({"type":"object"}),
             category: ToolCategory::File,
             access: sigil_kernel::ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
     )?;
@@ -366,6 +369,7 @@ fn approval_handler_forwards_approved_argument_overrides() -> Result<()> {
             input_schema: serde_json::json!({"type":"object"}),
             category: ToolCategory::Agent,
             access: sigil_kernel::ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
     )?;
@@ -456,6 +460,7 @@ fn approval_handler_returns_cancel_denial() -> Result<()> {
             input_schema: serde_json::json!({"type":"object"}),
             category: ToolCategory::File,
             access: sigil_kernel::ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
     )?;
@@ -486,6 +491,7 @@ fn approval_handler_errors_when_channel_closes() {
                 input_schema: serde_json::json!({"type":"object"}),
                 category: ToolCategory::File,
                 access: sigil_kernel::ToolAccess::Write,
+                network_effect: None,
                 preview: ToolPreviewCapability::Required,
             },
         )

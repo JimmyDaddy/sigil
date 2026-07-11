@@ -20,11 +20,12 @@ use tokio::{
 };
 
 use super::{
-    LocalMcpProcessLauncher, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
-    McpListChangedKind, McpListChangedNotification, McpProcessClass, McpProcessCoverage,
-    McpProcessLaunchRequest, McpProcessLauncher, McpProgressNotification, McpPromptToolKind,
-    McpRuntimeEventHandler, McpToolRegistrationOptions, activate_lazy_mcp_tools,
-    register_mcp_tools, register_mcp_tools_with_options, unsupported_mcp_runtime_event_handler,
+    ExtensionProcessNetworkAdmission, LocalMcpProcessLauncher, McpElicitationHandler,
+    McpElicitationRequest, McpElicitationResponse, McpListChangedKind, McpListChangedNotification,
+    McpProcessClass, McpProcessCoverage, McpProcessLaunchRequest, McpProcessLauncher,
+    McpProgressNotification, McpPromptToolKind, McpRuntimeEventHandler, McpToolRegistrationOptions,
+    activate_lazy_mcp_tools, register_mcp_tools, register_mcp_tools_with_options,
+    unsupported_mcp_runtime_event_handler,
 };
 
 async fn register_mcp_tools_with_capabilities(
@@ -267,6 +268,8 @@ async fn local_mcp_process_launcher_marks_stdio_outside_sandbox() -> Result<()> 
         launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::default(),
+        declaration: None,
     })?;
 
     assert_eq!(
@@ -292,6 +295,121 @@ async fn local_mcp_process_launcher_marks_stdio_outside_sandbox() -> Result<()> 
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn mcp_process_network_ask_without_approval_is_zero_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("ask-without-approval-spawned");
+    let result = LocalMcpProcessLauncher.launch(McpProcessLaunchRequest {
+        server_name: "ask-without-approval".to_owned(),
+        command: "sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            "printf spawned > \"$1\"".to_owned(),
+            "sh".to_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+        working_dir: Some(temp.path().to_path_buf()),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:ask-without-approval".to_owned(),
+        startup_timeout_secs: 1,
+        classification: McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::new(
+            sigil_kernel::NetworkPolicy::Ask,
+            false,
+        ),
+        declaration: None,
+    });
+
+    let Err(error) = result else {
+        panic!("ask without explicit approval must fail before spawn");
+    };
+    assert_eq!(
+        error
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkApprovalRequired)
+    );
+    assert!(!marker.exists(), "network ask rejection must be zero-spawn");
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn mcp_process_network_ask_with_explicit_approval_spawns() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("ask-approved-spawned");
+    let mut launch = LocalMcpProcessLauncher.launch(McpProcessLaunchRequest {
+        server_name: "ask-approved".to_owned(),
+        command: "sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            "printf spawned > \"$1\"".to_owned(),
+            "sh".to_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+        working_dir: Some(temp.path().to_path_buf()),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:ask-approved".to_owned(),
+        startup_timeout_secs: 1,
+        classification: McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::new(
+            sigil_kernel::NetworkPolicy::Ask,
+            true,
+        ),
+        declaration: None,
+    })?;
+
+    assert!(launch.child.wait().await?.success());
+    assert!(
+        marker.exists(),
+        "explicit network approval should admit spawn"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn mcp_process_network_deny_without_proven_isolation_is_zero_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("deny-unproven-spawned");
+    let result = LocalMcpProcessLauncher.launch(McpProcessLaunchRequest {
+        server_name: "deny-unproven".to_owned(),
+        command: "sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            "printf spawned > \"$1\"".to_owned(),
+            "sh".to_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+        working_dir: Some(temp.path().to_path_buf()),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:deny-unproven".to_owned(),
+        startup_timeout_secs: 1,
+        classification: McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::new(
+            sigil_kernel::NetworkPolicy::Deny,
+            true,
+        ),
+        declaration: None,
+    });
+
+    let Err(error) = result else {
+        panic!("deny without isolation proof must fail before spawn");
+    };
+    assert_eq!(
+        error
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkIsolationUnavailable)
+    );
+    assert!(
+        !marker.exists(),
+        "network deny rejection must be zero-spawn"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn extension_process_environment_clears_ambient_and_injects_only_grants() -> Result<()> {
     let Some(home) = std::env::var("HOME").ok() else {
         return Ok(());
@@ -310,6 +428,8 @@ async fn extension_process_environment_clears_ambient_and_injects_only_grants() 
             launch_static_fingerprint: "sha256:test-launch".to_owned(),
             startup_timeout_secs: 1,
             classification: McpProcessClass::LocalStdioConfigured,
+            network_admission: ExtensionProcessNetworkAdmission::default(),
+            declaration: None,
         })
     };
 
@@ -454,6 +574,8 @@ fn changed_live_environment_fingerprint_invalidates_process_binding() -> Result<
         launch_static_fingerprint: "sha256:binding".to_owned(),
         startup_timeout_secs: 1,
         classification: McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::default(),
+        declaration: None,
     };
     let mut receipt = super::McpProcessLaunchReceipt::local_outside_sandbox(&request);
     assert!(super::client::environment_binding_matches(
@@ -702,6 +824,7 @@ async fn stale_environment_binding_rejects_inbound_notification_before_handler()
         runtime_handler,
         Arc::new(LocalMcpProcessLauncher),
         None,
+        ExtensionProcessNetworkAdmission::default(),
     )
     .await?;
     let monitor = client
@@ -798,7 +921,22 @@ while True:
         .spec_for("mcp__fake__echo")
         .expect("expected provider-visible MCP tool");
     assert_eq!(spec.category, ToolCategory::Mcp);
-    assert_eq!(spec.access, ToolAccess::Network);
+    assert_eq!(spec.access, ToolAccess::Read);
+    assert_eq!(
+        spec.network_effect,
+        Some(sigil_kernel::NetworkEffect::Unknown)
+    );
+    assert_eq!(
+        registry.permission_operation(
+            &ToolContext::new(temp.path().to_path_buf(), 5),
+            &sigil_kernel::ToolCall {
+                id: "call-operation".to_owned(),
+                name: "mcp__fake__echo".to_owned(),
+                args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
+            },
+        )?,
+        sigil_kernel::ToolOperation::NetworkRequest
+    );
     assert!(registry.spec_for("echo").is_none());
     assert!(registry.spec_for("mcp__fake__resources_list").is_none());
     assert!(registry.spec_for("mcp__fake__resources_read").is_none());
@@ -977,6 +1115,23 @@ while True:
     assert_eq!(payload.phase, ExtensionProcessLaunchPhase::PostSpawn);
     assert_eq!(payload.status, ExtensionProcessLifecycleStatus::Registered);
     assert_eq!(payload.safe_metadata["mcp_environment_grant_names"], "HOME");
+    assert_eq!(
+        payload.safe_metadata["mcp_process_declared_network_effect"],
+        "unknown"
+    );
+    assert_eq!(
+        payload.safe_metadata["mcp_process_effective_network_effect"],
+        "unknown"
+    );
+    assert_eq!(
+        payload.safe_metadata["mcp_process_network_isolation_proven"],
+        "false"
+    );
+    assert_eq!(payload.safe_metadata["mcp_process_network_policy"], "allow");
+    assert_eq!(
+        payload.safe_metadata["mcp_process_explicit_network_approval"],
+        "false"
+    );
     assert!(!payload.safe_metadata["mcp_environment_live_fingerprint"].is_empty());
     assert!(!serde_json::to_string(&payload)?.contains(&home));
     Ok(())
@@ -1147,14 +1302,8 @@ while True:
     let descendant_pid = fs::read_to_string(descendant_pid_path)?
         .trim()
         .parse::<u32>()?;
-    let status = Command::new("kill")
-        .args(["-0", &descendant_pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await?;
     assert!(
-        !status.success(),
+        !crate::process_group::process_has_live_effect(descendant_pid)?,
         "post-spawn lifecycle append failure must not orphan descendants"
     );
     Ok(())
@@ -1520,13 +1669,32 @@ while True:
         .expect("expected MCP resources/list tool");
     assert_eq!(list_spec.category, ToolCategory::Mcp);
     assert_eq!(list_spec.access, ToolAccess::Read);
+    assert_eq!(
+        list_spec.network_effect,
+        Some(sigil_kernel::NetworkEffect::Read)
+    );
     let read_spec = registry
         .spec_for("mcp__docs__resources_read")
         .expect("expected MCP resources/read tool");
     assert_eq!(read_spec.category, ToolCategory::Mcp);
     assert_eq!(read_spec.access, ToolAccess::Read);
+    assert_eq!(
+        read_spec.network_effect,
+        Some(sigil_kernel::NetworkEffect::Read)
+    );
 
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &sigil_kernel::ToolCall {
+                id: "call-resource-operation".to_owned(),
+                name: "mcp__docs__resources_read".to_owned(),
+                args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
+            },
+        )?,
+        sigil_kernel::ToolOperation::NetworkRequest
+    );
     let subjects = registry.permission_subjects(
         &ctx,
         &sigil_kernel::ToolCall {
@@ -1888,9 +2056,24 @@ while True:
         .spec_for("mcp__prompts__prompts_list")
         .expect("prompts/list tool should register");
     assert_eq!(list_spec.access, ToolAccess::Read);
+    assert_eq!(
+        list_spec.network_effect,
+        Some(sigil_kernel::NetworkEffect::Read)
+    );
     assert!(registry.spec_for("mcp__prompts__prompts_get").is_some());
 
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &sigil_kernel::ToolCall {
+                id: "call-prompt-operation".to_owned(),
+                name: "mcp__prompts__prompts_get".to_owned(),
+                args_json: r#"{"name":"story_seed"}"#.to_owned(),
+            },
+        )?,
+        sigil_kernel::ToolOperation::NetworkRequest
+    );
     let list = registry
         .execute(
             ctx.clone(),
@@ -2347,6 +2530,8 @@ fn mcp_output_metadata_bounds_remote_names_and_identity_arrays() {
     let long = "x".repeat(1024 * 1024);
     let identity = super::McpServerObservedIdentity {
         command_fingerprint: long.clone(),
+        process_authorization_fingerprint: long.clone(),
+        declaration: None,
         environment_grant_names: (0..1_000)
             .map(|index| format!("{}-{index}", "G".repeat(256)))
             .collect(),
@@ -2669,6 +2854,79 @@ fn mcp_launch_static_fingerprint_preserves_empty_grant_compatibility_and_binds_n
 
     assert_eq!(empty, legacy);
     assert_ne!(granted, legacy);
+    Ok(())
+}
+
+#[test]
+fn declaration_stable_pin_excludes_paths_but_binds_executable_content() -> Result<()> {
+    let first_root = tempfile::tempdir()?;
+    let second_root = tempfile::tempdir()?;
+    let first_executable = first_root.path().join("bin/server");
+    let second_executable = second_root.path().join("bin/server");
+    fs::create_dir_all(
+        first_executable
+            .parent()
+            .expect("first parent should exist"),
+    )?;
+    fs::create_dir_all(
+        second_executable
+            .parent()
+            .expect("second parent should exist"),
+    )?;
+    fs::write(&first_executable, "same executable bytes")?;
+    fs::write(&second_executable, "same executable bytes")?;
+    let projection_fingerprint = format!("sha256:{:064x}", 7);
+
+    let first = super::mcp_resolved_launch_static_fingerprint_at(
+        &projection_fingerprint,
+        &first_executable,
+    )?;
+    let second = super::mcp_resolved_launch_static_fingerprint_at(
+        &projection_fingerprint,
+        &second_executable,
+    )?;
+
+    assert_eq!(
+        first, second,
+        "persisted declaration pins must not disclose canonical root identity"
+    );
+    fs::write(&second_executable, "different executable bytes")?;
+    let changed = super::mcp_resolved_launch_static_fingerprint_at(
+        &projection_fingerprint,
+        &second_executable,
+    )?;
+    assert_ne!(
+        first, changed,
+        "executable content remains statically pinned"
+    );
+    Ok(())
+}
+
+#[test]
+fn process_launch_request_debug_hides_command_cwd_environment_and_args() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let command_secret = temp.path().join("private-command-secret");
+    let argument_secret = "private-argument-secret";
+    let request = McpProcessLaunchRequest::from_config(
+        &McpServerConfig {
+            name: "debug-safe".to_owned(),
+            command: command_secret.to_string_lossy().into_owned(),
+            args: vec![argument_secret.to_owned()],
+            ..McpServerConfig::default()
+        },
+        Some(temp.path().to_path_buf()),
+    )?;
+
+    let debug = format!("{request:?}");
+    let static_fingerprint = super::mcp_command_fingerprint(
+        &command_secret.to_string_lossy(),
+        &[argument_secret.to_owned()],
+    )?;
+    assert!(!debug.contains(&command_secret.to_string_lossy().into_owned()));
+    assert!(!debug.contains(&temp.path().to_string_lossy().into_owned()));
+    assert!(!debug.contains(argument_secret));
+    assert!(!debug.contains(&static_fingerprint));
+    assert!(debug.contains("command: \"[hidden]\""));
     Ok(())
 }
 
@@ -4299,6 +4557,8 @@ fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
 
     let observed = super::McpServerObservedIdentity {
         command_fingerprint: "sha256:observed".to_owned(),
+        process_authorization_fingerprint: "hmac-sha256:observed".to_owned(),
+        declaration: None,
         environment_grant_names: Vec::new(),
         environment_static_fingerprint: "sha256:environment".to_owned(),
         environment_live_fingerprint: "hmac-sha256:environment".to_owned(),
@@ -4861,6 +5121,8 @@ fn validate_mcp_pin_reports_all_supported_mismatch_fields() {
         },
         &super::McpServerObservedIdentity {
             command_fingerprint: "observed-fingerprint".to_owned(),
+            process_authorization_fingerprint: "observed-authorization".to_owned(),
+            declaration: None,
             environment_grant_names: Vec::new(),
             environment_static_fingerprint: "sha256:environment".to_owned(),
             environment_live_fingerprint: "hmac-sha256:environment".to_owned(),

@@ -340,12 +340,65 @@ async fn terminal_fast_exit_dual_stream_limits_preserve_observed_total() -> Resu
         final_entry.output_termination_reason,
         Some(TerminalOutputTerminationReason::OutputLimitExceeded)
     );
-    assert_eq!(final_entry.output_total_bytes, 8192);
-    assert_eq!(stdout_bytes, 1024);
-    assert_eq!(stderr_bytes, 1024);
-    assert_eq!(combined_bytes, 2048);
-    assert!(final_entry.output_total_bytes >= combined_bytes);
+    assert_eq!(final_entry.output_limit_bytes, Some(1024));
+    assert!(stdout_bytes <= 1024);
+    assert!(stderr_bytes <= 1024);
+    assert!(stdout_bytes == 1024 || stderr_bytes == 1024);
+    assert_eq!(combined_bytes, stdout_bytes + stderr_bytes);
+    assert!(combined_bytes <= 2048);
+    // The first reader to exceed its limit triggers immediate process-tree cleanup. The other
+    // pipe may therefore remain unread even when the command had already produced more bytes.
+    assert!(final_entry.output_total_bytes > combined_bytes);
     assert!(final_entry.output_truncated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_capture_limit_records_observed_bytes_without_unbounded_drain() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output_path = temp.path().join("capture-limit-output.log");
+    let output_file = Arc::new(Mutex::new(super::CombinedOutputWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_path)
+            .await?,
+        8,
+    )));
+    let stream_path = temp.path().join("capture-limit-stdout.log");
+    let ledger = Arc::new(super::TerminalCaptureLedger::default());
+    let (mut writer, reader) = tokio::io::duplex(8);
+    writer.write_all(b"observed").await?;
+    drop(writer);
+    let (capture_failure_tx, mut capture_failure_rx) = mpsc::unbounded_channel();
+
+    let error = super::capture_stream(
+        Some(reader),
+        super::TerminalOutputStream::Stdout,
+        stream_path.clone(),
+        output_file,
+        super::TerminalArtifactLimits {
+            stream_bytes: 4,
+            combined_bytes: 8,
+        },
+        Arc::clone(&ledger),
+        capture_failure_tx,
+    )
+    .await
+    .expect_err("the stream limit should stop capture");
+
+    assert!(error.to_string().contains("output limit exceeded"));
+    let failure = capture_failure_rx
+        .recv()
+        .await
+        .expect("capture failure should be reported");
+    assert_eq!(failure.limit_bytes(), Some(4));
+    assert_eq!(ledger.total_observed_bytes(), 8);
+    assert_eq!(ledger.omitted_observed_bytes(), 4);
+    assert_eq!(
+        ledger.termination_reason(),
+        Some(TerminalOutputTerminationReason::OutputLimitExceeded)
+    );
     Ok(())
 }
 
@@ -1207,15 +1260,9 @@ async fn terminal_reader_task_panic_triggers_live_cleanup_without_failure_signal
         Some(ExecutionCleanupStatus::Completed)
     );
     let pid = std::fs::read_to_string(pid_file)?;
+    let process_id = pid.trim().parse::<u32>()?;
     for _ in 0..20 {
-        let running = std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.trim())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if !running {
+        if !process_is_alive(process_id).await {
             return Ok(());
         }
         sleep(Duration::from_millis(25)).await;
@@ -1658,13 +1705,7 @@ fn test_shell(_dir: &Path) -> Result<String> {
 
 #[cfg(unix)]
 async fn process_is_alive(process_id: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &process_id.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|status| status.success())
+    crate::process_group::process_is_live(process_id).unwrap_or(true)
 }
 
 async fn wait_for_terminal_status(

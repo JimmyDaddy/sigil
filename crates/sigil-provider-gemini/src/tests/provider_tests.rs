@@ -6,7 +6,9 @@ use std::{
 
 use futures::StreamExt;
 use sigil_kernel::{
-    CompletionRequest, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+    CompletionRequest, HostedCitationFidelity, HostedEvidence, HostedQueryVisibility,
+    HostedSourceFidelity, HostedToolKind, HostedToolLimits, HostedToolRequest, HostedToolSupport,
+    ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
 };
 
 use super::*;
@@ -69,6 +71,31 @@ fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()>
     Ok(())
 }
 
+#[test]
+fn provider_hosted_search_capability_uses_exact_model_matrix() -> anyhow::Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::clear();
+    let provider = new_gemini_provider(GeminiProviderConfig::default())?;
+
+    let supported = provider.hosted_web_search_capability("models/gemini-2.5-flash");
+    assert_eq!(supported.support, HostedToolSupport::ServerManaged);
+    assert_eq!(
+        supported.query_visibility,
+        HostedQueryVisibility::ProviderReportedPostExecution
+    );
+    assert_eq!(supported.source_fidelity, HostedSourceFidelity::UrlAndTitle);
+    assert_eq!(
+        supported.citation_fidelity,
+        HostedCitationFidelity::OutputSpan
+    );
+    assert!(
+        !provider
+            .hosted_web_search_capability("gemini-unknown")
+            .is_supported()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn provider_rejects_stream_without_api_key_before_network() -> anyhow::Result<()> {
     let provider = {
@@ -95,6 +122,7 @@ async fn provider_rejects_stream_without_api_key_before_network() -> anyhow::Res
             background: false,
             store: false,
             deterministic_materialization: true,
+            hosted_tools: Vec::new(),
         })
         .await
     {
@@ -446,6 +474,184 @@ async fn provider_stream_maps_http_error_status_after_retry() -> anyhow::Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn provider_hosted_search_maps_wire_request_and_grounding_evidence() -> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+         data: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"猫🙂 grounded\"}]},\"groundingMetadata\":{\"webSearchQueries\":[\"raw search query\"],\"groundingChunks\":[{\"web\":{\"uri\":\"https://example.com/path?token=raw\",\"title\":\"Example\"}}],\"groundingSupports\":[{\"segment\":{\"partIndex\":0,\"startIndex\":0,\"endIndex\":7,\"text\":\"猫🙂\"},\"groundingChunkIndices\":[0]}]}}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await?;
+    let provider = gemini_provider(GeminiProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..GeminiProviderConfig::default()
+    })?;
+
+    let chunks = provider
+        .stream(hosted_test_request())
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    assert!(chunks.iter().any(|chunk| matches!(
+        chunk,
+        ProviderChunk::HostedToolStarted {
+            authorization_id,
+            invocation_id,
+            kind: HostedToolKind::WebSearch,
+        } if authorization_id == "auth-gemini"
+            && invocation_id.starts_with("gemini:hosted-v1:")
+    )));
+    assert!(chunks.iter().any(|chunk| matches!(
+        chunk,
+        ProviderChunk::HostedEvidence {
+            evidence: HostedEvidence::Source(_),
+            ..
+        }
+    )));
+    assert!(chunks.iter().any(|chunk| matches!(
+        chunk,
+        ProviderChunk::HostedEvidence {
+            evidence: HostedEvidence::Citation(citation),
+            ..
+        } if citation.start_byte() == 0 && citation.end_byte() == 7
+    )));
+    let request = server.request_text();
+    assert!(request.contains("\"google_search\":{}"));
+    assert!(!request.contains("functionDeclarations"));
+    let debug = format!("{chunks:?}");
+    assert!(!debug.contains("raw search query"));
+    assert!(!debug.contains("token=raw"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_hosted_search_keeps_query_and_url_secret_across_http_chunk_boundaries()
+-> anyhow::Result<()> {
+    let body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"answer\"}]},\"groundingMetadata\":{\"webSearchQueries\":[\"raw search query\"],\"groundingChunks\":[{\"web\":{\"uri\":\"https://example.com/?token=raw\",\"title\":\"raw title\"}}],\"groundingSupports\":[]}}]}\n\ndata: [DONE]\n\n";
+    let query_split = body
+        .find("search query")
+        .expect("query fixture marker should exist")
+        + 3;
+    let url_split = body
+        .find("token=raw")
+        .expect("URL fixture marker should exist")
+        + 5;
+    let server = TinySseServer::start_chunked_body(vec![
+        body.as_bytes()[..query_split].to_vec(),
+        body.as_bytes()[query_split..url_split].to_vec(),
+        body.as_bytes()[url_split..].to_vec(),
+    ])
+    .await?;
+    let provider = gemini_provider(GeminiProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..GeminiProviderConfig::default()
+    })?;
+
+    let chunks = provider
+        .stream(hosted_test_request())
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    assert!(chunks.iter().any(|chunk| matches!(
+        chunk,
+        ProviderChunk::HostedEvidence {
+            evidence: HostedEvidence::QueryObserved(_),
+            ..
+        }
+    )));
+    let debug = format!("{chunks:?}");
+    assert!(!debug.contains("raw search query"));
+    assert!(!debug.contains("token=raw"));
+    assert!(!debug.contains("raw title"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_hosted_search_unknown_model_fails_before_wire() -> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: [DONE]\n\n",
+    )
+    .await?;
+    let provider = gemini_provider(GeminiProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..GeminiProviderConfig::default()
+    })?;
+    let mut request = hosted_test_request();
+    request.model_name = "gemini-unknown".to_owned();
+
+    let error = match provider.stream(request).await {
+        Ok(_) => panic!("unknown model must fail closed"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("does not support"));
+    assert_eq!(server.request_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_hosted_search_does_not_retry_after_request_send() -> anyhow::Result<()> {
+    let server = TinySseServer::start_sequence(vec![
+        "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 7\r\n\r\nlimited".as_bytes(),
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: [DONE]\n\n".as_bytes(),
+    ])
+    .await?;
+    let provider = gemini_provider(GeminiProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..GeminiProviderConfig::default()
+    })?;
+
+    let error = match provider.stream(hosted_test_request()).await {
+        Ok(_) => panic!("rate limit must fail after the first hosted send"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.to_string(), "Gemini request was rate limited");
+    assert_eq!(server.request_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_hosted_search_rejects_limits_before_wire() -> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: [DONE]\n\n",
+    )
+    .await?;
+    let provider = gemini_provider(GeminiProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..GeminiProviderConfig::default()
+    })?;
+    let mut request = hosted_test_request();
+    request.hosted_tools[0] = HostedToolRequest::new(
+        "auth-gemini-filtered",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            allowed_domains: vec!["example.com".to_owned()],
+            ..HostedToolLimits::default()
+        },
+    )?;
+
+    let error = match provider.stream(request).await {
+        Ok(_) => panic!("unsupported domain filters must fail closed"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("does not enforce"));
+    assert_eq!(server.request_count(), 0);
+    Ok(())
+}
+
 #[test]
 fn provider_private_helpers_cover_retry_edges() {
     assert!(super::is_retryable_status(429));
@@ -495,7 +701,22 @@ fn test_request() -> CompletionRequest {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     }
+}
+
+fn hosted_test_request() -> CompletionRequest {
+    let mut request = test_request();
+    request.model_name = "gemini-2.5-flash".to_owned();
+    request.hosted_tools.push(
+        HostedToolRequest::new(
+            "auth-gemini",
+            HostedToolKind::WebSearch,
+            HostedToolLimits::default(),
+        )
+        .expect("hosted request fixture should be valid"),
+    );
+    request
 }
 
 fn retry_test_timeouts() -> ModelRequestTimeouts {

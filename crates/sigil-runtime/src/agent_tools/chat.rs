@@ -622,13 +622,14 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let prompt_hash = hash_text(&prompt);
+        let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+        let prompt_hash = hash_text(&safe_prompt);
         let requested = AgentThreadMessageRoutedEntry {
             route_id: route_id.clone(),
             source_thread_id: source_thread_id.clone(),
             target_thread_id: thread_id.clone(),
             prompt_hash: prompt_hash.clone(),
-            prompt: Some(prompt.clone()),
+            prompt: Some(safe_prompt.clone()),
             status: AgentRouteStatus::Requested,
         };
         let mailbox_queued = AgentMailboxMessageEntry {
@@ -636,7 +637,7 @@ impl AgentToolRuntime {
             source_thread_id: source_thread_id.clone(),
             target_thread_id: thread_id.clone(),
             prompt_hash: prompt_hash.clone(),
-            prompt: Some(prompt.clone()),
+            prompt: Some(safe_prompt),
             status: AgentMailboxStatus::Queued,
             reason: None,
             updated_at_ms: None,

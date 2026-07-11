@@ -11,9 +11,10 @@ use anyhow::{Result, anyhow};
 use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
-    EventHandler, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess, ToolCall,
-    ToolCategory, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
+    EventHandler, JsonlSessionStore, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess,
+    ToolCall, ToolCategory, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
     ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
+    WorkspaceTrust,
 };
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tokio::{
@@ -24,9 +25,9 @@ use tokio::{
 use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, ServeOptions, ServeStartupPlan,
     StdoutEventHandler, build_serve_startup_plan, default_session_path, drain_provider_stream,
-    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
-    render_serve_startup_plan, render_version, resolve_workspace_root, run_input_with_repo_context,
-    serve_command,
+    load_session_with_workspace_trust, render_cli_doctor_report, render_doctor_report,
+    render_provider_chunk, render_run_event, render_serve_startup_plan, render_version,
+    resolve_workspace_root, run_input_with_repo_context, serve_command,
 };
 
 fn boxed_chunk_stream(
@@ -82,6 +83,18 @@ fn default_session_path_uses_configured_log_dir_and_jsonl_suffix() {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("session-"))
     );
+}
+
+#[test]
+fn fresh_cli_session_projects_unknown_workspace_trust() -> Result<()> {
+    let workspace = unique_temp_workspace("sigil-cli-workspace-trust")?;
+    let store = JsonlSessionStore::new(workspace.join("session.jsonl"))?;
+
+    let (_session, trust) =
+        load_session_with_workspace_trust("deepseek", "deepseek-test", store, &workspace)?;
+
+    assert_eq!(trust, WorkspaceTrust::Unknown);
+    Ok(())
 }
 
 #[test]
@@ -150,12 +163,17 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         input_schema: Default::default(),
         category: ToolCategory::File,
         access: ToolAccess::Write,
+        network_effect: None,
         preview: ToolPreviewCapability::Required,
     };
     let approval = render_run_event(RunEvent::ToolApprovalRequested {
         call: call.clone(),
         spec,
         subjects: vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: vec![sigil_kernel::PathTrustZone::WorkspaceSource],
@@ -174,6 +192,12 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         approval
             .stderr
             .contains("[tool:approval] write_file (call-1) file write")
+    );
+    assert!(approval.stderr.contains("network=none risk=medium"));
+    assert!(
+        approval
+            .stderr
+            .contains("policy=local:ask network:allow source:allow final:ask")
     );
     assert!(approval.stderr.contains("[tool:preview] 1 file changed"));
 
@@ -693,6 +717,7 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
         input_schema: serde_json::json!({"type":"object"}),
         category: ToolCategory::File,
         access: ToolAccess::Read,
+        network_effect: None,
         preview: ToolPreviewCapability::Optional,
     };
 
@@ -710,6 +735,10 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
         call: call.clone(),
         spec,
         subjects: vec![ToolSubject::path("README.md", "README.md")],
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::Read,
         risk: sigil_kernel::PermissionRisk::Low,
         subject_zones: vec![sigil_kernel::PathTrustZone::WorkspaceSource],

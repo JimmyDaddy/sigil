@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     mutation::{ExecutionMutationProfile, MutationEventRecorder, WorkspaceMutationScan},
-    permission::{ApprovalMode, ToolOperation, infer_tool_operation},
+    permission::{ApprovalMode, NetworkPolicy, ToolOperation, infer_tool_operation},
     provider::ModelMessage,
     session::ControlEntry,
     verification::{DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ToolEffect, VerificationScope},
@@ -24,7 +24,7 @@ const MODEL_TOOL_CONTENT_HEAD_BYTES: usize = 24 * 1024;
 const MODEL_TOOL_CONTENT_TAIL_BYTES: usize = 8 * 1024;
 
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolSpec {
     pub name: String,
@@ -32,7 +32,41 @@ pub struct ToolSpec {
     pub input_schema: Value,
     pub category: ToolCategory,
     pub access: ToolAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_effect: Option<NetworkEffect>,
     pub preview: ToolPreviewCapability,
+}
+
+impl<'de> Deserialize<'de> for ToolSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        struct ToolSpecWire {
+            name: String,
+            description: String,
+            input_schema: Value,
+            category: ToolCategory,
+            access: ToolAccessWire,
+            #[serde(default)]
+            network_effect: Option<NetworkEffect>,
+            preview: ToolPreviewCapability,
+        }
+
+        let wire = ToolSpecWire::deserialize(deserializer)?;
+        let (access, network_effect) = wire.access.upcast_network_effect(wire.network_effect);
+        Ok(Self {
+            name: wire.name,
+            description: wire.description,
+            input_schema: wire.input_schema,
+            category: wire.category,
+            access,
+            network_effect,
+            preview: wire.preview,
+        })
+    }
 }
 
 /// Role-specific tool visibility and execution scope.
@@ -168,7 +202,6 @@ pub enum ToolAccess {
     Read,
     Write,
     Execute,
-    Network,
 }
 
 impl ToolAccess {
@@ -177,7 +210,49 @@ impl ToolAccess {
             Self::Read => "read",
             Self::Write => "write",
             Self::Execute => "execute",
-            Self::Network => "network",
+        }
+    }
+}
+
+/// Independent network effect declared by one tool or concrete tool call.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkEffect {
+    Read,
+    Mutate,
+    Unknown,
+}
+
+impl NetworkEffect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Mutate => "mutate",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Deserialize-only access wire that recognizes the removed legacy `network` variant.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ToolAccessWire {
+    Read,
+    Write,
+    Execute,
+    Network,
+}
+
+impl ToolAccessWire {
+    pub(crate) fn upcast_network_effect(
+        self,
+        network_effect: Option<NetworkEffect>,
+    ) -> (ToolAccess, Option<NetworkEffect>) {
+        match self {
+            Self::Read => (ToolAccess::Read, network_effect),
+            Self::Write => (ToolAccess::Write, network_effect),
+            Self::Execute => (ToolAccess::Execute, network_effect),
+            Self::Network => (ToolAccess::Read, Some(NetworkEffect::Unknown)),
         }
     }
 }
@@ -367,6 +442,8 @@ pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub timeout_secs: u64,
     pub mutation_recorder: Option<MutationEventRecorder>,
+    network_policy: NetworkPolicy,
+    explicit_network_approval: bool,
     approved_subjects: Vec<ToolSubject>,
     progress_sink: Option<Arc<dyn ToolProgressSink>>,
     execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
@@ -379,6 +456,8 @@ impl std::fmt::Debug for ToolContext {
             .field("workspace_root", &self.workspace_root)
             .field("timeout_secs", &self.timeout_secs)
             .field("mutation_recorder", &self.mutation_recorder.is_some())
+            .field("network_policy", &self.network_policy)
+            .field("explicit_network_approval", &self.explicit_network_approval)
             .field("approved_subjects", &self.approved_subjects.len())
             .field("progress_sink", &self.progress_sink.is_some())
             .field("cancellation", &self.cancellation.is_some())
@@ -397,6 +476,8 @@ impl ToolContext {
             workspace_root: workspace_root.into(),
             timeout_secs,
             mutation_recorder: None,
+            network_policy: NetworkPolicy::Allow,
+            explicit_network_approval: false,
             approved_subjects: Vec::new(),
             progress_sink: None,
             execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
@@ -414,6 +495,35 @@ impl ToolContext {
     pub fn with_cancellation(mut self, cancellation: crate::RunCancellationHandle) -> Self {
         self.cancellation = Some(cancellation);
         self
+    }
+
+    /// Installs the effective network policy and the explicit approval fact for execution.
+    ///
+    /// This is crate-private so adapters can observe authorization but cannot manufacture it.
+    /// An explicit approval is retained only for an `ask` policy, which keeps accidental callers
+    /// fail-closed.
+    #[must_use]
+    pub(crate) fn with_network_authorization(
+        mut self,
+        network_policy: NetworkPolicy,
+        explicit_network_approval: bool,
+    ) -> Self {
+        self.network_policy = network_policy;
+        self.explicit_network_approval =
+            explicit_network_approval && network_policy == NetworkPolicy::Ask;
+        self
+    }
+
+    /// Returns the effective network policy for this execution.
+    #[must_use]
+    pub fn network_policy(&self) -> NetworkPolicy {
+        self.network_policy
+    }
+
+    /// Returns whether the agent observed an explicit approval for this `ask`-policy execution.
+    #[must_use]
+    pub fn explicit_network_approval(&self) -> bool {
+        self.explicit_network_approval
     }
 
     /// Admits one nested forward effect at the last responsible execution boundary.
@@ -1749,6 +1859,23 @@ pub trait Tool: Send + Sync {
         Ok(self.spec().access)
     }
 
+    /// Returns the independent network effect for this concrete call.
+    ///
+    /// Argument-dependent adapters may return a narrower verified effect than their static
+    /// contract. The default preserves the static [`ToolSpec::network_effect`] declaration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments are invalid and no reliable network effect can be
+    /// derived.
+    fn permission_network_effect(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Value,
+    ) -> Result<Option<NetworkEffect>> {
+        Ok(self.spec().network_effect)
+    }
+
     /// Returns the fine-grained operation used by permission policy on this concrete call.
     ///
     /// Tools with argument-dependent behavior can override this. The default keeps existing tools
@@ -2273,6 +2400,29 @@ impl ToolRegistry {
         tool.permission_access(ctx, &args)
     }
 
+    /// Returns the dynamic network effect for one concrete tool call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown, the JSON args are invalid, or the tool cannot
+    /// derive a reliable network effect for the call.
+    pub fn permission_network_effect(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<NetworkEffect>> {
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            self.allowed_tool(&tools, &call.name)?
+        };
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        tool.permission_network_effect(ctx, &args)
+    }
+
     /// Returns the fine-grained permission operation for a tool call by name.
     ///
     /// # Errors
@@ -2425,6 +2575,14 @@ impl ScopedToolRegistry {
         call: &crate::provider::ToolCall,
     ) -> Result<ToolAccess> {
         self.inner.permission_access(ctx, call)
+    }
+
+    pub fn permission_network_effect(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<NetworkEffect>> {
+        self.inner.permission_network_effect(ctx, call)
     }
 
     pub fn permission_operation(
@@ -2598,6 +2756,9 @@ fn unknown_mutation_tool_effect(_spec: &ToolSpec) -> ToolEffect {
     ToolEffect::Unknown
 }
 
+#[cfg(test)]
+#[path = "tests/network_tool_tests.rs"]
+mod network_tests;
 #[cfg(test)]
 #[path = "tests/tool_tests.rs"]
 mod tests;

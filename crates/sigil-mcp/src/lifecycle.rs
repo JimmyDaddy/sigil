@@ -13,7 +13,9 @@ pub struct McpToolRegistrationOptions {
     pub mutation_recorder: Option<MutationEventRecorder>,
     pub mutation_workspace_root: Option<PathBuf>,
     pub process_launcher: Arc<dyn McpProcessLauncher>,
+    pub network_admission: ExtensionProcessNetworkAdmission,
     pub expected_process_subject: Option<ToolSubject>,
+    pub pre_spawn_safe_metadata: BTreeMap<String, BTreeMap<String, String>>,
     pub strict_registration: bool,
 }
 
@@ -44,7 +46,9 @@ impl McpToolRegistrationOptions {
             mutation_recorder: None,
             mutation_workspace_root: None,
             process_launcher: Arc::new(LocalMcpProcessLauncher),
+            network_admission: ExtensionProcessNetworkAdmission::default(),
             expected_process_subject: None,
+            pre_spawn_safe_metadata: BTreeMap::new(),
             strict_registration: false,
         })
     }
@@ -100,10 +104,30 @@ impl McpToolRegistrationOptions {
         self
     }
 
+    /// Carries one run-scoped network authorization to the process spawn boundary.
+    #[must_use]
+    pub fn with_network_admission(
+        mut self,
+        network_admission: ExtensionProcessNetworkAdmission,
+    ) -> Self {
+        self.network_admission = network_admission;
+        self
+    }
+
     /// Requires the launch-time process binding to match the exact subject approved by the agent.
     #[must_use]
     pub fn with_expected_process_subject(mut self, subject: ToolSubject) -> Self {
         self.expected_process_subject = Some(subject);
+        self
+    }
+
+    /// Adds declaration-safe metadata that remains available when launch fails before a receipt.
+    #[must_use]
+    pub fn with_pre_spawn_safe_metadata(
+        mut self,
+        metadata: BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Self {
+        self.pre_spawn_safe_metadata = metadata;
         self
     }
 
@@ -210,6 +234,7 @@ async fn register_mcp_tools_for_startup_inner(
             Arc::clone(&options.runtime_event_handler),
             Arc::clone(&options.process_launcher),
             options.expected_process_subject.as_ref(),
+            options.network_admission,
         )
         .await
         {
@@ -319,7 +344,8 @@ async fn register_mcp_tools_for_startup_inner(
                     description: tool.description.unwrap_or_else(|| "MCP tool".to_owned()),
                     input_schema: tool.input_schema,
                     category: ToolCategory::Mcp,
-                    access: ToolAccess::Network,
+                    access: ToolAccess::Read,
+                    network_effect: Some(NetworkEffect::Unknown),
                     preview: ToolPreviewCapability::None,
                 },
                 tool_name,
@@ -344,6 +370,7 @@ async fn register_mcp_tools_for_startup_inner(
                         input_schema: resource_kind.input_schema(),
                         category: ToolCategory::Mcp,
                         access: ToolAccess::Read,
+                        network_effect: Some(NetworkEffect::Read),
                         preview: ToolPreviewCapability::None,
                     },
                     tool_name,
@@ -370,6 +397,7 @@ async fn register_mcp_tools_for_startup_inner(
                         input_schema: prompt_kind.input_schema(),
                         category: ToolCategory::Mcp,
                         access: ToolAccess::Read,
+                        network_effect: Some(NetworkEffect::Read),
                         preview: ToolPreviewCapability::None,
                     },
                     tool_name,
@@ -478,7 +506,12 @@ pub(super) fn capture_mcp_server_lifecycle_scan(
     match recorder.capture_workspace_scan(workspace_root, &scope) {
         Ok(scan) => Ok(Some(scan)),
         Err(error) => {
-            let mut metadata = mcp_lifecycle_metadata(None, "scan_unavailable_before_startup");
+            let mut metadata = mcp_lifecycle_metadata(
+                None,
+                "scan_unavailable_before_startup",
+                options.network_admission,
+                options.pre_spawn_safe_metadata.get(server_name),
+            );
             metadata.insert(
                 "mcp_lifecycle_scan".to_owned(),
                 "before_unavailable".to_owned(),
@@ -515,7 +548,12 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
     else {
         return Ok(());
     };
-    let metadata = mcp_lifecycle_metadata(receipt, startup_result);
+    let metadata = mcp_lifecycle_metadata(
+        receipt,
+        startup_result,
+        options.network_admission,
+        options.pre_spawn_safe_metadata.get(server_name),
+    );
     let status = match startup_result {
         "registered" => ExtensionProcessLifecycleStatus::Registered,
         "startup_failed" => ExtensionProcessLifecycleStatus::StartupFailed,
@@ -590,6 +628,8 @@ pub(super) fn record_mcp_server_lifecycle_scan_result(
 pub(super) fn mcp_lifecycle_metadata(
     receipt: Option<&McpProcessLaunchReceipt>,
     startup_result: &'static str,
+    network_admission: ExtensionProcessNetworkAdmission,
+    pre_spawn_safe_metadata: Option<&BTreeMap<String, String>>,
 ) -> BTreeMap<String, String> {
     let mut metadata = receipt
         .map(McpProcessLaunchReceipt::audit_metadata)
@@ -599,7 +639,43 @@ pub(super) fn mcp_lifecycle_metadata(
                 McpProcessCoverage::Unsupported.as_str().to_owned(),
             )])
         });
+    if receipt.is_none()
+        && let Some(pre_spawn_safe_metadata) = pre_spawn_safe_metadata
+    {
+        metadata.extend(pre_spawn_safe_metadata.clone());
+    }
     metadata.insert("mcp_startup_result".to_owned(), startup_result.to_owned());
+    let isolation_proven = receipt.is_some_and(|receipt| {
+        receipt.network.is_denied()
+            && receipt.backend_capabilities.is_some_and(|capabilities| {
+                capabilities.network_isolation && capabilities.process_isolation
+            })
+    });
+    metadata.insert(
+        "mcp_process_declared_network_effect".to_owned(),
+        NetworkEffect::Unknown.as_str().to_owned(),
+    );
+    metadata.insert(
+        "mcp_process_effective_network_effect".to_owned(),
+        if network_admission.policy == NetworkPolicy::Deny && isolation_proven {
+            "none"
+        } else {
+            NetworkEffect::Unknown.as_str()
+        }
+        .to_owned(),
+    );
+    metadata.insert(
+        "mcp_process_network_isolation_proven".to_owned(),
+        isolation_proven.to_string(),
+    );
+    metadata.insert(
+        "mcp_process_network_policy".to_owned(),
+        network_admission.policy.as_str().to_owned(),
+    );
+    metadata.insert(
+        "mcp_process_explicit_network_approval".to_owned(),
+        network_admission.explicit_approval.to_string(),
+    );
     metadata
 }
 

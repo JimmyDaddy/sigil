@@ -8,7 +8,7 @@ use crate::{
         ApprovalMode, InteractionMode, PermissionDecision, PermissionRisk,
         tool_approval_session_grant_available,
     },
-    tool::{ToolSpec, ToolSubject, ToolSubjectScope},
+    tool::{ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope},
 };
 
 use super::AgentRunOptions;
@@ -26,12 +26,16 @@ pub(super) fn plan_approval_decision_override(
 ) -> PermissionDecision {
     if decision.mode != ApprovalMode::Ask
         || decision.external_directory_required
+        || decision.local_policy_decision != ApprovalMode::Ask
+        || decision.network_policy_decision != ApprovalMode::Allow
+        || decision.source_policy_decision != ApprovalMode::Allow
         || !plan_approval_can_auto_allow_decision(&decision)
     {
         return decision;
     }
     if active_plan_approval_authority(session, spec, &decision).is_some() {
-        decision.mode = ApprovalMode::Allow;
+        decision.local_policy_decision = ApprovalMode::Allow;
+        decision.recompute_mode();
     }
     decision
 }
@@ -43,6 +47,9 @@ pub(super) fn active_plan_approval_authority(
 ) -> Option<PlanApprovalAuthority> {
     if decision.mode != ApprovalMode::Ask
         || decision.external_directory_required
+        || decision.local_policy_decision != ApprovalMode::Ask
+        || decision.network_policy_decision != ApprovalMode::Allow
+        || decision.source_policy_decision != ApprovalMode::Allow
         || !plan_approval_can_auto_allow_decision(decision)
     {
         return None;
@@ -71,7 +78,7 @@ pub(super) fn interactive_external_directory_approval_override(
         && decision.mode == ApprovalMode::Deny
         && options.interaction_mode == InteractionMode::Interactive
     {
-        decision.mode = ApprovalMode::Ask;
+        decision.request_external_directory_interactive_approval();
     }
     decision
 }
@@ -91,12 +98,13 @@ pub(super) fn tool_session_grant_decision_override(
         session_grant_covers_decision(grant, tool_name, &decision).then(|| grant.clone())
     });
     if matching_grant.is_some() {
-        decision.mode = ApprovalMode::Allow;
+        decision.local_policy_decision = ApprovalMode::Allow;
+        decision.recompute_mode();
     }
     (decision, matching_grant)
 }
 
-fn session_grant_covers_decision(
+pub(super) fn session_grant_covers_decision(
     grant: &ToolApprovalSessionGrantEntry,
     tool_name: &str,
     decision: &PermissionDecision,
@@ -104,6 +112,7 @@ fn session_grant_covers_decision(
     grant.expires == ToolApprovalSessionGrantExpiry::Session
         && grant.tool_name == tool_name
         && grant.access == decision.access
+        && grant.network_effect == decision.network_effect
         && grant.operation == decision.operation
         && grant_subjects_match_decision(&grant.subjects, &decision.subjects)
 }
@@ -129,14 +138,19 @@ fn grant_subjects_match_decision(
 }
 
 fn grant_subject_key(subject: &ToolSubjectAudit) -> Option<(String, String, String)> {
-    let value = match subject.scope {
-        ToolSubjectScope::External => subject.canonical_path.as_deref().or_else(|| {
-            let normalized = subject.normalized.trim();
-            (!normalized.is_empty()).then_some(normalized)
-        })?,
-        ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
-            let normalized = subject.normalized.trim();
-            (!normalized.is_empty()).then_some(normalized)?
+    let value = if subject.kind == ToolSubjectKind::McpTrustClass {
+        let original = subject.original.trim();
+        (!original.is_empty()).then_some(original)?
+    } else {
+        match subject.scope {
+            ToolSubjectScope::External => subject.canonical_path.as_deref().or_else(|| {
+                let normalized = subject.normalized.trim();
+                (!normalized.is_empty()).then_some(normalized)
+            })?,
+            ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
+                let normalized = subject.normalized.trim();
+                (!normalized.is_empty()).then_some(normalized)?
+            }
         }
     };
     Some((
@@ -147,18 +161,23 @@ fn grant_subject_key(subject: &ToolSubjectAudit) -> Option<(String, String, Stri
 }
 
 fn decision_subject_key(subject: &ToolSubject) -> Option<(String, String, String)> {
-    let value = match subject.scope {
-        ToolSubjectScope::External => subject
-            .canonical_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .or_else(|| {
+    let value = if subject.kind == ToolSubjectKind::McpTrustClass {
+        let original = subject.original.trim();
+        (!original.is_empty()).then(|| original.to_owned())?
+    } else {
+        match subject.scope {
+            ToolSubjectScope::External => subject
+                .canonical_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .or_else(|| {
+                    let normalized = subject.normalized.trim();
+                    (!normalized.is_empty()).then(|| normalized.to_owned())
+                })?,
+            ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
                 let normalized = subject.normalized.trim();
-                (!normalized.is_empty()).then(|| normalized.to_owned())
-            })?,
-        ToolSubjectScope::Workspace | ToolSubjectScope::Unknown => {
-            let normalized = subject.normalized.trim();
-            (!normalized.is_empty()).then(|| normalized.to_owned())?
+                (!normalized.is_empty()).then(|| normalized.to_owned())?
+            }
         }
     };
     Some((

@@ -52,6 +52,7 @@ struct NamedFixtureTool {
     name: &'static str,
     category: ToolCategory,
     access: ToolAccess,
+    network_effect: Option<crate::NetworkEffect>,
 }
 struct MutatingTool;
 struct ApprovalRequiredTool;
@@ -484,6 +485,7 @@ impl Tool for RecoverableErrorTool {
             input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -512,6 +514,7 @@ impl Tool for NamedFixtureTool {
             input_schema: json!({"type":"object","properties":{}}),
             category: self.category,
             access: self.access,
+            network_effect: self.network_effect,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -540,6 +543,7 @@ impl Tool for MutatingTool {
             input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Optional,
         }
     }
@@ -572,6 +576,7 @@ impl Tool for ApprovalRequiredTool {
             input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -1594,16 +1599,25 @@ async fn changeset_only_child_registry_filters_unsafe_same_name_tools() -> Resul
         name: "grep",
         category: ToolCategory::Search,
         access: ToolAccess::Read,
+        network_effect: Some(crate::NetworkEffect::Read),
     }));
     registry.register(Arc::new(NamedFixtureTool {
         name: "read_file",
         category: ToolCategory::File,
         access: ToolAccess::Write,
+        network_effect: None,
+    }));
+    registry.register(Arc::new(NamedFixtureTool {
+        name: "ls",
+        category: ToolCategory::Search,
+        access: ToolAccess::Read,
+        network_effect: None,
     }));
 
     let scoped = crate::changeset_only_child_tool_registry(&registry);
 
-    assert!(scoped.spec_for("grep").is_some());
+    assert!(scoped.spec_for("ls").is_some());
+    assert!(scoped.spec_for("grep").is_none());
     assert!(scoped.spec_for("read_file").is_none());
 
     Ok(())

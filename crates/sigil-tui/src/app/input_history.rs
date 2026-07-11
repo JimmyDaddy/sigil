@@ -156,7 +156,8 @@ fn write_input_history(path: &Path, history: &[String]) -> Result<()> {
     }
     let mut content = String::new();
     for prompt in history {
-        content.push_str(&serde_json::to_string(prompt)?);
+        let safe_prompt = sigil_kernel::safe_persistence_text(prompt);
+        content.push_str(&serde_json::to_string(&safe_prompt)?);
         content.push('\n');
     }
 

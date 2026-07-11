@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(unix)]
+use crate::process_group::{process_group_has_live_members, send_process_group_signal};
+
 pub(super) struct PtyRuntime {
     pub(super) input_tx: std_mpsc::SyncSender<Vec<u8>>,
     pub(super) master: Arc<StdMutex<Box<dyn MasterPty + Send>>>,
@@ -1205,40 +1208,10 @@ pub(super) async fn send_terminate_signal(process_id: u32) -> Result<()> {
 }
 
 #[cfg(unix)]
-async fn send_process_group_signal(process_id: u32, signal: &str) -> Result<()> {
-    let mut command = Command::new("kill");
-    command
-        .arg(format!("-{signal}"))
-        .arg(format!("-{process_id}"));
-    let status = run_terminal_cleanup_command(
-        command,
-        format!("kill -{signal} terminal process group {process_id}"),
-    )
-    .await?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("kill -{signal} returned non-zero status for terminal process group {process_id}")
-    }
-}
-
-#[cfg(unix)]
-async fn terminal_process_group_is_alive(process_id: u32) -> Result<bool> {
-    let mut command = Command::new("kill");
-    command.arg("-0").arg(format!("-{process_id}"));
-    let status = run_terminal_cleanup_command(
-        command,
-        format!("kill -0 terminal process group {process_id}"),
-    )
-    .await?;
-    Ok(status.success())
-}
-
-#[cfg(unix)]
 async fn wait_for_terminal_process_group_exit(process_id: u32) -> Result<bool> {
     let deadline = tokio::time::Instant::now() + TERMINAL_CLEANUP_WAIT_TIMEOUT;
     loop {
-        if !terminal_process_group_is_alive(process_id).await? {
+        if !process_group_has_live_members(process_id).await? {
             return Ok(true);
         }
         if tokio::time::Instant::now() >= deadline {

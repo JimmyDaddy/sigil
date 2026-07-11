@@ -35,6 +35,7 @@ fn build_chat_request_maps_messages_tools_and_sampling_options() -> Result<()> {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }],
         temperature: Some(0.2),
@@ -46,6 +47,7 @@ fn build_chat_request_maps_messages_tools_and_sampling_options() -> Result<()> {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
 
     let body = build_chat_request(&request)?;
@@ -95,6 +97,7 @@ fn build_chat_request_omits_tools_and_sampling_when_absent() -> Result<()> {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
 
     let body = build_chat_request(&request)?;

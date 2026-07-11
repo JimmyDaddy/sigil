@@ -1117,6 +1117,7 @@ fn public_run_event_projects_approval_requested_details() {
         }),
         category: ToolCategory::File,
         access: ToolAccess::Read,
+        network_effect: Some(crate::NetworkEffect::Read),
         preview: ToolPreviewCapability::None,
     };
     let event = PublicRunEvent::from_run_event(
@@ -1127,6 +1128,10 @@ fn public_run_event_projects_approval_requested_details() {
             call,
             spec,
             subjects: vec![ToolSubject::path("README.md", "README.md")],
+            network_effect: Some(crate::NetworkEffect::Read),
+            local_policy_decision: ApprovalMode::Ask,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
             operation: crate::ToolOperation::Read,
             risk: crate::PermissionRisk::Low,
             subject_zones: vec![crate::PathTrustZone::WorkspaceSource],
@@ -1144,6 +1149,10 @@ fn public_run_event_projects_approval_requested_details() {
     assert_eq!(value["event"]["call"]["name"], "read_file");
     assert_eq!(value["event"]["spec"]["category"], "file");
     assert_eq!(value["event"]["spec"]["access"], "read");
+    assert_eq!(value["event"]["network_effect"], "read");
+    assert_eq!(value["event"]["local_policy_decision"], "ask");
+    assert_eq!(value["event"]["network_policy_decision"], "allow");
+    assert_eq!(value["event"]["source_policy_decision"], "allow");
     assert_eq!(value["event"]["subjects"][0]["kind"], "path");
     assert_eq!(value["event"]["subjects"][0]["scope"], "workspace");
     assert!(value["event"]["preview"].is_null());
@@ -1349,6 +1358,10 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 call_id: "call-approval".to_owned(),
                 tool_name: "read_file".to_owned(),
                 access: ToolAccess::Read,
+                network_effect: None,
+                local_policy_decision: ApprovalMode::Ask,
+                network_policy_decision: ApprovalMode::Allow,
+                source_policy_decision: ApprovalMode::Allow,
                 subjects: Vec::new(),
                 operation: None,
                 risk: None,
@@ -1507,6 +1520,9 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 compacted_message_count: 2,
                 retained_tail_message_count: 1,
                 task_memory: None,
+                external_trust: None,
+                external_provenance_message_ids: Vec::new(),
+                external_source_ids: Vec::new(),
             }),
             "compaction_applied",
         ),

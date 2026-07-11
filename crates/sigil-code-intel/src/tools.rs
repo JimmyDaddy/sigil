@@ -8,7 +8,7 @@ use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, PreparedToolExecution, Tool, ToolAccess,
     ToolCategory, ToolContext, ToolErrorKind, ToolMutationTracking, ToolPreparation, ToolPreview,
     ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectScope,
+    ToolSubjectScope, WorkspaceTrust,
 };
 
 use crate::{
@@ -22,10 +22,28 @@ pub fn register_code_intelligence_tools(
     config: &CodeIntelligenceConfig,
     workspace_root: PathBuf,
 ) -> Option<CodeIntelligenceService> {
+    register_code_intelligence_tools_with_workspace_trust(
+        registry,
+        config,
+        workspace_root,
+        WorkspaceTrust::Unknown,
+    )
+}
+
+pub fn register_code_intelligence_tools_with_workspace_trust(
+    registry: &mut ToolRegistry,
+    config: &CodeIntelligenceConfig,
+    workspace_root: PathBuf,
+    workspace_trust: WorkspaceTrust,
+) -> Option<CodeIntelligenceService> {
     if !config.enabled || config.server_startup == CodeIntelStartup::Off {
         return None;
     }
-    let service = CodeIntelligenceService::new(workspace_root, config.clone());
+    let service = CodeIntelligenceService::new_with_workspace_trust(
+        workspace_root,
+        config.clone(),
+        workspace_trust,
+    );
     let service = Arc::new(service);
     registry.register(Arc::new(CodeSymbolsTool {
         service: Arc::clone(&service),
@@ -105,6 +123,7 @@ impl Tool for CodeSymbolsTool {
             }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -155,6 +174,7 @@ impl Tool for CodeWorkspaceSymbolsTool {
             }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -190,6 +210,7 @@ impl Tool for CodeDefinitionTool {
             input_schema: position_schema(),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -237,6 +258,7 @@ impl Tool for CodeReferencesTool {
             input_schema: schema,
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -297,6 +319,7 @@ impl Tool for CodeActionsTool {
             input_schema: schema,
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -367,6 +390,7 @@ impl Tool for CodeActionTool {
             input_schema: schema,
             category: ToolCategory::Custom,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -438,6 +462,7 @@ impl Tool for CodeRenameTool {
             input_schema: schema,
             category: ToolCategory::Custom,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -517,6 +542,7 @@ impl Tool for CodeDiagnosticsTool {
             }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -914,7 +940,9 @@ where
 }
 
 fn classify_error(message: &str) -> ToolErrorKind {
-    if message.contains("outside workspace") {
+    if message.contains("workspace trust is required") {
+        ToolErrorKind::PermissionDenied
+    } else if message.contains("outside workspace") {
         ToolErrorKind::PathOutsideWorkspace
     } else if message.contains("does not exist") || message.contains("not found") {
         ToolErrorKind::NotFound

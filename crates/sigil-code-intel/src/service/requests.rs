@@ -21,6 +21,7 @@ pub struct CodeIntelligenceService {
 pub(super) struct ServiceInner {
     pub(super) workspace_root: PathBuf,
     pub(super) config: CodeIntelligenceConfig,
+    pub(super) workspace_trust: WorkspaceTrust,
     pub(super) server_plan: RwLock<ServerPlanState>,
     pub(super) clients: Mutex<BTreeMap<String, LanguageServerHandle>>,
     pub(super) status: Mutex<CodeIntelStatus>,
@@ -32,6 +33,14 @@ pub(super) struct ServiceInner {
 
 impl CodeIntelligenceService {
     pub fn new(workspace_root: PathBuf, config: CodeIntelligenceConfig) -> Self {
+        Self::new_with_workspace_trust(workspace_root, config, WorkspaceTrust::Unknown)
+    }
+
+    pub fn new_with_workspace_trust(
+        workspace_root: PathBuf,
+        config: CodeIntelligenceConfig,
+        workspace_trust: WorkspaceTrust,
+    ) -> Self {
         let server_plan = if config_enabled(&config) {
             initial_server_plan(&config, &workspace_root)
         } else {
@@ -48,6 +57,7 @@ impl CodeIntelligenceService {
             inner: Arc::new(ServiceInner {
                 workspace_root,
                 config,
+                workspace_trust,
                 server_plan: RwLock::new(server_plan),
                 clients: Mutex::new(BTreeMap::new()),
                 status: Mutex::new(status),
@@ -1020,10 +1030,17 @@ impl CodeIntelligenceService {
             Err(error) => {
                 drop(server_slot);
                 self.remove_client_handle(server_name, &handle).await;
-                let reason = lsp_error_to_reason(error);
+                let preserve_trust_error =
+                    error.downcast_ref::<CodeIntelError>().is_some_and(|error| {
+                        matches!(error, CodeIntelError::WorkspaceTrustRequired { .. })
+                    });
+                let reason = error.to_string();
                 *self.inner.status.lock().await = CodeIntelStatus::Degraded {
                     reason: format!("{server_name} {reason}"),
                 };
+                if preserve_trust_error {
+                    return Err(error);
+                }
                 Err(CodeIntelError::ServerUnavailable {
                     server: server_name.to_owned(),
                     reason,
@@ -1044,6 +1061,12 @@ impl CodeIntelligenceService {
     }
 
     async fn start_server(&self, config: LanguageServerConfig) -> Result<ProcessLanguageServer> {
+        if config.trust_required && self.inner.workspace_trust != WorkspaceTrust::Trusted {
+            return Err(CodeIntelError::WorkspaceTrustRequired {
+                server: config.name.clone(),
+            }
+            .into());
+        }
         let root = find_server_root(&self.inner.workspace_root, &config)?;
         let command_path = safe_lsp_command(&self.inner.workspace_root, &config.command)?;
         let mut command = Command::new(command_path);

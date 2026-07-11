@@ -1606,13 +1606,10 @@ async fn bounded_output_hard_limit_kills_group_and_maps_resource_limit() -> Resu
 
 #[cfg(unix)]
 fn process_is_running(pid: &str) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    pid.parse::<u32>()
+        .ok()
+        .and_then(|process_id| crate::process_group::process_is_live(process_id).ok())
+        .unwrap_or(true)
 }
 
 #[tokio::test]
@@ -2973,11 +2970,7 @@ async fn terminal_start_foreground_cancellation_reaps_process_tree() -> Result<(
     };
     assert_eq!(error.kind, ToolErrorKind::Interrupted);
     assert!(owner.cleanup_complete());
-    let descendant_pid = descendant_pid.to_string();
-    let alive = std::process::Command::new("kill")
-        .args(["-0", descendant_pid.as_str()])
-        .status()
-        .is_ok_and(|status| status.success());
+    let alive = crate::process_group::process_is_live(descendant_pid).unwrap_or(true);
     assert!(
         !alive,
         "foreground terminal descendant survived cancellation"
@@ -3657,10 +3650,7 @@ async fn bash_inflight_cancellation_reaps_the_process_group() -> Result<()> {
         anyhow::bail!("cancelled bash execution must return an interrupted tool result");
     };
     assert_eq!(error.kind, ToolErrorKind::Interrupted);
-    let alive = std::process::Command::new("kill")
-        .args(["-0", descendant_pid.to_string().as_str()])
-        .status()
-        .is_ok_and(|status| status.success());
+    let alive = crate::process_group::process_is_live(descendant_pid).unwrap_or(true);
     assert!(
         !alive,
         "descendant process survived cooperative cancellation"

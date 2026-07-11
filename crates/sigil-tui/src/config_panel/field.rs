@@ -217,7 +217,7 @@ impl ConfigField {
                 "DeepSeek-only model used by prefix/FIM helpers. Chat runs use Model."
             }
             Self::PermissionMode => {
-                "Top-level safety mode: read-only, manual confirmation, automatic workspace edits, or danger full access."
+                "Local safety mode for Read/Write/Execute. Network effects use an independent policy that local danger mode cannot widen."
             }
             Self::VerificationAutoRun => {
                 "Controls whether trusted project checks may start automatically after writes."

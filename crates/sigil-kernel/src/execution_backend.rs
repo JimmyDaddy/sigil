@@ -5,10 +5,11 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    permission::NetworkPolicy,
     process_environment::{
         ExtensionProcessLaunchError, ExtensionProcessLaunchErrorCode, ProcessEnvironmentPolicy,
     },
-    tool::ToolCategory,
+    tool::{NetworkEffect, ToolCategory},
 };
 
 /// Stable identifier for an execution backend implementation.
@@ -781,12 +782,32 @@ impl ExecutionSandboxProfile {
     }
 }
 
+/// Ephemeral network authorization carried to an extension process pre-spawn boundary.
+///
+/// This value is intentionally neither configuration nor durable state. The effective policy is
+/// resolved for one execution, while `explicit_approval` is supplied only after the agent observes
+/// a user approval for an `ask` network facet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtensionProcessNetworkAdmission {
+    pub policy: NetworkPolicy,
+    pub explicit_approval: bool,
+}
+
+impl ExtensionProcessNetworkAdmission {
+    #[must_use]
+    pub const fn new(policy: NetworkPolicy, explicit_approval: bool) -> Self {
+        Self {
+            policy,
+            explicit_approval,
+        }
+    }
+}
+
 /// Validates extension process-tree isolation before a backend may spawn a process.
 ///
-/// This uses the existing execution profile as the launch intent. It deliberately does not add
-/// the independent network permission lattice tracked by RFC-0021 E21.6. Both static capability
-/// and the concrete backend instance's planned network receipt are required so a backend that can
-/// isolate networking but is configured to allow it cannot pass a deny preflight.
+/// This uses the existing execution profile as the launch intent. Both static capability and the
+/// concrete backend instance's planned network receipt are required so a backend that can isolate
+/// networking but is configured to allow it cannot pass a deny preflight.
 ///
 /// # Errors
 ///
@@ -828,6 +849,86 @@ pub fn validate_extension_process_isolation(
     Ok(())
 }
 
+/// Applies the independent network policy to an extension process launch plan.
+///
+/// A denied network policy may still launch a declared network-capable process only when the
+/// backend proves both process-tree and network isolation and plans a denied network receipt.
+///
+/// # Errors
+///
+/// Returns a typed pre-spawn error when either the execution profile or independent network
+/// policy cannot be enforced by the selected backend plan.
+pub fn validate_extension_process_isolation_with_network_policy(
+    profile: ExecutionSandboxProfile,
+    network_effect: Option<NetworkEffect>,
+    network_policy: NetworkPolicy,
+    capabilities: ExecutionBackendCapabilities,
+    planned_network: &ExecutionNetworkReceipt,
+    subject: impl Into<String>,
+) -> std::result::Result<(), ExtensionProcessLaunchError> {
+    validate_extension_process_network_admission(
+        profile,
+        network_effect,
+        ExtensionProcessNetworkAdmission::new(network_policy, false),
+        capabilities,
+        planned_network,
+        subject,
+    )
+}
+
+/// Applies one resolved network admission to an extension process launch plan.
+///
+/// A declared network effect under `ask` requires an explicit user approval carrier. A denied
+/// network policy may still launch only when the backend proves both process-tree and network
+/// isolation and plans a denied network receipt. Tools without a declared network effect add no
+/// independent network gate, but the selected execution profile is always validated.
+///
+/// # Errors
+///
+/// Returns [`ExtensionProcessLaunchErrorCode::NetworkApprovalRequired`] when an `ask` admission
+/// lacks explicit user approval, or a typed isolation error when the execution profile or denied
+/// network policy cannot be enforced by the selected backend plan.
+pub fn validate_extension_process_network_admission(
+    profile: ExecutionSandboxProfile,
+    network_effect: Option<NetworkEffect>,
+    admission: ExtensionProcessNetworkAdmission,
+    capabilities: ExecutionBackendCapabilities,
+    planned_network: &ExecutionNetworkReceipt,
+    subject: impl Into<String>,
+) -> std::result::Result<(), ExtensionProcessLaunchError> {
+    let subject = subject.into();
+    if let Some(network_effect) = network_effect
+        && admission.policy == NetworkPolicy::Ask
+        && !admission.explicit_approval
+    {
+        return Err(ExtensionProcessLaunchError::network_approval_required(
+            subject,
+            format!(
+                "extension {} network effect requires explicit user approval before spawn",
+                network_effect.as_str()
+            ),
+        ));
+    }
+    validate_extension_process_isolation(profile, capabilities, planned_network, subject.clone())?;
+    if network_effect.is_some()
+        && admission.policy == NetworkPolicy::Deny
+        && (!capabilities.network_isolation
+            || !capabilities.process_isolation
+            || !planned_network.is_denied())
+    {
+        return Err(ExtensionProcessLaunchError::isolation_unavailable(
+            ExtensionProcessLaunchErrorCode::NetworkIsolationUnavailable,
+            subject,
+            format!(
+                "extension network policy denies {} effect but the backend launch plan is {} and cannot prove network and process-tree isolation",
+                network_effect.map_or("none", NetworkEffect::as_str),
+                planned_network.policy.as_str()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Cross-checks the backend receipt after an extension process ran under network-deny intent.
 ///
 /// # Errors
@@ -845,6 +946,35 @@ pub fn validate_extension_process_network_receipt(
             format!(
                 "extension process profile {} requires a denied network receipt, observed {}",
                 profile.as_str(),
+                receipt.policy.as_str()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Cross-checks a completed extension process receipt against independent network policy.
+///
+/// # Errors
+///
+/// Returns a typed receipt error when a declared network effect ran under deny policy without a
+/// denied backend receipt.
+pub fn validate_extension_process_network_receipt_with_policy(
+    profile: ExecutionSandboxProfile,
+    network_effect: Option<NetworkEffect>,
+    network_policy: NetworkPolicy,
+    receipt: &ExecutionNetworkReceipt,
+    subject: impl Into<String>,
+) -> std::result::Result<(), ExtensionProcessLaunchError> {
+    let subject = subject.into();
+    validate_extension_process_network_receipt(profile, receipt, subject.clone())?;
+    if network_effect.is_some() && network_policy == NetworkPolicy::Deny && !receipt.is_denied() {
+        return Err(ExtensionProcessLaunchError::isolation_unavailable(
+            ExtensionProcessLaunchErrorCode::BackendReceiptInvalid,
+            subject,
+            format!(
+                "extension network policy denies {:?} effect, observed {} receipt",
+                network_effect,
                 receipt.policy.as_str()
             ),
         ));

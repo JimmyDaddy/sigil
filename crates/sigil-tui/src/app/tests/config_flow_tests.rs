@@ -868,6 +868,8 @@ fn config_permissions_step_uses_policy_summary_and_details() {
 
     assert!(detail.contains("[permissions]"));
     assert!(detail.contains("Mode: manual"));
+    assert!(detail.contains("Local boundary: read-only blocks local write + execute"));
+    assert!(detail.contains("Network boundary: independent policy; deny/ask cannot be widened"));
     assert!(!detail.contains("Checks: manual"));
     assert!(detail.contains("[workspace]"));
     assert!(detail.contains("Workspace trust: unknown"));
@@ -1259,9 +1261,9 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
     assert!(detail.contains("Auto discover: no"));
     assert!(detail.contains("Missing reports: yes"));
     assert!(detail.contains("[trust]"));
-    assert!(detail.contains("- Tool access: read-only"));
-    assert!(detail.contains("- Server process: local workspace LSP"));
-    assert!(detail.contains("- Write actions: unavailable"));
+    assert!(detail.contains("- Tool access: read + approval-gated write"));
+    assert!(detail.contains("- Server process: per-server trust_required"));
+    assert!(detail.contains("- Write actions: diff approval required"));
     assert!(detail.contains("[readiness]"));
     assert!(detail.contains("- Saved runtime: lazy"));
     assert!(detail.contains("- Draft status: lazy"));
@@ -2539,7 +2541,9 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(detail.contains("- MCP 1 command: node server.js"));
     assert!(detail.contains("- MCP 1 startup: lazy"));
     assert!(detail.contains("- MCP 1 required: no"));
-    assert!(detail.contains("- MCP 1 policy: approval=ask egress=yes secrets=blocked"));
+    assert!(detail.contains(
+        "- MCP 1 policy: local=execute network=unknown source=ask egress=yes secrets=blocked"
+    ));
     assert!(detail.contains("- Approve: trusts this reviewed manifest"));
     assert!(detail.contains("- Deny: disables this reviewed manifest"));
     assert!(detail.contains("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny"));
@@ -3772,6 +3776,10 @@ fn config_permission_and_mcp_details_render_rule_and_pin_summaries() -> Result<(
     let off_lines = app.config_detail_lines().join("\n");
     assert!(off_lines.contains("Pin: off"));
     assert!(off_lines.contains("Boundary: local stdio outside local sandbox"));
+    assert!(off_lines.contains("Source policy: ask"));
+    assert!(off_lines.contains("Tool local access: read"));
+    assert!(off_lines.contains("Tool network effect: unknown"));
+    assert!(off_lines.contains("Server launch: execute · network unknown"));
 
     let state = app
         .config_state

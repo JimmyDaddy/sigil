@@ -181,10 +181,11 @@ Compaction 会追加 control records，不会改写旧 session history。
 - `[code_intelligence].enabled`
 - 对应 language server 是否已安装并在 `PATH` 上；
 - discovery 是否启用；
+- server 保持默认 `trust_required = true` 时，当前精确 workspace 是否已被信任；
 - `/config` 里的 LSP readiness rows；
 - `/doctor` 输出。
 
-如果没有 LSP server，Rust 项目仍可使用 Tree-sitter fallback 提供 outline 和 syntax diagnostics。普通 chat 和文件工具不受影响。
+全新的 headless `sigil run` trust 状态是 `Unknown`，也不会复用另一个 session 的 decision，因此要求 trust 的 LSP 会按设计保持停止。需要 session-bound trusted LSP 时应使用 TUI；只有该 headless 进程启动策略确实合适时，才应显式设置 `trust_required = false`。如果没有 LSP server，Rust 项目仍可使用 Tree-sitter fallback 提供 outline 和 syntax diagnostics。普通 chat 和文件工具不受影响。
 
 ## 安装后 Command Not Found
 

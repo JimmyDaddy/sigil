@@ -134,6 +134,12 @@ pub struct CompactionRecord {
     pub retained_tail_message_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_memory: Option<crate::TaskMemoryV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_trust: Option<ExternalTrust>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_provenance_message_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_source_ids: Vec<String>,
 }
 
 /// Deterministic preview of what one manual compaction would fold and project.
@@ -177,6 +183,8 @@ pub enum ControlEntry {
     PrefixSnapshotCaptured(PrefixSnapshot),
     MemorySnapshotCaptured(MemorySnapshot),
     ContextAssemblySkipped(ContextAssemblySkippedEntry),
+    ExternalProvenance(ExternalProvenanceEntry),
+    WebUrlCapabilityDescriptor(crate::WebUrlCapabilityDescriptor),
     UsageSnapshot(UsageStats),
     ToolApproval(ToolApprovalEntry),
     ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry),
@@ -253,13 +261,18 @@ pub enum ControlEntry {
 }
 
 /// Append-only audit entry for permission policy evaluation and interactive approval decisions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolApprovalEntry {
     pub action: ToolApprovalAuditAction,
     pub call_id: String,
     pub tool_name: String,
     pub access: ToolAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_effect: Option<NetworkEffect>,
+    pub local_policy_decision: ApprovalMode,
+    pub network_policy_decision: ApprovalMode,
+    pub source_policy_decision: ApprovalMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<ToolOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +295,94 @@ pub struct ToolApprovalEntry {
     pub user_decision: Option<ToolApprovalUserDecision>,
     pub reason: Option<String>,
     pub preview_hash: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ToolApprovalEntryWire {
+    action: ToolApprovalAuditAction,
+    call_id: String,
+    tool_name: String,
+    access: ToolAccessWire,
+    #[serde(default)]
+    network_effect: Option<NetworkEffect>,
+    #[serde(default)]
+    local_policy_decision: Option<ApprovalMode>,
+    #[serde(default)]
+    network_policy_decision: Option<ApprovalMode>,
+    #[serde(default)]
+    source_policy_decision: Option<ApprovalMode>,
+    #[serde(default)]
+    operation: Option<ToolOperation>,
+    #[serde(default)]
+    risk: Option<PermissionRisk>,
+    subjects: Vec<ToolSubjectAudit>,
+    #[serde(default)]
+    subject_zones: Vec<PathTrustZone>,
+    policy_decision: ApprovalMode,
+    external_directory_required: bool,
+    #[serde(default)]
+    confirmation: Option<PermissionConfirmation>,
+    #[serde(default)]
+    snapshot_required: bool,
+    #[serde(default)]
+    command_permission_matches: Vec<CommandPermissionMatch>,
+    #[serde(default)]
+    allow_source: Option<ToolApprovalAllowSource>,
+    #[serde(default)]
+    grant_call_id: Option<String>,
+    user_decision: Option<ToolApprovalUserDecision>,
+    reason: Option<String>,
+    preview_hash: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ToolApprovalEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ToolApprovalEntryWire::deserialize(deserializer)?;
+        let legacy_network_access = wire.access == ToolAccessWire::Network;
+        let (access, network_effect) = wire.access.upcast_network_effect(wire.network_effect);
+        let local_policy_decision =
+            wire.local_policy_decision
+                .unwrap_or(if legacy_network_access {
+                    ApprovalMode::Allow
+                } else {
+                    wire.policy_decision
+                });
+        let network_policy_decision =
+            wire.network_policy_decision
+                .unwrap_or(if legacy_network_access {
+                    wire.policy_decision
+                } else {
+                    ApprovalMode::Allow
+                });
+        Ok(Self {
+            action: wire.action,
+            call_id: wire.call_id,
+            tool_name: wire.tool_name,
+            access,
+            network_effect,
+            local_policy_decision,
+            network_policy_decision,
+            source_policy_decision: wire.source_policy_decision.unwrap_or(ApprovalMode::Allow),
+            operation: wire.operation,
+            risk: wire.risk,
+            subjects: wire.subjects,
+            subject_zones: wire.subject_zones,
+            policy_decision: wire.policy_decision,
+            external_directory_required: wire.external_directory_required,
+            confirmation: wire.confirmation,
+            snapshot_required: wire.snapshot_required,
+            command_permission_matches: wire.command_permission_matches,
+            allow_source: wire.allow_source,
+            grant_call_id: wire.grant_call_id,
+            user_decision: wire.user_decision,
+            reason: wire.reason,
+            preview_hash: wire.preview_hash,
+        })
+    }
 }
 
 /// Source that allowed a tool call after policy evaluation.
@@ -311,12 +412,14 @@ pub enum ToolApprovalUserDecision {
 }
 
 /// Append-only session-local approval grant created from an interactive tool approval.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolApprovalSessionGrantEntry {
     pub call_id: String,
     pub tool_name: String,
     pub access: ToolAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_effect: Option<NetworkEffect>,
     pub operation: ToolOperation,
     pub risk: PermissionRisk,
     pub subjects: Vec<ToolSubjectAudit>,
@@ -324,6 +427,45 @@ pub struct ToolApprovalSessionGrantEntry {
     pub subject_zones: Vec<PathTrustZone>,
     pub expires: ToolApprovalSessionGrantExpiry,
     pub granted_at_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ToolApprovalSessionGrantEntryWire {
+    call_id: String,
+    tool_name: String,
+    access: ToolAccessWire,
+    #[serde(default)]
+    network_effect: Option<NetworkEffect>,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    subjects: Vec<ToolSubjectAudit>,
+    #[serde(default)]
+    subject_zones: Vec<PathTrustZone>,
+    expires: ToolApprovalSessionGrantExpiry,
+    granted_at_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for ToolApprovalSessionGrantEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ToolApprovalSessionGrantEntryWire::deserialize(deserializer)?;
+        let (access, network_effect) = wire.access.upcast_network_effect(wire.network_effect);
+        Ok(Self {
+            call_id: wire.call_id,
+            tool_name: wire.tool_name,
+            access,
+            network_effect,
+            operation: wire.operation,
+            risk: wire.risk,
+            subjects: wire.subjects,
+            subject_zones: wire.subject_zones,
+            expires: wire.expires,
+            granted_at_ms: wire.granted_at_ms,
+        })
+    }
 }
 
 /// Expiration policy for a session-local tool approval grant.

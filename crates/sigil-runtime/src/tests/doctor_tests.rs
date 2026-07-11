@@ -20,6 +20,30 @@ use super::*;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+fn write_doctor_executable(workspace: &Path, stem: &str) -> Result<String> {
+    let file_name = if cfg!(windows) {
+        format!("{stem}.cmd")
+    } else {
+        stem.to_owned()
+    };
+    let path = workspace.join(&file_name);
+    fs::write(
+        &path,
+        if cfg!(windows) {
+            "@exit /B 0\r\n"
+        } else {
+            "#!/bin/sh\nexit 0\n"
+        },
+    )?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions)?;
+    }
+    Ok(format!("./{file_name}"))
+}
+
 #[test]
 fn doctor_reports_missing_config_without_panicking() {
     let temp = tempdir().expect("test workspace should be created");
@@ -165,12 +189,13 @@ api_key = "test-secret-key"
 fn doctor_reports_valid_config_without_leaking_plaintext_secret() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
-    fs::write(workspace.join("mcp-server"), "#!/bin/sh\n")?;
-    fs::write(workspace.join("rust-analyzer"), "#!/bin/sh\n")?;
+    let mcp_command = write_doctor_executable(&workspace, "mcp-server")?;
+    let rust_analyzer_command = write_doctor_executable(&workspace, "rust-analyzer")?;
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        format!(
+            r#"[workspace]
 root = "."
 
 [session]
@@ -187,7 +212,7 @@ enabled = true
 [[code_intelligence.servers]]
 name = "rust-analyzer"
 languages = ["rust"]
-command = "./rust-analyzer"
+command = {rust_analyzer_command:?}
 file_extensions = ["rs"]
 root_markers = ["Cargo.toml"]
 
@@ -200,7 +225,7 @@ api_key = "test-secret-key"
 
 [[mcp_servers]]
 name = "local"
-command = "./mcp-server"
+command = {mcp_command:?}
 startup = "lazy"
 required = false
 
@@ -208,7 +233,8 @@ required = false
 trust_class = "self_hosted"
 approval_default = "ask"
 allow_secrets = false
-"#,
+"#
+        ),
     )?;
 
     let report = build_doctor_report(&config_path, &workspace);
@@ -248,6 +274,10 @@ allow_secrets = false
         check.name == "mcp:local"
             && check.status == DoctorStatus::Ok
             && check.message.contains("command=available")
+            && check.message.contains(
+                "facets=(local=execute declared_network=unknown effective_network=runtime_preflight source_trust=self_hosted source_approval=ask)"
+            )
+            && check.message.contains("network_admission=run_scoped")
             && check
                 .message
                 .contains("boundary=local stdio outside local sandbox")
@@ -325,12 +355,16 @@ api_key = "test-secret-key"
     assert_eq!(hook_check.status, DoctorStatus::Warn);
     assert!(hook_check.message.contains("hooks=2"));
     assert!(hook_check.message.contains("trusted=2"));
+    assert!(hook_check.message.contains(
+        "process_facets=local_execute:2 declared_network_unknown:2 effective_network_preflight:2"
+    ));
+    assert!(hook_check.message.contains("network_admission=run_scoped"));
     assert!(hook_check.message.contains("verification:1"));
     assert!(hook_check.message.contains("workspace_write:1"));
     assert_eq!(
         hook_check.remediation.as_deref(),
         Some(
-            "mutating, network or unknown-effect hooks require execution backend and mutation evidence"
+            "source trust, declared effects and secret access do not authorize network; hooks require run-scoped network admission, backend isolation and mutation evidence"
         )
     );
     Ok(())
@@ -790,11 +824,12 @@ fn doctor_reports_mcp_environment_grant_names_and_missing_without_values() -> Re
     };
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
-    fs::write(workspace.join("mcp-server"), "#!/bin/sh\n")?;
+    let mcp_command = write_doctor_executable(&workspace, "mcp-server")?;
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
-        r#"[workspace]
+        format!(
+            r#"[workspace]
 root = "."
 
 [agent]
@@ -806,18 +841,19 @@ api_key = "test-secret-key"
 
 [[mcp_servers]]
 name = "ready-env"
-command = "./mcp-server"
+command = {mcp_command:?}
 startup = "lazy"
 required = false
 inherit_env = ["HOME"]
 
 [[mcp_servers]]
 name = "missing-env"
-command = "./mcp-server"
+command = {mcp_command:?}
 startup = "lazy"
 required = false
 inherit_env = ["SIGIL_E21_DOCTOR_MISSING_4D21"]
-"#,
+"#
+        ),
     )?;
 
     let report = build_doctor_report(&config_path, &workspace);

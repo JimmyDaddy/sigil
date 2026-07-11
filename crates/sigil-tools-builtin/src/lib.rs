@@ -3,11 +3,14 @@ mod constants;
 mod execution_backends;
 mod file_tools;
 mod path;
+#[cfg(unix)]
+mod process_group;
 mod registry;
 mod shell;
 mod support;
 mod terminal_process;
 mod terminal_tools;
+pub mod webfetch;
 
 pub use changeset_tool::{
     ChangeSetArtifactRecord, ChangeSetArtifactStore, ChangeSetArtifactSummary,
@@ -27,6 +30,11 @@ pub use terminal_process::{
     MAX_TERMINAL_INPUT_BYTES, TerminalBackendKind, TerminalInputResult, TerminalProcessManager,
     TerminalPtySize, TerminalReadResult, TerminalResizeResult, TerminalStartRequest,
     TerminalTaskArtifacts, TerminalTaskPermissionContext,
+};
+pub use webfetch::{
+    WebFetchAuthorizedDialPlan, WebFetchError, WebFetchFetchedResponse, WebFetchFormat,
+    WebFetchHopResult, WebFetchLimits, WebFetchNetworkGuard, WebFetchProxyEnvSource, WebFetchRoute,
+    WebFetchTransport, WebFetchTransportSecurity,
 };
 
 #[cfg(test)]

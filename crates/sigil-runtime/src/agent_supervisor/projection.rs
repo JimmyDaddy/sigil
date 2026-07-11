@@ -99,16 +99,17 @@ pub(crate) async fn materialize_child_agent_final_answer(
     thread_id: &AgentThreadId,
     result: &AgentRunResult,
 ) -> Result<AgentResultMaterialization> {
-    let original_chars = result.final_text.trim().chars().count();
+    let safe_final_text = sigil_kernel::safe_persistence_text(&result.final_text);
+    let original_chars = safe_final_text.trim().chars().count();
     let can_write_artifact = child_session.store_path().is_some();
     if original_chars <= AGENT_RESULT_ARTIFACT_THRESHOLD || !can_write_artifact {
         return Ok(AgentResultMaterialization::inline(
-            result.final_text.clone(),
-            agent_final_answer_ref(child_session_ref, result),
+            safe_final_text.clone(),
+            agent_final_answer_ref(child_session_ref, result, &safe_final_text),
         ));
     }
 
-    let full_result_hash = hash_text(&result.final_text);
+    let full_result_hash = hash_text(&safe_final_text);
     let artifact_ref = AgentArtifactRef {
         kind: AGENT_FINAL_REPORT_ARTIFACT_KIND.to_owned(),
         path: final_report_artifact_ref_path(child_session_ref)
@@ -126,7 +127,7 @@ pub(crate) async fn materialize_child_agent_final_answer(
             )
         })?;
     }
-    tokio::fs::write(&artifact_path, result.final_text.as_bytes())
+    tokio::fs::write(&artifact_path, safe_final_text.as_bytes())
         .await
         .with_context(|| {
             format!(
@@ -136,7 +137,7 @@ pub(crate) async fn materialize_child_agent_final_answer(
         })?;
 
     let final_text =
-        compact_child_agent_final_text(thread_id, original_chars, &artifact_ref, result);
+        compact_child_agent_final_text(thread_id, original_chars, &artifact_ref, &safe_final_text);
     let final_answer_ref =
         append_compact_final_answer(child_session, child_session_ref, final_text.clone())?;
     Ok(AgentResultMaterialization {
@@ -150,13 +151,14 @@ pub(crate) async fn materialize_child_agent_final_answer(
 fn agent_final_answer_ref(
     session_ref: &SessionRef,
     result: &AgentRunResult,
+    safe_final_text: &str,
 ) -> Option<AgentFinalAnswerRef> {
     let message_id = result.final_message_id.as_ref()?;
     Some(AgentFinalAnswerRef {
         session_ref: session_ref.clone(),
         message_id: message_id.clone(),
-        content_hash: hash_text(&result.final_text),
-        char_count: result.final_text.chars().count(),
+        content_hash: hash_text(safe_final_text),
+        char_count: safe_final_text.chars().count(),
     })
 }
 
@@ -188,10 +190,9 @@ fn compact_child_agent_final_text(
     thread_id: &AgentThreadId,
     original_chars: usize,
     artifact_ref: &AgentArtifactRef,
-    result: &AgentRunResult,
+    safe_final_text: &str,
 ) -> String {
-    let excerpt = result
-        .final_text
+    let excerpt = safe_final_text
         .trim()
         .chars()
         .take(AGENT_RESULT_EXCERPT_LIMIT)

@@ -47,6 +47,7 @@ pub fn changeset_only_child_tool_registry(registry: &ToolRegistry) -> ToolRegist
 
 pub(super) fn changeset_only_child_tool_spec_is_safe(spec: &ToolSpec) -> bool {
     spec.access == ToolAccess::Read
+        && spec.network_effect.is_none()
         && matches!(
             spec.category,
             ToolCategory::File | ToolCategory::Search | ToolCategory::Custom

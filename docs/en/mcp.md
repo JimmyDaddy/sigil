@@ -78,6 +78,8 @@ In the TUI, eager MCP servers are activated in the background after the core age
 
 A lazy server can be activated manually from the TUI `/config` MCP section. The `Server` row follows the same cycle interaction as theme choices: `Enter` selects the next server for lifecycle inspection without modifying the config. `Down` moves to the footer; select `activate` and press `Enter` to activate or refresh that server. `PageUp/PageDown` remain compatibility aliases for cycling the inspected server. The model can also call `mcp_activate_server` to start a named lazy server on demand. After activation succeeds, real MCP tools are added to the current agent registry.
 
+Model-triggered server activation is classified as local `Execute` plus `NetworkEffect::Unknown` and goes through the complete tool permission decision. Configured eager startup, direct lifecycle activation, and refresh keep their existing lifecycle/source semantics, but carry the current run-scoped network policy to the spawn boundary: network `Ask` without explicit approval does not silently start a process, and network `Deny` is admitted only when the selected backend proves both network and process-tree isolation. Once connected, a generic MCP tool call is local `Read` plus network `Unknown`; resource and prompt surfaces are local `Read` plus network `Read`. These local labels do not mean that data stays on the machine.
+
 The TUI shows lifecycle states:
 
 - `deferred`
@@ -157,7 +159,7 @@ If `allow_secrets = false`, secret-like content in the `roots/list` payload is b
 
 ## Resources
 
-When a server declares the MCP `resources` capability during `initialize`, Sigil registers two read-only provider-visible tools:
+When a server declares the MCP `resources` capability during `initialize`, Sigil registers two provider-visible tools with local `Read` access and network `Read` effect:
 
 ```text
 mcp__<server>__resources_list
@@ -180,7 +182,7 @@ Sigil does not inject MCP resources into the system prompt. The model must expli
 
 ## Prompts
 
-When a server declares the MCP `prompts` capability during `initialize`, Sigil registers two read-only provider-visible tools:
+When a server declares the MCP `prompts` capability during `initialize`, Sigil registers two provider-visible tools with local `Read` access and network `Read` effect:
 
 ```text
 mcp__<server>__prompts_list

@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::{
+    TransientMessageOverlay,
     event::{EventHandler, RunEvent},
     provider::{AssistantMessageKind, ModelMessage, ProviderContinuationState, ToolCall},
     session::{ControlEntry, Session},
@@ -14,7 +15,7 @@ pub(super) fn append_tool_preamble_message<H>(
     assistant_text: &str,
     completed_calls: &[ToolCall],
     pending_states: Vec<ProviderContinuationState>,
-) -> Result<()>
+) -> Result<TransientMessageOverlay>
 where
     H: EventHandler,
 {
@@ -24,15 +25,18 @@ where
     } else {
         (!assistant_text.trim().is_empty()).then(|| assistant_text.to_owned())
     };
-    let assistant_message = ModelMessage::assistant_with_kind(
+    let exact_assistant_message = ModelMessage::assistant_with_kind(
         assistant_content,
         completed_calls.to_vec(),
         AssistantMessageKind::ToolPreamble,
     );
+    let (assistant_message, exact_overlay) =
+        crate::project_message_for_persistence(exact_assistant_message)?;
     let assistant_message_id = assistant_message.id.clone();
     session.append_assistant_message(assistant_message.clone())?;
     handler.handle(RunEvent::AssistantMessage(assistant_message))?;
-    save_continuation_states(session, handler, pending_states, &assistant_message_id)
+    save_continuation_states(session, handler, pending_states, &assistant_message_id)?;
+    Ok(exact_overlay)
 }
 
 pub(super) fn append_final_answer_message<H>(
@@ -44,11 +48,12 @@ pub(super) fn append_final_answer_message<H>(
 where
     H: EventHandler,
 {
-    let assistant_message = ModelMessage::assistant_with_kind(
+    let exact_assistant_message = ModelMessage::assistant_with_kind(
         Some(assistant_text.to_owned()),
         Vec::new(),
         AssistantMessageKind::FinalAnswer,
     );
+    let (assistant_message, _) = crate::project_message_for_persistence(exact_assistant_message)?;
     let final_message_id = assistant_message.id.clone();
     session.append_assistant_message(assistant_message.clone())?;
     handler.handle(RunEvent::AssistantMessage(assistant_message))?;

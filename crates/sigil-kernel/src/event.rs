@@ -8,12 +8,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ChangeSet, ChangeSetResult, CommandPermissionMatch, ControlEntry, JobIntentEntry, ModelMessage,
-    MutationCommitted, MutationPrepared, PathTrustZone, PermissionConfirmation, PermissionRisk,
-    ProviderContinuationState, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
-    TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview, ToolProgressEvent, ToolResult,
-    ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationRecordedEntry,
-    WorkspaceMutationDetected,
+    ApprovalMode, ChangeSet, ChangeSetResult, CommandPermissionMatch, ControlEntry,
+    EgressDisclosurePresented, HostedToolAuthorization, HostedToolOutcome, JobIntentEntry,
+    McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared, NetworkEffect,
+    PathTrustZone, PermissionConfirmation, PermissionRisk, ProviderContinuationState,
+    QueryEgressOutcome, QueryEgressStarted, SessionLogEntry, StepLeaseEntry,
+    StepLeaseHeartbeatEntry, TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview,
+    ToolProgressEvent, ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
+    VerificationRecordedEntry, WebFetchTransportAuthorization, WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -232,6 +234,13 @@ durable_event_types! {
     PluginHookExecutionStarted => ("plugin_hook_execution_started", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PluginHookExecutionFinished => ("plugin_hook_execution_finished", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ExtensionProcessLifecycleRecorded => ("extension_process_lifecycle_recorded", RecoveryCritical, Critical, DirectJson, "extension_process_lifecycle"),
+    HostedToolAuthorization => ("hosted_tool_authorization", RecoveryCritical, Critical, DirectJson, "hosted_tool_authorization"),
+    HostedToolOutcome => ("hosted_tool_outcome", RecoveryCritical, Critical, DirectJson, "hosted_tool_outcome"),
+    McpTransportAuthorization => ("mcp_transport_authorization", RecoveryCritical, Critical, DirectJson, "mcp_transport_authorization"),
+    WebFetchTransportAuthorization => ("web_fetch_transport_authorization", RecoveryCritical, Critical, DirectJson, "web_fetch_transport_authorization"),
+    EgressDisclosurePresented => ("egress_disclosure_presented", RecoveryCritical, Critical, DirectJson, "egress_disclosure_presented"),
+    QueryEgressStarted => ("query_egress_started", RecoveryCritical, Critical, DirectJson, "query_egress_started"),
+    QueryEgressOutcome => ("query_egress_outcome", RecoveryCritical, Critical, DirectJson, "query_egress_outcome"),
     SandboxDecisionRecorded => ("sandbox_decision_recorded", RecoveryCritical, Critical, DirectJson, "sandbox_decision_recorded"),
     LogTailRecovered => ("log_tail_recovered", TailRecovery, Critical, DirectJson, "log_tail_recovered"),
 }
@@ -451,6 +460,13 @@ pub enum TypedDomainEvent {
     ChangeSetProposed(ChangeSet),
     ChangeSetApplied(ChangeSetResult),
     WriteIsolation(ControlEntry),
+    HostedToolAuthorization(HostedToolAuthorization),
+    HostedToolOutcome(HostedToolOutcome),
+    McpTransportAuthorization(McpTransportAuthorization),
+    WebFetchTransportAuthorization(WebFetchTransportAuthorization),
+    EgressDisclosurePresented(EgressDisclosurePresented),
+    QueryEgressStarted(QueryEgressStarted),
+    QueryEgressOutcome(QueryEgressOutcome),
     Other(DomainEvent),
 }
 
@@ -490,6 +506,41 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         }
         DurableEventType::WorkspaceMutationDetected => {
             TypedDomainEvent::WorkspaceMutationDetected(decode_event_payload(&event)?)
+        }
+        DurableEventType::HostedToolAuthorization => {
+            let entry: HostedToolAuthorization = decode_event_payload(&event)?;
+            entry.validate().map_err(anyhow::Error::from)?;
+            TypedDomainEvent::HostedToolAuthorization(entry)
+        }
+        DurableEventType::HostedToolOutcome => {
+            let entry: HostedToolOutcome = decode_event_payload(&event)?;
+            entry.validate().map_err(anyhow::Error::from)?;
+            TypedDomainEvent::HostedToolOutcome(entry)
+        }
+        DurableEventType::McpTransportAuthorization => {
+            let entry: McpTransportAuthorization = decode_event_payload(&event)?;
+            entry.validate().map_err(anyhow::Error::from)?;
+            TypedDomainEvent::McpTransportAuthorization(entry)
+        }
+        DurableEventType::WebFetchTransportAuthorization => {
+            let entry: WebFetchTransportAuthorization = decode_event_payload(&event)?;
+            entry.validate().map_err(anyhow::Error::from)?;
+            TypedDomainEvent::WebFetchTransportAuthorization(entry)
+        }
+        DurableEventType::EgressDisclosurePresented => {
+            let entry: EgressDisclosurePresented = decode_event_payload(&event)?;
+            entry.validate().map_err(anyhow::Error::from)?;
+            TypedDomainEvent::EgressDisclosurePresented(entry)
+        }
+        DurableEventType::QueryEgressStarted => {
+            let entry: QueryEgressStarted = decode_event_payload(&event)?;
+            entry.validate().map_err(anyhow::Error::from)?;
+            TypedDomainEvent::QueryEgressStarted(entry)
+        }
+        DurableEventType::QueryEgressOutcome => {
+            let entry: QueryEgressOutcome = decode_event_payload(&event)?;
+            entry.validate().map_err(anyhow::Error::from)?;
+            TypedDomainEvent::QueryEgressOutcome(entry)
         }
         DurableEventType::VerificationRecorded => {
             TypedDomainEvent::VerificationRecorded(decode_verification_recorded(&event)?)
@@ -859,6 +910,10 @@ pub enum RunEvent {
         call: ToolCall,
         spec: ToolSpec,
         subjects: Vec<ToolSubject>,
+        network_effect: Option<NetworkEffect>,
+        local_policy_decision: ApprovalMode,
+        network_policy_decision: ApprovalMode,
+        source_policy_decision: ApprovalMode,
         operation: ToolOperation,
         risk: PermissionRisk,
         subject_zones: Vec<PathTrustZone>,
@@ -966,6 +1021,14 @@ pub enum PublicRunEventKind {
         spec: ToolSpec,
         subjects: Vec<ToolSubject>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        network_effect: Option<NetworkEffect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_policy_decision: Option<ApprovalMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        network_policy_decision: Option<ApprovalMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_policy_decision: Option<ApprovalMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         operation: Option<ToolOperation>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         risk: Option<PermissionRisk>,
@@ -1062,6 +1125,10 @@ impl From<RunEvent> for PublicRunEventKind {
                 call,
                 spec,
                 subjects,
+                network_effect,
+                local_policy_decision,
+                network_policy_decision,
+                source_policy_decision,
                 operation,
                 risk,
                 subject_zones,
@@ -1073,6 +1140,10 @@ impl From<RunEvent> for PublicRunEventKind {
                 call,
                 spec,
                 subjects,
+                network_effect,
+                local_policy_decision: Some(local_policy_decision),
+                network_policy_decision: Some(network_policy_decision),
+                source_policy_decision: Some(source_policy_decision),
                 operation: Some(operation),
                 risk: Some(risk),
                 subject_zones,
@@ -1114,6 +1185,8 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::PrefixSnapshotCaptured(_) => "prefix_snapshot_captured",
         ControlEntry::MemorySnapshotCaptured(_) => "memory_snapshot_captured",
         ControlEntry::ContextAssemblySkipped(_) => "context_assembly_skipped",
+        ControlEntry::ExternalProvenance(_) => "external_provenance",
+        ControlEntry::WebUrlCapabilityDescriptor(_) => "web_url_capability_descriptor",
         ControlEntry::UsageSnapshot(_) => "usage_snapshot",
         ControlEntry::ToolApproval(_) => "tool_approval",
         ControlEntry::ToolApprovalSessionGrant(_) => "tool_approval_session_grant",

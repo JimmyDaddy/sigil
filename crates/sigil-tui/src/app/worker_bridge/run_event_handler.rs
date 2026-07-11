@@ -71,6 +71,10 @@ impl EventHandler for AppState {
                 call,
                 spec,
                 subjects,
+                network_effect,
+                local_policy_decision,
+                network_policy_decision,
+                source_policy_decision,
                 operation,
                 risk,
                 subject_zones,
@@ -96,20 +100,28 @@ impl EventHandler for AppState {
                         });
                 }
                 let session_grant_available =
-                    sigil_kernel::tool_approval_session_grant_available_for_parts(
+                    sigil_kernel::tool_approval_session_grant_available_for_facets(
                         spec.access,
+                        network_effect,
                         operation,
                         risk,
                         &subjects,
                         &subject_zones,
                         confirmation.as_ref(),
                         snapshot_required,
+                        local_policy_decision,
+                        network_policy_decision,
+                        source_policy_decision,
                     );
                 self.approval.pending = Some(PendingApproval {
                     call: call.clone(),
                     session_grant_available,
                     spec,
                     subjects,
+                    network_effect,
+                    local_policy_decision,
+                    network_policy_decision,
+                    source_policy_decision,
                     operation,
                     risk,
                     subject_zones,

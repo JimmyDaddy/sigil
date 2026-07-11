@@ -143,6 +143,10 @@ impl Tool for McpPromptTool {
         Ok(Some(self.trust.approval_default))
     }
 
+    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
+        Ok(ToolOperation::NetworkRequest)
+    }
+
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
         if !self.trust.egress_logging {
             return Ok(None);

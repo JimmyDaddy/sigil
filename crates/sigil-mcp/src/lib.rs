@@ -16,10 +16,12 @@ use sigil_kernel::{
     ExecutionSandboxProfile, ExtensionProcessLaunchError, ExtensionProcessLaunchPhase,
     ExtensionProcessLifecycleAudit, ExtensionProcessLifecycleStatus, McpServerConfig,
     McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, MutationEventRecorder,
-    ProcessEnvironmentPolicy, ProviderCapabilities, ResolvedProcessEnvironment, SecretRedactor,
-    Tool, ToolAccess, ToolCategory, ToolContext, ToolEffect, ToolEgressAudit, ToolErrorKind,
-    ToolLifecycleOwner, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
+    NetworkEffect, NetworkPolicy, ProcessEnvironmentPolicy, ProviderCapabilities,
+    ResolvedProcessEnvironment, SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext,
+    ToolEffect, ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    VerificationScope, WorkspaceMutationScan, resolve_extension_process_environment,
+    validate_extension_process_network_admission,
 };
 use tokio::{
     io::{AsyncReadExt, BufReader},
@@ -39,9 +41,12 @@ mod lifecycle; // server startup, activation, and registry reporting.
 mod name; // provider-visible MCP tool name normalization.
 mod output; // bounded MCP tool output and egress summaries.
 mod process; // local process launch contracts and stderr handling.
+mod process_group; // direct Unix process-group signalling and liveness checks.
 mod prompts; // prompt-backed MCP tool adapter.
 mod resources; // resource-backed MCP tool adapter.
 mod roots; // workspace root URI/name helpers.
+mod search_binding; // stable search eligibility over exact MCP identity and schema.
+mod streamable_http; // internal-only MCP Streamable HTTP protocol core.
 mod tools; // remote tool adapter and command fingerprinting.
 
 const DEFAULT_PROVIDER_TOOL_NAME_MAX_CHARS: usize = 64;
@@ -108,10 +113,29 @@ pub use lifecycle::{
 };
 pub use name::{McpToolName, mcp_provider_tool_name_prefix};
 pub use process::{
-    LocalMcpProcessLauncher, McpProcessClass, McpProcessCoverage, McpProcessLaunch,
-    McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,
+    LocalMcpProcessLauncher, McpDeclarationLaunchMetadata, McpProcessClass, McpProcessCoverage,
+    McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,
 };
-pub use tools::{mcp_launch_static_fingerprint, mcp_launch_static_fingerprint_at};
+pub use search_binding::{
+    KnownMcpSearchAdapter, McpSearchAdapterKind, McpSearchIncompatibility,
+    McpStableSearchEligibility, classify_mcp_search_binding, mcp_schema_fingerprint,
+    mcp_tool_schema_fingerprint,
+};
+pub use sigil_kernel::ExtensionProcessNetworkAdmission;
+pub use streamable_http::{
+    CompiledMcpSchema, McpCallToolResult, McpRemoteClientCapabilities, McpRemoteFormField,
+    McpRemoteFormFieldKind, McpRemoteFormHandler, McpRemoteFormResponse, McpRemoteProtocolVersion,
+    McpRemoteRoot, McpRemoteServerIdentity, McpRemoteTool, McpRequestBodyObserver,
+    McpStreamableHttpAuthState, McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpClient,
+    McpStreamableHttpDestinationAuthorizer, McpStreamableHttpDestinationError,
+    McpStreamableHttpError, McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment,
+    McpStreamableHttpLifecycle, McpStreamableHttpLimits, McpStreamableHttpRoute,
+    McpStreamableHttpRouteEvidence, PreparedMcpStreamableHttpHeaders, ValidatedMcpFormRequest,
+};
+pub use tools::{
+    mcp_launch_static_fingerprint, mcp_launch_static_fingerprint_at,
+    mcp_resolved_launch_static_fingerprint_at,
+};
 
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]

@@ -78,6 +78,8 @@ Sigil 只保存和展示 grant name、source metadata 以及 static/live fingerp
 
 Lazy server 可以通过 TUI `/config` 的 MCP section 手动 `activate`。`Server` 行与主题选择采用相同的循环交互：按 `Enter` 切换下一个用于查看 lifecycle 的 server，且不会修改配置。按 `Down` 进入 footer，选择 `activate` 后按 `Enter` 启动或刷新该 server。`PageUp/PageDown` 保留为循环切换查看对象的兼容别名。模型也可以调用 `mcp_activate_server` 按需启动指定 lazy server。启动成功后，真实 MCP tools 会加入当前 agent registry。
 
+模型触发的 server activation 会分类为本地 `Execute` 加 `NetworkEffect::Unknown`，并经过完整的工具 permission decision。配置声明的 eager startup、直接 lifecycle activation 与 refresh 保持既有 lifecycle/source 语义，但必须把当前 run-scoped network policy 带到 spawn boundary：网络 `Ask` 缺少显式批准时不能静默启动，网络 `Deny` 下只有所选 backend 能同时证明 network isolation 与 process-tree isolation 时才允许启动。连接建立后，通用 MCP tool call 分类为本地 `Read` 加网络 `Unknown`；resource 和 prompt surface 分类为本地 `Read` 加网络 `Read`。这些本地 access 标签不代表数据不会离开机器。
+
 TUI 会展示生命周期状态：
 
 - `deferred`
@@ -157,7 +159,7 @@ Sigil 只把已解析的 workspace root 暴露给 MCP server 的 `roots/list`。
 
 ## Resources
 
-当 server 在 `initialize` 中声明 MCP `resources` capability 时，Sigil 会注册两个只读 provider-visible tools：
+当 server 在 `initialize` 中声明 MCP `resources` capability 时，Sigil 会注册两个本地 access 为 `Read`、网络 effect 为 `Read` 的 provider-visible tools：
 
 ```text
 mcp__<server>__resources_list
@@ -180,7 +182,7 @@ Sigil 不会把 MCP resources 自动注入 system prompt。模型必须通过这
 
 ## Prompts
 
-当 server 在 `initialize` 中声明 MCP `prompts` capability 时，Sigil 会注册两个只读 provider-visible tools：
+当 server 在 `initialize` 中声明 MCP `prompts` capability 时，Sigil 会注册两个本地 access 为 `Read`、网络 effect 为 `Read` 的 provider-visible tools：
 
 ```text
 mcp__<server>__prompts_list

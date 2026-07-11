@@ -92,6 +92,7 @@ fn permission_spec(name: &str, access: ToolAccess) -> ToolSpec {
         input_schema: json!({"type":"object"}),
         category: ToolCategory::File,
         access,
+        network_effect: None,
         preview: ToolPreviewCapability::None,
     }
 }

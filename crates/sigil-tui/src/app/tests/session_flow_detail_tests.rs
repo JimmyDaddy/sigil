@@ -15,8 +15,8 @@ use sigil_kernel::{
     PluginHookExecutionStatus, PluginHookKind, PluginManifestSnapshot, PluginTrustDecision,
     PluginTrustEntry, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
     SkillRunMode, SkillSource, SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolApprovalUserDecision, ToolEffect, ToolError, ToolErrorKind, ToolResultMeta,
-    WorkspaceConfig,
+    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
+    ToolEffect, ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
 };
 
 #[test]
@@ -1374,6 +1374,9 @@ fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
             compacted_message_count: 2,
             retained_tail_message_count: 1,
             task_memory: None,
+            external_trust: None,
+            external_provenance_message_ids: Vec::new(),
+            external_source_ids: Vec::new(),
         },
         folded_messages: vec![ModelMessage::user("before")],
         projected_messages: vec![ModelMessage::assistant(
@@ -1822,6 +1825,10 @@ fn render_session_control_entries_cover_remaining_labels() {
             call_id: "call-approval".to_owned(),
             tool_name: "write_file".to_owned(),
             access: sigil_kernel::ToolAccess::Write,
+            network_effect: None,
+            local_policy_decision: ApprovalMode::Deny,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
             subjects: Vec::new(),
             operation: None,
             risk: None,
@@ -1839,6 +1846,23 @@ fn render_session_control_entries_cover_remaining_labels() {
         },
     )));
     assert!(approval.contains("action=resolved"));
+    assert!(approval.contains("local=deny network=allow source=allow final=deny"));
+
+    let legacy_network_grant = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry {
+            call_id: "call-network".to_owned(),
+            tool_name: "legacy_mcp".to_owned(),
+            access: sigil_kernel::ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Unknown),
+            operation: sigil_kernel::ToolOperation::NetworkRequest,
+            risk: sigil_kernel::PermissionRisk::High,
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            expires: ToolApprovalSessionGrantExpiry::Session,
+            granted_at_ms: 1,
+        }),
+    ));
+    assert!(legacy_network_grant.contains("access=read effect=unknown"));
 
     let skill_index =
         render_session_log_entry(&SessionLogEntry::Control(ControlEntry::SkillIndexCaptured(

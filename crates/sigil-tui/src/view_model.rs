@@ -854,6 +854,7 @@ fn context_source_label(source: &ContextSource) -> &'static str {
         ContextSource::SessionArchive => "session archive",
         ContextSource::TaskDigest => "memory context",
         ContextSource::ExtensionProvided => "extension",
+        ContextSource::ExternalSource => "external source",
     }
 }
 

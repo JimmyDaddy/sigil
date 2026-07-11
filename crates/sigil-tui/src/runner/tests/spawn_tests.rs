@@ -3,15 +3,17 @@ use std::{collections::BTreeMap, path::PathBuf, sync::mpsc, time::Duration};
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
-    MemoryConfig, PermissionConfig, RootConfig, SessionConfig, SessionStreamRecord,
-    WorkspaceConfig,
+    AgentConfig, ControlEntry, DurableEventType, JsonlSessionStore, McpServerConfig,
+    McpServerStartup, MemoryConfig, PermissionConfig, RootConfig, SessionConfig, SessionLogEntry,
+    SessionStreamRecord, WorkspaceConfig, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    stable_workspace_id,
 };
 use std::fs;
 use tempfile::tempdir;
 
 use super::super::{
-    McpActivationStatus, WorkerCommand, WorkerMessage, spawn::report_runtime_build_result,
+    McpActivationStatus, WorkerCommand, WorkerMessage,
+    spawn::load_session_entries_with_workspace_trust, spawn::report_runtime_build_result,
     spawn_agent_worker,
 };
 
@@ -112,6 +114,29 @@ fn report_runtime_build_result_forwards_runtime_build_failures() -> Result<()> {
 }
 
 #[test]
+fn worker_loads_workspace_trust_from_the_active_session_before_registry_build() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join("session-trust.jsonl");
+    JsonlSessionStore::new(&session_log_path)?.append(&SessionLogEntry::Control(
+        ControlEntry::WorkspaceTrustDecision(WorkspaceTrustDecisionEntry {
+            workspace_id: stable_workspace_id(&workspace_root)?,
+            workspace_trust_snapshot_id: "workspace-trust:test".to_owned(),
+            trust: WorkspaceTrust::Trusted,
+            decided_by_event_id: None,
+            reason: Some("test trust decision".to_owned()),
+        }),
+    ))?;
+
+    let (entries, trust) =
+        load_session_entries_with_workspace_trust(&session_log_path, &workspace_root)?;
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(trust, WorkspaceTrust::Trusted);
+    Ok(())
+}
+
+#[test]
 fn spawn_agent_worker_reports_provider_build_failures_from_worker_thread() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -195,7 +220,8 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
             server_name: Some(ref server_name),
             status: McpActivationStatus::Failed { ref error },
         } if server_name == "required-eager"
-            && error.contains("failed to spawn MCP server required-eager")
+            && error.contains("mcp_command_resolution_failed")
+            && error.contains("stdio command does not resolve to an existing file")
     ));
     if let Ok(message) = message_rx.recv_timeout(Duration::from_millis(100)) {
         assert!(

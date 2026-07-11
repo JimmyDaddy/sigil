@@ -91,6 +91,19 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             skipped.item_ids.len(),
             truncate_session_view_text(&skipped.reason, 96)
         ),
+        ControlEntry::ExternalProvenance(entry) => format!(
+            "[ctl] external provenance message={} sources={} citations={} trust={:?}",
+            truncate_session_view_text(&entry.message_id, 48),
+            entry.sources.len(),
+            entry.citations.len(),
+            entry.trust
+        ),
+        ControlEntry::WebUrlCapabilityDescriptor(entry) => format!(
+            "[ctl] url capability source={} message={} restart={:?}",
+            truncate_session_view_text(&entry.source_id, 48),
+            truncate_session_view_text(&entry.durable_entry_id, 48),
+            entry.restart_policy
+        ),
         ControlEntry::UsageSnapshot(usage) => format!(
             "[ctl] usage p={} c={} hit={} miss={}",
             usage.prompt_tokens,
@@ -99,16 +112,26 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             usage.cache_miss_tokens
         ),
         ControlEntry::ToolApproval(approval) => format!(
-            "[ctl] approval {} {} action={} mode={}",
+            "[ctl] approval {} {} action={} effect={} local={} network={} source={} final={}",
             approval.call_id,
             approval.tool_name,
             tool_approval_action_label(approval.action),
+            approval
+                .network_effect
+                .map_or("none", sigil_kernel::NetworkEffect::as_str),
+            approval.local_policy_decision.as_str(),
+            approval.network_policy_decision.as_str(),
+            approval.source_policy_decision.as_str(),
             approval.policy_decision.as_str()
         ),
         ControlEntry::ToolApprovalSessionGrant(grant) => format!(
-            "[ctl] approval grant {} {} scope=session subjects={}",
+            "[ctl] approval grant {} {} scope=session access={} effect={} subjects={}",
             grant.call_id,
             grant.tool_name,
+            grant.access.as_str(),
+            grant
+                .network_effect
+                .map_or("none", sigil_kernel::NetworkEffect::as_str),
             grant.subjects.len()
         ),
         ControlEntry::ToolExecution(execution) => render_tool_execution_line(execution),

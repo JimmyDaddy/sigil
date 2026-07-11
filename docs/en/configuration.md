@@ -330,10 +330,10 @@ Modes:
 
 | Mode | User meaning | Semantics |
 | --- | --- | --- |
-| `read-only` | Inspect only | Reads are allowed; write, execute, and network tools are denied even if a lower-level override tries to allow them. |
-| `manual` | Confirm manually | Reads are allowed by default; write, execute, and network tools ask unless a specific tool/rule/external-directory policy says otherwise. |
-| `auto-edit` | Edit files automatically | Workspace file edits are allowed; shell and network tools still ask by default. |
-| `danger-full-access` | High-risk full access | All tool access is allowed by default. The explicit `danger` name is intentional to avoid accidental use. |
+| `read-only` | Inspect only | Local reads are allowed; local writes and process execution are denied even if a lower-level local override tries to allow them. Network effects are evaluated separately. |
+| `manual` | Confirm manually | Local reads are allowed by default; local writes and execution ask unless a specific tool/rule/external-directory policy says otherwise. |
+| `auto-edit` | Edit files automatically | Workspace file edits are allowed; local process execution still asks by default. |
+| `danger-full-access` | High-risk local access | Local access is allowed by default. The explicit `danger` name is intentional; it does not override an independent network ask or deny. |
 
 Meaning:
 
@@ -344,18 +344,21 @@ Meaning:
 - Paths outside the workspace are disabled by default; if external directories are enabled, they still go through the external-directory gate.
 - Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`. It is backed by Sigil's per-user cache root and shown to the model as `cache/tmp`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
 - In headless `run`, final `ask` decisions are returned to the model as structured `approval_required` tool errors instead of being executed silently.
+- Local access and network effect are independent axes. A tool declares local `Read` / `Write` / `Execute` plus an optional network `Read` / `Mutate` / `Unknown` effect. `read-only` permits a network read only when the effective `NetworkPolicy` permits it, while network mutation or an unknown network effect remains denied in `read-only`. `danger-full-access` cannot override network `Ask` or `Deny`.
+- This release does not expose a new `[web]` or remote-MCP network configuration and does not enable WebFetch/WebSearch. Existing generic MCP calls are classified conservatively as local `Read` plus `NetworkEffect::Unknown`; their existing source/tool approval still participates in the final `Deny > Ask > Allow` decision.
 
 Precedence:
 
 | Order | Source | Responsibility |
 | --- | --- | --- |
-| 1 | `mode` baseline | The user-facing top-level mode sets the default posture; `read-only` is a hard non-read cap and `danger-full-access` is an explicit full-access override. |
-| 2 | Tool-provided default | Runtime/tool-specific default, such as a trusted read-only command downgrade. |
-| 3 | `tools.<tool_name>` | Tool-name override. |
-| 4 | `rules[]` | Matching tool/subject rules; the last matching rule wins, preserving file-order specificity. |
-| 5 | `commands.allow/ask/deny` | Matching command patterns for shell commands. Within command groups, `deny > ask > allow`; command `allow` can widen the default `manual` shell ask, but it cannot override explicit tool/rule ask or deny. |
-| 6 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
-| 7 | Effective policy cap and risk overlays | Runtime caps, `read-only`, protected paths, destructive operations, and external-directory denial remain hard safety boundaries. |
+| 1 | Local `mode` baseline | The user-facing top-level mode sets the local Read/Write/Execute posture; `read-only` is a hard local write/execute cap. |
+| 2 | Independent network policy | The runtime evaluates the declared/dynamic network effect separately; network `Ask` or `Deny` cannot be widened by local danger mode, plan approval, or a session grant. |
+| 3 | Tool/source-provided default | Runtime/tool-specific source policy, such as MCP trust approval or a trusted read-only command downgrade. |
+| 4 | `tools.<tool_name>` | Tool-name override. |
+| 5 | `rules[]` | Matching tool/subject rules; the last matching rule wins, preserving file-order specificity. |
+| 6 | `commands.allow/ask/deny` | Matching command patterns for shell commands. Within command groups, `deny > ask > allow`; command `allow` can widen the default `manual` shell ask, but it cannot override explicit tool/rule ask or deny. |
+| 7 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
+| 8 | Effective policy cap and risk overlays | Runtime caps, local `read-only`, protected paths, destructive operations, and external-directory denial remain hard safety boundaries. The final result is the strictest local, network, and source decision. |
 
 ## Memory
 
@@ -436,11 +439,11 @@ auto_discover = true
 report_missing = true
 ```
 
-When enabled, the runtime registers read-only code intelligence tools plus LSP edit tools for code actions and symbol rename. Edit tools are `Write` tools and require a diff approval before files are changed. The TUI can use `Alt-D` to run diagnostics over git changed source files.
+When enabled, the runtime registers code-query tools plus LSP edit tools for code actions and symbol rename. Edit tools are `Write` tools and require a diff approval before files are changed. Workspace trust only controls whether a configured LSP process may start; it does not bypass tool permission or diff approval. The TUI can use `Alt-D` to run diagnostics over git changed source files.
 
 With `auto_discover = true`, Sigil discovers common languages and safe LSP servers available on `PATH`. Explicit `code_intelligence.servers` entries are advanced overrides or additions.
 
-The TUI `/config` panel includes a `Code Intel` section for `enabled`, `server_startup`, `auto_discover`, the read-only trust boundary, and readiness checks. The readiness rows reuse the same local doctor facts, so missing LSP commands show remediation before any language server is started.
+The TUI `/config` panel includes a `Code Intel` section for `enabled`, `server_startup`, `auto_discover`, the LSP process trust boundary, write approval requirements, and readiness checks. The readiness rows reuse the same local doctor facts, so missing LSP commands show remediation before any language server is started.
 
 Language server example:
 
@@ -454,6 +457,8 @@ file_extensions = ["rs"]
 startup_timeout_ms = 5000
 trust_required = true
 ```
+
+`trust_required` defaults to `true`. Such a server starts only when the current session contains a matching durable `Trusted` decision for this exact workspace. `Unknown`, `Restricted`, and `Denied` fail closed before command resolution or process spawn. A fresh `sigil run` session therefore cannot start a trust-required LSP; set `trust_required = false` only as an explicit opt-out from this process-start gate. Rust Tree-sitter fallback remains available without an LSP process, and LSP write tools still require their normal diff approval in either mode.
 
 ## Terminal
 

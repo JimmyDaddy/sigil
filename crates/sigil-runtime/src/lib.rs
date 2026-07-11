@@ -4,20 +4,21 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 use sigil_kernel::{
     AgentRole, AgentRunOptions, ApprovalMode, ExecutionBackend, InteractionMode, McpServerConfig,
-    McpServerStartup, MutationEventRecorder, PermissionEvaluationContext, Provider,
-    ProviderCapabilities, ReasoningEffort, RoleModelConfig, RootConfig, ScopedToolRegistry,
-    SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory,
-    ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
-    ToolSubjectScope, default_user_config_dir,
+    McpServerStartup, MutationEventRecorder, NetworkEffect, NetworkPolicy,
+    PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RoleModelConfig,
+    RootConfig, ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess,
+    ToolAllowlistConfig, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, ToolSubjectKind, ToolSubjectScope, WorkspaceTrust, default_user_config_dir,
 };
 pub use sigil_mcp::{
-    McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
-    McpListChangedKind, McpListChangedNotification, McpProcessCoverage, McpProcessLaunch,
-    McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher, McpProgressNotification,
-    McpRuntimeEventHandler, McpToolRegistrationReport,
+    McpDeclarationLaunchMetadata, McpElicitationAction, McpElicitationHandler,
+    McpElicitationRequest, McpElicitationResponse, McpListChangedKind, McpListChangedNotification,
+    McpProcessCoverage, McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest,
+    McpProcessLauncher, McpProgressNotification, McpRuntimeEventHandler, McpToolRegistrationReport,
 };
 use sigil_provider_anthropic::{
     AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV, anthropic_capabilities,
@@ -35,6 +36,7 @@ use sigil_provider_openai_compat::{
 use tokio::process::Command;
 
 mod mcp_registry; // local/MCP tool registry construction and activation.
+mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
 mod provider_factory; // provider construction, capabilities, and secrets.
 mod run_options; // shared run options and scoped tool registry views.
 
@@ -44,6 +46,11 @@ pub mod agent_tools;
 pub mod context;
 pub mod context_window;
 pub mod doctor;
+pub mod egress_ordering;
+#[allow(dead_code)] // Fully implemented E21.15 codec remains unreachable until E21.17 cutover.
+mod exa_text_v1;
+pub mod hosted_finalizer;
+pub mod mcp_declaration;
 pub mod paths;
 pub mod plugins;
 pub mod product_view;
@@ -52,6 +59,13 @@ pub mod provider_debug;
 pub mod provider_status;
 pub mod session_control;
 pub mod skills;
+#[allow(dead_code)] // E21.15 runtime-private route is intentionally dormant before E21.17.
+mod stable_mcp_search;
+pub mod streamable_http;
+pub mod url_capability;
+pub mod web_destination;
+pub mod web_search_connector;
+pub mod webfetch;
 pub use agent_profile_registry::{
     AgentProfileIndexContext, AgentProfileRegistry, BUILD_PROFILE_ID, EXPLORE_PROFILE_ID,
     ModelVisibleAgentIndex, ModelVisibleAgentIndexEntry, PLAN_PROFILE_ID, ResolvedAgentProfile,
@@ -81,6 +95,17 @@ pub use context_window::{
     ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
     resolve_context_window_tokens,
 };
+pub use egress_ordering::{
+    ActiveHostedEgress, ActiveQueryEgress, AuthorizedHostedEgress, AuthorizedQueryEgress,
+    AuthorizedTransportEgress, EgressOrderingCoordinator, EgressOrderingError,
+};
+pub use hosted_finalizer::{HostedEvidenceFinalizer, hosted_terminal_status};
+pub use mcp_declaration::{
+    McpConfigOrigin, McpConfigOriginKind, McpExecutionBase, McpExecutionBaseKind,
+    McpRegistrationError, McpRegistrationErrorCode, McpServerDeclarationProjection,
+    PluginManifestAttestation, ResolvedMcpServerDeclaration, ResolvedMcpStdioLaunch,
+    resolve_user_root_mcp_declarations,
+};
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR,
     DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF,
@@ -92,7 +117,7 @@ pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
     PluginHookExecutionOutcome, PluginHookExecutionRequest, PluginHookExecutionRunner,
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
-    discover_workspace_plugins, merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
+    discover_workspace_plugins, merge_mcp_server_declarations, merge_plugin_skill_descriptors,
 };
 pub use product_view::{
     AgentGraphProductSummary, agent_graph_product_summary_from_entries,
@@ -125,18 +150,53 @@ pub use skills::{
     SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,
     load_user_invoked_skill, namespaced_plugin_skill_id, register_skill_tools,
 };
+pub use stable_mcp_search::{
+    BundledExaAuthorizerFactory, RuntimeStableSearchQueryAttempt,
+    RuntimeStableSearchQueryPermitFactory, StableSearchQueryAttemptFactory,
+};
+pub use streamable_http::{
+    QueuedRuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpAttempt,
+    RuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpDestinationAuthorizer,
+};
+pub use url_capability::{
+    DEFAULT_URL_CAPABILITY_CAPACITY, DEFAULT_URL_CAPABILITY_TTL, UrlCapabilityLookupError,
+    WebUrlCapability, WebUrlCapabilityStore, attach_session_url_capability_store,
+};
+pub use web_destination::{
+    IpCidr, ProxyEnvironment, SystemWebDestinationResolver, WebDestinationError,
+    WebDestinationGuard, WebDestinationGuardPolicy, WebDestinationPreview, WebDestinationResolver,
+};
+pub use web_search_connector::{
+    ConfiguredMcpSearchBindingState, McpSearchBindingOrigin, McpSearchBindingRegistry,
+    McpSearchBindingRegistryError, PendingMcpSearchBinding, PreparedMcpSearchBinding,
+    PreparedMcpSearchLease, SourceProjection, SourceProjectionUnavailableReason,
+    StableMcpRouteSelection, WebSearchConnector, WebSearchConnectorError,
+    WebSearchConnectorIdentity, WebSearchFailure, WebSearchProtocolFailureKind, WebSearchRequest,
+    WebSearchResponse, generic_query_arguments, normalize_web_search_query,
+};
+pub use webfetch::{
+    WebFetchExecutionError, WebFetchExecutionOutcome, WebFetchExecutionRequest, WebFetchExecutor,
+    WebFetchHopTransport,
+};
 
 pub use mcp_registry::{
-    LazyMcpActivationResult, McpRefreshResult, activate_lazy_mcp_tools,
+    LazyMcpActivationResult, McpDeclarationRegistrationOptions, McpPluginTrustSource,
+    McpRefreshResult, SessionMcpPluginTrustSource, activate_lazy_mcp_tools,
     activate_lazy_mcp_tools_detailed, activate_lazy_mcp_tools_detailed_with_mcp_elicitation,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder,
+    activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder_and_network_admission,
     build_configured_execution_backend, build_tool_registry,
     build_tool_registry_with_mcp_elicitation, build_tool_registry_with_mcp_handlers,
-    build_tool_registry_with_mutation_recorder, build_tool_registry_without_eager_mcp,
-    mcp_process_receipts_summary, mcp_stdio_boundary_summary,
-    refresh_mcp_server_tools_with_mcp_handlers,
+    build_tool_registry_with_mutation_recorder,
+    build_tool_registry_with_mutation_recorder_and_workspace_trust,
+    build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission,
+    build_tool_registry_without_eager_mcp,
+    build_tool_registry_without_eager_mcp_with_workspace_trust, mcp_process_receipts_summary,
+    mcp_stdio_boundary_summary, refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder,
+    refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
+    register_mcp_server_declarations,
 };
 pub use provider_factory::{
     ProviderCapabilityRow, ProviderCapabilityStatus, ProviderCapabilityView, SecretResolution,
@@ -158,7 +218,8 @@ use run_options::canonical_workspace_root;
 
 #[cfg(test)]
 use mcp_registry::{
-    ConfiguredMcpProcessLauncher, register_lazy_mcp_activation_tool, shutdown_registered_tools,
+    ConfiguredMcpProcessLauncher, launch_planned_mcp_process, register_lazy_mcp_activation_tool,
+    shutdown_registered_tools,
 };
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ fn tool_spec(name: &str, input_schema: Value) -> ToolSpec {
         input_schema,
         category: ToolCategory::Custom,
         access: ToolAccess::Read,
+        network_effect: None,
         preview: ToolPreviewCapability::None,
     }
 }
@@ -31,6 +32,7 @@ fn strict_mode_normalizes_optional_fields() -> Result<()> {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }],
         StrictToolsMode::Always,
@@ -60,6 +62,7 @@ fn strict_auto_falls_back_to_standard_tools_for_unsupported_schema() -> Result<(
             input_schema: Value::Bool(true),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }],
         StrictToolsMode::Auto,
@@ -93,6 +96,7 @@ fn strict_always_errors_for_unsupported_schema() {
             input_schema: Value::Bool(true),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }],
         StrictToolsMode::Always,
@@ -127,11 +131,13 @@ fn local_tool_metadata_does_not_affect_standard_tool_wire_schema() -> Result<()>
         input_schema: json!({"type":"object"}),
         category: ToolCategory::File,
         access: ToolAccess::Read,
+        network_effect: None,
         preview: ToolPreviewCapability::None,
     };
     let write_tool = ToolSpec {
         category: ToolCategory::Shell,
         access: ToolAccess::Execute,
+        network_effect: None,
         preview: ToolPreviewCapability::Required,
         ..read_tool.clone()
     };

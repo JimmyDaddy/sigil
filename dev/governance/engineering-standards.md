@@ -58,6 +58,7 @@
 - 跑必要 gate；日常提交优先使用分层门禁，不默认跑完整 workspace gate
 - 更新必要文档
 - 在说明里明确哪些能力已完成，哪些只是扩展点
+- 新增直接依赖时同步维护 [`dependency-supply-chain.md`](dependency-supply-chain.md)，记录 owner、版本/feature、许可、安全理由和发布前剩余 gate
 
 ## 4. 文档同步规范
 

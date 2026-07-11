@@ -125,16 +125,17 @@ pub(super) fn build_agent_child_session(
     if let Some(parent_path) = parent_session.store_path() {
         let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
         let store = JsonlSessionStore::new(child_ref.resolve(parent_dir))?;
-        return Session::load_from_store(
+        let mut session = Session::load_from_store(
             parent_session.provider_name(),
             parent_session.model_name(),
             store,
-        );
+        )?;
+        crate::attach_session_url_capability_store(&mut session)?;
+        return Ok(session);
     }
-    Ok(Session::new(
-        parent_session.provider_name(),
-        parent_session.model_name(),
-    ))
+    let mut session = Session::new(parent_session.provider_name(), parent_session.model_name());
+    crate::attach_session_url_capability_store(&mut session)?;
+    Ok(session)
 }
 
 pub(super) fn chat_budget_scope_id(call_id: &str) -> Result<TaskId> {

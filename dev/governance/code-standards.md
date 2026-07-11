@@ -77,6 +77,8 @@
 - 负责：agent loop、session、approval、event、provider/tool 契约
 - 不负责：DeepSeek 私有协议细节、具体 HTTP 端点拼装、UI 展示逻辑
 - 公共类型修改时，必须先判断是否仍适合未来多 provider 复用
+- provider-hosted 能力只能通过中立 `HostedToolKind` / model capability 表达；hosted-enabled turn 的 text/reasoning/summary/evidence 必须先进入 hard-capped transient buffer，并在 runtime finalizer 完成 URL/source/citation 安全投影后才允许进入 session、`RunEvent` 或前端 handler
+- provider-hosted raw URL、title、query 与 remote source id 必须使用无 serde 实现且 redacted `Debug` 的 secret carrier；request bytes 开始发送后禁止透明 retry，provider 成功但未实际使用 hosted tool 必须记录 `NotUsed`
 
 ### 3.2 `sigil-provider-deepseek`
 

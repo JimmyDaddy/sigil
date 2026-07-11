@@ -10,24 +10,23 @@ use std::os::unix::fs::symlink;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentConfig, ApprovalMode, CodeIntelligenceConfig, CompactionConfig, ExecutionBackend,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel, ExecutionFuture,
-    ExecutionNetworkReceipt, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
-    JsonlSessionStore, MAX_PLUGIN_HOOK_ARTIFACT_REFS, McpServerStartup, MemoryConfig,
-    MutationEventRecorder, PermissionConfig, PluginCapability, PluginHookExecutionStatus,
-    PluginHookKind, PluginHookOutputArtifactRef, PluginSkillRef, PluginTrustDecision,
-    PluginTrustEntry, ProviderCapabilities, ReasoningStreamSupport, RedactionState, RootConfig,
-    SecretRedactor, SessionConfig, SessionStreamRecord, SkillConfig, SkillIndexSnapshot,
-    SkillSource, TaskConfig, ToolAccess, ToolCategory, ToolEffect, WorkspaceConfig,
-    WorkspaceMutationDetected,
+    ApprovalMode, ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionCoverageLabel, ExecutionFuture, ExecutionNetworkReceipt, ExecutionReceipt,
+    ExecutionRequest, ExecutionSandboxProfile, ExtensionProcessNetworkAdmission, JsonlSessionStore,
+    MAX_PLUGIN_HOOK_ARTIFACT_REFS, McpServerStartup, MutationEventRecorder, NetworkEffect,
+    NetworkPolicy, PluginCapability, PluginHookExecutionStatus, PluginHookKind,
+    PluginHookOutputArtifactRef, PluginSkillRef, PluginTrustDecision, PluginTrustEntry,
+    RedactionState, SecretRedactor, SessionStreamRecord, SkillIndexSnapshot, SkillSource,
+    ToolAccess, ToolCategory, ToolEffect, WorkspaceMutationDetected,
 };
 
 use super::{
-    PluginDiscoveryWarningKind, PluginHookExecutionRequest, PluginHookExecutionRunner,
-    discover_workspace_plugins, merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
+    MAX_PLUGIN_MANIFEST_BYTES, PluginDiscoveryWarningKind, PluginHookExecutionRequest,
+    PluginHookExecutionRunner, discover_workspace_plugins, merge_mcp_server_declarations,
+    merge_plugin_skill_descriptors,
 };
-use crate::build_tool_registry_without_eager_mcp;
 use crate::skills::discover_plugin_skill_descriptors;
+use crate::{McpConfigOrigin, McpExecutionBase, resolve_user_root_mcp_declarations};
 
 #[test]
 fn missing_plugin_directory_returns_empty_report() {
@@ -77,6 +76,40 @@ trust: trusted
             .manifest_path
             .starts_with(".sigil/plugins")
     );
+}
+
+#[test]
+fn plugin_discovery_accepts_manifest_at_limit_and_rejects_limit_plus_one() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let manifest_path = workspace.path().join(".sigil/plugins/bounded/plugin.toml");
+    let base = r#"id = "bounded"
+name = "Bounded"
+version = "1.0.0"
+"#;
+    assert!(base.len() + 2 < MAX_PLUGIN_MANIFEST_BYTES);
+    let mut at_limit = base.to_owned();
+    at_limit.push_str("\n#");
+    at_limit.push_str(&"x".repeat(MAX_PLUGIN_MANIFEST_BYTES - at_limit.len()));
+    assert_eq!(at_limit.len(), MAX_PLUGIN_MANIFEST_BYTES);
+    write_file(&manifest_path, &at_limit);
+
+    let accepted = discover_workspace_plugins(workspace.path(), &[])
+        .expect("manifest at the hard limit should discover");
+    assert_eq!(accepted.manifests.len(), 1);
+    assert!(accepted.warnings.is_empty());
+
+    at_limit.push('x');
+    write_file(&manifest_path, &at_limit);
+    let rejected = discover_workspace_plugins(workspace.path(), &[])
+        .expect("oversized manifest should become a bounded warning");
+    assert!(rejected.manifests.is_empty());
+    assert!(rejected.registrations.is_empty());
+    assert_eq!(rejected.warnings.len(), 1);
+    assert_eq!(
+        rejected.warnings[0].kind,
+        PluginDiscoveryWarningKind::ReadFailed
+    );
+    assert!(rejected.warnings[0].message.contains("1 MiB"));
 }
 
 #[test]
@@ -320,7 +353,8 @@ allow_secrets = true
 
     let mcp_policy = mcp.policy_summary();
     assert_eq!(mcp_policy.tool_category, Some(ToolCategory::Mcp));
-    assert_eq!(mcp_policy.tool_access, Some(ToolAccess::Network));
+    assert_eq!(mcp_policy.tool_access, Some(ToolAccess::Execute));
+    assert_eq!(mcp_policy.network_effect, Some(NetworkEffect::Unknown));
     assert_eq!(mcp_policy.approval_default, Some(ApprovalMode::Allow));
     assert!(mcp_policy.execution_backend_required);
     assert!(!mcp_policy.egress_logging);
@@ -576,11 +610,21 @@ required = false
     let mcp = &report.registrations.mcp_servers[0];
     assert_eq!(mcp.plugin_id, "repo-review");
     assert_eq!(mcp.original_name, "repo-tools");
-    assert_eq!(mcp.server.name, "repo-review.repo-tools");
+    assert_eq!(mcp.server.name, "repo-tools");
     assert_eq!(mcp.server.startup, McpServerStartup::Lazy);
     assert_eq!(
-        report.registrations.mcp_server_configs()[0].name,
-        "repo-review.repo-tools"
+        mcp.plugin_root,
+        workspace
+            .path()
+            .join(".sigil/plugins/repo-review")
+            .canonicalize()
+            .expect("plugin root should canonicalize")
+    );
+    assert_eq!(
+        mcp.manifest_path,
+        manifest_path
+            .canonicalize()
+            .expect("manifest should canonicalize")
     );
 
     let merged = merge_plugin_skill_descriptors(
@@ -841,28 +885,7 @@ allow_secrets = true
 #[tokio::test]
 async fn plugin_hook_network_deny_without_proven_isolation_is_zero_execute() {
     let workspace = tempfile::tempdir().expect("workspace should create");
-    write_plugin_manifest(
-        workspace.path(),
-        "repo-review",
-        r#"id = "repo-review"
-name = "Repository Review"
-version = "0.1.0"
-
-[[hooks]]
-id = "context-pack"
-event = "context"
-kind = "context"
-command = "hook-runner"
-declared_effect = "read_only"
-"#,
-    );
-    let pending = discover_workspace_plugins(workspace.path(), &[])
-        .expect("initial discovery should succeed");
-    let trust =
-        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
-            .expect("trust should build");
-    let report = discover_workspace_plugins(workspace.path(), &[trust])
-        .expect("trusted discovery should succeed");
+    let registration = trusted_read_only_hook_registration(workspace.path());
     let backends = [
         RecordingExecutionBackend {
             backend_kind: ExecutionBackendKind::MacosSeatbelt,
@@ -893,11 +916,15 @@ declared_effect = "read_only"
         let requests = backend.requests.clone();
         let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
             Arc::new(backend),
-            ExecutionSandboxProfile::WorkspaceWrite,
-        );
+            ExecutionSandboxProfile::BuildNetworked,
+        )
+        .with_network_admission(ExtensionProcessNetworkAdmission::new(
+            NetworkPolicy::Deny,
+            false,
+        ));
         let error = runner
             .execute(PluginHookExecutionRequest::new(
-                report.registrations.hooks[0].clone(),
+                registration.clone(),
                 workspace.path().to_path_buf(),
             ))
             .await
@@ -911,6 +938,92 @@ declared_effect = "read_only"
         );
         assert!(requests.lock().expect("requests should lock").is_empty());
     }
+}
+
+#[tokio::test]
+async fn plugin_hook_network_ask_without_approval_is_zero_execute() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let registration = trusted_read_only_hook_registration(workspace.path());
+    let backend = RecordingExecutionBackend::default();
+    let requests = backend.requests.clone();
+    let runner = PluginHookExecutionRunner::new(Arc::new(backend)).with_network_admission(
+        ExtensionProcessNetworkAdmission::new(NetworkPolicy::Ask, false),
+    );
+
+    let error = runner
+        .execute(PluginHookExecutionRequest::new(
+            registration,
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect_err("network ask without explicit approval must fail before execute");
+
+    assert_eq!(
+        error
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkApprovalRequired)
+    );
+    assert!(requests.lock().expect("requests should lock").is_empty());
+}
+
+#[tokio::test]
+async fn plugin_hook_network_ask_with_approval_executes() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let registration = trusted_read_only_hook_registration(workspace.path());
+    let backend = RecordingExecutionBackend::default();
+    let requests = backend.requests.clone();
+    let runner = PluginHookExecutionRunner::new(Arc::new(backend)).with_network_admission(
+        ExtensionProcessNetworkAdmission::new(NetworkPolicy::Ask, true),
+    );
+
+    let outcome = runner
+        .execute(PluginHookExecutionRequest::new(
+            registration,
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect("explicit network approval should admit plugin hook execution");
+
+    assert_eq!(outcome.receipt.network, ExecutionNetworkReceipt::default());
+    assert_eq!(requests.lock().expect("requests should lock").len(), 1);
+}
+
+#[tokio::test]
+async fn plugin_hook_network_deny_with_proven_isolation_executes() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let registration = trusted_read_only_hook_registration(workspace.path());
+    let backend = RecordingExecutionBackend {
+        backend_kind: ExecutionBackendKind::LinuxBubblewrap,
+        capabilities: ExecutionBackendCapabilities {
+            filesystem_isolation: true,
+            process_isolation: true,
+            network_isolation: true,
+            ..ExecutionBackendCapabilities::default()
+        },
+        network: ExecutionNetworkReceipt::denied("test backend proves isolated process tree"),
+        ..RecordingExecutionBackend::default()
+    };
+    let requests = backend.requests.clone();
+    let runner = PluginHookExecutionRunner::new_with_sandbox_profile(
+        Arc::new(backend),
+        ExecutionSandboxProfile::BuildNetworked,
+    )
+    .with_network_admission(ExtensionProcessNetworkAdmission::new(
+        NetworkPolicy::Deny,
+        false,
+    ));
+
+    let outcome = runner
+        .execute(PluginHookExecutionRequest::new(
+            registration,
+            workspace.path().to_path_buf(),
+        ))
+        .await
+        .expect("denied receipt plus process-tree isolation should admit execution");
+
+    assert!(outcome.receipt.network.is_denied());
+    assert_eq!(requests.lock().expect("requests should lock").len(), 1);
 }
 
 #[tokio::test]
@@ -1642,7 +1755,7 @@ path = "agents/reviewer/agent.toml"
 }
 
 #[test]
-fn plugin_mcp_servers_remain_lifecycle_inputs_until_existing_registry_activation() -> Result<()> {
+fn plugin_mcp_servers_merge_into_origin_preserving_declarations() -> Result<()> {
     let workspace = tempfile::tempdir().expect("workspace should create");
     write_plugin_manifest(
         workspace.path(),
@@ -1666,64 +1779,92 @@ required = false
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted plugin discovery should succeed");
 
-    let merged_mcp = merge_plugin_mcp_servers(&[], &report.registrations.mcp_servers)?;
-    assert_eq!(merged_mcp[0].name, "repo-review.repo-tools");
+    let merged_mcp = merge_mcp_server_declarations(&[], &report.registrations.mcp_servers)?;
+    assert_eq!(merged_mcp[0].declared_name(), "repo-tools");
+    assert_eq!(merged_mcp[0].effective_name(), "repo-review.repo-tools");
+    assert!(matches!(
+        merged_mcp[0].origin(),
+        McpConfigOrigin::PluginManifest { plugin_id, .. } if plugin_id == "repo-review"
+    ));
+    assert!(matches!(
+        merged_mcp[0].execution_base(),
+        McpExecutionBase::PluginRoot(_)
+    ));
+    assert!(merged_mcp[0].plugin_attestation().is_some());
     let mut invalid_registration = report.registrations.mcp_servers[0].clone();
     invalid_registration.server.inherit_env = vec!["PLUGIN_TOKEN".to_owned()];
-    let error = merge_plugin_mcp_servers(&[], &[invalid_registration])
+    let error = merge_mcp_server_declarations(&[], &[invalid_registration])
         .expect_err("programmatic plugin environment grant should fail merge");
-    let diagnostic = error
-        .downcast_ref::<super::PluginMcpEnvironmentGrantNotSupported>()
-        .expect("merge error should preserve its typed diagnostic");
-    assert_eq!(
-        diagnostic.code(),
-        "plugin_mcp_environment_grant_not_supported"
-    );
-    assert_eq!(diagnostic.entry_index, 0);
-    assert_eq!(diagnostic.server_name.as_deref(), Some("repo-tools"));
-    let conflicting_base = vec![sigil_kernel::McpServerConfig {
-        name: "repo-review.repo-tools".to_owned(),
-        command: "existing".to_owned(),
-        ..sigil_kernel::McpServerConfig::default()
-    }];
+    assert_eq!(error.code(), "plugin_mcp_environment_grant_not_supported");
+    let conflicting_base = resolve_user_root_mcp_declarations(
+        &[sigil_kernel::McpServerConfig {
+            name: "repo-review.repo-tools".to_owned(),
+            command: "existing".to_owned(),
+            ..sigil_kernel::McpServerConfig::default()
+        }],
+        workspace.path(),
+    )?;
     let identity = "repo-review\0repo-tools";
     let hash = format!("{:x}", Sha256::digest(identity.as_bytes()));
-    let deeply_conflicting_base = vec![
-        conflicting_base[0].clone(),
-        sigil_kernel::McpServerConfig {
-            name: format!("repo-review.repo-tools.{}", &hash[..8]),
-            command: "existing-hash".to_owned(),
-            ..sigil_kernel::McpServerConfig::default()
-        },
-    ];
+    let deeply_conflicting_base = resolve_user_root_mcp_declarations(
+        &[
+            sigil_kernel::McpServerConfig {
+                name: "repo-review.repo-tools".to_owned(),
+                command: "existing".to_owned(),
+                ..sigil_kernel::McpServerConfig::default()
+            },
+            sigil_kernel::McpServerConfig {
+                name: format!("repo-review.repo-tools.{}", &hash[..8]),
+                command: "existing-hash".to_owned(),
+                ..sigil_kernel::McpServerConfig::default()
+            },
+        ],
+        workspace.path(),
+    )?;
     let conflict_merged =
-        merge_plugin_mcp_servers(&conflicting_base, &report.registrations.mcp_servers)?;
-    assert_eq!(conflict_merged[0].name, "repo-review.repo-tools");
+        merge_mcp_server_declarations(&conflicting_base, &report.registrations.mcp_servers)?;
+    assert_eq!(
+        conflict_merged[0].effective_name(),
+        "repo-review.repo-tools"
+    );
     assert!(
         conflict_merged[1]
-            .name
+            .effective_name()
             .starts_with("repo-review.repo-tools.")
     );
-    assert_ne!(conflict_merged[0].name, conflict_merged[1].name);
-    let deep_conflict_merged =
-        merge_plugin_mcp_servers(&deeply_conflicting_base, &report.registrations.mcp_servers)?;
-    assert!(deep_conflict_merged[2].name.ends_with(".1"));
-    let mut config = root_config();
-    config.mcp_servers = merged_mcp;
-    let registry = build_tool_registry_without_eager_mcp(
-        &config,
-        &provider_capabilities(),
-        workspace.path().to_path_buf(),
-        sigil_mcp::unsupported_mcp_elicitation_handler(),
-        sigil_mcp::unsupported_mcp_runtime_event_handler(),
-    )?;
-
-    assert!(registry.spec_for("mcp_activate_server").is_some());
-    assert!(
-        registry
-            .spec_for("mcp__repo_review_repo_tools__echo")
-            .is_none()
+    assert_ne!(
+        conflict_merged[0].effective_name(),
+        conflict_merged[1].effective_name()
     );
+    assert_eq!(conflict_merged[1].declared_name(), "repo-tools");
+    let deep_conflict_merged =
+        merge_mcp_server_declarations(&deeply_conflicting_base, &report.registrations.mcp_servers)?;
+    assert!(deep_conflict_merged[2].effective_name().ends_with(".1"));
+
+    let mut reserved = report.registrations.mcp_servers[0].clone();
+    reserved.original_name = "builtin:claimed".to_owned();
+    reserved.server.name = reserved.original_name.clone();
+    let error = merge_mcp_server_declarations(&[], &[reserved])
+        .expect_err("plugin cannot claim builtin namespace through namespacing");
+    assert_eq!(error.code(), "reserved_mcp_namespace");
+
+    let mut forged_plugin_id = report.registrations.mcp_servers[0].clone();
+    forged_plugin_id.plugin_id = "builtin:evil".to_owned();
+    let error = merge_mcp_server_declarations(&[], &[forged_plugin_id])
+        .expect_err("forged plugin id cannot create a builtin effective namespace");
+    assert_eq!(error.code(), "reserved_mcp_namespace");
+
+    let mut untrusted = report.registrations.mcp_servers[0].clone();
+    untrusted.trust = PluginTrustDecision::NeedsReview;
+    let error = merge_mcp_server_declarations(&[], &[untrusted])
+        .expect_err("programmatic merge cannot bypass current plugin trust");
+    assert_eq!(error.code(), "plugin_mcp_attestation_review_required");
+
+    let mut mismatched_name = report.registrations.mcp_servers[0].clone();
+    mismatched_name.server.name = "different-server".to_owned();
+    let error = merge_mcp_server_declarations(&[], &[mismatched_name])
+        .expect_err("registration source name must match the reviewed config");
+    assert_eq!(error.code(), "plugin_origin_attestation_mismatch");
     Ok(())
 }
 
@@ -2005,6 +2146,36 @@ fn workspace_mutation_events(
     Ok(events)
 }
 
+fn trusted_read_only_hook_registration(workspace: &Path) -> super::PluginHookRegistration {
+    write_plugin_manifest(
+        workspace,
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+id = "context-pack"
+event = "context"
+kind = "context"
+command = "hook-runner"
+declared_effect = "read_only"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace, &[])
+        .expect("initial plugin discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("plugin trust should build");
+    discover_workspace_plugins(workspace, &[trust])
+        .expect("trusted plugin discovery should succeed")
+        .registrations
+        .hooks
+        .into_iter()
+        .next()
+        .expect("trusted hook should register")
+}
+
 fn write_plugin_manifest(workspace: &Path, plugin_id: &str, manifest: &str) -> std::path::PathBuf {
     let path = workspace
         .join(".sigil/plugins")
@@ -2043,57 +2214,4 @@ fn write_file(path: &Path, content: &str) {
 fn expected_manifest_digest(path: &Path) -> String {
     let bytes = fs::read(path).expect("manifest should read");
     format!("sha256:{:x}", Sha256::digest(&bytes))
-}
-
-fn root_config() -> RootConfig {
-    RootConfig {
-        workspace: WorkspaceConfig {
-            root: ".".to_owned(),
-        },
-        storage: Default::default(),
-        session: SessionConfig {
-            log_dir: Some(".sigil/sessions".to_owned()),
-        },
-        agent: AgentConfig {
-            provider: "deepseek".to_owned(),
-            model: "deepseek-v4-flash".to_owned(),
-            max_turns: None,
-            tool_timeout_secs: 45,
-        },
-        permission: PermissionConfig::default(),
-        model_request: Default::default(),
-        memory: MemoryConfig::default(),
-        skills: SkillConfig::default(),
-        compaction: CompactionConfig::default(),
-        code_intelligence: CodeIntelligenceConfig::default(),
-        terminal: Default::default(),
-        execution: Default::default(),
-        verification: Default::default(),
-        appearance: Default::default(),
-        task: TaskConfig::default(),
-        providers: Default::default(),
-        mcp_servers: Vec::new(),
-    }
-}
-
-fn provider_capabilities() -> ProviderCapabilities {
-    ProviderCapabilities {
-        exact_prefix_cache: false,
-        reports_cache_tokens: false,
-        reasoning_stream: ReasoningStreamSupport::Native,
-        supports_reasoning_effort: true,
-        supports_tool_stream: true,
-        supports_background_tasks: false,
-        supports_response_handles: false,
-        supports_reasoning_artifacts: false,
-        supports_structured_output: false,
-        supports_assistant_prefix_seed: false,
-        supports_schema_constrained_tools: false,
-        supports_agent_background_resume: false,
-        supports_agent_thread_usage: false,
-        supports_agent_result_replay: false,
-        supports_infill_completion: false,
-        supports_system_fingerprint: false,
-        tool_name_max_chars: 64,
-    }
 }

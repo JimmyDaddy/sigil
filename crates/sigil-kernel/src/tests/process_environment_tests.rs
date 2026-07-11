@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn extension_process_network_approval_error_has_stable_label_and_constructor() {
+    let error =
+        ExtensionProcessLaunchError::network_approval_required("extension", "network approval");
+    assert_eq!(
+        error.code,
+        ExtensionProcessLaunchErrorCode::NetworkApprovalRequired
+    );
+    assert_eq!(error.code.as_str(), "network_approval_required");
+    assert_eq!(error.code.to_string(), "network_approval_required");
+    assert_eq!(error.subject, "extension");
+}
+
+#[test]
 fn extension_environment_baseline_names_are_a_stable_platform_snapshot() {
     #[cfg(not(windows))]
     let expected = vec![

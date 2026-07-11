@@ -12,7 +12,25 @@ pub(super) fn check_mcp_servers(
     }
 
     for server in servers {
-        let command_status = command_status(&server.command, workspace_root);
+        let declaration =
+            crate::ResolvedMcpServerDeclaration::user_root(server.clone(), workspace_root);
+        let projection = declaration
+            .as_ref()
+            .ok()
+            .map(crate::ResolvedMcpServerDeclaration::safe_projection);
+        let command_status =
+            match declaration
+                .as_ref()
+                .map_err(ToString::to_string)
+                .and_then(|declaration| {
+                    declaration
+                        .resolve_stdio_launch(&[])
+                        .map_err(|error| error.to_string())
+                }) {
+                Ok(_) => CommandStatus::Available,
+                Err(_) if server.command.trim().is_empty() => CommandStatus::Empty,
+                Err(_) => CommandStatus::Missing,
+            };
         let environment = sigil_kernel::resolve_extension_process_environment(&server.inherit_env);
         let status = if environment.is_err() {
             DoctorStatus::Error
@@ -50,10 +68,30 @@ pub(super) fn check_mcp_servers(
             status,
             format!("mcp:{}", server.name),
             format!(
-                "{} required={} command={} trust={} approval={} secrets={} pin={} environment=({}) boundary={}",
+                "{} required={} command={} declaration=(declared={} effective={} origin={} base={} fingerprint={}) facets=(local=execute declared_network=unknown effective_network=runtime_preflight source_trust={} source_approval={}) secrets={} pin={} environment=({}) network_admission=run_scoped boundary={}",
                 server.startup.as_str(),
                 server.required,
                 command_status.as_str(),
+                projection
+                    .as_ref()
+                    .map(|projection| projection.declared_name.as_str())
+                    .unwrap_or("invalid"),
+                projection
+                    .as_ref()
+                    .map(|projection| projection.effective_name.as_str())
+                    .unwrap_or("invalid"),
+                projection
+                    .as_ref()
+                    .map(|projection| projection.origin_kind.as_str())
+                    .unwrap_or("invalid"),
+                projection
+                    .as_ref()
+                    .map(|projection| projection.execution_base_kind.as_str())
+                    .unwrap_or("invalid"),
+                projection
+                    .as_ref()
+                    .map(|projection| projection.declaration_fingerprint.as_str())
+                    .unwrap_or("invalid"),
                 server.trust.trust_class.as_str(),
                 server.trust.approval_default.as_str(),
                 if server.trust.allow_secrets {
@@ -141,11 +179,14 @@ impl PluginHookDoctorSummary {
 
     fn message(&self) -> String {
         format!(
-            "hooks={} trusted={} review={} disabled={} kinds=context:{} compaction:{} verification:{} event:{} effects=read_only:{} workspace_write:{} external_write:{} network:{} unknown:{}",
+            "hooks={} trusted={} review={} disabled={} process_facets=local_execute:{} declared_network_unknown:{} effective_network_preflight:{} source_trust=manifest kinds=context:{} compaction:{} verification:{} event:{} declared_effects=read_only:{} workspace_write:{} external_write:{} network:{} unknown:{} network_admission=run_scoped",
             self.hooks,
             self.trusted,
             self.needs_review,
             self.disabled,
+            self.hooks,
+            self.hooks,
+            self.hooks,
             self.context,
             self.compaction,
             self.verification,
@@ -190,6 +231,66 @@ pub(super) fn check_plugin_hooks(
         );
     }
 
+    if !discovery.registrations.mcp_servers.is_empty() {
+        match crate::merge_mcp_server_declarations(&[], &discovery.registrations.mcp_servers) {
+            Ok(declarations) => {
+                let declaration_rows = declarations
+                    .iter()
+                    .map(|declaration| {
+                        let activation_status =
+                            if declaration.verify_activation(plugin_trust_entries).is_ok() {
+                                "attested"
+                            } else {
+                                "stale"
+                            };
+                        (declaration.safe_projection(), activation_status)
+                    })
+                    .collect::<Vec<_>>();
+                let stale = declaration_rows
+                    .iter()
+                    .filter(|(_, activation_status)| *activation_status == "stale")
+                    .count();
+                let projections = declaration_rows
+                    .into_iter()
+                    .map(|(projection, activation_status)| {
+                        format!(
+                            "{}/{}:{}/{}:{}",
+                            projection.declared_name,
+                            projection.effective_name,
+                            projection.origin_kind.as_str(),
+                            projection.execution_base_kind.as_str(),
+                            activation_status
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                report.push_with_remediation(
+                    if stale == 0 {
+                        DoctorStatus::Ok
+                    } else {
+                        DoctorStatus::Warn
+                    },
+                    "plugins:mcp",
+                    format!(
+                        "declarations={} stale={} safe=[{}] paths=hidden",
+                        declarations.len(),
+                        stale,
+                        projections
+                    ),
+                    (stale > 0).then_some(
+                        "review the changed plugin manifest before activating its MCP server",
+                    ),
+                );
+            }
+            Err(error) => report.push_with_remediation(
+                DoctorStatus::Warn,
+                "plugins:mcp",
+                format!("{}: {}", error.code(), error.reason),
+                Some("review plugin MCP declarations before activation"),
+            ),
+        }
+    }
+
     let mut summary = PluginHookDoctorSummary::default();
     for manifest in &discovery.manifests {
         for capability in &manifest.capabilities {
@@ -214,7 +315,7 @@ pub(super) fn check_plugin_hooks(
         Some("review plugin manifests in /config before hook commands can run")
     } else if summary.risky_effects() > 0 {
         Some(
-            "mutating, network or unknown-effect hooks require execution backend and mutation evidence",
+            "source trust, declared effects and secret access do not authorize network; hooks require run-scoped network admission, backend isolation and mutation evidence",
         )
     } else {
         None

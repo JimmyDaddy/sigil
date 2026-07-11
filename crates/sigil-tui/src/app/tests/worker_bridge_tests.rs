@@ -52,6 +52,50 @@ fn normal_input_creates_user_and_running_state() -> Result<()> {
 }
 
 #[test]
+fn sensitive_prompt_stays_exact_in_action_and_live_history_but_safe_on_tui_surfaces() -> Result<()>
+{
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let raw = "inspect https://example.com/private?signature=tui-secret exactly";
+    app.composer.input = raw.to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(action, Some(AppAction::SubmitPrompt(prompt)) if prompt == raw));
+    assert_eq!(app.composer.input_history, vec![raw.to_owned()]);
+    assert!(
+        app.timeline
+            .iter()
+            .all(|entry| !entry.text.contains("tui-secret"))
+    );
+    assert!(
+        app.events
+            .iter()
+            .all(|event| !event.detail.contains("tui-secret"))
+    );
+
+    app.handle_worker_message(WorkerMessage::ConversationQueueDispatchStarted {
+        queue_id: sigil_kernel::ConversationInputQueueId::new("queue_1")?,
+        prompt: raw.to_owned(),
+    })?;
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: "task_1".to_owned(),
+        objective: raw.to_owned(),
+    })?;
+
+    assert!(
+        app.timeline
+            .iter()
+            .all(|entry| !entry.text.contains("tui-secret"))
+    );
+    assert!(
+        app.events
+            .iter()
+            .all(|event| !event.detail.contains("tui-secret"))
+    );
+    Ok(())
+}
+
+#[test]
 fn run_notice_filters_status_noise_but_keeps_errors() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -490,6 +534,9 @@ fn automatic_compaction_message_resets_status_and_emits_notice() -> Result<()> {
             compacted_message_count: 3,
             retained_tail_message_count: 2,
             task_memory: None,
+            external_trust: None,
+            external_provenance_message_ids: Vec::new(),
+            external_source_ids: Vec::new(),
         }),
         trigger: CompactionTrigger::AutomaticHardThreshold,
         entries: Vec::new(),
@@ -985,6 +1032,9 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             compacted_message_count: 2,
             retained_tail_message_count: 1,
             task_memory: None,
+            external_trust: None,
+            external_provenance_message_ids: Vec::new(),
+            external_source_ids: Vec::new(),
         }),
         trigger: CompactionTrigger::Manual,
         entries,
@@ -1144,9 +1194,14 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             input_schema: json!({"type": "object"}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),
@@ -1603,9 +1658,14 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
                 input_schema: json!({"type":"object"}),
                 category: ToolCategory::File,
                 access: ToolAccess::Write,
+                network_effect: None,
                 preview: ToolPreviewCapability::Required,
             },
             subjects: Vec::new(),
+            network_effect: None,
+            local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+            network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+            source_policy_decision: sigil_kernel::ApprovalMode::Allow,
             operation: sigil_kernel::ToolOperation::OverwriteFile,
             risk: sigil_kernel::PermissionRisk::Medium,
             subject_zones: Vec::new(),
@@ -1761,9 +1821,14 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Agent,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::SpawnAgent,
         risk: sigil_kernel::PermissionRisk::High,
         subject_zones: Vec::new(),
@@ -2739,6 +2804,9 @@ fn manual_compaction_restores_session_view_and_notice() -> Result<()> {
             compacted_message_count: 2,
             retained_tail_message_count: 1,
             task_memory: None,
+            external_trust: None,
+            external_provenance_message_ids: Vec::new(),
+            external_source_ids: Vec::new(),
         }),
         trigger: CompactionTrigger::Manual,
         entries: entries.clone(),

@@ -6,6 +6,14 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
         config_state,
         ConfigField::PermissionMode,
     ));
+    lines.push(render_config_readonly_row(
+        "Local boundary",
+        "read-only blocks local write + execute",
+    ));
+    lines.push(render_config_readonly_row(
+        "Network boundary",
+        "independent policy; deny/ask cannot be widened",
+    ));
     lines.push(String::new());
     lines.push("[workspace]".to_owned());
     lines.extend(verification::render_trust_summary(app, config_state));

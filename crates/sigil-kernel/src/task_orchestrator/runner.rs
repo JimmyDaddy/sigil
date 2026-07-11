@@ -484,7 +484,15 @@ where
                 task_id: request.task_id.clone(),
                 plan_version,
                 status: TaskPlanStatus::Accepted,
-                steps: vec![step.clone()],
+                steps: vec![TaskStepSpec {
+                    title: crate::safe_persistence_text(&step.title),
+                    display_name: step
+                        .display_name
+                        .as_deref()
+                        .map(crate::safe_persistence_text),
+                    detail: step.detail.as_deref().map(crate::safe_persistence_text),
+                    ..step.clone()
+                }],
                 reason: Some("direct child session invocation".to_owned()),
             }),
         )?;

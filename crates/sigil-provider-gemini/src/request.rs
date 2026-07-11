@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
-use sigil_kernel::{CompletionRequest, MessageRole, ModelMessage, ToolCall, ToolSpec};
+use sigil_kernel::{CompletionRequest, MessageRole, ModelMessage, ToolCall};
 
 use crate::{
+    hosted_search::{gemini_hosted_custom_tools_supported, hosted_invocation},
     mapper::GEMINI_THOUGHT_SIGNATURE_STATE_KIND,
     models::{GeminiGenerateContentRequest, GeminiGenerationConfig},
 };
@@ -41,7 +42,7 @@ pub fn build_generate_content_request(
 
     Ok(GeminiGenerateContentRequest {
         contents,
-        tools: gemini_tools(&request.tools),
+        tools: gemini_tools(request)?,
         system_instruction: (!system_parts.is_empty()).then(|| {
             json!({
                 "role": "system",
@@ -124,12 +125,21 @@ fn tool_result_message_to_content(
     }))
 }
 
-fn gemini_tools(tools: &[ToolSpec]) -> Option<Vec<Value>> {
-    if tools.is_empty() {
-        return None;
+fn gemini_tools(request: &CompletionRequest) -> Result<Option<Vec<Value>>> {
+    let hosted = hosted_invocation(&request.hosted_tools)?;
+    if hosted.is_some()
+        && !request.tools.is_empty()
+        && !gemini_hosted_custom_tools_supported(&request.model_name)
+    {
+        return Err(anyhow!(
+            "Gemini model does not support combining hosted search with local function declarations"
+        ));
     }
-    Some(vec![json!({
-        "functionDeclarations": tools
+
+    let mut tools = Vec::new();
+    if !request.tools.is_empty() {
+        tools.push(json!({
+        "functionDeclarations": request.tools
             .iter()
             .map(|tool| {
                 json!({
@@ -139,7 +149,12 @@ fn gemini_tools(tools: &[ToolSpec]) -> Option<Vec<Value>> {
                 })
             })
             .collect::<Vec<_>>(),
-    })])
+        }));
+    }
+    if hosted.is_some() {
+        tools.push(json!({"google_search": {}}));
+    }
+    Ok((!tools.is_empty()).then_some(tools))
 }
 
 fn generation_config(request: &CompletionRequest) -> Option<GeminiGenerationConfig> {

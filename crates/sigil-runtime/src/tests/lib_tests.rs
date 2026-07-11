@@ -15,14 +15,15 @@ use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ControlEntry,
-    ExecutionBackendKind, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    ExecutionSandboxStrategyConfig, InteractionMode, JsonlSessionStore, LanguageServerConfig,
-    McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ProviderCapabilities,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
+    ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
+    InteractionMode, JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup,
+    McpServerTrustPolicy, MemoryConfig, NetworkEffect, PermissionConfig, ProviderCapabilities,
     ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionConfig,
     SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool,
     ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolLifecycleOwner,
     ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubjectKind, WorkspaceConfig,
+    ToolSubjectKind, WorkspaceConfig, WorkspaceTrust,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -30,13 +31,16 @@ use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 
 use super::{
-    McpProcessLaunchRequest, McpProcessLauncher, SecretSource, activate_lazy_mcp_tools,
-    activate_lazy_mcp_tools_detailed, build_plan_prompt_tool_registry, build_provider,
-    build_role_provider, build_role_run_options, build_role_skill_tool_registry,
+    ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher, SecretSource,
+    activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_plan_prompt_tool_registry,
+    build_provider, build_role_provider, build_role_run_options, build_role_skill_tool_registry,
     build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
-    build_tool_registry_without_eager_mcp, load_anthropic_config, load_deepseek_config,
-    load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
-    provider_capability_view, refresh_mcp_server_tools_with_mcp_handlers,
+    build_tool_registry_without_eager_mcp,
+    build_tool_registry_without_eager_mcp_with_workspace_trust, launch_planned_mcp_process,
+    load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
+    provider_capabilities_for_name, provider_capability_view,
+    refresh_mcp_server_tools_with_mcp_handlers,
+    refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
     register_lazy_mcp_activation_tool, resolve_anthropic_api_key, resolve_deepseek_api_key,
     resolve_deepseek_api_key_with_session, resolve_gemini_api_key,
     resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
@@ -203,7 +207,8 @@ impl Tool for ExistingMcpTool {
             description: "already registered MCP tool".to_owned(),
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Mcp,
-            access: ToolAccess::Network,
+            access: ToolAccess::Read,
+            network_effect: Some(NetworkEffect::Unknown),
             preview: ToolPreviewCapability::None,
         }
     }
@@ -247,7 +252,8 @@ impl Tool for CountingShutdownTool {
             description: "counting cleanup fixture".to_owned(),
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Mcp,
-            access: ToolAccess::Network,
+            access: ToolAccess::Read,
+            network_effect: Some(NetworkEffect::Unknown),
             preview: ToolPreviewCapability::None,
         }
     }
@@ -284,7 +290,8 @@ impl Tool for ShutdownFailingMcpTool {
             description: "MCP tool with injected retirement failure".to_owned(),
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Mcp,
-            access: ToolAccess::Network,
+            access: ToolAccess::Read,
+            network_effect: Some(NetworkEffect::Unknown),
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1081,6 +1088,8 @@ async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Resu
         launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::default(),
+        declaration: None,
     })?;
 
     assert_eq!(
@@ -1100,6 +1109,212 @@ async fn configured_mcp_process_launcher_local_records_outside_sandbox() -> Resu
 
 #[cfg(unix)]
 #[tokio::test]
+async fn configured_mcp_process_launcher_network_ask_without_evidence_is_zero_spawn() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("configured-ask-rejected-spawned");
+    let launcher = super::ConfiguredMcpProcessLauncher {
+        execution: sigil_kernel::ExecutionConfig::default(),
+    };
+    let result = launcher.launch(McpProcessLaunchRequest {
+        server_name: "configured-ask-rejected".to_owned(),
+        command: "sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            "printf spawned > \"$1\"".to_owned(),
+            "sh".to_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+        working_dir: Some(temp.path().to_path_buf()),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:configured-ask-rejected".to_owned(),
+        startup_timeout_secs: 1,
+        classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::new(
+            sigil_kernel::NetworkPolicy::Ask,
+            false,
+        ),
+        declaration: None,
+    });
+
+    let Err(error) = result else {
+        panic!("ask without explicit evidence must fail before configured spawn");
+    };
+    assert_eq!(
+        error
+            .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+            .map(|error| error.code),
+        Some(sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkApprovalRequired)
+    );
+    assert!(
+        !marker.exists(),
+        "configured ask rejection must be zero-spawn"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn configured_mcp_process_launcher_network_ask_with_evidence_spawns() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("configured-ask-approved-spawned");
+    let launcher = super::ConfiguredMcpProcessLauncher {
+        execution: sigil_kernel::ExecutionConfig::default(),
+    };
+    let mut launch = launcher.launch(McpProcessLaunchRequest {
+        server_name: "configured-ask-approved".to_owned(),
+        command: "sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            "printf spawned > \"$1\"".to_owned(),
+            "sh".to_owned(),
+            marker.to_string_lossy().into_owned(),
+        ],
+        working_dir: Some(temp.path().to_path_buf()),
+        environment: sigil_kernel::resolve_extension_process_environment(&[])?,
+        launch_static_fingerprint: "sha256:configured-ask-approved".to_owned(),
+        startup_timeout_secs: 1,
+        classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::new(
+            sigil_kernel::NetworkPolicy::Ask,
+            true,
+        ),
+        declaration: None,
+    })?;
+
+    assert!(launch.child.wait().await?.success());
+    assert!(
+        marker.exists(),
+        "explicit evidence should admit configured spawn"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    for (label, admission, expected_code) in [
+        (
+            "ask",
+            ExtensionProcessNetworkAdmission::new(sigil_kernel::NetworkPolicy::Ask, false),
+            sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkApprovalRequired,
+        ),
+        (
+            "deny",
+            ExtensionProcessNetworkAdmission::new(sigil_kernel::NetworkPolicy::Deny, true),
+            sigil_kernel::ExtensionProcessLaunchErrorCode::NetworkIsolationUnavailable,
+        ),
+    ] {
+        let marker = temp.path().join(format!("refresh-{label}-spawned"));
+        let mut config = test_root_config("deepseek");
+        config.mcp_servers.push(McpServerConfig {
+            name: format!("refresh-{label}"),
+            command: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "printf spawned > \"$1\"".to_owned(),
+                "sh".to_owned(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            required: true,
+            trust: McpServerTrustPolicy {
+                approval_default: ApprovalMode::Allow,
+                allow_secrets: true,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        });
+        let mut registry = ToolRegistry::new();
+        let error =
+            refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
+                &mut registry,
+                &config,
+                &provider.capabilities(),
+                temp.path().to_path_buf(),
+                &format!("refresh-{label}"),
+                sigil_mcp::unsupported_mcp_elicitation_handler(),
+                sigil_mcp::unsupported_mcp_runtime_event_handler(),
+                None,
+                admission,
+            )
+            .await
+            .expect_err("network admission must reject before MCP refresh spawn");
+
+        assert_eq!(
+            error
+                .downcast_ref::<sigil_kernel::ExtensionProcessLaunchError>()
+                .map(|error| error.code),
+            Some(expected_code)
+        );
+        assert!(
+            !marker.exists(),
+            "{label} rejection must not be authorized by source defaults or secret policy"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn planned_mcp_process_network_deny_with_proof_returns_denied_receipt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
+    let capabilities = ExecutionBackendCapabilities {
+        filesystem_isolation: true,
+        network_isolation: true,
+        process_isolation: true,
+        ..ExecutionBackendCapabilities::default()
+    };
+    let plan = sigil_tools_builtin::LongLivedStdioProcessPlan {
+        program: "sh".into(),
+        args: vec![OsString::from("-c"), OsString::from("true")],
+        cwd: temp.path().canonicalize()?,
+        environment: environment.clone(),
+        backend: ExecutionBackendKind::LinuxBubblewrap,
+        backend_capabilities: capabilities,
+        sandbox_profile: ExecutionSandboxProfile::BuildNetworked,
+        network: ExecutionNetworkReceipt::denied(
+            "deterministic test plan proves isolated process tree",
+        ),
+        sandboxed: true,
+    };
+    let mut launch = launch_planned_mcp_process(
+        McpProcessLaunchRequest {
+            server_name: "configured-deny-proven".to_owned(),
+            command: "sh".to_owned(),
+            args: vec!["-c".to_owned(), "true".to_owned()],
+            working_dir: Some(temp.path().to_path_buf()),
+            environment,
+            launch_static_fingerprint: "sha256:configured-deny-proven".to_owned(),
+            startup_timeout_secs: 1,
+            classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+            network_admission: ExtensionProcessNetworkAdmission::new(
+                sigil_kernel::NetworkPolicy::Deny,
+                false,
+            ),
+            declaration: None,
+        },
+        plan,
+    )?;
+
+    assert!(launch.receipt.network.is_denied());
+    let receipt_capabilities = launch
+        .receipt
+        .backend_capabilities
+        .expect("configured launcher should report backend capabilities");
+    assert_eq!(receipt_capabilities, capabilities);
+    assert_eq!(
+        launch.receipt.classification,
+        sigil_mcp::McpProcessClass::LocalStdioSandboxed
+    );
+    assert!(launch.child.wait().await?.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn configured_mcp_process_launcher_creates_killable_process_group() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let launcher = super::ConfiguredMcpProcessLauncher {
@@ -1114,6 +1329,8 @@ async fn configured_mcp_process_launcher_creates_killable_process_group() -> Res
         launch_static_fingerprint: "sha256:test-process-group".to_owned(),
         startup_timeout_secs: 1,
         classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::default(),
+        declaration: None,
     })?;
     let mut child = launch.child;
     let process_id = child.id().expect("configured MCP child should have a pid");
@@ -1156,6 +1373,8 @@ fn configured_mcp_process_launcher_local_required_sandbox_fails_closed() {
         launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::default(),
+        declaration: None,
     });
 
     let Err(error) = result else {
@@ -1203,6 +1422,8 @@ async fn configured_mcp_process_launcher_macos_seatbelt_conformance_denies_exter
         launch_static_fingerprint: "sha256:test-launch".to_owned(),
         startup_timeout_secs: 1,
         classification: sigil_mcp::McpProcessClass::LocalStdioConfigured,
+        network_admission: ExtensionProcessNetworkAdmission::default(),
+        declaration: None,
     })?;
 
     assert_eq!(
@@ -1336,6 +1557,67 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
 
     assert!(registry.spec_for("code_symbols").is_some());
     assert!(registry.spec_for("code_diagnostics").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_workspace_trust_reaches_code_intelligence_services() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='runtime-trust-test'\nversion='0.1.0'\n",
+    )?;
+    std::fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n")?;
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.code_intelligence = CodeIntelligenceConfig {
+        enabled: true,
+        server_startup: CodeIntelStartup::Lazy,
+        servers: vec![LanguageServerConfig {
+            name: "rust-analyzer".to_owned(),
+            languages: vec!["rust".to_owned()],
+            command: "/definitely/missing/rust-analyzer".to_owned(),
+            args: Vec::new(),
+            env: Default::default(),
+            root_markers: vec!["Cargo.toml".to_owned()],
+            file_extensions: vec!["rs".to_owned()],
+            initialization_options: serde_json::Value::Null,
+            trust_required: true,
+            startup_timeout_ms: 100,
+        }],
+        ..CodeIntelligenceConfig::default()
+    };
+
+    let registry = build_tool_registry_without_eager_mcp_with_workspace_trust(
+        &config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        WorkspaceTrust::Denied,
+    )?;
+    let result = registry
+        .execute(
+            ToolContext::new(temp.path().to_path_buf(), 5),
+            ToolCall {
+                id: "runtime-denied-code-symbols".to_owned(),
+                name: "code_symbols".to_owned(),
+                args_json: json!({ "path": "lib.rs", "query": "hello" }).to_string(),
+            },
+        )
+        .await?;
+
+    assert!(!result.is_error());
+    let content: serde_json::Value = serde_json::from_str(&result.content)?;
+    assert_eq!(content["server"], "tree-sitter-rust");
+    assert!(content["servers"].as_array().is_some_and(|servers| {
+        servers.iter().any(|server| {
+            server["server"] == "rust-analyzer"
+                && server["status"]
+                    .as_str()
+                    .is_some_and(|status| status.contains("workspace trust is required"))
+        })
+    }));
     Ok(())
 }
 
@@ -2004,7 +2286,12 @@ async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -
     .await
     .expect_err("missing required server should fail refresh");
 
-    assert!(error.to_string().contains("failed to spawn MCP server"));
+    assert!(error.to_string().contains("mcp_command_resolution_failed"));
+    assert!(
+        error
+            .to_string()
+            .contains("stdio command does not resolve to an existing file")
+    );
     assert!(registry.spec_for("mcp__lazy__echo").is_some());
     Ok(())
 }
@@ -2238,7 +2525,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     let mut config = test_root_config("deepseek");
     config.mcp_servers.push(McpServerConfig {
         name: "lazy".to_owned(),
-        command: "/definitely/missing/sigil-mcp-server".to_owned(),
+        command: std::env::current_exe()?.display().to_string(),
         startup: McpServerStartup::Lazy,
         ..McpServerConfig::default()
     });
@@ -2256,8 +2543,23 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
         .spec_for("mcp_activate_server")
         .expect("activation tool should register");
     assert_eq!(spec.category, ToolCategory::Mcp);
-    assert_eq!(spec.access, ToolAccess::Network);
+    assert_eq!(spec.access, ToolAccess::Execute);
+    assert_eq!(spec.network_effect, Some(NetworkEffect::Unknown));
     assert_eq!(spec.preview, ToolPreviewCapability::None);
+    let activation_call = ToolCall {
+        id: "activate-permission-contract".to_owned(),
+        name: "mcp_activate_server".to_owned(),
+        args_json: json!({"server_name": "lazy"}).to_string(),
+    };
+    let activation_context = ToolContext::new(std::env::current_dir()?, 5);
+    assert_eq!(
+        registry.permission_operation(&activation_context, &activation_call)?,
+        sigil_kernel::ToolOperation::NetworkRequest
+    );
+    assert_eq!(
+        registry.permission_network_effect(&activation_context, &activation_call)?,
+        Some(NetworkEffect::Unknown)
+    );
 
     let missing_name = registry.permission_subjects(
         &ToolContext::new(std::env::current_dir()?, 5),

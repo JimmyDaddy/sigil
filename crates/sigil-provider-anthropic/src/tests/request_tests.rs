@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use sigil_kernel::{
-    CompletionRequest, MessageRole, ModelMessage, ToolAccess, ToolCall, ToolCategory,
-    ToolPreviewCapability, ToolSpec,
+    CompletionRequest, HostedToolKind, HostedToolLimits, HostedToolRequest, MessageRole,
+    ModelMessage, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
 use super::*;
@@ -23,6 +23,7 @@ fn completion_request(messages: Vec<ModelMessage>) -> CompletionRequest {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }],
         temperature: Some(0.2),
@@ -34,6 +35,7 @@ fn completion_request(messages: Vec<ModelMessage>) -> CompletionRequest {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     }
 }
 
@@ -169,5 +171,88 @@ fn build_messages_request_honors_explicit_max_tokens() -> anyhow::Result<()> {
 
     assert_eq!(body.max_tokens, 77);
     assert_eq!(serde_json::to_value(&body)?["max_tokens"], Value::from(77));
+    Ok(())
+}
+
+#[test]
+fn build_messages_request_maps_basic_hosted_search_limits_before_client_tools() -> anyhow::Result<()>
+{
+    let mut request = completion_request(vec![ModelMessage::user("search")]);
+    request.hosted_tools = vec![HostedToolRequest::new(
+        "authorization-1",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            max_uses: Some(3),
+            allowed_domains: vec!["docs.example.com/reference".to_owned()],
+            blocked_domains: Vec::new(),
+        },
+    )?];
+
+    let body = build_messages_request(&request, 1024)?;
+    let tools = body.tools.expect("hosted and client tools should render");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["type"], "web_search_20250305");
+    assert_eq!(tools[0]["name"], "web_search");
+    assert_eq!(tools[0]["max_uses"], 3);
+    assert_eq!(tools[0]["allowed_domains"][0], "docs.example.com/reference");
+    assert!(tools[0].get("blocked_domains").is_none());
+    assert_eq!(tools[1]["name"], "read_file");
+    Ok(())
+}
+
+#[test]
+fn build_messages_request_replays_live_exact_blocks_and_rematerializes_safely_after_restart()
+-> anyhow::Result<()> {
+    let store = crate::hosted_search::AnthropicHostedContinuationStore::default();
+    let raw_blocks = vec![
+        json!({
+            "type": "server_tool_use",
+            "id": "srvtoolu_1",
+            "name": "web_search",
+            "input": {"query": "private query"}
+        }),
+        json!({
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_1",
+            "content": [{
+                "type": "web_search_result",
+                "url": "https://example.com/?token=secret",
+                "title": "private title",
+                "encrypted_content": "encrypted-content"
+            }]
+        }),
+    ];
+    let mut state = store.retain_blocks(raw_blocks.clone(), "pause_turn")?;
+    let mut assistant = ModelMessage::assistant(Some("safe answer".to_owned()), Vec::new());
+    assistant.id = "assistant-1".to_owned();
+    state.message_id = Some(assistant.id.clone());
+    let mut request = completion_request(vec![ModelMessage::user("search"), assistant]);
+    request.continuation_states = vec![state.clone()];
+    request.hosted_tools = vec![HostedToolRequest::new(
+        "authorization-1",
+        HostedToolKind::WebSearch,
+        HostedToolLimits::default(),
+    )?];
+
+    let live = build_messages_request_with_continuations(&request, 1024, &store)?;
+    assert_eq!(live.body.messages[1]["content"], Value::Array(raw_blocks));
+    assert_eq!(
+        live.prior_hosted_invocations.get("srvtoolu_1"),
+        Some(&"authorization-1".to_owned())
+    );
+
+    let restarted = build_messages_request_with_continuations(
+        &request,
+        1024,
+        &crate::hosted_search::AnthropicHostedContinuationStore::default(),
+    )?;
+    assert_eq!(
+        restarted.body.messages[1]["content"][0]["text"],
+        "safe answer"
+    );
+    let restarted_wire = serde_json::to_string(&restarted.body)?;
+    for secret in ["private query", "token=secret", "encrypted-content"] {
+        assert!(!restarted_wire.contains(secret));
+    }
     Ok(())
 }

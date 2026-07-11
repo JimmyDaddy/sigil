@@ -28,9 +28,9 @@ where
         ControlEntry::TaskRun(TaskRunEntry {
             task_id: request.task_id.clone(),
             parent_session_ref: request.parent_session_ref.clone(),
-            objective: request.objective.clone(),
+            objective: crate::safe_persistence_text(&request.objective),
             status,
-            reason,
+            reason: reason.as_deref().map(crate::safe_persistence_text),
         }),
     )
 }
@@ -57,9 +57,9 @@ where
             step_id: step.step_id.clone(),
             role: step.role,
             status,
-            title: Some(step.title.clone()),
-            summary,
-            reason,
+            title: Some(crate::safe_persistence_text(&step.title)),
+            summary: summary.as_deref().map(crate::safe_persistence_text),
+            reason: reason.as_deref().map(crate::safe_persistence_text),
         }),
     )
 }

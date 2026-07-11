@@ -1,8 +1,15 @@
 use super::*;
 
+const MAX_EXACT_CONVERSATION_PROMPTS: usize = 128;
+const EXACT_PROMPT_REQUIRED_HASH_PREFIX: &str = "exact-required:";
+
+pub(in crate::runner) type ExactConversationPromptStore =
+    BTreeMap<ConversationInputQueueId, SecretString>;
+
 pub(in crate::runner) fn queue_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    exact_prompts: &mut ExactConversationPromptStore,
     prompt: String,
     kind: ConversationInputKind,
     target: ConversationInputTarget,
@@ -12,12 +19,23 @@ pub(in crate::runner) fn queue_conversation_input(
         .as_ref()
         .map(|session| session.entries().to_vec())
         .unwrap_or_else(|| JsonlSessionStore::read_entries(session_log_path).unwrap_or_default());
+    let active_queue_count = ConversationQueueProjection::from_entries(&entries)
+        .items
+        .len();
+    if active_queue_count >= MAX_EXACT_CONVERSATION_PROMPTS
+        || exact_prompts.len() >= MAX_EXACT_CONVERSATION_PROMPTS
+    {
+        return Err("conversation input queue capacity is exhausted".to_owned());
+    }
+    let queue_id = next_conversation_queue_id(&entries)?;
+    let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+    let prompt_hash = durable_conversation_prompt_hash(&prompt, &safe_prompt);
     let entry = ConversationInputQueuedEntry {
-        queue_id: next_conversation_queue_id(&entries)?,
+        queue_id: queue_id.clone(),
         target,
         kind,
-        prompt_hash: conversation_prompt_hash(&prompt),
-        prompt,
+        prompt_hash,
+        prompt: safe_prompt,
         reasoning_effort: Some(reasoning_effort),
         created_at_ms: Some(current_unix_time_ms()),
     };
@@ -26,6 +44,7 @@ pub(in crate::runner) fn queue_conversation_input(
         session
             .append_control(control)
             .map_err(|error| format!("failed to append follow-up: {error:#}"))?;
+        exact_prompts.insert(queue_id, SecretString::new(prompt));
         Ok(session.entries().to_vec())
     } else {
         let store = JsonlSessionStore::new(session_log_path.to_path_buf())
@@ -33,6 +52,7 @@ pub(in crate::runner) fn queue_conversation_input(
         store
             .append(&SessionLogEntry::Control(control))
             .map_err(|error| format!("failed to persist follow-up: {error:#}"))?;
+        exact_prompts.insert(queue_id, SecretString::new(prompt));
         JsonlSessionStore::read_entries(session_log_path)
             .map_err(|error| format!("failed to reload follow-up: {error:#}"))
     }
@@ -41,26 +61,30 @@ pub(in crate::runner) fn queue_conversation_input(
 pub(in crate::runner) fn cancel_queued_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    exact_prompts: &mut ExactConversationPromptStore,
     queue_id: ConversationInputQueueId,
 ) -> std::result::Result<Vec<SessionLogEntry>, String> {
     ensure_queued_conversation_item_is_mutable(session_log_path, current_session, &queue_id)?;
-    append_conversation_queue_control_entries(
+    let entries = append_conversation_queue_control_entries(
         session_log_path,
         current_session,
         vec![ControlEntry::ConversationInputStatusChanged(
             ConversationInputStatusEntry {
-                queue_id,
+                queue_id: queue_id.clone(),
                 status: ConversationInputStatus::Cancelled,
                 reason: Some("cancelled by user".to_owned()),
                 updated_at_ms: Some(current_unix_time_ms()),
             },
         )],
-    )
+    )?;
+    exact_prompts.remove(&queue_id);
+    Ok(entries)
 }
 
 pub(in crate::runner) fn edit_queued_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    exact_prompts: &mut ExactConversationPromptStore,
     queue_id: ConversationInputQueueId,
     prompt: String,
     reasoning_effort: ReasoningEffort,
@@ -69,19 +93,23 @@ pub(in crate::runner) fn edit_queued_conversation_input(
         return Err("follow-up prompt cannot be empty".to_owned());
     }
     ensure_queued_conversation_item_is_mutable(session_log_path, current_session, &queue_id)?;
-    append_conversation_queue_control_entries(
+    let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+    let prompt_hash = durable_conversation_prompt_hash(&prompt, &safe_prompt);
+    let entries = append_conversation_queue_control_entries(
         session_log_path,
         current_session,
         vec![ControlEntry::ConversationInputEdited(
             ConversationInputEditedEntry {
-                queue_id,
-                prompt_hash: conversation_prompt_hash(&prompt),
-                prompt,
+                queue_id: queue_id.clone(),
+                prompt_hash,
+                prompt: safe_prompt,
                 reasoning_effort: Some(reasoning_effort),
                 updated_at_ms: Some(current_unix_time_ms()),
             },
         )],
-    )
+    )?;
+    exact_prompts.insert(queue_id, SecretString::new(prompt));
+    Ok(entries)
 }
 
 pub(in crate::runner) fn move_queued_conversation_input(
@@ -311,6 +339,15 @@ pub(in crate::runner) fn conversation_prompt_hash(prompt: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn durable_conversation_prompt_hash(raw_prompt: &str, safe_prompt: &str) -> String {
+    let safe_hash = conversation_prompt_hash(safe_prompt);
+    if raw_prompt == safe_prompt {
+        format!("safe:{safe_hash}")
+    } else {
+        format!("{EXACT_PROMPT_REQUIRED_HASH_PREFIX}{safe_hash}")
+    }
+}
+
 pub(in crate::runner) fn queue_status_label(status: ConversationInputStatus) -> &'static str {
     match status {
         ConversationInputStatus::Queued => "queued",
@@ -337,25 +374,38 @@ pub(in crate::runner) fn send_conversation_queue_update(
 
 pub(in crate::runner) fn mark_stale_dispatching_conversation_queue_items(
     session: &mut Session,
+    exact_prompts: &ExactConversationPromptStore,
     message_tx: &mpsc::Sender<WorkerMessage>,
 ) {
-    let dispatching_queue_ids = session
+    let stale_queue_items = session
         .conversation_queue_projection()
         .items
         .into_iter()
-        .filter(|item| item.status == ConversationInputStatus::Dispatching)
-        .map(|item| item.queued.queue_id)
+        .filter_map(|item| {
+            let missing_exact = item.status == ConversationInputStatus::Queued
+                && item
+                    .queued
+                    .prompt_hash
+                    .starts_with(EXACT_PROMPT_REQUIRED_HASH_PREFIX)
+                && !exact_prompts.contains_key(&item.queued.queue_id);
+            (item.status == ConversationInputStatus::Dispatching || missing_exact)
+                .then_some((item.queued.queue_id, missing_exact))
+        })
         .collect::<Vec<_>>();
-    if dispatching_queue_ids.is_empty() {
+    if stale_queue_items.is_empty() {
         return;
     }
 
     let mut changed = false;
-    for queue_id in dispatching_queue_ids {
+    for (queue_id, missing_exact) in stale_queue_items {
         let status = ConversationInputStatusEntry {
             queue_id,
             status: ConversationInputStatus::Stale,
-            reason: Some("stale after session restore without active run".to_owned()),
+            reason: Some(if missing_exact {
+                "exact sensitive follow-up was lost after restart".to_owned()
+            } else {
+                "stale after session restore without active run".to_owned()
+            }),
             updated_at_ms: Some(current_unix_time_ms()),
         };
         if let Err(error) =
@@ -435,16 +485,40 @@ pub(in crate::runner) fn append_queue_failure_and_pause_and_notify(
 
 pub(in crate::runner) fn mark_next_conversation_queue_item_dispatching(
     current_session: &mut Option<Session>,
+    exact_prompts: &mut ExactConversationPromptStore,
     message_tx: &mpsc::Sender<WorkerMessage>,
 ) -> Option<ConversationInputQueuedEntry> {
     let session = current_session.as_mut()?;
     let projection = session.conversation_queue_projection();
     let queue_id = projection.next_dispatchable?;
-    let queued = projection
+    let mut queued = projection
         .items
         .iter()
         .find(|item| item.queued.queue_id == queue_id)
         .map(|item| item.queued.clone())?;
+    if let Some(exact_prompt) = exact_prompts.remove(&queue_id) {
+        queued.prompt = exact_prompt.expose_secret().to_owned();
+    } else if queued
+        .prompt_hash
+        .starts_with(EXACT_PROMPT_REQUIRED_HASH_PREFIX)
+    {
+        let status = ConversationInputStatusEntry {
+            queue_id,
+            status: ConversationInputStatus::Stale,
+            reason: Some("exact sensitive follow-up was lost after restart".to_owned()),
+            updated_at_ms: Some(current_unix_time_ms()),
+        };
+        if let Err(error) =
+            session.append_control(ControlEntry::ConversationInputStatusChanged(status))
+        {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "conversation queue stale transition failed: {error:#}"
+            )));
+            return None;
+        }
+        send_conversation_queue_update(message_tx, session.entries());
+        return None;
+    }
     let status = ConversationInputStatusEntry {
         queue_id,
         status: ConversationInputStatus::Dispatching,
@@ -460,4 +534,92 @@ pub(in crate::runner) fn mark_next_conversation_queue_item_dispatching(
     }
     send_conversation_queue_update(message_tx, session.entries());
     Some(queued)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RAW_PROMPT: &str =
+        "inspect https://example.com/private?signature=queue-secret-value exactly";
+
+    #[test]
+    fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
+        let mut session = Some(Session::new("test", "model"));
+        let mut exact_prompts = ExactConversationPromptStore::new();
+
+        let entries = queue_conversation_input(
+            Path::new("unused.jsonl"),
+            &mut session,
+            &mut exact_prompts,
+            RAW_PROMPT.to_owned(),
+            ConversationInputKind::Chat,
+            ConversationInputTarget::MainThread,
+            ReasoningEffort::High,
+        )
+        .expect("sensitive follow-up should queue");
+
+        let durable_json = serde_json::to_string(&entries).expect("entries should serialize");
+        assert!(!durable_json.contains("queue-secret-value"));
+        assert!(!durable_json.contains(RAW_PROMPT));
+        assert!(durable_json.contains(EXACT_PROMPT_REQUIRED_HASH_PREFIX));
+
+        let (message_tx, _message_rx) = mpsc::channel();
+        let dispatched = mark_next_conversation_queue_item_dispatching(
+            &mut session,
+            &mut exact_prompts,
+            &message_tx,
+        )
+        .expect("same-process dispatch should retain exact material");
+        assert_eq!(dispatched.prompt, RAW_PROMPT);
+        assert!(exact_prompts.is_empty());
+
+        let durable_json = serde_json::to_string(
+            session
+                .as_ref()
+                .expect("session should remain available")
+                .entries(),
+        )
+        .expect("entries should serialize");
+        assert!(!durable_json.contains("queue-secret-value"));
+        assert!(!durable_json.contains(RAW_PROMPT));
+    }
+
+    #[test]
+    fn sensitive_queue_prompt_without_process_local_exact_material_becomes_stale() {
+        let mut original = Some(Session::new("test", "model"));
+        let mut exact_prompts = ExactConversationPromptStore::new();
+        let entries = queue_conversation_input(
+            Path::new("unused.jsonl"),
+            &mut original,
+            &mut exact_prompts,
+            RAW_PROMPT.to_owned(),
+            ConversationInputKind::Chat,
+            ConversationInputTarget::MainThread,
+            ReasoningEffort::High,
+        )
+        .expect("sensitive follow-up should queue");
+
+        let mut restored = Some(Session::from_entries("test", "model", entries));
+        let mut restored_exact_prompts = ExactConversationPromptStore::new();
+        let (message_tx, _message_rx) = mpsc::channel();
+        let dispatched = mark_next_conversation_queue_item_dispatching(
+            &mut restored,
+            &mut restored_exact_prompts,
+            &message_tx,
+        );
+
+        assert!(dispatched.is_none());
+        let restored = restored.expect("session should remain available");
+        assert!(restored.entries().iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+                if status.status == ConversationInputStatus::Stale
+                    && status.reason.as_deref().is_some_and(|reason| reason.contains("lost after restart"))
+        )));
+        let durable_json =
+            serde_json::to_string(restored.entries()).expect("entries should serialize");
+        assert!(!durable_json.contains("queue-secret-value"));
+        assert!(!durable_json.contains(RAW_PROMPT));
+    }
 }

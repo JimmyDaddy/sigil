@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     AgentThreadStateProjection, ApprovalMode, ControlEntry, EvidenceScope, ModelMessage,
-    PermissionRisk, ProjectionApplyDecision, ProjectionCursor, RunStatus, TaskRunStatus,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolErrorKind, ToolExecutionStatus,
-    ToolOperation, ToolSubjectScope, UsageStats, VerificationStateProjection,
+    NetworkEffect, PermissionRisk, ProjectionApplyDecision, ProjectionCursor, RunStatus,
+    TaskRunStatus, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolErrorKind,
+    ToolExecutionStatus, ToolOperation, ToolSubjectScope, UsageStats, VerificationStateProjection,
     VerificationStateProjectionSnapshot, VerificationVerdict, VisibleCompletionState,
     projection_apply_decision_for_record,
     session::{SessionLogEntry, SessionStreamRecord},
@@ -1051,6 +1051,14 @@ pub struct DispatchTraceEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_policy_decision: Option<ApprovalMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_network_effect: Option<NetworkEffect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_local_policy_decision: Option<ApprovalMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_network_policy_decision: Option<ApprovalMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_source_policy_decision: Option<ApprovalMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_operation: Option<ToolOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_risk: Option<PermissionRisk>,
@@ -1180,6 +1188,10 @@ impl DispatchTraceProjection {
         trace.latest_approval_action = Some(entry.action);
         trace.latest_user_decision = entry.user_decision;
         trace.latest_policy_decision = Some(entry.policy_decision);
+        trace.latest_network_effect = entry.network_effect;
+        trace.latest_local_policy_decision = Some(entry.local_policy_decision);
+        trace.latest_network_policy_decision = Some(entry.network_policy_decision);
+        trace.latest_source_policy_decision = Some(entry.source_policy_decision);
         trace.latest_operation = entry.operation;
         trace.latest_risk = entry.risk;
         trace.subject_count = entry.subjects.len() as u64;
@@ -1313,6 +1325,10 @@ impl DispatchTraceEntry {
             latest_approval_action: None,
             latest_user_decision: None,
             latest_policy_decision: None,
+            latest_network_effect: None,
+            latest_local_policy_decision: None,
+            latest_network_policy_decision: None,
+            latest_source_policy_decision: None,
             latest_operation: None,
             latest_risk: None,
             subject_count: 0,

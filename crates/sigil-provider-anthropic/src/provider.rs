@@ -6,10 +6,10 @@ use futures::{Stream, stream};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 
 use sigil_kernel::{
-    CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
-    ProviderTimeoutPhase, SecretRedactor, read_provider_error_body, timeout_provider_request,
-    timeout_provider_stream_next,
+    CompletionRequest, HostedWebSearchCapability, ModelRequestTimeouts,
+    PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor,
+    read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
 };
 
 use crate::{
@@ -17,9 +17,13 @@ use crate::{
     client::build_http_client,
     config::AnthropicProviderConfig,
     errors::{AnthropicProviderError, classify_status},
+    hosted_search::{
+        AnthropicHostedContinuationStore, AnthropicHostedPlatform, AnthropicHostedStreamContext,
+        hosted_web_search_capability, hosted_web_search_request, is_hosted_web_search_model,
+    },
     mapper::StreamMapper,
     models::AnthropicStreamEnvelope,
-    request::build_messages_request,
+    request::build_messages_request_with_continuations,
     stream::{AnthropicSseDecoder, AnthropicSseFrame},
 };
 
@@ -31,6 +35,8 @@ pub struct AnthropicProvider {
     timeouts: ModelRequestTimeouts,
     capabilities: ProviderCapabilities,
     client: reqwest::Client,
+    hosted_continuations: AnthropicHostedContinuationStore,
+    hosted_platform: AnthropicHostedPlatform,
 }
 
 impl AnthropicProvider {
@@ -41,11 +47,14 @@ impl AnthropicProvider {
     /// Returns an error when environment overrides are invalid or the HTTP client cannot be built.
     pub fn new(config: AnthropicProviderConfig, timeouts: ModelRequestTimeouts) -> Result<Self> {
         let config = config.resolved()?;
+        let hosted_platform = AnthropicHostedPlatform::from_base_url(&config.base_url);
         Ok(Self {
             timeouts,
             client: build_http_client()?,
             capabilities: anthropic_capabilities(),
             config,
+            hosted_continuations: AnthropicHostedContinuationStore::default(),
+            hosted_platform,
         })
     }
 
@@ -73,13 +82,44 @@ impl Provider for AnthropicProvider {
         self.capabilities.clone()
     }
 
+    fn hosted_web_search_capability(&self, model_name: &str) -> HostedWebSearchCapability {
+        hosted_web_search_capability(model_name, self.hosted_platform)
+    }
+
     async fn stream(
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let body = build_messages_request(&request, self.config.max_tokens)?;
+        let hosted_search = hosted_web_search_request(&request.hosted_tools)?;
+        if hosted_search.is_some() {
+            if !self.hosted_platform.supports_web_search() {
+                return Err(AnthropicProviderError::UnsupportedHostedWebSearchPlatform.into());
+            }
+            if !is_hosted_web_search_model(&request.model_name) {
+                return Err(AnthropicProviderError::UnsupportedHostedWebSearchModel(
+                    request.model_name.clone(),
+                )
+                .into());
+            }
+        }
+        let prepared = build_messages_request_with_continuations(
+            &request,
+            self.config.max_tokens,
+            &self.hosted_continuations,
+        )?;
+        let hosted_context = hosted_search.map(|hosted_search| AnthropicHostedStreamContext {
+            authorization_id: hosted_search.authorization_id.clone(),
+            continuation_store: self.hosted_continuations.clone(),
+            prior_invocations: prepared.prior_hosted_invocations.clone(),
+        });
+        let body = prepared.body;
         let url = self.messages_url();
         let mut attempt = 0usize;
+        let max_attempts = if hosted_context.is_some() {
+            1
+        } else {
+            ANTHROPIC_MAX_ATTEMPTS
+        };
         loop {
             attempt += 1;
             let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
@@ -94,6 +134,7 @@ impl Provider for AnthropicProvider {
                     response,
                     request.model_name.clone(),
                     self.timeouts,
+                    hosted_context,
                 ));
             }
             let status_code = status.as_u16();
@@ -106,7 +147,7 @@ impl Provider for AnthropicProvider {
                 status_code,
             )
             .await;
-            if attempt < ANTHROPIC_MAX_ATTEMPTS && is_retryable_status(status_code) {
+            if attempt < max_attempts && is_retryable_status(status_code) {
                 continue;
             }
             let error_body = error_body?;
@@ -171,10 +212,11 @@ fn response_stream(
     response: reqwest::Response,
     model_name: String,
     timeouts: ModelRequestTimeouts,
+    hosted_context: Option<AnthropicHostedStreamContext>,
 ) -> Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
     let byte_stream = response.bytes_stream();
     let decoder = AnthropicSseDecoder::default();
-    let mapper = StreamMapper::new();
+    let mapper = StreamMapper::new(hosted_context);
     let pending = VecDeque::<ProviderChunk>::new();
     let finished = false;
     let saw_done = false;
@@ -318,7 +360,7 @@ fn enqueue_finished_frames(
     let frames = decoder.finish()?;
     let done_seen = enqueue_decoded_frames(mapper, pending, frames)?;
     if !done_seen {
-        pending.extend(mapper.finish());
+        pending.extend(mapper.finish()?);
     }
     Ok(done_seen)
 }

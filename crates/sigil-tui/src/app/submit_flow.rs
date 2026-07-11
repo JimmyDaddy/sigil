@@ -24,7 +24,10 @@ impl AppState {
         if prompt.starts_with('/') {
             let Some(command) = self.resolve_slash_command(&prompt) else {
                 self.push_timeline(TimelineRole::Notice, "unknown slash command");
-                self.push_event("slash:unknown", prompt.clone());
+                self.push_event(
+                    "slash:unknown",
+                    sigil_kernel::safe_persistence_text(&prompt),
+                );
                 self.last_notice = Some("unknown slash command".to_owned());
                 return Ok(None);
             };
@@ -35,7 +38,7 @@ impl AppState {
         if prompt.trim_start().starts_with('@') {
             if self.runtime.is_busy {
                 self.push_timeline(TimelineRole::Notice, "busy; @agent input kept for later");
-                self.push_event("agent:busy", prompt);
+                self.push_event("agent:busy", sigil_kernel::safe_persistence_text(&prompt));
                 self.last_notice = Some("busy; @agent input kept for later".to_owned());
                 return Ok(None);
             }
@@ -44,7 +47,10 @@ impl AppState {
                 Err(error) => {
                     let notice = error.to_string();
                     self.push_timeline(TimelineRole::Notice, notice.clone());
-                    self.push_event("agent:unknown", prompt.clone());
+                    self.push_event(
+                        "agent:unknown",
+                        sigil_kernel::safe_persistence_text(&prompt),
+                    );
                     self.last_notice = Some(notice);
                     return Ok(None);
                 }
@@ -79,8 +85,9 @@ impl AppState {
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
             self.timeline_scroll_back = 0;
-            self.push_timeline(TimelineRole::User, prompt.clone());
-            self.push_event("input", format!("submitted plan prompt {prompt}"));
+            let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+            self.push_timeline(TimelineRole::User, safe_prompt.clone());
+            self.push_event("input", format!("submitted plan prompt {safe_prompt}"));
             self.active_pane = PaneFocus::Composer;
             self.push_event("focus", current_focus_label(self));
             self.runtime.is_busy = true;
@@ -104,8 +111,9 @@ impl AppState {
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
-        self.push_timeline(TimelineRole::User, prompt.clone());
-        self.push_event("input", format!("submitted {prompt}"));
+        let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+        self.push_timeline(TimelineRole::User, safe_prompt.clone());
+        self.push_event("input", format!("submitted {safe_prompt}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
@@ -129,7 +137,7 @@ impl AppState {
         self.composer.input_paste_spans.clear();
         self.pending_mouse_slash_confirmation = None;
         self.reset_slash_selector();
-        self.push_event("slash", prompt.clone());
+        self.push_event("slash", sigil_kernel::safe_persistence_text(&prompt));
         match command.canonical.as_str() {
             "/compact" => {
                 if self.runtime.is_busy {
@@ -204,14 +212,15 @@ impl AppState {
         }
 
         let plan_prompt = arg.to_owned();
+        let safe_plan_prompt = sigil_kernel::safe_persistence_text(&plan_prompt);
         self.clear_pending_plan_approval();
         self.composer.input.clear();
         self.composer.input_cursor = 0;
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
-        self.push_timeline(TimelineRole::User, format!("/plan {plan_prompt}"));
-        self.push_event("input", format!("submitted plan prompt {plan_prompt}"));
+        self.push_timeline(TimelineRole::User, format!("/plan {safe_plan_prompt}"));
+        self.push_event("input", format!("submitted plan prompt {safe_plan_prompt}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
@@ -260,10 +269,11 @@ impl AppState {
         }
 
         let objective = arg.to_owned();
+        let safe_objective = sigil_kernel::safe_persistence_text(&objective);
         self.clear_pending_plan_approval();
         self.timeline_scroll_back = 0;
-        self.push_timeline(TimelineRole::User, format!("/task {objective}"));
-        self.push_event("input", format!("submitted task {objective}"));
+        self.push_timeline(TimelineRole::User, format!("/task {safe_objective}"));
+        self.push_event("input", format!("submitted task {safe_objective}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
@@ -337,7 +347,10 @@ impl AppState {
         self.composer.input_paste_spans.clear();
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
-        self.push_timeline(TimelineRole::User, prompt.clone());
+        self.push_timeline(
+            TimelineRole::User,
+            sigil_kernel::safe_persistence_text(&prompt),
+        );
         self.push_event("input", format!("invoked agent {profile_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
@@ -400,7 +413,10 @@ impl AppState {
         }
 
         self.timeline_scroll_back = 0;
-        self.push_timeline(TimelineRole::User, prompt.to_owned());
+        self.push_timeline(
+            TimelineRole::User,
+            sigil_kernel::safe_persistence_text(prompt),
+        );
         self.push_event("input", format!("invoked {item_kind} {skill_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));

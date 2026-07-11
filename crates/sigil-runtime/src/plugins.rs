@@ -10,17 +10,23 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ExecutionBackend,
     ExecutionCoverageLabel, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
-    ExecutionStreamCapture, ExecutionTerminationCause, MAX_PLUGIN_HOOK_ARTIFACT_REFS,
-    MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig, MutationEventRecorder,
-    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginHookExecutionFinishedEntry,
-    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookOutputArtifactRef,
-    PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef, PluginManifest,
-    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState, SecretRedactor,
-    SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope, WorkspaceMutationScan,
-    validate_plugin_id,
+    ExecutionStreamCapture, ExecutionTerminationCause, ExtensionProcessNetworkAdmission,
+    MAX_PLUGIN_HOOK_ARTIFACT_REFS, MAX_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, McpServerConfig,
+    MutationEventRecorder, NetworkEffect, PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef,
+    PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
+    PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream, PluginHookRef,
+    PluginManifest, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, RedactionState,
+    SecretRedactor, SkillDescriptor, SkillIndexSnapshot, ToolEffect, VerificationScope,
+    WorkspaceMutationScan, validate_extension_process_network_admission,
+    validate_extension_process_network_receipt_with_policy, validate_plugin_id,
 };
 use uuid::Uuid;
 
+use crate::mcp_declaration::{
+    McpConfigOrigin, McpExecutionBase, McpRegistrationError, McpRegistrationErrorCode,
+    PluginManifestAttestation, ResolvedMcpServerDeclaration,
+};
+use crate::plugin_manifest_io::{MAX_PLUGIN_MANIFEST_BYTES, read_bounded_plugin_manifest};
 use crate::skills::discover_plugin_skill_descriptors;
 
 /// Result of workspace plugin discovery, including review snapshots and trusted registrations.
@@ -62,11 +68,36 @@ pub struct PluginHookRegistration {
 }
 
 /// MCP registration with explicit plugin source attribution and a lifecycle-safe server config.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PluginMcpServerRegistration {
     pub plugin_id: String,
     pub original_name: String,
+    pub plugin_root: PathBuf,
+    pub manifest_path: PathBuf,
+    pub trust_manifest_path: PathBuf,
+    pub manifest_hash: String,
+    pub manifest_version: String,
+    pub capability_digest: String,
+    pub trust: PluginTrustDecision,
     pub server: McpServerConfig,
+}
+
+impl std::fmt::Debug for PluginMcpServerRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginMcpServerRegistration")
+            .field("plugin_id", &self.plugin_id)
+            .field("original_name", &self.original_name)
+            .field("paths", &"[hidden]")
+            .field("manifest_hash", &self.manifest_hash)
+            .field("manifest_version", &self.manifest_version)
+            .field("capability_digest", &self.capability_digest)
+            .field("trust", &self.trust)
+            .field("command", &"[hidden]")
+            .field("args", &"[hidden]")
+            .field("startup", &self.server.startup)
+            .finish()
+    }
 }
 
 /// One non-fatal problem found while discovering workspace plugins.
@@ -142,14 +173,6 @@ impl PluginRegistrations {
             && self.hooks.is_empty()
             && self.mcp_servers.is_empty()
     }
-
-    #[must_use]
-    pub fn mcp_server_configs(&self) -> Vec<McpServerConfig> {
-        self.mcp_servers
-            .iter()
-            .map(|registration| registration.server.clone())
-            .collect()
-    }
 }
 
 /// Input for one trusted plugin hook command execution.
@@ -197,6 +220,7 @@ pub struct PluginHookExecutionOutcome {
 pub struct PluginHookExecutionRunner {
     backend: Arc<dyn ExecutionBackend>,
     sandbox_profile: ExecutionSandboxProfile,
+    network_admission: ExtensionProcessNetworkAdmission,
 }
 
 impl PluginHookExecutionRunner {
@@ -205,6 +229,7 @@ impl PluginHookExecutionRunner {
         Self {
             backend,
             sandbox_profile: ExecutionSandboxProfile::Unconfined,
+            network_admission: ExtensionProcessNetworkAdmission::default(),
         }
     }
 
@@ -216,7 +241,20 @@ impl PluginHookExecutionRunner {
         Self {
             backend,
             sandbox_profile,
+            network_admission: ExtensionProcessNetworkAdmission::default(),
         }
+    }
+
+    /// Applies one run-scoped network authorization to extension process admission.
+    ///
+    /// Source trust, declared hook effects and `allow_secrets` never supply this evidence.
+    #[must_use]
+    pub fn with_network_admission(
+        mut self,
+        network_admission: ExtensionProcessNetworkAdmission,
+    ) -> Self {
+        self.network_admission = network_admission;
+        self
     }
 
     /// Executes one plugin hook command and returns durable evidence entries.
@@ -256,11 +294,14 @@ impl PluginHookExecutionRunner {
         let backend = self.backend.kind();
         let backend_capabilities = self.backend.capabilities();
         let planned_network = self.backend.planned_network_receipt();
-        sigil_kernel::validate_extension_process_isolation(
+        let process_subject = format!("plugin_hook:{tool_name}");
+        validate_extension_process_network_admission(
             self.sandbox_profile,
+            Some(NetworkEffect::Unknown),
+            self.network_admission,
             backend_capabilities,
             &planned_network,
-            format!("plugin_hook:{tool_name}"),
+            process_subject,
         )?;
         let execution_coverage = ExecutionCoverageLabel::LocalBackendEnforced;
         let sandbox_profile = self.sandbox_profile;
@@ -342,8 +383,10 @@ impl PluginHookExecutionRunner {
                 return Err(error);
             }
         };
-        if let Err(error) = sigil_kernel::validate_extension_process_network_receipt(
+        if let Err(error) = validate_extension_process_network_receipt_with_policy(
             self.sandbox_profile,
+            Some(NetworkEffect::Unknown),
+            self.network_admission.policy,
             &receipt.network,
             format!("plugin_hook:{tool_name}"),
         ) {
@@ -760,41 +803,122 @@ pub fn merge_plugin_skill_descriptors(
     SkillIndexSnapshot::new(descriptors)
 }
 
-/// Appends plugin-provided MCP server configs to an existing MCP registry input.
+/// Appends plugin-provided MCP declarations to an existing runtime declaration set.
 ///
-/// Plugin server names are already namespaced during discovery, so the returned configs can be
-/// handed to the existing MCP eager/lazy lifecycle without starting plugin servers early.
+/// Collision handling changes only the effective config name. The declared name, origin,
+/// attestation and execution base remain unchanged.
 ///
 /// # Errors
 ///
-/// Returns a typed error if a programmatically constructed plugin registration attempts to carry
-/// an environment grant that plugin manifests are not allowed to declare.
-pub fn merge_plugin_mcp_servers(
-    base: &[McpServerConfig],
+/// Returns a typed error when source identity, reserved namespace, environment grant or effective
+/// naming invariants are violated.
+pub fn merge_mcp_server_declarations(
+    base: &[ResolvedMcpServerDeclaration],
     plugin_servers: &[PluginMcpServerRegistration],
-) -> Result<Vec<McpServerConfig>> {
+) -> std::result::Result<Vec<ResolvedMcpServerDeclaration>, McpRegistrationError> {
     let mut used_names = base
         .iter()
-        .map(|server| server.name.clone())
+        .map(|declaration| declaration.effective_name().to_owned())
         .collect::<BTreeSet<_>>();
+    if used_names.len() != base.len() {
+        return Err(McpRegistrationError {
+            code: McpRegistrationErrorCode::DuplicateMcpServerName,
+            declared_name: "<merged>".to_owned(),
+            reason: "base MCP declarations contain duplicate effective names".to_owned(),
+            safe_projection: None,
+        });
+    }
     let mut merged = base.to_vec();
     for (index, registration) in plugin_servers.iter().enumerate() {
+        if registration.plugin_id.starts_with("builtin:")
+            || registration.original_name.starts_with("builtin:")
+        {
+            return Err(McpRegistrationError {
+                code: McpRegistrationErrorCode::ReservedMcpNamespace,
+                declared_name: registration.original_name.clone(),
+                reason: "plugin MCP registrations cannot claim the builtin: namespace".to_owned(),
+                safe_projection: None,
+            });
+        }
+        if validate_plugin_id(&registration.plugin_id).is_err()
+            || validate_plugin_id(&registration.original_name).is_err()
+            || registration.server.name != registration.original_name
+        {
+            return Err(McpRegistrationError {
+                code: McpRegistrationErrorCode::PluginOriginAttestationMismatch,
+                declared_name: registration.original_name.clone(),
+                reason: format!(
+                    "plugin MCP registration at index {index} has inconsistent source identity"
+                ),
+                safe_projection: None,
+            });
+        }
+        if registration.trust != PluginTrustDecision::Trusted {
+            return Err(McpRegistrationError {
+                code: McpRegistrationErrorCode::PluginAttestationReviewRequired,
+                declared_name: registration.original_name.clone(),
+                reason: format!(
+                    "plugin MCP registration at index {index} is not currently trusted"
+                ),
+                safe_projection: None,
+            });
+        }
         if !registration.server.inherit_env.is_empty() {
-            return Err(anyhow::Error::new(PluginMcpEnvironmentGrantNotSupported {
-                entry_index: index,
-                server_name: Some(registration.original_name.clone()),
-            }));
+            return Err(McpRegistrationError {
+                code: McpRegistrationErrorCode::PluginMcpEnvironmentGrantNotSupported,
+                declared_name: registration.original_name.clone(),
+                reason: format!(
+                    "plugin MCP registration at index {index} cannot carry environment grants"
+                ),
+                safe_projection: None,
+            });
         }
         let mut server = registration.server.clone();
-        if !used_names.insert(server.name.clone()) {
-            server.name = unique_plugin_mcp_server_name(
+        server.name = format!("{}.{}", registration.plugin_id, registration.original_name);
+        if server.name.starts_with("builtin:") {
+            return Err(McpRegistrationError {
+                code: McpRegistrationErrorCode::ReservedMcpNamespace,
+                declared_name: registration.original_name.clone(),
+                reason: "plugin MCP effective name cannot claim the builtin: namespace".to_owned(),
+                safe_projection: None,
+            });
+        }
+        let effective_name = if used_names.insert(server.name.clone()) {
+            server.name.clone()
+        } else {
+            let effective_name = unique_plugin_mcp_server_name(
                 &registration.plugin_id,
                 &registration.original_name,
                 &used_names,
             );
-            used_names.insert(server.name.clone());
-        }
-        merged.push(server);
+            used_names.insert(effective_name.clone());
+            effective_name
+        };
+        let attestation = PluginManifestAttestation::capture(
+            &registration.original_name,
+            registration.plugin_root.clone(),
+            registration.manifest_path.clone(),
+            registration.trust_manifest_path.clone(),
+            registration.manifest_hash.clone(),
+            registration.manifest_version.clone(),
+            registration.capability_digest.clone(),
+            registration.trust,
+        )?;
+        let declaration = ResolvedMcpServerDeclaration::plugin_manifest(
+            registration.original_name.clone(),
+            server,
+            McpConfigOrigin::PluginManifest {
+                plugin_id: registration.plugin_id.clone(),
+                manifest_hash: registration.manifest_hash.clone(),
+                manifest_version: registration.manifest_version.clone(),
+                capability_digest: registration.capability_digest.clone(),
+                trust: registration.trust,
+            },
+            McpExecutionBase::PluginRoot(registration.plugin_root.clone()),
+            attestation,
+        )?
+        .with_effective_name(effective_name);
+        merged.push(declaration);
     }
     Ok(merged)
 }
@@ -882,7 +1006,12 @@ impl PluginDiscovery {
             snapshot.trust = trust.decision;
         }
         if snapshot.trust == PluginTrustDecision::Trusted
-            && let Err(error) = self.register_trusted_plugin(&outcome.manifest, &snapshot)
+            && let Err(error) = self.register_trusted_plugin(
+                &outcome.manifest,
+                &snapshot,
+                &outcome.canonical_plugin_root,
+                &outcome.canonical_manifest_path,
+            )
         {
             self.warn(
                 warning_kind_for_manifest_error(&error),
@@ -921,8 +1050,12 @@ impl PluginDiscovery {
             );
         }
 
-        let bytes = fs::read(manifest_path).with_context(|| {
-            format!("failed to read plugin manifest {}", manifest_path.display())
+        let bytes = read_bounded_plugin_manifest(&canonical_manifest).with_context(|| {
+            format!(
+                "failed to read plugin manifest {} within the 1 MiB ({} byte) review limit",
+                manifest_path.display(),
+                MAX_PLUGIN_MANIFEST_BYTES
+            )
         })?;
         let manifest_hash = format!(
             "{}{:x}",
@@ -954,6 +1087,8 @@ impl PluginDiscovery {
         Ok(PluginManifestReadOutcome {
             manifest,
             manifest_hash,
+            canonical_plugin_root,
+            canonical_manifest_path: canonical_manifest,
         })
     }
 
@@ -961,6 +1096,8 @@ impl PluginDiscovery {
         &mut self,
         manifest: &PluginManifest,
         snapshot: &PluginManifestSnapshot,
+        canonical_plugin_root: &Path,
+        canonical_manifest_path: &Path,
     ) -> Result<()> {
         let capability_digest = snapshot.capability_digest()?;
         self.registrations
@@ -1010,7 +1147,14 @@ impl PluginDiscovery {
                     .map(|server| PluginMcpServerRegistration {
                         plugin_id: manifest.id.clone(),
                         original_name: server.name.clone(),
-                        server: namespaced_mcp_server(&manifest.id, server),
+                        plugin_root: canonical_plugin_root.to_path_buf(),
+                        manifest_path: canonical_manifest_path.to_path_buf(),
+                        trust_manifest_path: snapshot.manifest_path.clone(),
+                        manifest_hash: snapshot.manifest_hash.clone(),
+                        manifest_version: snapshot.version.clone(),
+                        capability_digest: capability_digest.clone(),
+                        trust: snapshot.trust,
+                        server: server.clone(),
                     }),
             );
         Ok(())
@@ -1092,6 +1236,8 @@ fn reject_plugin_mcp_environment_grants(raw: &str) -> Result<()> {
 struct PluginManifestReadOutcome {
     manifest: PluginManifest,
     manifest_hash: String,
+    canonical_plugin_root: PathBuf,
+    canonical_manifest_path: PathBuf,
 }
 
 fn validate_plugin_agent_paths(
@@ -1150,12 +1296,6 @@ fn matching_trust_entry<'a>(
         .iter()
         .rev()
         .find(|entry| entry.matches_snapshot(snapshot))
-}
-
-fn namespaced_mcp_server(plugin_id: &str, server: &McpServerConfig) -> McpServerConfig {
-    let mut server = server.clone();
-    server.name = format!("{plugin_id}.{}", server.name);
-    server
 }
 
 fn unique_plugin_mcp_server_name(

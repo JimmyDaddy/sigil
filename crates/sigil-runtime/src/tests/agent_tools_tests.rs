@@ -49,6 +49,7 @@ fn permission_test_spec(access: ToolAccess) -> ToolSpec {
         input_schema: json!({"type":"object"}),
         category: ToolCategory::File,
         access,
+        network_effect: None,
         preview: ToolPreviewCapability::Required,
     }
 }
@@ -1676,6 +1677,48 @@ async fn message_agent_records_rejected_message_route_for_terminal_thread() -> R
 }
 
 #[tokio::test]
+async fn message_agent_keeps_sensitive_prompt_exact_for_delivery_but_safe_in_controls() -> Result<()>
+{
+    let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let raw = "inspect https://example.com/private?signature=mailbox-secret exactly";
+
+    let result = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-message-sensitive".to_owned(),
+                name: MESSAGE_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "prompt": raw
+                })
+                .to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("message_agent handled by runtime delegate");
+
+    let durable = serde_json::to_string(&result.control_entries)?;
+    assert!(!durable.contains("mailbox-secret"));
+    assert!(!durable.contains(raw));
+    let safe = sigil_kernel::safe_persistence_text(raw);
+    let expected_hash = super::hash_text(&safe);
+    assert!(result.control_entries.iter().any(|entry| matches!(
+        entry,
+        ControlEntry::AgentThreadMessageRouted(route)
+            if route.prompt.as_deref() == Some(safe.as_str())
+                && route.prompt_hash == expected_hash
+    )));
+    assert_ne!(expected_hash, super::hash_text(raw));
+    Ok(())
+}
+
+#[tokio::test]
 async fn route_agent_message_appends_route_controls_to_session() -> Result<()> {
     let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
 
@@ -2596,6 +2639,10 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
             call_id: "call-read".to_owned(),
             tool_name: "read_file".to_owned(),
             access: ToolAccess::Read,
+            network_effect: None,
+            local_policy_decision: ApprovalMode::Allow,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
             operation: Some(ToolOperation::Read),
             risk: Some(PermissionRisk::Low),
             subjects: Vec::new(),
@@ -2670,6 +2717,54 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
 }
 
 #[test]
+fn final_answer_context_includes_network_policy_allow_facets() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    session.append_control(ControlEntry::ToolApproval(
+        sigil_kernel::ToolApprovalEntry {
+            action: ToolApprovalAuditAction::PolicyEvaluated,
+            call_id: "call-network-read".to_owned(),
+            tool_name: "mcp__docs__resources_read".to_owned(),
+            access: ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Read),
+            local_policy_decision: ApprovalMode::Allow,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
+            operation: Some(ToolOperation::NetworkRequest),
+            risk: Some(PermissionRisk::High),
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            policy_decision: ApprovalMode::Allow,
+            external_directory_required: false,
+            confirmation: None,
+            snapshot_required: false,
+            command_permission_matches: Vec::new(),
+            allow_source: None,
+            grant_call_id: None,
+            user_decision: None,
+            reason: None,
+            preview_hash: None,
+        },
+    ))?;
+
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let context = runtime
+        .final_answer_context(&session, &options, &AgentRunOutcome::default())?
+        .expect("network effect records should remain visible to final-answer facts");
+    let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
+    let approvals = &payload["session_facts"]["approvals"];
+    assert_eq!(approvals["policy_allow"], 1);
+    assert_eq!(approvals["facets"]["network_effect"]["read"], 1);
+    assert_eq!(approvals["facets"]["network_policy"]["allow"], 1);
+    assert_eq!(approvals["facets"]["local_policy"]["allow"], 1);
+    assert_eq!(approvals["facets"]["source_policy"]["allow"], 1);
+    Ok(())
+}
+
+#[test]
 fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_grant() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
@@ -2681,6 +2776,10 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             call_id: "call-policy".to_owned(),
             tool_name: "bash".to_owned(),
             access: ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Read),
+            local_policy_decision: ApprovalMode::Allow,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
             operation: Some(ToolOperation::ExecuteReadOnlyCommand),
             risk: Some(PermissionRisk::Low),
             subjects: Vec::new(),
@@ -2703,6 +2802,10 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             call_id: "call-user".to_owned(),
             tool_name: "bash".to_owned(),
             access: ToolAccess::Execute,
+            network_effect: None,
+            local_policy_decision: ApprovalMode::Ask,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
             operation: Some(ToolOperation::ExecuteUnknownCommand),
             risk: Some(PermissionRisk::Medium),
             subjects: Vec::new(),
@@ -2725,6 +2828,10 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             call_id: "call-user".to_owned(),
             tool_name: "bash".to_owned(),
             access: ToolAccess::Execute,
+            network_effect: None,
+            local_policy_decision: ApprovalMode::Ask,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
             operation: Some(ToolOperation::ExecuteUnknownCommand),
             risk: Some(PermissionRisk::Medium),
             subjects: Vec::new(),
@@ -2746,6 +2853,7 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             call_id: "call-user".to_owned(),
             tool_name: "bash".to_owned(),
             access: ToolAccess::Execute,
+            network_effect: None,
             operation: ToolOperation::ExecuteUnknownCommand,
             risk: PermissionRisk::Medium,
             subjects: Vec::new(),
@@ -2760,6 +2868,10 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             call_id: "call-user-reuse".to_owned(),
             tool_name: "bash".to_owned(),
             access: ToolAccess::Execute,
+            network_effect: None,
+            local_policy_decision: ApprovalMode::Allow,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
             operation: Some(ToolOperation::ExecuteUnknownCommand),
             risk: Some(PermissionRisk::Medium),
             subjects: Vec::new(),
@@ -2792,6 +2904,16 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
     assert_eq!(approvals["session_grants"], 1);
     assert_eq!(approvals["session_grant_reuses"], 1);
     assert_eq!(approvals["grant_reuses"][0]["grant_call_id"], "call-user");
+    assert_eq!(approvals["facets"]["local_policy"]["allow"], 2);
+    assert_eq!(approvals["facets"]["local_policy"]["ask"], 2);
+    assert_eq!(approvals["facets"]["network_policy"]["allow"], 4);
+    assert_eq!(approvals["facets"]["source_policy"]["allow"], 4);
+    assert_eq!(approvals["facets"]["network_effect"]["read"], 1);
+    assert_eq!(approvals["facets"]["network_effect"]["none"], 3);
+    assert_eq!(
+        approvals["grant_reuses"][0]["network_policy_decision"],
+        "allow"
+    );
     Ok(())
 }
 
@@ -3915,7 +4037,12 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let tail_marker = "TAIL_MARKER_SHOULD_ONLY_BE_IN_ARTIFACT";
-    let full_text = format!("long report start\n{}\n{tail_marker}", "x".repeat(5_100));
+    let raw_sensitive_url = "https://example.com/private?signature=child-artifact-secret";
+    let full_text = format!(
+        "long report start {raw_sensitive_url}\n{}\n{tail_marker}",
+        "x".repeat(5_100)
+    );
+    let safe_full_text = sigil_kernel::safe_persistence_text(&full_text);
     let mut runtime = AgentToolRuntime::with_provider_factory(
         supervisor,
         config,
@@ -3975,7 +4102,7 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
     assert!(result.summary_truncated);
     assert_eq!(
         result.original_summary_chars,
-        Some(full_text.chars().count())
+        Some(safe_full_text.chars().count())
     );
     assert!(result.summary.contains("full_result_artifact"));
     assert!(!result.summary.contains(tail_marker));
@@ -3984,7 +4111,7 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
         .as_ref()
         .expect("compact final answer ref should be recorded");
     assert!(final_answer_ref.char_count < full_text.chars().count());
-    let full_text_hash = super::hash_text(&full_text);
+    let full_text_hash = super::hash_text(&safe_full_text);
     assert_ne!(final_answer_ref.content_hash, full_text_hash);
     let artifact = result
         .artifacts
@@ -3993,7 +4120,9 @@ async fn spawn_agent_materializes_long_child_result_to_artifact_summary() -> Res
         .expect("final report artifact should be recorded");
     assert_eq!(artifact.hash.as_deref(), Some(full_text_hash.as_str()));
     let artifact_text = fs::read_to_string(temp.path().join(&artifact.path))?;
-    assert_eq!(artifact_text, full_text);
+    assert_eq!(artifact_text, safe_full_text);
+    assert!(!artifact_text.contains("child-artifact-secret"));
+    assert!(!artifact_text.contains(raw_sensitive_url));
 
     let read = runtime
         .handle_agent_tool_call(

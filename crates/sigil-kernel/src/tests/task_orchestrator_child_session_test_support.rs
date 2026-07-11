@@ -238,6 +238,10 @@ where
         )?;
         Ok(approval)
     }
+
+    fn approval_is_explicit_user_action(&self) -> bool {
+        self.inner.approval_is_explicit_user_action()
+    }
 }
 
 fn append_child_session<H>(

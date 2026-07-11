@@ -147,6 +147,27 @@ async fn execute_changed_files_diagnostics(
             return Ok(result);
         }
     };
+    let network_effect = match tools.permission_network_effect(&tool_ctx, &call) {
+        Ok(network_effect) => network_effect,
+        Err(error) => {
+            let mut result = ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::InvalidInput,
+                format!("invalid code diagnostics network effect: {error}"),
+            );
+            attach_diagnostics_context(&mut result, &paths);
+            append_execution_audit(
+                session,
+                &call,
+                &subjects,
+                ToolExecutionStatus::Failed,
+                None,
+                Some(&result),
+            )?;
+            return Ok(result);
+        }
+    };
     let operation = match tools.permission_operation(&tool_ctx, &call) {
         Ok(operation) => operation,
         Err(error) => {
@@ -170,11 +191,12 @@ async fn execute_changed_files_diagnostics(
     };
     let decision =
         PermissionPolicy::new_with_context(&options.permission_config, &options.permission_context)
-            .decide_with_operation_and_default(
+            .decide_with_operation_network_effect_and_default(
                 &spec,
                 &call.name,
                 access,
                 operation,
+                network_effect,
                 subjects.clone(),
                 None,
             )?;
@@ -408,6 +430,10 @@ fn append_policy_audit(
         call_id: call.id.clone(),
         tool_name: call.name.clone(),
         access: decision.access,
+        network_effect: decision.network_effect,
+        local_policy_decision: decision.local_policy_decision,
+        network_policy_decision: decision.network_policy_decision,
+        source_policy_decision: decision.source_policy_decision,
         subjects: audit_subjects(&decision.subjects),
         operation: Some(decision.operation),
         risk: Some(decision.risk),

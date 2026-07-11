@@ -83,6 +83,7 @@ impl AppState {
         target: ConversationInputTarget,
     ) {
         let queue_id = self.next_optimistic_queue_id();
+        let prompt = sigil_kernel::safe_persistence_text(&prompt);
         self.composer
             .optimistic_queue_items
             .push(ConversationInputQueuedEntry {

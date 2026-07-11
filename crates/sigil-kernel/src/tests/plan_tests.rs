@@ -2,17 +2,19 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    ControlEntry, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,
-    PlanApprovalScope, PlanApprovedEntry, PlanArtifactProjection, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanSourceRef, Session, SessionLogEntry, TaskCreatedFromPlanEntry,
-    TaskId, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, plan_draft_created_entry,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
+    ControlEntry, NetworkEffect, PlanApprovalExpiry, PlanApprovalPermission,
+    PlanApprovalProjection, PlanApprovalScope, PlanApprovedEntry, PlanArtifactProjection,
+    PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanSourceRef, Session,
+    SessionLogEntry, TaskCreatedFromPlanEntry, TaskId, ToolAccess, ToolCategory,
+    ToolPreviewCapability, ToolSpec, plan_draft_created_entry, plan_task_input_from_draft,
+    plan_text_hash, plan_workspace_paths,
 };
 
 fn tool_spec(
     name: &str,
     category: ToolCategory,
     access: ToolAccess,
+    network_effect: Option<NetworkEffect>,
     preview: ToolPreviewCapability,
 ) -> ToolSpec {
     ToolSpec {
@@ -21,6 +23,7 @@ fn tool_spec(
         input_schema: json!({"type": "object"}),
         category,
         access,
+        network_effect,
         preview,
     }
 }
@@ -290,6 +293,34 @@ fn plan_artifact_projection_tracks_pending_decision_and_created_task() -> Result
 }
 
 #[test]
+fn plan_draft_projects_sensitive_model_text_before_hash_and_persistence() -> Result<()> {
+    let raw_url = "https://example.com/private?signature=plan-draft-secret";
+    let raw = simple_structured_plan(
+        &format!("Inspect {raw_url}"),
+        "Use token=plan-step-secret",
+        "README.md",
+    );
+
+    let draft = plan_draft_created_entry(&raw, PlanSourceRef::default(), 1, None)?
+        .expect("structured plan should produce a draft");
+    let durable = serde_json::to_string(&draft)?;
+
+    for forbidden in [raw_url, "plan-draft-secret", "plan-step-secret"] {
+        assert!(!durable.contains(forbidden));
+    }
+    assert_eq!(
+        draft.plan_hash,
+        plan_text_hash(
+            draft
+                .inline_text
+                .as_deref()
+                .expect("sensitive plan should retain bounded safe inline text")
+        )
+    );
+    Ok(())
+}
+
+#[test]
 fn approved_plan_input_is_stable_and_does_not_materialize_task_plan() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"
@@ -385,42 +416,49 @@ fn workspace_edits_plan_permission_does_not_cover_shell_network_mcp_or_agent() {
         "edit_file",
         ToolCategory::File,
         ToolAccess::Write,
+        None,
         ToolPreviewCapability::Required
     )));
     assert!(!permission.covers_tool(&tool_spec(
         "write_file_without_preview",
         ToolCategory::File,
         ToolAccess::Write,
+        None,
         ToolPreviewCapability::None
     )));
     assert!(!permission.covers_tool(&tool_spec(
         "bash",
         ToolCategory::Shell,
         ToolAccess::Execute,
+        None,
         ToolPreviewCapability::None
     )));
     assert!(!permission.covers_tool(&tool_spec(
         "web_fetch",
         ToolCategory::Custom,
-        ToolAccess::Network,
+        ToolAccess::Read,
+        Some(NetworkEffect::Read),
         ToolPreviewCapability::None
     )));
     assert!(!permission.covers_tool(&tool_spec(
         "mcp__filesystem__read",
         ToolCategory::Mcp,
         ToolAccess::Write,
+        None,
         ToolPreviewCapability::Optional
     )));
     assert!(!permission.covers_tool(&tool_spec(
         "spawn_agent",
         ToolCategory::Agent,
         ToolAccess::Execute,
+        None,
         ToolPreviewCapability::Required
     )));
     assert!(!PlanApprovalPermission::Ask.covers_tool(&tool_spec(
         "edit_file",
         ToolCategory::File,
         ToolAccess::Write,
+        None,
         ToolPreviewCapability::Required
     )));
 }

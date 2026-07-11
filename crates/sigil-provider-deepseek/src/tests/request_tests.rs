@@ -34,6 +34,7 @@ fn compatible_strict_tools_route_to_beta() -> Result<()> {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }],
         temperature: None,
@@ -45,6 +46,7 @@ fn compatible_strict_tools_route_to_beta() -> Result<()> {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
     let prepared = build_chat_request(
         &request,
@@ -150,6 +152,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
 
     let prepared = build_chat_request(
@@ -214,6 +217,7 @@ fn build_chat_request_maps_tool_calls_and_remaining_reasoning_efforts() -> Resul
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
 
     let prepared = build_chat_request(
@@ -294,6 +298,7 @@ fn extract_user_id_supports_known_strategies_and_rejects_unknown() -> Result<()>
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
 
     assert_eq!(

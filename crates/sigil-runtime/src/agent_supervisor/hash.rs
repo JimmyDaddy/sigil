@@ -4,9 +4,19 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{AgentRunInput, ProviderCapabilities};
 
 pub(super) fn hash_child_input(input: &AgentRunInput) -> Result<String> {
+    let transient_context = input
+        .transient_context
+        .iter()
+        .cloned()
+        .map(sigil_kernel::project_message_for_persistence)
+        .map(|projection| projection.map(|(durable, _overlay)| durable))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     hash_json(&json!({
-        "persisted_user_message": input.persisted_user_message.as_deref(),
-        "transient_context": &input.transient_context,
+        "persisted_user_message": input
+            .persisted_user_message
+            .as_deref()
+            .map(sigil_kernel::safe_persistence_text),
+        "transient_context": transient_context,
         "task_plan_update": input.task_plan_update.as_ref().map(|context| {
             json!({
                 "task_id": context.task_id.as_str(),

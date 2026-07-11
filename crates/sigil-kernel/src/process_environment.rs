@@ -85,6 +85,7 @@ impl ProcessEnvironmentPolicy {
 pub enum ExtensionProcessLaunchErrorCode {
     ConfigurationInvalid,
     EnvironmentBindingChanged,
+    NetworkApprovalRequired,
     NetworkIsolationUnavailable,
     ProcessIsolationUnavailable,
     BackendReceiptInvalid,
@@ -96,6 +97,7 @@ impl ExtensionProcessLaunchErrorCode {
         match self {
             Self::ConfigurationInvalid => "configuration_invalid",
             Self::EnvironmentBindingChanged => "environment_binding_changed",
+            Self::NetworkApprovalRequired => "network_approval_required",
             Self::NetworkIsolationUnavailable => "network_isolation_unavailable",
             Self::ProcessIsolationUnavailable => "process_isolation_unavailable",
             Self::BackendReceiptInvalid => "backend_receipt_invalid",
@@ -135,6 +137,18 @@ impl ExtensionProcessLaunchError {
     ) -> Self {
         Self {
             code: ExtensionProcessLaunchErrorCode::EnvironmentBindingChanged,
+            subject: subject.into(),
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn network_approval_required(
+        subject: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: ExtensionProcessLaunchErrorCode::NetworkApprovalRequired,
             subject: subject.into(),
             message: message.into(),
         }

@@ -224,6 +224,25 @@ impl JsonlSessionStore {
         writer.append_audit_batch(batch)
     }
 
+    pub(crate) fn append_audit_batch_if<F>(
+        &self,
+        batch: DurableAuditBatch,
+        should_append: F,
+    ) -> Result<Option<DurableAppendReceipt>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let records = writer.read_records_writer()?;
+        if !should_append(&records)? {
+            return Ok(None);
+        }
+        writer.append_audit_batch(batch).map(Some)
+    }
+
     pub(super) fn validate_audit_receipt(
         &self,
         receipt: DurableAppendReceipt,
@@ -254,7 +273,7 @@ impl JsonlSessionStore {
     }
 
     #[cfg(test)]
-    pub(super) fn inject_writer_fault(&self, fault: SessionWriterFault) -> Result<()> {
+    pub(crate) fn inject_writer_fault(&self, fault: SessionWriterFault) -> Result<()> {
         let mut writer = self
             .writer
             .lock()

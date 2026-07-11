@@ -181,10 +181,11 @@ Check:
 - `[code_intelligence].enabled`
 - whether the relevant language server is installed and on `PATH`;
 - whether discovery is enabled;
+- whether this exact workspace is trusted when the server keeps the default `trust_required = true`;
 - the LSP readiness rows in `/config`;
 - `/doctor` output.
 
-If no LSP server is available, Rust projects can still use Tree-sitter fallback for outline and syntax diagnostics. Normal chat and file tools are not blocked.
+For a fresh headless `sigil run`, the trust state is `Unknown`; it does not reuse another session's decision, so a trust-required LSP intentionally stays stopped. Use the TUI when a session-bound trusted LSP is required, or explicitly set `trust_required = false` only when that headless process-start policy is appropriate. If no LSP server is available, Rust projects can still use Tree-sitter fallback for outline and syntax diagnostics. Normal chat and file tools are not blocked.
 
 ## Command Not Found After Install
 

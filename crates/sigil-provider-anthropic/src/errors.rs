@@ -14,6 +14,10 @@ pub enum AnthropicProviderError {
     Status { status: u16, body: String },
     #[error("Anthropic stream error: {0}")]
     Stream(String),
+    #[error("Anthropic hosted web search is unsupported for model {0}")]
+    UnsupportedHostedWebSearchModel(String),
+    #[error("Anthropic hosted web search is unsupported for this compatible endpoint")]
+    UnsupportedHostedWebSearchPlatform,
 }
 
 pub fn classify_status(status: u16, body: &str) -> AnthropicProviderError {

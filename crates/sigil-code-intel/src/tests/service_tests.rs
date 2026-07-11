@@ -1,6 +1,8 @@
 use std::{fs, sync::OnceLock, time::Duration};
 
-use sigil_kernel::{CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig};
+use sigil_kernel::{
+    CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig, WorkspaceTrust,
+};
 
 use super::*;
 use crate::context::LspContextSnapshotStatus;
@@ -59,6 +61,17 @@ fn legacy_fake_lsp_server_config(script_path: &std::path::Path) -> CodeIntellige
 
 fn missing_server_config() -> CodeIntelligenceConfig {
     fake_config()
+}
+
+fn trusted_service(
+    workspace_root: std::path::PathBuf,
+    config: CodeIntelligenceConfig,
+) -> CodeIntelligenceService {
+    CodeIntelligenceService::new_with_workspace_trust(
+        workspace_root,
+        config,
+        WorkspaceTrust::Trusted,
+    )
 }
 
 #[tokio::test]
@@ -513,7 +526,7 @@ async fn document_symbols_uses_configured_lsp_server_when_available() {
     .expect("source should write");
     let server_script = temp.path().join("fake_lsp.py");
     write_legacy_fake_lsp_server(&server_script);
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         legacy_fake_lsp_server_config(&server_script),
     );
@@ -754,7 +767,7 @@ async fn code_actions_filter_malformed_and_only_kind_results() {
             }
         }),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config(&script, &scenario),
     );
@@ -825,7 +838,7 @@ async fn code_action_edit_plan_resolves_actions_and_unsupported_capabilities() {
             }
         }),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config(&script, &scenario),
     );
@@ -870,7 +883,7 @@ async fn code_actions_report_unsupported_capability() {
             }
         }),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config(&script, &scenario),
     );
@@ -1010,7 +1023,7 @@ async fn lsp_service_caches_document_symbols_and_supports_shutdown() {
         &file_uri_from_path(&inside),
         &file_uri_from_path(outside.path()),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         full_feature_lsp_server_config(&server_script),
     );
@@ -1058,7 +1071,7 @@ async fn definition_references_workspace_symbols_and_diagnostics_use_lsp() {
         &file_uri_from_path(&inside),
         &file_uri_from_path(outside.path()),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         full_feature_lsp_server_config(&server_script),
     );
@@ -1429,7 +1442,7 @@ async fn lsp_helpers_report_unsupported_capabilities_and_missing_servers() {
             }
         }),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config(&server_script, &scenario_path),
     );
@@ -1554,7 +1567,7 @@ async fn definition_filters_malformed_and_external_locations() {
             }
         }),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config(&server_script, &scenario_path),
     );
@@ -1595,7 +1608,7 @@ async fn definition_startup_failure_marks_service_degraded() {
     .expect("source should write");
     let server_script = temp.path().join("fake_lsp.py");
     write_fake_lsp_server(&server_script);
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config_with_env(
             &server_script,
@@ -1674,7 +1687,7 @@ async fn diagnostics_uses_publish_diagnostics_when_pull_is_unavailable() {
             }
         }),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config(&server_script, &scenario_path),
     );
@@ -1709,7 +1722,7 @@ async fn diagnostics_wait_for_publish_notifications_when_pull_response_is_empty(
     fs::write(&workspace_file, "pub fn hello() {}\n").expect("source should write");
     let server_script = temp.path().join("fake_lsp.py");
     write_fake_lsp_server(&server_script);
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config_with_env(
             &server_script,
@@ -1754,7 +1767,7 @@ async fn document_symbols_cache_key_changes_when_query_changes() {
     let server_script = temp.path().join("fake_lsp.py");
     let counter_path = temp.path().join("document_symbol.count");
     write_fake_lsp_server(&server_script);
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config_with_env(
             &server_script,
@@ -1802,7 +1815,7 @@ async fn document_symbols_falls_back_when_lsp_returns_malformed_payload() {
     .expect("source should write");
     let server_script = temp.path().join("fake_lsp.py");
     write_fake_lsp_server(&server_script);
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config_with_env(
             &server_script,
@@ -1873,7 +1886,7 @@ async fn document_symbols_returns_cached_result_for_repeat_query() {
             }
         }),
     );
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config(&server_script, &scenario_path),
     );
@@ -1914,7 +1927,7 @@ async fn document_symbols_uses_lsp_cache_for_identical_requests() {
     let server_script = temp.path().join("fake_lsp.py");
     let counter_path = temp.path().join("document_symbol.count");
     write_fake_lsp_server(&server_script);
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config_with_env(
             &server_script,
@@ -1990,7 +2003,7 @@ async fn workspace_symbols_filter_external_and_malformed_entries() {
     fs::write(outside.path(), "pub fn outside() {}\n").expect("outside source should write");
     let server_script = temp.path().join("fake_lsp.py");
     write_fake_lsp_server(&server_script);
-    let service = CodeIntelligenceService::new(
+    let service = trusted_service(
         temp.path().to_path_buf(),
         fake_lsp_server_config_with_env(
             &server_script,
@@ -2074,7 +2087,7 @@ async fn workspace_symbols_labels_multiple_successful_lsp_servers() {
         BTreeMap::new(),
         2_000,
     ));
-    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), config);
+    let service = trusted_service(temp.path().to_path_buf(), config);
 
     let result = service
         .workspace_symbols("hello", 10)

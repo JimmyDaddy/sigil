@@ -1,6 +1,6 @@
 use sigil_kernel::{
-    CommandPermissionMatch, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolCall,
-    ToolOperation, ToolPreview, ToolSpec, ToolSubject,
+    ApprovalMode, CommandPermissionMatch, NetworkEffect, PathTrustZone, PermissionConfirmation,
+    PermissionRisk, ToolCall, ToolOperation, ToolPreview, ToolSpec, ToolSubject,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +123,8 @@ pub(crate) struct ApprovalModalView {
     pub call_id: String,
     pub source_agent: Option<String>,
     pub access_label: String,
+    pub risk: PermissionRisk,
+    pub policy_label: String,
     pub preview_title: String,
     pub preview_summary: String,
     pub change_set: Option<ApprovalChangeSetSummary>,
@@ -143,6 +145,10 @@ pub struct PendingApproval {
     pub call: ToolCall,
     pub spec: ToolSpec,
     pub subjects: Vec<ToolSubject>,
+    pub network_effect: Option<NetworkEffect>,
+    pub local_policy_decision: ApprovalMode,
+    pub network_policy_decision: ApprovalMode,
+    pub source_policy_decision: ApprovalMode,
     pub operation: ToolOperation,
     pub risk: PermissionRisk,
     pub subject_zones: Vec<PathTrustZone>,

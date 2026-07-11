@@ -1,4 +1,5 @@
 use super::*;
+use sigil_kernel::NetworkEffect;
 
 /// Runtime delegate that executes approved agent-thread tool calls.
 pub struct AgentToolRuntime {
@@ -443,6 +444,16 @@ fn collect_session_facts(
     let mut approvals_user_deny = 0_u64;
     let mut approval_session_grants = 0_u64;
     let mut approval_session_grant_reuses = 0_u64;
+    let mut approval_network_effect_records = 0_u64;
+    let mut local_policy_facets = approval_mode_counts();
+    let mut network_policy_facets = approval_mode_counts();
+    let mut source_policy_facets = approval_mode_counts();
+    let mut network_effects = BTreeMap::from([
+        ("none".to_owned(), 0_u64),
+        ("read".to_owned(), 0_u64),
+        ("mutate".to_owned(), 0_u64),
+        ("unknown".to_owned(), 0_u64),
+    ]);
     let mut approval_subject_counts = BTreeMap::<String, u64>::new();
     let mut approval_grant_reuses = Vec::new();
     let mut commands = Vec::new();
@@ -454,58 +465,75 @@ fn collect_session_facts(
             continue;
         };
         match control {
-            ControlEntry::ToolApproval(approval) => match approval.action {
-                ToolApprovalAuditAction::PolicyEvaluated => {
-                    if approval.policy_decision == ApprovalMode::Allow {
-                        approvals_policy_allow += 1;
-                    } else if approval.policy_decision == ApprovalMode::Deny {
-                        approvals_policy_deny += 1;
-                    }
-                    if approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant) {
-                        approval_session_grant_reuses += 1;
-                        approval_grant_reuses.push(json!({
-                            "call_id": approval.call_id.as_str(),
-                            "tool_name": approval.tool_name.as_str(),
-                            "grant_call_id": approval.grant_call_id.as_deref(),
-                            "operation": approval.operation,
-                            "risk": approval.risk,
-                            "subjects": approval
-                                .subjects
-                                .iter()
-                                .map(|subject| subject.normalized.as_str())
-                                .collect::<Vec<_>>(),
-                        }));
-                    }
+            ControlEntry::ToolApproval(approval) => {
+                record_approval_mode(&mut local_policy_facets, approval.local_policy_decision);
+                record_approval_mode(&mut network_policy_facets, approval.network_policy_decision);
+                record_approval_mode(&mut source_policy_facets, approval.source_policy_decision);
+                let effect = approval
+                    .network_effect
+                    .map(NetworkEffect::as_str)
+                    .unwrap_or("none");
+                if approval.network_effect.is_some() {
+                    approval_network_effect_records += 1;
                 }
-                ToolApprovalAuditAction::Requested => {
-                    approvals_requested += 1;
-                    let key = approval
-                        .subjects
-                        .iter()
-                        .map(|subject| subject.normalized.as_str())
-                        .collect::<Vec<_>>()
-                        .join("|");
-                    if !key.is_empty() {
-                        *approval_subject_counts.entry(key).or_default() += 1;
+                *network_effects.entry(effect.to_owned()).or_default() += 1;
+                match approval.action {
+                    ToolApprovalAuditAction::PolicyEvaluated => {
+                        if approval.policy_decision == ApprovalMode::Allow {
+                            approvals_policy_allow += 1;
+                        } else if approval.policy_decision == ApprovalMode::Deny {
+                            approvals_policy_deny += 1;
+                        }
+                        if approval.allow_source == Some(ToolApprovalAllowSource::SessionGrant) {
+                            approval_session_grant_reuses += 1;
+                            approval_grant_reuses.push(json!({
+                                "call_id": approval.call_id.as_str(),
+                                "tool_name": approval.tool_name.as_str(),
+                                "grant_call_id": approval.grant_call_id.as_deref(),
+                                "network_effect": approval.network_effect,
+                                "local_policy_decision": approval.local_policy_decision,
+                                "network_policy_decision": approval.network_policy_decision,
+                                "source_policy_decision": approval.source_policy_decision,
+                                "operation": approval.operation,
+                                "risk": approval.risk,
+                                "subjects": approval
+                                    .subjects
+                                    .iter()
+                                    .map(|subject| subject.normalized.as_str())
+                                    .collect::<Vec<_>>(),
+                            }));
+                        }
                     }
-                }
-                ToolApprovalAuditAction::Resolved => {
-                    approvals_resolved += 1;
-                    match approval.user_decision {
-                        Some(ToolApprovalUserDecision::Approved) => {
-                            approvals_user_allow_once += 1;
+                    ToolApprovalAuditAction::Requested => {
+                        approvals_requested += 1;
+                        let key = approval
+                            .subjects
+                            .iter()
+                            .map(|subject| subject.normalized.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        if !key.is_empty() {
+                            *approval_subject_counts.entry(key).or_default() += 1;
                         }
-                        Some(ToolApprovalUserDecision::ApprovedForSession) => {
-                            approvals_user_allow_session += 1;
-                        }
-                        Some(ToolApprovalUserDecision::Denied) => {
-                            approvals_user_deny += 1;
-                        }
-                        None => {}
                     }
+                    ToolApprovalAuditAction::Resolved => {
+                        approvals_resolved += 1;
+                        match approval.user_decision {
+                            Some(ToolApprovalUserDecision::Approved) => {
+                                approvals_user_allow_once += 1;
+                            }
+                            Some(ToolApprovalUserDecision::ApprovedForSession) => {
+                                approvals_user_allow_session += 1;
+                            }
+                            Some(ToolApprovalUserDecision::Denied) => {
+                                approvals_user_deny += 1;
+                            }
+                            None => {}
+                        }
+                    }
+                    ToolApprovalAuditAction::PreviewFailed => {}
                 }
-                ToolApprovalAuditAction::PreviewFailed => {}
-            },
+            }
             ControlEntry::ToolApprovalSessionGrant(_) => {
                 approval_session_grants += 1;
             }
@@ -626,6 +654,7 @@ fn collect_session_facts(
         || approvals_resolved > 0
         || approval_session_grants > 0
         || approval_session_grant_reuses > 0
+        || approval_network_effect_records > 0
         || !commands.is_empty()
         || subagents_total > 0
         || !changed_files.is_empty();
@@ -644,6 +673,12 @@ fn collect_session_facts(
                 "session_grant_reuses": approval_session_grant_reuses,
                 "repeated_approval_count": repeated_approvals,
                 "grant_reuses": approval_grant_reuses,
+                "facets": {
+                    "local_policy": local_policy_facets,
+                    "network_policy": network_policy_facets,
+                    "source_policy": source_policy_facets,
+                    "network_effect": network_effects,
+                },
             },
             "commands": commands,
             "gates": gates,
@@ -657,6 +692,18 @@ fn collect_session_facts(
             "files_changed": changed_files.into_iter().collect::<Vec<_>>(),
         }),
     })
+}
+
+fn approval_mode_counts() -> BTreeMap<String, u64> {
+    BTreeMap::from([
+        (ApprovalMode::Allow.as_str().to_owned(), 0),
+        (ApprovalMode::Ask.as_str().to_owned(), 0),
+        (ApprovalMode::Deny.as_str().to_owned(), 0),
+    ])
+}
+
+fn record_approval_mode(counts: &mut BTreeMap<String, u64>, mode: ApprovalMode) {
+    *counts.entry(mode.as_str().to_owned()).or_default() += 1;
 }
 
 fn tool_execution_status_label(status: ToolExecutionStatus) -> &'static str {

@@ -279,6 +279,45 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
 }
 
 #[test]
+fn task_plan_update_projects_sensitive_model_fields_before_durable_control() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 1,
+        max_plan_versions: 1,
+    };
+    let raw_url = "https://example.com/private?signature=task-plan-secret";
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: serde_json::json!({
+            "plan_version": 1,
+            "status": "accepted",
+            "steps": [{
+                "step_id": "step_1",
+                "title": format!("Inspect {raw_url}"),
+                "detail": "use token=task-detail-secret",
+                "role": "executor"
+            }],
+            "reason": format!("requested from {raw_url}")
+        })
+        .to_string(),
+    };
+
+    let entry = task_plan_update_entry(&context, &call)?;
+    let durable = serde_json::to_string(&entry)?;
+
+    for forbidden in [raw_url, "task-plan-secret", "task-detail-secret"] {
+        assert!(!durable.contains(forbidden));
+    }
+    assert!(entry.steps[0].title.contains("[redacted]"));
+    assert_eq!(
+        entry.steps[0].detail.as_deref(),
+        Some("use token=[redacted]")
+    );
+    Ok(())
+}
+
+#[test]
 fn task_replan_budget_rejects_plan_versions_beyond_limit() -> Result<()> {
     let context = TaskPlanUpdateContext {
         task_id: task_id("task_1")?,

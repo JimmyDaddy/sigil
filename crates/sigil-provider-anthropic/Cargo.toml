@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

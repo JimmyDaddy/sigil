@@ -30,6 +30,9 @@ use crate::{
 #[cfg(test)]
 #[path = "tests/verification_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "tests/workspace_trust_projection_tests.rs"]
+mod workspace_trust_projection_tests;
 
 mod config;
 mod discovery;

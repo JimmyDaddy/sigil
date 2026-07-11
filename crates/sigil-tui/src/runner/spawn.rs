@@ -1,13 +1,14 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
 };
 
 use anyhow::{Context, Result};
 use sigil_kernel::{
-    Agent, InteractionMode, JsonlSessionStore, McpServerStartup, MutationEventRecorder,
-    ProviderCapabilities, RootConfig,
+    Agent, ExtensionProcessNetworkAdmission, InteractionMode, JsonlSessionStore, McpServerStartup,
+    MutationEventRecorder, ProviderCapabilities, RootConfig, SessionLogEntry, WorkspaceTrust,
+    workspace_trust_from_entries,
 };
 use sigil_runtime::{McpElicitationHandler, McpRuntimeEventHandler};
 use tokio::runtime::Runtime;
@@ -30,6 +31,8 @@ pub fn spawn_agent_worker(
 
     let options =
         sigil_runtime::build_run_options(&root_config, workspace_root.clone(), interaction_mode);
+    let extension_network_admission =
+        ExtensionProcessNetworkAdmission::new(options.permission_context.network_policy, false);
 
     thread::Builder::new()
         .name("sigil-agent-worker".to_owned())
@@ -51,26 +54,30 @@ pub fn spawn_agent_worker(
                 Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
             let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
             let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
-            let mut registry = match sigil_runtime::build_tool_registry_without_eager_mcp(
-                &root_config,
-                &provider_capabilities,
-                workspace_root.clone(),
-                elicitation_handler.clone(),
-                mcp_event_handler.clone(),
-            ) {
-                Ok(registry) => registry,
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                    return;
-                }
-            };
-            let session_entries = match JsonlSessionStore::read_entries(&session_log_path) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                    return;
-                }
-            };
+            let (session_entries, workspace_trust) =
+                match load_session_entries_with_workspace_trust(&session_log_path, &workspace_root)
+                {
+                    Ok(projection) => projection,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        return;
+                    }
+                };
+            let mut registry =
+                match sigil_runtime::build_tool_registry_without_eager_mcp_with_workspace_trust(
+                    &root_config,
+                    &provider_capabilities,
+                    workspace_root.clone(),
+                    elicitation_handler.clone(),
+                    mcp_event_handler.clone(),
+                    workspace_trust,
+                ) {
+                    Ok(registry) => registry,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        return;
+                    }
+                };
             if let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
                 &mut registry,
                 &root_config,
@@ -98,6 +105,7 @@ pub fn spawn_agent_worker(
                 elicitation_handler.clone(),
                 mcp_event_handler.clone(),
                 mutation_recorder,
+                extension_network_admission,
             );
             let agent = Arc::new(Agent::new(provider, registry));
             run_worker_loop(
@@ -123,6 +131,15 @@ pub fn spawn_agent_worker(
     Ok((command_tx, message_rx))
 }
 
+pub(super) fn load_session_entries_with_workspace_trust(
+    session_log_path: &Path,
+    workspace_root: &Path,
+) -> Result<(Vec<SessionLogEntry>, WorkspaceTrust)> {
+    let entries = JsonlSessionStore::read_entries(session_log_path)?;
+    let workspace_trust = workspace_trust_from_entries(&entries, workspace_root)?;
+    Ok((entries, workspace_trust))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_eager_mcp_startup_tasks(
     runtime: &Runtime,
@@ -134,6 +151,7 @@ fn spawn_eager_mcp_startup_tasks(
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     mcp_event_handler: Arc<ChannelMcpRuntimeEventHandler>,
     mutation_recorder: MutationEventRecorder,
+    network_admission: ExtensionProcessNetworkAdmission,
 ) {
     for server in root_config
         .mcp_servers
@@ -161,7 +179,7 @@ fn spawn_eager_mcp_startup_tasks(
         let mutation_recorder = mutation_recorder.clone();
 
         runtime.spawn(async move {
-            match sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
+            match sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
                 &mut registry,
                 &root_config,
                 &provider_capabilities,
@@ -170,6 +188,7 @@ fn spawn_eager_mcp_startup_tasks(
                 elicitation_handler,
                 mcp_event_handler,
                 Some(mutation_recorder),
+                network_admission,
             )
             .await
             {

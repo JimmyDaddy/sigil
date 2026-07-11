@@ -6,9 +6,11 @@ use futures::{Stream, stream};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 
 use sigil_kernel::{
-    CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
-    ProviderTimeoutPhase, SecretRedactor, read_provider_error_body, timeout_provider_request,
+    CompletionRequest, HostedCitationFidelity, HostedConstraintEnforcement, HostedQueryVisibility,
+    HostedRequestWireState, HostedSourceFidelity, HostedToolSupport, HostedWebSearchCapability,
+    ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
+    SecretRedactor, read_provider_error_body, timeout_provider_request,
     timeout_provider_stream_next,
 };
 
@@ -17,6 +19,7 @@ use crate::{
     client::build_http_client,
     config::GeminiProviderConfig,
     errors::{GeminiProviderError, classify_status},
+    hosted_search::{gemini_hosted_web_search_supported, hosted_invocation},
     mapper::StreamMapper,
     models::GeminiStreamEnvelope,
     request::build_generate_content_request,
@@ -88,27 +91,71 @@ impl Provider for GeminiProvider {
         self.capabilities.clone()
     }
 
+    fn hosted_web_search_capability(&self, model_name: &str) -> HostedWebSearchCapability {
+        if gemini_hosted_web_search_supported(model_name) {
+            HostedWebSearchCapability {
+                support: HostedToolSupport::ServerManaged,
+                query_visibility: HostedQueryVisibility::ProviderReportedPostExecution,
+                source_fidelity: HostedSourceFidelity::UrlAndTitle,
+                citation_fidelity: HostedCitationFidelity::OutputSpan,
+                max_uses_enforcement: HostedConstraintEnforcement::Unsupported,
+                domain_filter_enforcement: HostedConstraintEnforcement::Unsupported,
+            }
+        } else {
+            HostedWebSearchCapability::default()
+        }
+    }
+
     async fn stream(
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let hosted_invocation = hosted_invocation(&request.hosted_tools)?;
+        let hosted_enabled = hosted_invocation.is_some();
+        if hosted_enabled
+            && !self
+                .hosted_web_search_capability(&request.model_name)
+                .is_supported()
+        {
+            anyhow::bail!("Gemini model does not support hosted web search");
+        }
         let body = build_generate_content_request(&request)?;
         let url = self.stream_generate_content_url(&request.model_name);
         let mut attempt = 0usize;
+        let mut hosted_wire_state = HostedRequestWireState::Prepared;
         loop {
             attempt += 1;
-            let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
-                .await
-                .map_err(|phase| {
-                    provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
-                })?
-                .context("Gemini request failed")?;
+            let response = timeout_provider_request(
+                self.post_json(
+                    &url,
+                    &body,
+                    hosted_enabled.then_some(&mut hosted_wire_state),
+                ),
+                self.timeouts,
+            )
+            .await
+            .map_err(|phase| {
+                provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
+            })?;
+            let response = match response {
+                Ok(response) => response,
+                Err(error)
+                    if hosted_enabled
+                        && attempt < GEMINI_MAX_ATTEMPTS
+                        && hosted_wire_state.retry_allowed()
+                        && is_zero_wire_connect_error(&error) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error).context("Gemini request failed"),
+            };
             let status = response.status();
             if status.is_success() {
                 return Ok(response_stream(
                     response,
                     request.model_name.clone(),
                     self.timeouts,
+                    hosted_invocation,
                 ));
             }
             let status_code = status.as_u16();
@@ -121,7 +168,8 @@ impl Provider for GeminiProvider {
                 status_code,
             )
             .await;
-            if attempt < GEMINI_MAX_ATTEMPTS && is_retryable_status(status_code) {
+            if attempt < GEMINI_MAX_ATTEMPTS && is_retryable_status(status_code) && !hosted_enabled
+            {
                 continue;
             }
             let error_body = error_body?;
@@ -140,6 +188,7 @@ impl GeminiProvider {
         &self,
         url: &str,
         body: &T,
+        hosted_wire_state: Option<&mut HostedRequestWireState>,
     ) -> Result<reqwest::Response> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -148,25 +197,51 @@ impl GeminiProvider {
             HeaderValue::from_str(&self.api_key()?).context("invalid Gemini API key header")?,
         );
 
-        self.client
+        let request = self
+            .client
             .post(url)
             .query(&[("alt", "sse")])
             .headers(headers)
-            .json(body)
-            .send()
-            .await
-            .context("failed to send Gemini request")
+            .json(body);
+        match request.send().await {
+            Ok(response) => {
+                if let Some(wire_state) = hosted_wire_state {
+                    wire_state
+                        .mark_request_bytes_started()
+                        .context("invalid Gemini hosted request wire state")?;
+                }
+                Ok(response)
+            }
+            Err(error) => {
+                if !error.is_connect()
+                    && let Some(wire_state) = hosted_wire_state
+                {
+                    wire_state
+                        .mark_request_bytes_started()
+                        .context("invalid Gemini hosted request wire state")?;
+                }
+                Err(error).context("failed to send Gemini request")
+            }
+        }
     }
+}
+
+fn is_zero_wire_connect_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|source| source.downcast_ref::<reqwest::Error>())
+        .is_some_and(reqwest::Error::is_connect)
 }
 
 fn response_stream(
     response: reqwest::Response,
     model_name: String,
     timeouts: ModelRequestTimeouts,
+    hosted_invocation: Option<crate::hosted_search::GeminiHostedInvocation>,
 ) -> Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
     let byte_stream = response.bytes_stream();
     let decoder = GeminiSseDecoder::default();
-    let mapper = StreamMapper::new();
+    let mapper = hosted_invocation.map_or_else(StreamMapper::new, StreamMapper::with_hosted);
     let pending = VecDeque::<ProviderChunk>::new();
     let finished = false;
     let saw_done = false;

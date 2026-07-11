@@ -16,23 +16,31 @@ pub(super) fn latest_user_context_query(
         })
 }
 
-pub(super) fn session_archive_from_projected_messages(
+pub(super) fn session_archive_from_projected_messages_with_external(
     projected_messages: &[ModelMessage],
     latest_user_index: usize,
+    external_message_ids: &std::collections::BTreeSet<String>,
 ) -> SessionArchive {
     projected_messages
         .iter()
         .take(latest_user_index)
         .enumerate()
-        .flat_map(|(index, message)| session_archive_entries_from_message(index, message))
+        .flat_map(|(index, message)| {
+            session_archive_entries_from_message_with_external(
+                index,
+                message,
+                external_message_ids.contains(&message.id),
+            )
+        })
         .fold(SessionArchive::new(), |archive, entry| {
             archive.with_entry(entry)
         })
 }
 
-pub(super) fn session_archive_entries_from_message(
+pub(super) fn session_archive_entries_from_message_with_external(
     index: usize,
     message: &ModelMessage,
+    external_untrusted: bool,
 ) -> Vec<SessionArchiveEntry> {
     let Some(content) = message.content.as_deref().map(str::trim) else {
         return Vec::new();
@@ -40,26 +48,40 @@ pub(super) fn session_archive_entries_from_message(
     if content.is_empty() || matches!(message.role, MessageRole::System) {
         return Vec::new();
     }
-    let (role, source, trust_level, sensitivity) = match message.role {
-        MessageRole::System => return Vec::new(),
-        MessageRole::User => (
-            "user",
-            ContextSource::UserMessage,
-            ContextTrustLevel::UserProvided,
-            ContextSensitivity::Public,
-        ),
-        MessageRole::Assistant => (
-            "assistant",
-            ContextSource::ToolObservation,
-            ContextTrustLevel::ToolObservation,
-            ContextSensitivity::Repository,
-        ),
-        MessageRole::Tool => (
-            "tool",
-            ContextSource::ToolObservation,
-            ContextTrustLevel::ToolObservation,
-            ContextSensitivity::Repository,
-        ),
+    let (role, source, trust_level, sensitivity) = if external_untrusted {
+        (
+            match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+                MessageRole::System => return Vec::new(),
+            },
+            ContextSource::ExternalSource,
+            ContextTrustLevel::ExternalUntrusted,
+            ContextSensitivity::External,
+        )
+    } else {
+        match message.role {
+            MessageRole::System => return Vec::new(),
+            MessageRole::User => (
+                "user",
+                ContextSource::UserMessage,
+                ContextTrustLevel::UserProvided,
+                ContextSensitivity::Public,
+            ),
+            MessageRole::Assistant => (
+                "assistant",
+                ContextSource::ToolObservation,
+                ContextTrustLevel::ToolObservation,
+                ContextSensitivity::Repository,
+            ),
+            MessageRole::Tool => (
+                "tool",
+                ContextSource::ToolObservation,
+                ContextTrustLevel::ToolObservation,
+                ContextSensitivity::Repository,
+            ),
+        }
     };
     let chunks = chunk_runtime_context_body(
         content,
@@ -77,13 +99,18 @@ pub(super) fn session_archive_entries_from_message(
                 format!("{role} chunk {}/{}: {chunk}", chunk_index + 1, chunk_count)
             };
             let digest = Sha256::digest(body.as_bytes());
-            SessionArchiveEntry::new(
+            let entry = SessionArchiveEntry::new(
                 format!("message:{index}:{chunk_index}:{digest:x}"),
                 source.clone(),
                 body,
                 trust_level,
                 sensitivity,
-            )
+            );
+            if external_untrusted {
+                entry.egress_decision("external_safe_persistence")
+            } else {
+                entry
+            }
         })
         .collect()
 }

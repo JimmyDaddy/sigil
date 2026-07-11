@@ -7,6 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+futures.workspace = true
+hmac.workspace = true
+regex.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -14,7 +18,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+url.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

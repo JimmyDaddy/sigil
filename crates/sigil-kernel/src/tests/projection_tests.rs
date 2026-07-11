@@ -319,6 +319,10 @@ fn sample_tool_approval_entry(action: ToolApprovalAuditAction) -> ToolApprovalEn
         call_id: "call_1".to_owned(),
         tool_name: "write_file".to_owned(),
         access: ToolAccess::Write,
+        network_effect: Some(crate::NetworkEffect::Read),
+        local_policy_decision: ApprovalMode::Ask,
+        network_policy_decision: ApprovalMode::Ask,
+        source_policy_decision: ApprovalMode::Allow,
         operation: Some(ToolOperation::EditFile),
         risk: Some(PermissionRisk::Medium),
         subjects: vec![sample_tool_subject(ToolSubjectScope::External)],
@@ -641,6 +645,22 @@ fn dispatch_trace_projection_rebuilds_tool_agent_usage_and_readiness() -> Result
     assert_eq!(tool_trace.kind, DispatchTraceKind::Tool);
     assert_eq!(tool_trace.status, DispatchTraceStatus::Completed);
     assert_eq!(tool_trace.tool_name.as_deref(), Some("write_file"));
+    assert_eq!(
+        tool_trace.latest_network_effect,
+        Some(crate::NetworkEffect::Read)
+    );
+    assert_eq!(
+        tool_trace.latest_local_policy_decision,
+        Some(ApprovalMode::Ask)
+    );
+    assert_eq!(
+        tool_trace.latest_network_policy_decision,
+        Some(ApprovalMode::Ask)
+    );
+    assert_eq!(
+        tool_trace.latest_source_policy_decision,
+        Some(ApprovalMode::Allow)
+    );
     assert_eq!(tool_trace.egress_count, 1);
     assert_eq!(tool_trace.egress_redacted_count, 1);
     assert_eq!(

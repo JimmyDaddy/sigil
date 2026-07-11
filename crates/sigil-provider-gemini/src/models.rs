@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use sigil_kernel::SecretString;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +40,8 @@ pub struct GeminiStreamEnvelope {
 #[serde(rename_all = "camelCase")]
 pub struct GeminiCandidate {
     #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
     pub content: Option<GeminiContent>,
     #[serde(default)]
     pub finish_reason: Option<String>,
@@ -46,6 +49,8 @@ pub struct GeminiCandidate {
     pub finish_message: Option<String>,
     #[serde(default)]
     pub safety_ratings: Vec<GeminiSafetyRating>,
+    #[serde(default)]
+    pub grounding_metadata: Option<GeminiGroundingMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,4 +106,68 @@ pub struct GeminiSafetyRating {
     pub probability: Option<String>,
     #[serde(default)]
     pub blocked: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiGroundingMetadata {
+    #[serde(default, deserialize_with = "deserialize_secret_strings")]
+    pub web_search_queries: Vec<SecretString>,
+    #[serde(default)]
+    pub grounding_chunks: Vec<GeminiGroundingChunk>,
+    #[serde(default)]
+    pub grounding_supports: Vec<GeminiGroundingSupport>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GeminiGroundingChunk {
+    #[serde(default)]
+    pub web: Option<GeminiWebGroundingChunk>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GeminiWebGroundingChunk {
+    #[serde(default, deserialize_with = "deserialize_optional_secret_string")]
+    pub uri: Option<SecretString>,
+    #[serde(default, deserialize_with = "deserialize_optional_secret_string")]
+    pub title: Option<SecretString>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiGroundingSupport {
+    #[serde(default)]
+    pub grounding_chunk_indices: Vec<usize>,
+    #[serde(default)]
+    pub segment: Option<GeminiGroundingSegment>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiGroundingSegment {
+    #[serde(default)]
+    pub part_index: usize,
+    #[serde(default)]
+    pub start_index: Option<usize>,
+    #[serde(default)]
+    pub end_index: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_optional_secret_string")]
+    pub text: Option<SecretString>,
+}
+
+fn deserialize_secret_strings<'de, D>(deserializer: D) -> Result<Vec<SecretString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer)
+        .map(|values| values.into_iter().map(SecretString::new).collect())
+}
+
+fn deserialize_optional_secret_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<SecretString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|value| value.map(SecretString::new))
 }

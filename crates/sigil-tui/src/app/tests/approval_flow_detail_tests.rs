@@ -21,6 +21,7 @@ fn approval_helper_functions_format_subjects_and_diff_lines() {
         input_schema: serde_json::json!({}),
         category: ToolCategory::File,
         access: ToolAccess::Write,
+        network_effect: None,
         preview: ToolPreviewCapability::Required,
     };
 

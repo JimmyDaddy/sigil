@@ -6,7 +6,8 @@ use std::{
 
 use futures::StreamExt;
 use sigil_kernel::{
-    CompletionRequest, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+    CompletionRequest, HostedEvidence, HostedToolKind, HostedToolLimits, HostedToolRequest,
+    ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
 };
 
 use super::*;
@@ -99,6 +100,7 @@ async fn provider_rejects_stream_without_api_key_before_network() -> anyhow::Res
             background: false,
             store: false,
             deterministic_materialization: true,
+            hosted_tools: Vec::new(),
         })
         .await
     {
@@ -386,6 +388,136 @@ async fn provider_stream_maps_http_error_status_after_retry() -> anyhow::Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn provider_hosted_search_integrates_wire_and_stream_without_raw_chunk_debug()
+-> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+         data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{\"query\":\"private query\"}}}\n\n\
+         data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+         data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_1\",\"content\":[{\"type\":\"web_search_result\",\"url\":\"https://example.com/?token=secret\",\"title\":\"private title\",\"encrypted_content\":\"encrypted-secret\"}]}}\n\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":4,\"output_tokens\":2,\"server_tool_use\":{\"web_search_requests\":1}}}\n\n\
+         data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await?;
+    let provider = anthropic_hosted_test_provider(AnthropicProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..AnthropicProviderConfig::default()
+    })?;
+
+    let chunks = provider
+        .stream(hosted_test_request("claude-sonnet-4-6"))
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    assert!(chunks.iter().any(|chunk| matches!(
+        chunk,
+        ProviderChunk::HostedEvidence {
+            evidence: HostedEvidence::Source(source),
+            ..
+        } if source.raw_url() == "https://example.com/?token=secret"
+    )));
+    let debug = format!("{chunks:?}");
+    for secret in [
+        "private query",
+        "token=secret",
+        "private title",
+        "encrypted-secret",
+    ] {
+        assert!(!debug.contains(secret));
+    }
+    let wire = server.request_text();
+    assert!(wire.contains("\"type\":\"web_search_20250305\""));
+    assert!(wire.contains("\"max_uses\":2"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_hosted_search_rejects_unsupported_model_before_network() -> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await?;
+    let provider = anthropic_hosted_test_provider(AnthropicProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..AnthropicProviderConfig::default()
+    })?;
+    let error = match provider.stream(hosted_test_request("claude-test")).await {
+        Ok(_) => panic!("unsupported model should fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported for model claude-test")
+    );
+    assert_eq!(server.request_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_hosted_search_rejects_unsupported_platform_before_network() -> anyhow::Result<()>
+{
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await?;
+    let provider = anthropic_provider(AnthropicProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..AnthropicProviderConfig::default()
+    })?;
+
+    assert!(
+        !provider
+            .hosted_web_search_capability("claude-sonnet-4-6")
+            .is_supported()
+    );
+    let error = match provider
+        .stream(hosted_test_request("claude-sonnet-4-6"))
+        .await
+    {
+        Ok(_) => panic!("unsupported platform should fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported for this compatible endpoint")
+    );
+    assert_eq!(server.request_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_hosted_search_never_transparently_retries_post_send_status() -> anyhow::Result<()>
+{
+    let server = TinySseServer::start_sequence(vec![
+        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\n\r\nbusy".as_bytes(),
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: {\"type\":\"message_stop\"}\n\n".as_bytes(),
+    ])
+    .await?;
+    let provider = anthropic_hosted_test_provider(AnthropicProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..AnthropicProviderConfig::default()
+    })?;
+    let error = match provider
+        .stream(hosted_test_request("claude-sonnet-4-6"))
+        .await
+    {
+        Ok(_) => panic!("hosted 500 should terminate the invocation"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("retryable status 500"));
+    assert_eq!(server.request_count(), 1);
+    Ok(())
+}
+
 #[test]
 fn provider_private_helpers_cover_retry_and_beta_header_edges() -> anyhow::Result<()> {
     assert!(super::is_retryable_status(429));
@@ -396,7 +528,7 @@ fn provider_private_helpers_cover_retry_and_beta_header_edges() -> anyhow::Resul
         .expect_err("invalid beta header should fail");
     assert!(error.to_string().contains("invalid Anthropic beta header"));
 
-    let mut mapper = crate::mapper::StreamMapper::new();
+    let mut mapper = crate::mapper::StreamMapper::new(None);
     let mut pending = VecDeque::new();
     let done = super::enqueue_decoded_frames(
         &mut mapper,
@@ -413,6 +545,14 @@ fn provider_private_helpers_cover_retry_and_beta_header_edges() -> anyhow::Resul
 
 fn anthropic_provider(config: AnthropicProviderConfig) -> anyhow::Result<AnthropicProvider> {
     anthropic_provider_with_timeouts(config, ModelRequestTimeouts::default())
+}
+
+fn anthropic_hosted_test_provider(
+    config: AnthropicProviderConfig,
+) -> anyhow::Result<AnthropicProvider> {
+    let mut provider = anthropic_provider(config)?;
+    provider.hosted_platform = crate::hosted_search::AnthropicHostedPlatform::ClaudeApi;
+    Ok(provider)
 }
 
 fn anthropic_provider_with_timeouts(
@@ -439,7 +579,26 @@ fn test_request() -> CompletionRequest {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     }
+}
+
+fn hosted_test_request(model_name: &str) -> CompletionRequest {
+    let mut request = test_request();
+    request.model_name = model_name.to_owned();
+    request.hosted_tools = vec![
+        HostedToolRequest::new(
+            "authorization-1",
+            HostedToolKind::WebSearch,
+            HostedToolLimits {
+                max_uses: Some(2),
+                allowed_domains: vec!["example.com".to_owned()],
+                blocked_domains: Vec::new(),
+            },
+        )
+        .expect("hosted request fixture should validate"),
+    ];
+    request
 }
 
 fn retry_test_timeouts() -> ModelRequestTimeouts {

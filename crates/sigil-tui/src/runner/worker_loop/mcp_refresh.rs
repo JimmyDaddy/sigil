@@ -43,7 +43,7 @@ where
         let mcp_event_handler_trait: Arc<dyn sigil_runtime::McpRuntimeEventHandler> =
             mcp_event_handler.clone();
         match runtime.block_on(
-            sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
+            sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
                 agent.tool_registry_mut(),
                 root_config,
                 provider_capabilities,
@@ -52,6 +52,10 @@ where
                 elicitation_handler_trait,
                 mcp_event_handler_trait,
                 mutation_recorder.clone(),
+                sigil_kernel::ExtensionProcessNetworkAdmission::new(
+                    options.permission_context.network_policy,
+                    false,
+                ),
             ),
         ) {
             Ok(result) if result.matched_servers == 0 => {

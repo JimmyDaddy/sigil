@@ -2,9 +2,9 @@ use super::*;
 
 pub(super) fn render_code_intelligence_trust_summary() -> Vec<String> {
     vec![
-        render_config_readonly_row("Tool access", "read-only"),
-        render_config_readonly_row("Server process", "local workspace LSP"),
-        render_config_readonly_row("Write actions", "unavailable"),
+        render_config_readonly_row("Tool access", "read + approval-gated write"),
+        render_config_readonly_row("Server process", "per-server trust_required"),
+        render_config_readonly_row("Write actions", "diff approval required"),
     ]
 }
 

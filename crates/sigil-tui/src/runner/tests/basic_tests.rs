@@ -847,7 +847,8 @@ fn spawn_agent_worker_reports_eager_mcp_failure_without_stopping_worker() -> Res
             server_name: Some(ref server_name),
             status: McpActivationStatus::Failed { ref error },
         } if server_name == "required-eager"
-            && error.contains("failed to spawn MCP server required-eager")
+            && error.contains("mcp_command_resolution_failed")
+            && error.contains("stdio command does not resolve to an existing file")
     ));
 
     command_tx.send(WorkerCommand::CancelRun)?;
@@ -1016,13 +1017,14 @@ fn activate_lazy_mcp_reports_failed_status_for_required_server_error() -> Result
             }
         )
     })?;
-
     assert!(matches!(
         status,
         WorkerMessage::McpActivationStatus {
             server_name: Some(ref server_name),
             status: McpActivationStatus::Failed { ref error },
-        } if server_name == "required-lazy" && error.contains("failed to spawn MCP server required-lazy")
+        } if server_name == "required-lazy"
+            && error.contains("mcp_command_resolution_failed")
+            && error.contains("stdio command does not resolve to an existing file")
     ));
 
     worker.shutdown()?;
@@ -1492,7 +1494,7 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
         .path()
         .join(".sigil/sessions/session-queue-send-now.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![
+    let (provider, first_stream_started) = PlannedProvider::new_with_stream_start_signal(vec![
         StreamPlan::Pending,
         StreamPlan::Chunks(vec![
             ProviderChunk::TextDelta("urgent done".to_owned()),
@@ -1507,6 +1509,7 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    first_stream_started.recv_timeout(Duration::from_secs(3))?;
 
     worker.send(WorkerCommand::QueueConversationInput {
         prompt: "urgent queued prompt".to_owned(),

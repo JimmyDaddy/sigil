@@ -5,6 +5,7 @@ const MCP_STDERR_HEAD_LIMIT_BYTES: usize = 16 * 1024;
 const MCP_STDERR_TAIL_LIMIT_BYTES: usize = 48 * 1024;
 const MCP_STDERR_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const MCP_PROCESS_EXIT_GRACE: Duration = Duration::from_millis(500);
+#[cfg(any(windows, test))]
 const MCP_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,7 +52,7 @@ impl McpProcessCoverage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpProcessLaunchRequest {
     pub server_name: String,
     pub command: String,
@@ -61,13 +62,34 @@ pub struct McpProcessLaunchRequest {
     pub launch_static_fingerprint: String,
     pub startup_timeout_secs: u64,
     pub classification: McpProcessClass,
+    pub network_admission: ExtensionProcessNetworkAdmission,
+    pub declaration: Option<McpDeclarationLaunchMetadata>,
+}
+
+impl std::fmt::Debug for McpProcessLaunchRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpProcessLaunchRequest")
+            .field("server_name", &"[hidden]")
+            .field("command", &"[hidden]")
+            .field("args", &"[hidden]")
+            .field("working_dir", &"[hidden]")
+            .field("environment", &"[hidden]")
+            .field("launch_static_fingerprint", &"[hidden]")
+            .field("startup_timeout_secs", &self.startup_timeout_secs)
+            .field("classification", &self.classification)
+            .field("network_admission", &self.network_admission)
+            .field("declaration", &self.declaration)
+            .finish()
+    }
 }
 
 impl McpProcessLaunchRequest {
-    pub(super) fn from_config(
-        config: &McpServerConfig,
-        working_dir: Option<PathBuf>,
-    ) -> Result<Self> {
+    /// Resolves one legacy stdio config into a launch request.
+    ///
+    /// Declaration-aware launchers may call this only after validating their origin/attestation
+    /// and execution base, then replace the command with the already resolved executable.
+    pub fn from_config(config: &McpServerConfig, working_dir: Option<PathBuf>) -> Result<Self> {
         let environment = resolve_extension_process_environment(&config.inherit_env)?;
         let fingerprint_working_dir = working_dir
             .clone()
@@ -88,8 +110,43 @@ impl McpProcessLaunchRequest {
             launch_static_fingerprint: static_binding.fingerprint,
             startup_timeout_secs: config.startup_timeout_secs,
             classification: McpProcessClass::LocalStdioConfigured,
+            network_admission: ExtensionProcessNetworkAdmission::default(),
+            declaration: None,
         })
     }
+
+    #[must_use]
+    pub fn with_network_admission(
+        mut self,
+        network_admission: ExtensionProcessNetworkAdmission,
+    ) -> Self {
+        self.network_admission = network_admission;
+        self
+    }
+}
+
+/// Secret-safe declaration identity carried through process authorization and lifecycle audit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct McpDeclarationLaunchMetadata {
+    pub declared_name: String,
+    pub effective_name: String,
+    pub origin_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_id: Option<String>,
+    pub execution_base_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<String>,
+    pub projection_fingerprint: String,
+    pub authorization_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +172,8 @@ pub struct McpProcessLaunchReceipt {
     pub environment_live_fingerprint: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub launch_static_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<McpDeclarationLaunchMetadata>,
 }
 
 impl McpProcessLaunchReceipt {
@@ -136,6 +195,7 @@ impl McpProcessLaunchReceipt {
             environment_static_fingerprint: request.environment.static_fingerprint().to_owned(),
             environment_live_fingerprint: request.environment.live_fingerprint().to_owned(),
             launch_static_fingerprint: request.launch_static_fingerprint.clone(),
+            declaration: request.declaration.clone(),
         }
     }
 
@@ -201,6 +261,53 @@ impl McpProcessLaunchReceipt {
             "mcp_launch_static_fingerprint".to_owned(),
             self.launch_static_fingerprint.clone(),
         );
+        if let Some(declaration) = &self.declaration {
+            metadata.insert(
+                "mcp_declared_name".to_owned(),
+                declaration.declared_name.clone(),
+            );
+            metadata.insert(
+                "mcp_effective_name".to_owned(),
+                declaration.effective_name.clone(),
+            );
+            metadata.insert(
+                "mcp_config_origin".to_owned(),
+                declaration.origin_kind.clone(),
+            );
+            if let Some(origin_id) = &declaration.origin_id {
+                metadata.insert("mcp_config_origin_id".to_owned(), origin_id.clone());
+            }
+            metadata.insert(
+                "mcp_execution_base_kind".to_owned(),
+                declaration.execution_base_kind.clone(),
+            );
+            if let Some(manifest_hash) = &declaration.manifest_hash {
+                metadata.insert("mcp_manifest_hash".to_owned(), manifest_hash.clone());
+            }
+            if let Some(manifest_version) = &declaration.manifest_version {
+                metadata.insert("mcp_manifest_version".to_owned(), manifest_version.clone());
+            }
+            if let Some(capability_digest) = &declaration.capability_digest {
+                metadata.insert(
+                    "mcp_capability_digest".to_owned(),
+                    capability_digest.clone(),
+                );
+            }
+            if let Some(release_digest) = &declaration.release_digest {
+                metadata.insert("mcp_release_digest".to_owned(), release_digest.clone());
+            }
+            if let Some(trust) = &declaration.trust {
+                metadata.insert("mcp_plugin_trust".to_owned(), trust.clone());
+            }
+            metadata.insert(
+                "mcp_declaration_projection_fingerprint".to_owned(),
+                declaration.projection_fingerprint.clone(),
+            );
+            metadata.insert(
+                "mcp_declaration_authorization_fingerprint".to_owned(),
+                declaration.authorization_fingerprint.clone(),
+            );
+        }
         metadata
     }
 }
@@ -248,6 +355,17 @@ pub struct McpProcessLaunch {
 }
 
 pub trait McpProcessLauncher: Send + Sync {
+    /// Resolves declaration-aware launch material before process-subject and pin validation.
+    ///
+    /// The default preserves the legacy config-only launcher behavior.
+    fn resolve_launch_request(
+        &self,
+        config: &McpServerConfig,
+        fallback_working_dir: Option<PathBuf>,
+    ) -> Result<McpProcessLaunchRequest> {
+        McpProcessLaunchRequest::from_config(config, fallback_working_dir)
+    }
+
     /// Launches one local MCP stdio process and returns its coverage receipt.
     ///
     /// # Errors
@@ -262,6 +380,17 @@ pub struct LocalMcpProcessLauncher;
 
 impl McpProcessLauncher for LocalMcpProcessLauncher {
     fn launch(&self, request: McpProcessLaunchRequest) -> Result<McpProcessLaunch> {
+        let planned_network = ExecutionNetworkReceipt::unknown(
+            "local MCP launcher does not report network enforcement",
+        );
+        validate_extension_process_network_admission(
+            ExecutionSandboxProfile::Unconfined,
+            Some(NetworkEffect::Unknown),
+            request.network_admission,
+            ExecutionBackendCapabilities::default(),
+            &planned_network,
+            format!("mcp_server:{}", request.server_name),
+        )?;
         let mut command = Command::new(&request.command);
         command
             .args(&request.args)
@@ -461,7 +590,7 @@ pub(super) async fn terminate_mcp_process(child: &mut Child) -> McpProcessCleanu
 
     #[cfg(unix)]
     if let Some(process_id) = process_id {
-        if let Err(error) = signal_mcp_process_group(process_id, "TERM").await {
+        if let Err(error) = crate::process_group::signal_process_group(process_id, "TERM") {
             let fallback = kill_and_reap_child(child).await;
             return McpProcessCleanupSummary::failed(format!(
                 "failed to terminate MCP process group {process_id}: {error}; {}",
@@ -482,7 +611,7 @@ pub(super) async fn terminate_mcp_process(child: &mut Child) -> McpProcessCleanu
                 )),
             };
         }
-        if let Err(error) = signal_mcp_process_group(process_id, "KILL").await {
+        if let Err(error) = crate::process_group::signal_process_group(process_id, "KILL") {
             let fallback = kill_and_reap_child(child).await;
             return McpProcessCleanupSummary::failed(format!(
                 "failed to kill MCP process group {process_id}: {error}; {}",
@@ -557,8 +686,8 @@ async fn cleanup_after_mcp_leader_reaped(
     let reason = reason.into();
     #[cfg(unix)]
     if let Some(process_id) = process_id {
-        if let Err(signal_error) = signal_mcp_process_group(process_id, "TERM").await {
-            return match process_group_is_alive(process_id).await {
+        if let Err(signal_error) = crate::process_group::signal_process_group(process_id, "TERM") {
+            return match crate::process_group::process_group_has_live_members(process_id).await {
                 Ok(false) => McpProcessCleanupSummary::completed(format!(
                     "{reason}; no remaining process-group descendants"
                 )),
@@ -571,7 +700,7 @@ async fn cleanup_after_mcp_leader_reaped(
             };
         }
         tokio::time::sleep(MCP_PROCESS_EXIT_GRACE).await;
-        match process_group_is_alive(process_id).await {
+        match crate::process_group::process_group_has_live_members(process_id).await {
             Ok(false) => {
                 return McpProcessCleanupSummary::completed(format!(
                     "{reason}; process-group descendants exited during grace"
@@ -584,13 +713,13 @@ async fn cleanup_after_mcp_leader_reaped(
                 ));
             }
         }
-        if let Err(error) = signal_mcp_process_group(process_id, "KILL").await {
+        if let Err(error) = crate::process_group::signal_process_group(process_id, "KILL") {
             return McpProcessCleanupSummary::failed(format!(
                 "{reason}; failed to kill remaining process-group descendants: {error}"
             ));
         }
         for _ in 0..20 {
-            match process_group_is_alive(process_id).await {
+            match crate::process_group::process_group_has_live_members(process_id).await {
                 Ok(false) => {
                     return McpProcessCleanupSummary::completed(format!(
                         "{reason}; killed remaining process-group descendants"
@@ -645,32 +774,7 @@ fn configure_mcp_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(unix)]
-async fn signal_mcp_process_group(process_id: u32, signal: &str) -> Result<()> {
-    let label = format!("kill -{signal} -{process_id}");
-    let mut command = Command::new("kill");
-    command
-        .arg(format!("-{signal}"))
-        .arg(format!("-{process_id}"));
-    let status = bounded_cleanup_command_status(command, &label).await?;
-    if !status.success() {
-        bail!("{label} exited with {status}");
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn process_group_is_alive(process_id: u32) -> Result<bool> {
-    let mut command = Command::new("kill");
-    command.arg("-0").arg(format!("-{process_id}"));
-    let status = bounded_cleanup_command_status(
-        command,
-        format!("kill -0 process-group probe for {process_id}"),
-    )
-    .await?;
-    Ok(status.success())
-}
-
+#[cfg(any(windows, test))]
 async fn bounded_cleanup_command_status(
     mut command: Command,
     label: impl AsRef<str>,

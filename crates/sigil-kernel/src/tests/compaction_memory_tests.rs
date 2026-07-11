@@ -77,6 +77,9 @@ fn compaction_memory_record_can_attach_typed_task_memory() -> Result<()> {
         compacted_message_count: 4,
         retained_tail_message_count: 2,
         task_memory: Some(sample_task_memory()),
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     };
 
     record
@@ -216,6 +219,9 @@ fn compaction_model_summary_text_does_not_update_verification_verdict() -> Resul
             compacted_message_count: 8,
             retained_tail_message_count: 2,
             task_memory: Some(memory),
+            external_trust: None,
+            external_provenance_message_ids: Vec::new(),
+            external_source_ids: Vec::new(),
         })),
     ];
 

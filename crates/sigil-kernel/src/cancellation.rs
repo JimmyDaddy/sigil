@@ -376,6 +376,20 @@ impl RunCancellationOwner {
         self.reserve_cancel() && self.activate_reserved_cancel()
     }
 
+    /// Creates a root-owned one-shot hook for deterministic hard-budget exhaustion.
+    ///
+    /// Child work receives only the budget handle; the cancellation authority remains captured by
+    /// the root-created hook and cannot be recovered from that handle.
+    #[must_use]
+    pub fn budget_cancellation_hook(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let handle = self.handle.clone();
+        Arc::new(move || {
+            if handle.reserve_cancel() {
+                handle.activate_reserved_cancel();
+            }
+        })
+    }
+
     pub fn reserve_cancel(&self) -> bool {
         self.handle.reserve_cancel()
     }

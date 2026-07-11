@@ -305,6 +305,10 @@ pub(super) fn bounded_mcp_identity_projection(
     for (key, value) in [
         ("command_fingerprint", identity.command_fingerprint.as_str()),
         (
+            "process_authorization_fingerprint",
+            identity.process_authorization_fingerprint.as_str(),
+        ),
+        (
             "environment_static_fingerprint",
             identity.environment_static_fingerprint.as_str(),
         ),
@@ -319,6 +323,23 @@ pub(super) fn bounded_mcp_identity_projection(
         let bounded = bounded_mcp_metadata_text(secret_redactor, value);
         projection[key] = Value::String(bounded.value.clone());
         add_bounded_text_evidence(&mut projection, key, &bounded);
+    }
+
+    if let Some(declaration) = &identity.declaration {
+        projection["declaration"] = json!({
+            "declared_name": declaration.declared_name,
+            "effective_name": declaration.effective_name,
+            "origin_kind": declaration.origin_kind,
+            "origin_id": declaration.origin_id,
+            "execution_base_kind": declaration.execution_base_kind,
+            "manifest_hash": declaration.manifest_hash,
+            "manifest_version": declaration.manifest_version,
+            "capability_digest": declaration.capability_digest,
+            "release_digest": declaration.release_digest,
+            "trust": declaration.trust,
+            "projection_fingerprint": declaration.projection_fingerprint,
+            "authorization_fingerprint": declaration.authorization_fingerprint,
+        });
     }
 
     let mut names = Vec::new();

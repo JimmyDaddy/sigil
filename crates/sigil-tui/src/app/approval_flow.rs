@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
-use sigil_kernel::{PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation};
+use sigil_kernel::{
+    NetworkEffect, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation,
+};
 
 use super::{
     AppAction, AppState, ApprovalChangeSetSummary, ApprovalDiagnosticSummary, ApprovalDiffLine,
@@ -28,13 +30,7 @@ impl AppState {
                 if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
                     lines.push(format!("source_agent={source_agent}"));
                 }
-                lines.extend(approval_permission_lines(
-                    pending.operation,
-                    pending.risk,
-                    &pending.subject_zones,
-                    pending.confirmation.as_ref(),
-                    pending.snapshot_required,
-                ));
+                lines.extend(approval_permission_lines(pending));
                 lines.extend(approval_command_permission_lines(
                     &pending.command_permission_matches,
                 ));
@@ -114,13 +110,7 @@ impl AppState {
             if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
                 lines.push(format!("source_agent={source_agent}"));
             }
-            lines.extend(approval_permission_lines(
-                pending.operation,
-                pending.risk,
-                &pending.subject_zones,
-                pending.confirmation.as_ref(),
-                pending.snapshot_required,
-            ));
+            lines.extend(approval_permission_lines(pending));
             lines.extend(approval_command_permission_lines(
                 &pending.command_permission_matches,
             ));
@@ -295,6 +285,8 @@ impl AppState {
                 call_id: pending.call.id.clone(),
                 source_agent,
                 access_label,
+                risk: pending.risk,
+                policy_label: approval_policy_label(pending),
                 preview_title: shell_preview
                     .as_ref()
                     .map(|preview| preview.title.clone())
@@ -417,6 +409,8 @@ impl AppState {
             call_id: pending.call.id.clone(),
             source_agent,
             access_label,
+            risk: pending.risk,
+            policy_label: approval_policy_label(pending),
             preview_title: shell_preview
                 .as_ref()
                 .map(|preview| preview.title.clone())
@@ -621,15 +615,35 @@ impl AppState {
     }
 }
 
-fn approval_access_label(spec: &sigil_kernel::ToolSpec) -> String {
-    format!("{} {}", spec.category.as_str(), spec.access.as_str())
-}
-
 fn approval_pending_access_label(pending: &PendingApproval) -> String {
     if pending.operation == ToolOperation::SendTerminalInput {
         return "terminal input".to_owned();
     }
-    approval_access_label(&pending.spec)
+    approval_access_and_network_label(
+        pending.spec.category.as_str(),
+        pending.spec.access.as_str(),
+        pending.network_effect,
+    )
+}
+
+#[cfg(test)]
+fn approval_access_label(spec: &sigil_kernel::ToolSpec) -> String {
+    approval_access_and_network_label(
+        spec.category.as_str(),
+        spec.access.as_str(),
+        spec.network_effect,
+    )
+}
+
+fn approval_access_and_network_label(
+    category: &str,
+    access: &str,
+    network_effect: Option<NetworkEffect>,
+) -> String {
+    match network_effect {
+        Some(effect) => format!("{category} {access} · network {}", effect.as_str()),
+        None => format!("{category} {access}"),
+    }
 }
 
 fn approval_tool_display_name(pending: &PendingApproval) -> String {
@@ -790,37 +804,72 @@ fn approval_shell_access_summary(pending: &PendingApproval) -> &'static str {
     }
 }
 
-fn approval_permission_lines(
-    operation: ToolOperation,
-    risk: PermissionRisk,
-    zones: &[PathTrustZone],
-    confirmation: Option<&PermissionConfirmation>,
-    snapshot_required: bool,
-) -> Vec<String> {
+fn approval_permission_lines(pending: &PendingApproval) -> Vec<String> {
     let mut lines = vec![
-        format!("operation={}", approval_operation_label(operation)),
-        format!("risk={}", approval_risk_label(risk)),
+        format!("operation={}", approval_operation_label(pending.operation)),
+        format!("risk={}", approval_risk_label(pending.risk)),
+        format!(
+            "policy=local:{} network:{} source:{} final:{}",
+            pending.local_policy_decision.as_str(),
+            pending.network_policy_decision.as_str(),
+            pending.source_policy_decision.as_str(),
+            strictest_approval_mode(pending).as_str(),
+        ),
     ];
-    if !zones.is_empty() {
+    if !pending.subject_zones.is_empty() {
         lines.push(format!(
             "path_zone={}",
-            zones
+            pending
+                .subject_zones
                 .iter()
                 .map(|zone| approval_path_zone_label(*zone))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
     }
-    if let Some(confirmation) = confirmation {
+    if let Some(confirmation) = pending.confirmation.as_ref() {
         lines.push(format!(
             "confirmation={}",
             approval_confirmation_label(confirmation)
         ));
     }
-    if snapshot_required {
+    if pending.snapshot_required {
         lines.push("recovery=pre-change snapshot required".to_owned());
     }
     lines
+}
+
+fn strictest_approval_mode(pending: &PendingApproval) -> sigil_kernel::ApprovalMode {
+    use sigil_kernel::ApprovalMode;
+    if [
+        pending.local_policy_decision,
+        pending.network_policy_decision,
+        pending.source_policy_decision,
+    ]
+    .contains(&ApprovalMode::Deny)
+    {
+        ApprovalMode::Deny
+    } else if [
+        pending.local_policy_decision,
+        pending.network_policy_decision,
+        pending.source_policy_decision,
+    ]
+    .contains(&ApprovalMode::Ask)
+    {
+        ApprovalMode::Ask
+    } else {
+        ApprovalMode::Allow
+    }
+}
+
+fn approval_policy_label(pending: &PendingApproval) -> String {
+    format!(
+        "local:{} network:{} source:{} final:{}",
+        pending.local_policy_decision.as_str(),
+        pending.network_policy_decision.as_str(),
+        pending.source_policy_decision.as_str(),
+        strictest_approval_mode(pending).as_str(),
+    )
 }
 
 fn approval_command_permission_lines(

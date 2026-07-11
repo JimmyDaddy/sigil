@@ -51,6 +51,7 @@ impl Tool for BashTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }

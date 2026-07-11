@@ -437,6 +437,7 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
         }),
         category: ToolCategory::Custom,
         access: ToolAccess::Read,
+        network_effect: None,
         preview: ToolPreviewCapability::None,
     }
 }
@@ -480,11 +481,20 @@ pub fn task_plan_update_entry(
         .into_iter()
         .map(|step| {
             let display_name = match step.display_name.as_deref() {
-                Some(display_name) => Some(
-                    normalize_task_agent_display_name(display_name).map_err(|error| {
-                        anyhow!("invalid display_name for step {}: {error}", step.step_id)
-                    })?,
-                ),
+                Some(display_name) => {
+                    let normalized =
+                        normalize_task_agent_display_name(display_name).map_err(|error| {
+                            anyhow!("invalid display_name for step {}: {error}", step.step_id)
+                        })?;
+                    Some(
+                        normalize_task_agent_display_name(&crate::safe_persistence_text(
+                            &normalized,
+                        ))
+                        .map_err(|error| {
+                            anyhow!("invalid display_name for step {}: {error}", step.step_id)
+                        })?,
+                    )
+                }
                 None => None,
             };
             let mode = step
@@ -493,9 +503,9 @@ pub fn task_plan_update_entry(
             let isolation = canonical_task_plan_update_isolation(mode, step.isolation);
             Ok(TaskStepSpec {
                 step_id: TaskStepId::new(step.step_id)?,
-                title: step.title,
+                title: crate::safe_persistence_text(&step.title),
                 display_name,
-                detail: step.detail,
+                detail: step.detail.as_deref().map(crate::safe_persistence_text),
                 role: step.role,
                 depends_on: step
                     .depends_on
@@ -513,7 +523,7 @@ pub fn task_plan_update_entry(
         plan_version: args.plan_version,
         status: args.status,
         steps,
-        reason: args.reason,
+        reason: args.reason.as_deref().map(crate::safe_persistence_text),
     })
 }
 

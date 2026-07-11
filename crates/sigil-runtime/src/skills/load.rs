@@ -86,6 +86,7 @@ impl Tool for LoadSkillTool {
             }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }

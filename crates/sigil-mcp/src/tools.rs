@@ -58,6 +58,10 @@ impl Tool for McpTool {
         Ok(Some(self.trust.approval_default))
     }
 
+    fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
+        Ok(ToolOperation::NetworkRequest)
+    }
+
     fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
         if !self.trust.egress_logging {
             return Ok(None);
@@ -260,6 +264,44 @@ pub fn mcp_launch_static_fingerprint_at(
     Ok(mcp_launch_static_binding(config, working_dir, &environment)?.fingerprint)
 }
 
+/// Computes a declaration-aware static fingerprint for an already resolved executable.
+///
+/// This binds a secret-safe declaration projection to executable content. Canonical paths,
+/// command text and arguments are deliberately excluded because this fingerprint may be persisted
+/// and a plain digest of low-entropy path/argument material would support offline guessing. Exact
+/// path/process identity belongs in the runtime-keyed authorization HMAC. Legacy user-root config
+/// keeps the existing fingerprint compatibility path.
+///
+/// # Errors
+///
+/// Returns an error when the projection fingerprint is malformed, the executable cannot be
+/// canonicalized, or executable bytes cannot be read.
+pub fn mcp_resolved_launch_static_fingerprint_at(
+    declaration_projection_fingerprint: &str,
+    executable: &Path,
+) -> Result<String> {
+    if !is_sha256_fingerprint(declaration_projection_fingerprint) {
+        bail!("MCP declaration projection fingerprint is not a SHA-256 identity");
+    }
+    let canonical_executable = executable
+        .canonicalize()
+        .context("failed to canonicalize MCP declaration executable")?;
+    let executable_digest = digest_mcp_executable(&canonical_executable)?;
+    let encoded = serde_json::to_vec(&json!({
+        "version": "sigil.mcp.declaration.safe-pin.v1",
+        "declaration_projection_fingerprint": declaration_projection_fingerprint,
+        "executable_content_sha256": executable_digest,
+    }))
+    .context("failed to serialize MCP declaration launch fingerprint material")?;
+    Ok(format!("sha256:{:x}", Sha256::digest(&encoded)))
+}
+
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 pub(super) fn mcp_launch_static_binding(
     config: &McpServerConfig,
     working_dir: &Path,
@@ -387,21 +429,13 @@ fn mcp_executable_candidates(
 }
 
 fn digest_mcp_executable(executable: &Path) -> Result<String> {
-    let mut file = File::open(executable).with_context(|| {
-        format!(
-            "failed to open credentialed MCP executable {}",
-            executable.display()
-        )
-    })?;
+    let mut file = File::open(executable).context("failed to open MCP executable for hashing")?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let read = file.read(&mut buffer).with_context(|| {
-            format!(
-                "failed to read credentialed MCP executable {}",
-                executable.display()
-            )
-        })?;
+        let read = file
+            .read(&mut buffer)
+            .context("failed to read MCP executable for hashing")?;
         if read == 0 {
             break;
         }

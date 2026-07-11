@@ -187,6 +187,7 @@ impl Tool for AgentTool {
                 | AgentToolKind::Message
                 | AgentToolKind::Close => ToolAccess::Execute,
             },
+            network_effect: None,
             preview: match self.kind {
                 AgentToolKind::Spawn => ToolPreviewCapability::Required,
                 AgentToolKind::Wait

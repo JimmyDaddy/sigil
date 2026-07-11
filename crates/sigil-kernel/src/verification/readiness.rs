@@ -221,6 +221,32 @@ impl VerificationStateProjection {
     }
 }
 
+/// Restores the latest durable trust decision for one canonical workspace root.
+///
+/// Decisions recorded for other workspaces are ignored. When no decision matches the stable
+/// workspace id, the workspace remains unknown.
+///
+/// # Errors
+///
+/// Returns an error when the workspace root cannot be canonicalized to derive its stable id.
+pub fn workspace_trust_from_entries(
+    entries: &[SessionLogEntry],
+    workspace_root: &Path,
+) -> Result<WorkspaceTrust> {
+    let workspace_id = stable_workspace_id(workspace_root)?;
+    Ok(entries
+        .iter()
+        .rev()
+        .find_map(|entry| {
+            let SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision)) = entry
+            else {
+                return None;
+            };
+            (decision.workspace_id == workspace_id).then_some(decision.trust)
+        })
+        .unwrap_or(WorkspaceTrust::Unknown))
+}
+
 /// JSON-friendly persisted form of `VerificationStateProjection`.
 ///
 /// The runtime projection uses map keys that are not ideal JSON object keys. The persisted snapshot

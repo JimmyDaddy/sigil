@@ -92,6 +92,7 @@ impl Tool for DiagnosticsTestTool {
             }),
             category: ToolCategory::Custom,
             access: self.access,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }

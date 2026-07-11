@@ -279,7 +279,7 @@ pub(super) fn plugin_capability_policy_summary(
     allow_secrets: bool,
 ) -> String {
     format!(
-        "approval={} egress={} secrets={}",
+        "local=execute network=unknown source={} egress={} secrets={}",
         approval.as_str(),
         bool_summary(egress_logging),
         secrets_summary(allow_secrets)

@@ -263,6 +263,7 @@ where
             }
         };
 
+    let url_capability_registrar = run_session.user_url_capability_registrar();
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -308,6 +309,7 @@ where
         elicitation_audit_buffer,
         cancellation_owner,
         cancellation_recorder,
+        url_capability_registrar,
     })
 }
 
@@ -385,7 +387,7 @@ where
     } = queued;
     let _ = message_tx.send(WorkerMessage::ConversationQueueDispatchStarted {
         queue_id: queue_id.clone(),
-        prompt: prompt.clone(),
+        prompt: sigil_kernel::safe_persistence_text(&prompt),
     });
     let background_ready_context = queued_background_ready_transient_context(Some(&run_session));
 
@@ -422,6 +424,7 @@ where
             }
         };
 
+    let url_capability_registrar = run_session.user_url_capability_registrar();
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -485,6 +488,7 @@ where
         elicitation_audit_buffer,
         cancellation_owner,
         cancellation_recorder,
+        url_capability_registrar,
     })
 }
 
@@ -624,10 +628,11 @@ pub(in crate::runner) fn close_agent_thread(
     thread_id: AgentThreadId,
     reason: Option<String>,
 ) -> std::result::Result<(AgentThreadId, Vec<SessionLogEntry>), String> {
-    let mut session = load_session(
+    let mut session = load_session_with_url_capability_attachment(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
+        current_session.as_ref(),
     )
     .map_err(|error| format!("failed to load session before agent close: {error:#}"))?;
     let mut result = sigil_runtime::close_agent_thread(&session, thread_id.clone(), reason);

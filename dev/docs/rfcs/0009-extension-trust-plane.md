@@ -148,6 +148,24 @@ Productization remains:
 - Plugin-owned process mutation accounting and verification hook receipt binding
   remain gated by RFC-0015 E15.5/E15.6 and must not be replaced by fake
   adapters.
+- RFC-0021 E21.13 adds a runtime-only MCP declaration carrier on top of this
+  trust plane. Trusted plugin MCP registrations now retain canonical plugin
+  root and manifest attestation; activation re-reads the manifest and checks
+  hash, version, capability digest and the latest matching trust decision both
+  before process authorization/static pin validation and immediately before
+  spawn. Plugin launchers use a read-through append-only session trust source
+  for both checks rather than retaining a discovery-time trust snapshot, so a
+  disable/review decision between authorization and spawn fails closed. The
+  durable/product projection exposes only origin/base kinds and
+  bounded fingerprints, never canonical paths or command arguments. Persisted
+  stable pins bind the safe projection plus executable content; exact paths and
+  raw arguments exist only inside a process-random-key authorization HMAC used
+  by tool/resource/prompt permission subjects and exact session-grant matching.
+  Pre-spawn rejection lifecycle evidence retains the safe declaration identity
+  even when no process receipt exists.
+  This carrier and explicit registry API do not automatically merge plugin MCP
+  servers into normal startup/refresh: RFC-0002/RFC-0003 still gate that product
+  wiring on plugin-owned external-process mutation/lifecycle accounting.
 - 2026-06-30 审计确认：E09.5 的 context/compaction provenance boundary 已由
   RFC-0015 E15.2-E15.4 满足；RFC-0002/RFC-0003 side-effect accounting 仍由后续
   plugin mutation / verification slices 跟踪。

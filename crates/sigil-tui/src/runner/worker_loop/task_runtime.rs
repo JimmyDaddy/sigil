@@ -1163,14 +1163,16 @@ pub(in crate::runner) fn approve_plan(
     current_session: &mut Option<Session>,
     request: PlanApprovalRequest,
 ) -> std::result::Result<(PlanApprovedEntry, Vec<SessionLogEntry>), String> {
-    let plan_text = request.plan_text.trim();
+    let safe_plan_text = sigil_kernel::safe_persistence_text(&request.plan_text);
+    let plan_text = safe_plan_text.trim();
     if plan_text.is_empty() {
         return Err("plan approval failed: plan text is empty".to_owned());
     }
-    let mut session = load_session(
+    let mut session = load_session_with_url_capability_attachment(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
+        current_session.as_ref(),
     )
     .map_err(|error| format!("failed to load session before plan approval: {error:#}"))?;
     let next_version = session
@@ -1182,7 +1184,7 @@ pub(in crate::runner) fn approve_plan(
     let scope_summary = if request.scope_summary.trim().is_empty() {
         "approved plan scope".to_owned()
     } else {
-        request.scope_summary.trim().to_owned()
+        sigil_kernel::safe_persistence_text(request.scope_summary.trim())
     };
     let workspace_paths = plan_workspace_paths(plan_text);
     let entry = PlanApprovedEntry {
@@ -1309,10 +1311,11 @@ pub(in crate::runner) fn create_task_from_plan(
 ) -> std::result::Result<CreatedTaskFromPlan, String> {
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for task creation: {error:#}"))?;
-    let mut session = load_session(
+    let mut session = load_session_with_url_capability_attachment(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
+        current_session.as_ref(),
     )
     .map_err(|error| format!("failed to load session before creating task from plan: {error:#}"))?;
     let projection = session.plan_artifact_projection();
@@ -1393,7 +1396,7 @@ pub(in crate::runner) fn create_task_from_plan(
         controls.push(ControlEntry::TaskRun(TaskRunEntry {
             task_id: task_id.clone(),
             parent_session_ref,
-            objective: objective.clone(),
+            objective: sigil_kernel::safe_persistence_text(&objective),
             status: TaskRunStatus::Paused,
             reason: Some(format!("created from plan {}", plan_id.as_str())),
         }));
@@ -1428,10 +1431,11 @@ pub(in crate::runner) fn reject_plan(
 ) -> std::result::Result<(PlanDecisionRecordedEntry, Vec<SessionLogEntry>), String> {
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for rejection: {error:#}"))?;
-    let mut session = load_session(
+    let mut session = load_session_with_url_capability_attachment(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
+        current_session.as_ref(),
     )
     .map_err(|error| format!("failed to load session before rejecting plan: {error:#}"))?;
     let projection = session.plan_artifact_projection();
@@ -1541,9 +1545,12 @@ fn append_terminated_task_state(
                 step_id: step.step_id,
                 role: step.role,
                 status: step_status,
-                title: step.title,
+                title: step
+                    .title
+                    .as_deref()
+                    .map(sigil_kernel::safe_persistence_text),
                 summary: None,
-                reason: Some(reason.to_owned()),
+                reason: Some(sigil_kernel::safe_persistence_text(reason)),
             }))
             .map_err(|error| format!("failed to append cancelled task step: {error:#}"))?;
     }
@@ -1557,9 +1564,9 @@ fn append_terminated_task_state(
         .append_control(ControlEntry::TaskRun(TaskRunEntry {
             task_id,
             parent_session_ref,
-            objective,
+            objective: sigil_kernel::safe_persistence_text(&objective),
             status: task_status,
-            reason: Some(reason.to_owned()),
+            reason: Some(sigil_kernel::safe_persistence_text(reason)),
         }))
         .map_err(|error| format!("failed to append cancelled task run: {error:#}"))?;
     Ok(())

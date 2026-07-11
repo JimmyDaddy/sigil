@@ -3,27 +3,52 @@ use super::*;
 /// In-memory session state backed by an optional append-only JSONL store.
 #[derive(Debug)]
 pub struct Session {
+    pub(super) session_scope_id: String,
     pub(super) provider_name: String,
     pub(super) model_name: String,
     pub(super) entries: Vec<SessionLogEntry>,
     pub(super) store: Option<JsonlSessionStore>,
     pub(super) stats: SessionStats,
+    pub(super) runtime_attachments: SessionRuntimeAttachments,
+}
+
+#[derive(Default)]
+pub(super) struct SessionRuntimeAttachments {
+    user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
+}
+
+impl std::fmt::Debug for SessionRuntimeAttachments {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionRuntimeAttachments")
+            .field(
+                "user_url_capability_registrar",
+                &self
+                    .user_url_capability_registrar
+                    .as_ref()
+                    .map(|_| "configured"),
+            )
+            .finish()
+    }
 }
 
 impl Session {
     /// Creates a new in-memory session with the given provider and model identity.
     pub fn new(provider_name: impl Into<String>, model_name: impl Into<String>) -> Self {
         Self {
+            session_scope_id: uuid::Uuid::new_v4().to_string(),
             provider_name: provider_name.into(),
             model_name: model_name.into(),
             entries: Vec::new(),
             store: None,
             stats: SessionStats::default(),
+            runtime_attachments: SessionRuntimeAttachments::default(),
         }
     }
 
     /// Attaches a durable JSONL store to the session.
     pub fn with_store(mut self, store: JsonlSessionStore) -> Self {
+        self.session_scope_id = session_id_for_path(store.path());
         self.store = Some(store);
         self
     }
@@ -34,13 +59,20 @@ impl Session {
         model_name: impl Into<String>,
         entries: Vec<SessionLogEntry>,
     ) -> Self {
+        let session_scope_id = uuid::Uuid::new_v4().to_string();
+        let (mut entries, audit_needed) = validated_recovered_entries(&session_scope_id, entries);
+        if audit_needed {
+            entries.push(unsafe_external_recovery_audit_entry());
+        }
         let stats = session_stats_from_entries(&entries);
         Self {
+            session_scope_id,
             provider_name: provider_name.into(),
             model_name: model_name.into(),
             entries,
             store: None,
             stats,
+            runtime_attachments: SessionRuntimeAttachments::default(),
         }
     }
 
@@ -54,7 +86,22 @@ impl Session {
         let fallback_model_name = model_name.into();
         let (entries, provider_name, model_name) =
             store.load_entries_writer_reconciled(fallback_provider_name, fallback_model_name)?;
-        let mut session = Self::from_entries(provider_name, model_name, entries).with_store(store);
+        crate::EgressAuditRecorder::new(store.clone()).reconcile_interrupted()?;
+        let session_scope_id = session_id_for_path(store.path());
+        let (entries, audit_needed) = validated_recovered_entries(&session_scope_id, entries);
+        let stats = session_stats_from_entries(&entries);
+        let mut session = Self {
+            session_scope_id,
+            provider_name,
+            model_name,
+            entries,
+            store: Some(store),
+            stats,
+            runtime_attachments: SessionRuntimeAttachments::default(),
+        };
+        if audit_needed {
+            session.append_control(unsafe_external_recovery_audit_control())?;
+        }
         let recovered_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -86,6 +133,78 @@ impl Session {
 
     pub fn append_control(&mut self, control: ControlEntry) -> Result<()> {
         self.append(SessionLogEntry::Control(control))
+    }
+
+    /// Returns the live session scope used to bind URL capabilities and external provenance.
+    pub fn session_scope_id(&self) -> &str {
+        &self.session_scope_id
+    }
+
+    /// Attaches a non-serializable runtime URL capability registrar to this logical session.
+    ///
+    /// The attachment moves with the in-memory session across turns but never enters the JSONL
+    /// log, snapshots, or provider-visible request material.
+    pub fn try_attach_user_url_capability_registrar(
+        &mut self,
+        registrar: Arc<dyn crate::UserUrlCapabilityRegistrar>,
+    ) -> Result<()> {
+        if self
+            .runtime_attachments
+            .user_url_capability_registrar
+            .is_some()
+        {
+            bail!("session already has a URL capability registrar attachment");
+        }
+        self.runtime_attachments.user_url_capability_registrar = Some(registrar);
+        Ok(())
+    }
+
+    /// Returns a clone of the process-local registrar attachment for run-boundary fallback.
+    pub fn user_url_capability_registrar(
+        &self,
+    ) -> Option<Arc<dyn crate::UserUrlCapabilityRegistrar>> {
+        self.runtime_attachments
+            .user_url_capability_registrar
+            .clone()
+    }
+
+    /// Appends a validated external provenance sidecar for an already-persisted safe message.
+    pub fn append_external_provenance(
+        &mut self,
+        provenance: ExternalProvenanceEntry,
+    ) -> Result<()> {
+        if provenance.session_scope_id != self.session_scope_id {
+            bail!("external provenance belongs to a different session scope");
+        }
+        let message = self
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                SessionLogEntry::User(message)
+                | SessionLogEntry::Assistant(message)
+                | SessionLogEntry::ToolResult(message)
+                    if message.id == provenance.message_id =>
+                {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("external provenance message does not exist"))?;
+        provenance.validate_against_message(message)?;
+        self.append_control(ControlEntry::ExternalProvenance(provenance))
+    }
+
+    /// Returns durable external provenance sidecars in append order.
+    pub fn external_provenance_entries(&self) -> Vec<ExternalProvenanceEntry> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::ExternalProvenance(provenance)) => {
+                    Some(provenance.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Appends a durable domain event that does not project into provider-visible chat history.
@@ -130,6 +249,17 @@ impl Session {
             .as_ref()
             .ok_or(DurableAuditError::MissingDurableStore)?;
         Ok(crate::RunCancellationRecorder::new(store.clone()))
+    }
+
+    /// Returns the store-backed recorder used by pre-egress barriers and lifecycle recovery.
+    pub fn egress_audit_recorder(
+        &self,
+    ) -> std::result::Result<crate::EgressAuditRecorder, DurableAuditError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or(DurableAuditError::MissingDurableStore)?;
+        Ok(crate::EgressAuditRecorder::new(store.clone()))
     }
 
     /// Returns a store-backed mutation recorder for tool contexts when this session is durable.
@@ -700,19 +830,53 @@ impl Session {
         transient_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
     ) -> Result<CompletionRequest> {
+        self.build_request_with_transient_messages_context_and_overlays(
+            workspace_root,
+            memory_config,
+            tools,
+            reasoning_effort,
+            previous_response_handle,
+            traffic_partition_key,
+            transient_messages,
+            runtime_context,
+            &[],
+        )
+    }
+
+    /// Builds one request while applying non-serializable exact-message overlays only after the
+    /// safe PrefixSnapshot and Context V0 materialization have been durably recorded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_request_with_transient_messages_context_and_overlays(
+        &mut self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        tools: Vec<ToolSpec>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
+        overlays: &[crate::TransientMessageOverlay],
+    ) -> Result<CompletionRequest> {
         let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
         let projected_messages = self.projected_messages();
-        let mut request_messages = memory.messages.clone();
+        let mut safe_request_messages = memory.messages.clone();
         if let Some(context_message) =
             self.runtime_context_v0_message(&projected_messages, runtime_context)?
         {
-            request_messages.push(context_message);
+            safe_request_messages.push(context_message);
         }
-        request_messages.extend(projected_messages);
-        request_messages.extend(transient_messages.iter().cloned());
+        safe_request_messages.extend(projected_messages);
+        let mut exact_overlays = overlays.to_vec();
+        for transient in transient_messages {
+            let (safe_transient, exact_overlay) =
+                crate::project_message_for_persistence(transient.clone())?;
+            safe_request_messages.push(safe_transient);
+            exact_overlays.push(exact_overlay);
+        }
 
-        let materialized_messages =
-            serde_json::to_string(&request_messages).context("failed to serialize messages")?;
+        let materialized_messages = serde_json::to_string(&safe_request_messages)
+            .context("failed to serialize messages")?;
         let materialized_tools =
             serde_json::to_string(&tools).context("failed to serialize tool specs")?;
         let prefix_materialized = format!("{materialized_messages}\n{materialized_tools}");
@@ -728,6 +892,8 @@ impl Session {
         };
         apply_memory_report(&mut snapshot, &memory.report);
         self.append_control(ControlEntry::PrefixSnapshotCaptured(snapshot))?;
+        let request_messages =
+            crate::apply_exact_message_overlays(&safe_request_messages, &exact_overlays)?;
         Ok(CompletionRequest {
             provider_name: self.provider_name.clone(),
             model_name: self.model_name.clone(),
@@ -742,6 +908,7 @@ impl Session {
             background: false,
             store: false,
             deterministic_materialization: true,
+            hosted_tools: Vec::new(),
         })
     }
 
@@ -781,8 +948,21 @@ impl Session {
         let mut items = Vec::new();
 
         if let Some((latest_user_index, query)) = latest_user_context_query(projected_messages) {
-            let archive =
-                session_archive_from_projected_messages(projected_messages, latest_user_index);
+            let mut external_message_ids = self
+                .external_provenance_entries()
+                .into_iter()
+                .map(|provenance| provenance.message_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Some(record) = self.latest_compaction_record()
+                && record.external_trust == Some(ExternalTrust::ExternalUntrusted)
+            {
+                external_message_ids.insert(compaction_summary_message(&record).id);
+            }
+            let archive = session_archive_from_projected_messages_with_external(
+                projected_messages,
+                latest_user_index,
+                &external_message_ids,
+            );
             let hits = archive.search_bm25(&query, REQUEST_CONTEXT_V0_SESSION_ARCHIVE_LIMIT);
             for hit in hits {
                 snippets.insert(hit.item.id.clone(), hit.snippet);
@@ -800,6 +980,36 @@ impl Session {
 
         snippets.extend(runtime_context.snippets);
         items.extend(runtime_context.items);
+
+        let external_sources = self
+            .external_provenance_entries()
+            .into_iter()
+            .rev()
+            .flat_map(|provenance| provenance.sources)
+            .take(REQUEST_CONTEXT_V0_EXTERNAL_SOURCE_LIMIT);
+        for source in external_sources {
+            let snippet = source.title.as_deref().map_or_else(
+                || source.safe_display_url.clone(),
+                |title| format!("{title} — {}", source.safe_display_url),
+            );
+            let item_id = format!("external-source:{}", source.source_id);
+            let item = ContextItem {
+                id: item_id.clone(),
+                source: ContextSource::ExternalSource,
+                source_event_id: None,
+                trust_level: ContextTrustLevel::ExternalUntrusted,
+                sensitivity: ContextSensitivity::External,
+                egress_decision: Some("external_safe_persistence".to_owned()),
+                repo_revision: None,
+                token_cost: estimate_context_token_cost(&snippet),
+                score: None,
+                score_breakdown: Vec::new(),
+                inclusion_reason: ContextInclusionReason::RequiredEvidence,
+                body_ref: ContextBodyRef::inline(&snippet),
+            };
+            snippets.insert(item_id, snippet);
+            items.push(item);
+        }
 
         if items.is_empty() {
             return Ok(None);
@@ -855,11 +1065,16 @@ impl Session {
 
         let summary = summarize_messages(&raw_messages[..compacted_message_count]);
         let task_memory = self.default_compaction_task_memory(&summary, compacted_message_count)?;
+        let (external_trust, external_provenance_message_ids, external_source_ids) =
+            self.compaction_external_projection(&raw_messages[..compacted_message_count]);
         let record = CompactionRecord {
             summary,
             compacted_message_count,
             retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
             task_memory,
+            external_trust,
+            external_provenance_message_ids,
+            external_source_ids,
         };
         self.append_control(ControlEntry::CompactionApplied(record.clone()))?;
         self.stats.last_prompt_tokens = 0;
@@ -901,11 +1116,16 @@ impl Session {
         }
 
         let summary = summarize_messages(&raw_messages[..compacted_message_count]);
+        let (external_trust, external_provenance_message_ids, external_source_ids) =
+            self.compaction_external_projection(&raw_messages[..compacted_message_count]);
         let record = CompactionRecord {
             task_memory: self.default_compaction_task_memory(&summary, compacted_message_count)?,
             summary,
             compacted_message_count,
             retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
+            external_trust,
+            external_provenance_message_ids,
+            external_source_ids,
         };
         Ok(Some(CompactionPreview {
             folded_messages: raw_messages[..compacted_message_count].to_vec(),
@@ -1038,4 +1258,112 @@ impl Session {
         }
         repair_orphan_tool_results(&projected_messages_with_record(&raw_messages, &record))
     }
+
+    fn compaction_external_projection(
+        &self,
+        folded_messages: &[ModelMessage],
+    ) -> (Option<ExternalTrust>, Vec<String>, Vec<String>) {
+        let folded_ids = folded_messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut message_ids = Vec::new();
+        let mut source_ids = Vec::new();
+        let inherited_external = self
+            .latest_compaction_record()
+            .filter(|record| record.external_trust == Some(ExternalTrust::ExternalUntrusted));
+        if let Some(record) = &inherited_external {
+            message_ids.extend(record.external_provenance_message_ids.iter().cloned());
+            source_ids.extend(record.external_source_ids.iter().cloned());
+        }
+        for provenance in self.external_provenance_entries() {
+            if !folded_ids.contains(provenance.message_id.as_str()) {
+                continue;
+            }
+            if !message_ids.contains(&provenance.message_id) {
+                message_ids.push(provenance.message_id.clone());
+            }
+            for source in provenance.sources {
+                if !source_ids.contains(&source.source_id) {
+                    source_ids.push(source.source_id);
+                }
+            }
+        }
+        let trust = (inherited_external.is_some() || !message_ids.is_empty())
+            .then_some(ExternalTrust::ExternalUntrusted);
+        (trust, message_ids, source_ids)
+    }
+}
+
+fn validated_recovered_entries(
+    session_scope_id: &str,
+    entries: Vec<SessionLogEntry>,
+) -> (Vec<SessionLogEntry>, bool) {
+    let audit_already_present = entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ContextAssemblySkipped(audit))
+                if audit.reason == UNSAFE_EXTERNAL_RECOVERY_AUDIT_REASON
+        )
+    });
+    let mut safe_entries = Vec::with_capacity(entries.len());
+    let mut skipped = false;
+    for entry in entries {
+        let accepted = match &entry {
+            SessionLogEntry::Control(ControlEntry::ExternalProvenance(provenance)) => {
+                let message = safe_entries.iter().find_map(|candidate| match candidate {
+                    SessionLogEntry::User(message)
+                    | SessionLogEntry::Assistant(message)
+                    | SessionLogEntry::ToolResult(message)
+                        if message.id == provenance.message_id =>
+                    {
+                        Some(message)
+                    }
+                    _ => None,
+                });
+                provenance.session_scope_id == session_scope_id
+                    && message
+                        .is_some_and(|message| provenance.validate_against_message(message).is_ok())
+            }
+            SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(descriptor)) => {
+                descriptor.session_scope_id == session_scope_id
+                    && descriptor.validate().is_ok()
+                    && safe_entries.iter().any(|candidate| {
+                        match (descriptor.provenance, candidate) {
+                            (
+                                crate::WebUrlProvenanceKind::UserMessage,
+                                SessionLogEntry::User(message),
+                            ) => message.id == descriptor.durable_entry_id,
+                            (
+                                crate::WebUrlProvenanceKind::WebSearchResult
+                                | crate::WebUrlProvenanceKind::PriorWebFetch
+                                | crate::WebUrlProvenanceKind::RedirectTarget,
+                                SessionLogEntry::Assistant(message)
+                                | SessionLogEntry::ToolResult(message),
+                            ) => message.id == descriptor.durable_entry_id,
+                            _ => false,
+                        }
+                    })
+            }
+            _ => true,
+        };
+        if accepted {
+            safe_entries.push(entry);
+        } else {
+            skipped = true;
+        }
+    }
+    (safe_entries, skipped && !audit_already_present)
+}
+
+fn unsafe_external_recovery_audit_control() -> ControlEntry {
+    ControlEntry::ContextAssemblySkipped(ContextAssemblySkippedEntry {
+        reason: UNSAFE_EXTERNAL_RECOVERY_AUDIT_REASON.to_owned(),
+        candidate_count: 0,
+        item_ids: Vec::new(),
+    })
+}
+
+fn unsafe_external_recovery_audit_entry() -> SessionLogEntry {
+    SessionLogEntry::Control(unsafe_external_recovery_audit_control())
 }

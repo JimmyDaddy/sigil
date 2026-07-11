@@ -134,6 +134,10 @@ fn test_tool_approval(action: ToolApprovalAuditAction) -> SessionLogEntry {
         call_id: "call-approval".to_owned(),
         tool_name: "read_file".to_owned(),
         access: ToolAccess::Read,
+        network_effect: None,
+        local_policy_decision: crate::ApprovalMode::Ask,
+        network_policy_decision: crate::ApprovalMode::Allow,
+        source_policy_decision: crate::ApprovalMode::Allow,
         operation: None,
         risk: None,
         subjects: Vec::new(),
@@ -3800,6 +3804,9 @@ fn build_request_injects_context_v0_from_latest_task_memory() -> Result<()> {
             risks: Vec::new(),
             unresolved_issues: Vec::new(),
         }),
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     }))?;
     session.append_user_message(ModelMessage::user("What context should I keep in mind?"))?;
 
@@ -4295,6 +4302,9 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         compacted_message_count: 1,
         retained_tail_message_count: 2,
         task_memory: None,
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     }))?;
     session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
         provider_name: "deepseek".to_owned(),
@@ -4315,6 +4325,9 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         compacted_message_count: 3,
         retained_tail_message_count: 2,
         task_memory: None,
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     }))?;
 
     assert!(matches!(
@@ -4534,6 +4547,9 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
             compacted_message_count: 2,
             retained_tail_message_count: 2,
             task_memory: None,
+            external_trust: None,
+            external_provenance_message_ids: Vec::new(),
+            external_source_ids: Vec::new(),
         })),
     ];
 
@@ -4581,6 +4597,9 @@ fn usage_stats_projection_replays_durable_stream_records() -> Result<()> {
             compacted_message_count: 2,
             retained_tail_message_count: 2,
             task_memory: None,
+            external_trust: None,
+            external_provenance_message_ids: Vec::new(),
+            external_source_ids: Vec::new(),
         }),
     ))?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
@@ -5095,6 +5114,9 @@ fn session_projection_helpers_repair_orphans_and_ignore_empty_compaction_records
         compacted_message_count: 1,
         retained_tail_message_count: 1,
         task_memory: None,
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     }))?;
 
     let projected = session.messages();
@@ -5106,6 +5128,9 @@ fn session_projection_helpers_repair_orphans_and_ignore_empty_compaction_records
         compacted_message_count: 2,
         retained_tail_message_count: 1,
         task_memory: None,
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     });
     assert_eq!(summary.role, crate::MessageRole::Assistant);
     assert_eq!(summary.content.as_deref(), Some("summary"));

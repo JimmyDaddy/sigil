@@ -218,14 +218,7 @@ fn approval_header_lines_with_palette(
         Line::from(vec![
             approval_badge_with_palette(
                 &view.access_label,
-                if view.access_label.contains("write")
-                    || view.access_label.contains("execute")
-                    || view.access_label.contains("network")
-                {
-                    palette.risk_medium
-                } else {
-                    palette.risk_low
-                },
+                permission_risk_color(view.risk, palette),
                 palette,
             ),
             Span::raw(" "),
@@ -249,6 +242,20 @@ fn approval_header_lines_with_palette(
                 .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
         )]),
+        Line::from(vec![
+            approval_badge_with_palette(
+                &format!("risk {}", approval_risk_label(view.risk)),
+                permission_risk_color(view.risk, palette),
+                palette,
+            ),
+            Span::raw(" "),
+            Span::styled("policy", Style::default().fg(palette.text_muted)),
+            Span::raw(" "),
+            Span::styled(
+                view.policy_label.clone(),
+                Style::default().fg(palette.text_secondary),
+            ),
+        ]),
     ];
 
     if let Some(source_agent) = &view.source_agent {
@@ -315,6 +322,26 @@ fn approval_header_lines_with_palette(
         ),
     ]));
     lines
+}
+
+fn approval_risk_label(risk: sigil_kernel::PermissionRisk) -> &'static str {
+    match risk {
+        sigil_kernel::PermissionRisk::Low => "low",
+        sigil_kernel::PermissionRisk::Medium => "medium",
+        sigil_kernel::PermissionRisk::High => "high",
+        sigil_kernel::PermissionRisk::Destructive => "destructive",
+        sigil_kernel::PermissionRisk::Protected => "protected",
+    }
+}
+
+fn permission_risk_color(risk: sigil_kernel::PermissionRisk, palette: &ThemePalette) -> Color {
+    match risk {
+        sigil_kernel::PermissionRisk::Low => palette.risk_low,
+        sigil_kernel::PermissionRisk::Medium => palette.risk_medium,
+        sigil_kernel::PermissionRisk::High
+        | sigil_kernel::PermissionRisk::Destructive
+        | sigil_kernel::PermissionRisk::Protected => palette.risk_high,
+    }
 }
 
 #[allow(dead_code)]

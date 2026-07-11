@@ -368,6 +368,7 @@ impl Tool for ApplyChangeSetTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }

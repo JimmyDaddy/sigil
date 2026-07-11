@@ -81,10 +81,15 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
             description: "Remote tool".to_owned(),
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Mcp,
-            access: ToolAccess::Network,
+            access: ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Unknown),
             preview: ToolPreviewCapability::None,
         },
         subjects: Vec::new(),
+        network_effect: Some(sigil_kernel::NetworkEffect::Unknown),
+        local_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Ask,
         operation: sigil_kernel::ToolOperation::NetworkRequest,
         risk: sigil_kernel::PermissionRisk::High,
         subject_zones: Vec::new(),
@@ -97,7 +102,8 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
     let lines = app.approval_preview_lines().join("\n");
     assert!(lines.contains("tool=remote_tool"));
     assert!(lines.contains("source_agent=MCP Agent · thread_mcp"));
-    assert!(lines.contains("mode=mcp network"));
+    assert!(lines.contains("mode=mcp read · network unknown"));
+    assert!(lines.contains("policy=local:allow network:allow source:ask final:ask"));
     assert!(lines.contains(r#"args={"query":"status"}"#));
 
     let view = app
@@ -105,7 +111,7 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
         .expect("approval modal view should exist");
     assert_eq!(view.preview_title, "Run remote_tool");
     assert_eq!(view.source_agent.as_deref(), Some("MCP Agent · thread_mcp"));
-    assert_eq!(view.access_label, "mcp network");
+    assert_eq!(view.access_label, "mcp read · network unknown");
     assert!(view.preview_summary.contains("preview unavailable"));
     assert!(
         view.diff_lines
@@ -131,12 +137,17 @@ fn terminal_input_approval_modal_explains_task_without_echoing_input() -> Result
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         },
         subjects: vec![
             ToolSubject::command("terminal task terminal-1", "terminal_task:terminal-1"),
             ToolSubject::command("terminal input bytes=2", "terminal_input_bytes:2"),
         ],
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::SendTerminalInput,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),
@@ -267,9 +278,14 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
                 input_schema: json!({"type":"object"}),
                 category: ToolCategory::Custom,
                 access: ToolAccess::Execute,
+                network_effect: None,
                 preview: ToolPreviewCapability::None,
             },
             subjects: Vec::new(),
+            network_effect: None,
+            local_policy_decision: sigil_kernel::ApprovalMode::Allow,
+            network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+            source_policy_decision: sigil_kernel::ApprovalMode::Allow,
             operation,
             risk: sigil_kernel::PermissionRisk::Low,
             subject_zones: Vec::new(),
@@ -294,9 +310,14 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Custom,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::DeleteFile,
         risk: sigil_kernel::PermissionRisk::Protected,
         subject_zones: vec![
@@ -366,9 +387,14 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
                 input_schema: json!({"type":"object"}),
                 category: ToolCategory::Custom,
                 access: ToolAccess::Write,
+                network_effect: None,
                 preview: ToolPreviewCapability::None,
             },
             subjects: Vec::new(),
+            network_effect: None,
+            local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+            network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+            source_policy_decision: sigil_kernel::ApprovalMode::Allow,
             operation: sigil_kernel::ToolOperation::DeleteFile,
             risk: sigil_kernel::PermissionRisk::Destructive,
             subject_zones: Vec::new(),
@@ -452,9 +478,14 @@ fn approval_modal_view_projects_apply_changeset_metadata() -> Result<()> {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::ApplyChangeSet,
         risk: sigil_kernel::PermissionRisk::Destructive,
         subject_zones: Vec::new(),
@@ -528,6 +559,7 @@ fn approval_request_shows_external_subjects_without_preview() -> Result<()> {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         },
         subjects: vec![ToolSubject::path_with_scope(
@@ -536,6 +568,10 @@ fn approval_request_shows_external_subjects_without_preview() -> Result<()> {
             Some(external_path.clone()),
             ToolSubjectScope::External,
         )],
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::Read,
         risk: sigil_kernel::PermissionRisk::Low,
         subject_zones: vec![sigil_kernel::PathTrustZone::External],
@@ -597,9 +633,14 @@ fn spawn_agent_approval_key_can_switch_call_to_background() -> Result<()> {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Agent,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::SpawnAgent,
         risk: sigil_kernel::PermissionRisk::High,
         subject_zones: Vec::new(),
@@ -857,9 +898,14 @@ fn approval_preview_lines_cover_changed_files_scroll_keys_and_escape() -> Result
             input_schema: json!({"type":"object"}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),

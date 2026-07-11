@@ -152,6 +152,7 @@ impl Tool for RegistryFixtureTool {
             input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
             category: ToolCategory::Custom,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::Optional,
         }
     }
@@ -217,6 +218,7 @@ impl Tool for NamedRegistryTool {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -250,6 +252,7 @@ impl Tool for OwnedRegistryTool {
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Mcp,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -291,6 +294,7 @@ impl Tool for ReadOnlyShellFixtureTool {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Shell,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -319,6 +323,7 @@ impl Tool for RemovingWorkspaceShellFixtureTool {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -348,6 +353,7 @@ impl Tool for MutatingShellFixtureTool {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1008,6 +1014,7 @@ impl Tool for DefaultHookTool {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::Optional,
         }
     }
@@ -1039,7 +1046,9 @@ fn tool_labels_are_stable() {
     assert_eq!(ToolAccess::Read.as_str(), "read");
     assert_eq!(ToolAccess::Write.as_str(), "write");
     assert_eq!(ToolAccess::Execute.as_str(), "execute");
-    assert_eq!(ToolAccess::Network.as_str(), "network");
+    assert_eq!(crate::NetworkEffect::Read.as_str(), "read");
+    assert_eq!(crate::NetworkEffect::Mutate.as_str(), "mutate");
+    assert_eq!(crate::NetworkEffect::Unknown.as_str(), "unknown");
 
     assert_eq!(ToolSubjectKind::Path.as_str(), "path");
     assert_eq!(ToolSubjectKind::Command.as_str(), "command");

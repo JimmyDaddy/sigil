@@ -55,7 +55,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 
 Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 
-Workspace trust is handled by the startup workspace trust gate, not a slash command. Trust decisions are recorded in the session audit log. They allow repository-local verification candidates to be promoted for task readiness, but they do not grant shell, plugin, MCP, or file-write permissions by themselves.
+Workspace trust is handled by the startup workspace trust gate, not a slash command. Trust decisions are recorded in the session audit log. They allow repository-local verification candidates to be promoted for task readiness and permit an exact-workspace LSP with `trust_required = true` to start. They do not grant shell, plugin, MCP, or file-write permissions, and LSP write tools still require diff approval.
 
 `/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
 

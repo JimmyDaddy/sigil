@@ -138,6 +138,8 @@ Sigil stores session and control state as append-only JSONL. For users, this mea
 - Tool executions that started but did not finish are shown as interrupted after restore.
 - File-change activities are restored with their captured diff summaries.
 - Saving new provider/model defaults in `/config` does not rewrite the identity of the current session.
+- Before prompts, queued follow-ups, tool arguments, task/agent controls, or external URLs reach durable storage, Sigil writes a bounded safe projection. Exact carrier-like values remain process-local for the active provider call, prompt history, or queued dispatch; after restart, Sigil uses the safe projection or marks exact-only work stale/interrupted instead of reconstructing secrets or signed/query-bearing URLs.
+- External material remains explicitly untrusted through compaction and recovery. Source records and claim citations are stored separately, and citations bind only to the final safe assistant text they support.
 
 ## Long Context and Compaction
 
@@ -152,7 +154,7 @@ Compaction appends control records. It does not rewrite old history.
 
 ## Code Intelligence
 
-Code intelligence is disabled by default. When enabled, Sigil registers read-only code tools:
+Code intelligence is disabled by default. When enabled, Sigil registers code-query tools:
 
 - `code_symbols`
 - `code_workspace_symbols`
@@ -165,6 +167,8 @@ It also registers LSP edit tools that require an approval diff before writing:
 
 - `code_action`
 - `code_rename`
+
+Language servers with the default `trust_required = true` start only after this exact workspace has a durable `Trusted` decision in the current session. A missing, restricted, or denied decision blocks the LSP process, but does not block normal chat, file tools, or the Rust Tree-sitter fallback. Workspace trust does not approve `code_action` or `code_rename`; their diff approval remains separate.
 
 In the TUI, `Alt-D` can run diagnostics over git changed source files. Results appear as a normal activity and the LSP section of the info rail keeps a summary.
 

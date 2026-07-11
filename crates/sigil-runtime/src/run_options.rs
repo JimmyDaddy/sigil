@@ -43,6 +43,7 @@ fn permission_evaluation_context(paths: &SigilPaths) -> PermissionEvaluationCont
         user_state_roots: vec![paths.state_root.clone()],
         user_cache_roots: vec![paths.cache_root.clone(), paths.workspace_cache_root.clone()],
         effective_policy_cap: None,
+        network_policy: NetworkPolicy::Allow,
     }
 }
 

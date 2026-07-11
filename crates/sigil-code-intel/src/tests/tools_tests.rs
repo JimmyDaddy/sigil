@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use serde_json::json;
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, JsonlSessionStore, LanguageServerConfig,
-    MutationEventRecorder, ToolCall, ToolContext, ToolErrorKind, ToolRegistry,
+    MutationEventRecorder, ToolCall, ToolContext, ToolErrorKind, ToolRegistry, WorkspaceTrust,
     write_file_with_mutation,
 };
 
@@ -112,6 +112,19 @@ fn fake_tool_lsp_config(
         )],
         ..enabled_config()
     }
+}
+
+fn register_trusted_code_intelligence_tools(
+    registry: &mut ToolRegistry,
+    config: &CodeIntelligenceConfig,
+    workspace_root: std::path::PathBuf,
+) -> Option<CodeIntelligenceService> {
+    register_code_intelligence_tools_with_workspace_trust(
+        registry,
+        config,
+        workspace_root,
+        WorkspaceTrust::Trusted,
+    )
 }
 
 fn mutation_context(workspace_root: &std::path::Path, state_root: &std::path::Path) -> ToolContext {
@@ -445,7 +458,7 @@ async fn code_workspace_definition_references_and_diagnostics_tools_use_lsp() {
         &crate::workspace::file_uri_from_path(outside.path()),
     );
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(
+    register_trusted_code_intelligence_tools(
         &mut registry,
         &tooling_lsp_config(&script),
         temp.path().to_path_buf(),
@@ -657,7 +670,7 @@ async fn code_definition_tool_maps_timeout_error_kind() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(
+    register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 10),
         temp.path().to_path_buf(),
@@ -837,7 +850,7 @@ async fn code_actions_tool_returns_lsp_action_summaries() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(
+    register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),
@@ -914,7 +927,7 @@ async fn code_rename_tool_previews_and_applies_workspace_edit() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),
@@ -1000,7 +1013,7 @@ async fn code_action_tool_previews_and_applies_selected_edit() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),
@@ -1084,7 +1097,7 @@ async fn approved_mutation_consumes_first_lsp_plan_without_second_request() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         workspace.path().to_path_buf(),
@@ -1163,7 +1176,7 @@ async fn approved_mutation_rejects_source_drift_with_zero_mutation() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         workspace.path().to_path_buf(),
@@ -1268,7 +1281,7 @@ async fn approved_mutation_requires_durable_recorder_before_write() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         workspace.path().to_path_buf(),
@@ -1357,7 +1370,7 @@ async fn approved_mutation_rolls_back_first_file_when_second_apply_fails() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         workspace.path().to_path_buf(),
@@ -1495,7 +1508,7 @@ async fn approved_mutation_records_residual_revision_when_rollback_fails() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         workspace.path().to_path_buf(),
@@ -1610,7 +1623,7 @@ async fn approved_mutation_treats_reconciled_reverse_write_as_rolled_back() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    let service = register_code_intelligence_tools(
+    let service = register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         workspace.path().to_path_buf(),
@@ -1712,7 +1725,7 @@ async fn code_workspace_symbols_tool_returns_lsp_results() {
         }),
     );
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(
+    register_trusted_code_intelligence_tools(
         &mut registry,
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),

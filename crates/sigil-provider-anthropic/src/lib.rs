@@ -2,6 +2,7 @@ mod capabilities;
 mod client;
 mod config;
 mod errors;
+mod hosted_search;
 mod mapper;
 mod models;
 mod provider;

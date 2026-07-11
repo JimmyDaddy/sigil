@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
@@ -23,7 +24,10 @@ sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
+thiserror.workspace = true
 uuid.workspace = true
+url.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

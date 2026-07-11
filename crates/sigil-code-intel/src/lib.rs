@@ -19,7 +19,9 @@ pub use service::{
     CodeActionSummary, CodeDiagnostic, CodeEditPlan, CodeIntelResponse, CodeIntelServerStatus,
     CodeIntelStatus, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol, QueryMetadata,
 };
-pub use tools::register_code_intelligence_tools;
+pub use tools::{
+    register_code_intelligence_tools, register_code_intelligence_tools_with_workspace_trust,
+};
 
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]

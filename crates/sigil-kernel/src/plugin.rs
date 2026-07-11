@@ -21,7 +21,7 @@ use crate::{
     },
     permission::ApprovalMode,
     session::{ControlEntry, SessionLogEntry},
-    tool::{ToolAccess, ToolCategory},
+    tool::{NetworkEffect, ToolAccess, ToolAccessWire, ToolCategory},
     verification::{ArtifactId, RedactionState, ToolEffect},
 };
 
@@ -356,6 +356,7 @@ impl PluginCapability {
             Self::Agent { .. } | Self::Skill { .. } => PluginCapabilityPolicy {
                 tool_category: None,
                 tool_access: None,
+                network_effect: None,
                 approval_default: None,
                 execution_backend_required: false,
                 egress_logging: false,
@@ -371,6 +372,7 @@ impl PluginCapability {
             } => PluginCapabilityPolicy {
                 tool_category: Some(ToolCategory::Custom),
                 tool_access: Some(ToolAccess::Execute),
+                network_effect: Some(NetworkEffect::Unknown),
                 approval_default: Some(*approval),
                 execution_backend_required: true,
                 egress_logging: *egress_logging,
@@ -384,7 +386,8 @@ impl PluginCapability {
                 ..
             } => PluginCapabilityPolicy {
                 tool_category: Some(ToolCategory::Mcp),
-                tool_access: Some(ToolAccess::Network),
+                tool_access: Some(ToolAccess::Execute),
+                network_effect: Some(NetworkEffect::Unknown),
                 approval_default: Some(*approval),
                 execution_backend_required: true,
                 egress_logging: *egress_logging,
@@ -464,7 +467,7 @@ impl PluginCapability {
 
 /// Static review summary showing how one plugin capability maps back to Sigil's normal tool
 /// permission, execution, egress, secret and mutation audit path.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct PluginCapabilityPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,11 +475,59 @@ pub struct PluginCapabilityPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_access: Option<ToolAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_effect: Option<NetworkEffect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_default: Option<ApprovalMode>,
     pub execution_backend_required: bool,
     pub egress_logging: bool,
     pub allow_secrets: bool,
     pub mutation_effect: ToolEffect,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct PluginCapabilityPolicyWire {
+    #[serde(default)]
+    tool_category: Option<ToolCategory>,
+    #[serde(default)]
+    tool_access: Option<ToolAccessWire>,
+    #[serde(default)]
+    network_effect: Option<NetworkEffect>,
+    #[serde(default)]
+    approval_default: Option<ApprovalMode>,
+    execution_backend_required: bool,
+    egress_logging: bool,
+    allow_secrets: bool,
+    mutation_effect: ToolEffect,
+}
+
+impl<'de> Deserialize<'de> for PluginCapabilityPolicy {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PluginCapabilityPolicyWire::deserialize(deserializer)?;
+        let (tool_access, network_effect) = match wire.tool_access {
+            Some(ToolAccessWire::Network) => {
+                (Some(ToolAccess::Execute), Some(NetworkEffect::Unknown))
+            }
+            Some(access) => {
+                let (access, network_effect) = access.upcast_network_effect(wire.network_effect);
+                (Some(access), network_effect)
+            }
+            None => (None, wire.network_effect),
+        };
+        Ok(Self {
+            tool_category: wire.tool_category,
+            tool_access,
+            network_effect,
+            approval_default: wire.approval_default,
+            execution_backend_required: wire.execution_backend_required,
+            egress_logging: wire.egress_logging,
+            allow_secrets: wire.allow_secrets,
+            mutation_effect: wire.mutation_effect,
+        })
+    }
 }
 
 /// Durable evidence that one trusted plugin hook command was handed to an execution backend.

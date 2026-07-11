@@ -56,6 +56,7 @@ impl Tool for ReadFileTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -175,6 +176,7 @@ impl Tool for WriteFileTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -291,6 +293,7 @@ impl Tool for EditFileTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -400,6 +403,7 @@ impl Tool for DeleteFileTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -489,6 +493,7 @@ impl Tool for ListTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -568,6 +573,7 @@ impl Tool for GlobTool {
             }),
             category: ToolCategory::Search,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -633,6 +639,7 @@ impl Tool for GrepTool {
             }),
             category: ToolCategory::Search,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }

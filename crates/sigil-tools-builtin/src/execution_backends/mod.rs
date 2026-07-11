@@ -26,6 +26,12 @@ use tokio::{
     time::Instant as TokioInstant,
 };
 
+#[cfg(unix)]
+use crate::process_group::{
+    process_group_has_live_members as process_group_is_alive,
+    send_process_group_signal as send_signal_to_process_group,
+};
+
 mod bubblewrap;
 mod docker;
 mod local;
@@ -1368,28 +1374,6 @@ async fn run_cleanup_command(
             "{description} exceeded the {:?} cleanup-command deadline",
             PROCESS_CLEANUP_COMMAND_TIMEOUT
         ),
-    }
-}
-
-#[cfg(unix)]
-async fn process_group_is_alive(process_id: u32) -> Result<bool> {
-    let mut command = Command::new("kill");
-    command.arg("-0").arg(format!("-{process_id}"));
-    let status = run_cleanup_command(command, format!("kill -0 -{process_id}")).await?;
-    Ok(status.success())
-}
-
-#[cfg(unix)]
-pub(crate) async fn send_signal_to_process_group(process_id: u32, signal: &str) -> Result<()> {
-    let mut command = Command::new("kill");
-    command
-        .arg(format!("-{signal}"))
-        .arg(format!("-{process_id}"));
-    let status = run_cleanup_command(command, format!("kill -{signal} -{process_id}")).await?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("kill -{signal} -{process_id} exited with {status}");
     }
 }
 

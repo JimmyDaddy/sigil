@@ -69,10 +69,11 @@ pub(in crate::runner) fn cancel_terminal_task(
     current_session: &mut Option<Session>,
     task_id: String,
 ) -> std::result::Result<(TerminalTaskEntry, Vec<SessionLogEntry>), String> {
-    let mut session = load_session(
+    let mut session = load_session_with_url_capability_attachment(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
+        current_session.as_ref(),
     )
     .map_err(|error| format!("failed to load session before terminal cancel: {error:#}"))?;
     let terminal_task_id = TerminalTaskId::new(task_id.clone())

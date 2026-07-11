@@ -7,7 +7,9 @@ use anyhow::{Result, anyhow};
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize, de};
 
-use crate::tool::{ToolAccess, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope};
+use crate::tool::{
+    NetworkEffect, ToolAccess, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+};
 
 const WORKSPACE_RUNTIME_STATE_PATHS: &[&str] = &[
     ".sigil/sessions",
@@ -49,6 +51,34 @@ impl ApprovalMode {
     }
 }
 
+/// Independent runtime policy for declared or dynamically resolved network effects.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    #[default]
+    Allow,
+    Ask,
+    Deny,
+}
+
+impl NetworkPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+        }
+    }
+
+    fn approval_mode(self) -> ApprovalMode {
+        match self {
+            Self::Allow => ApprovalMode::Allow,
+            Self::Ask => ApprovalMode::Ask,
+            Self::Deny => ApprovalMode::Deny,
+        }
+    }
+}
+
 /// User-facing permission mode for one agent run.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
@@ -77,7 +107,6 @@ impl PermissionMode {
             ToolAccess::Read => ToolOperation::Read,
             ToolAccess::Write => ToolOperation::EditFile,
             ToolAccess::Execute => ToolOperation::ExecuteUnknownCommand,
-            ToolAccess::Network => ToolOperation::NetworkRequest,
         };
         self.baseline_for(access, operation, None)
     }
@@ -98,7 +127,7 @@ impl PermissionMode {
             }
             Self::Manual => match access {
                 ToolAccess::Read => ApprovalMode::Allow,
-                ToolAccess::Write | ToolAccess::Execute | ToolAccess::Network => ApprovalMode::Ask,
+                ToolAccess::Write | ToolAccess::Execute => ApprovalMode::Ask,
             },
             Self::AutoEdit => auto_edit_baseline(access, operation, zone),
             Self::DangerFullAccess => ApprovalMode::Allow,
@@ -113,7 +142,7 @@ fn auto_edit_baseline(
 ) -> ApprovalMode {
     match access {
         ToolAccess::Read => ApprovalMode::Allow,
-        ToolAccess::Execute | ToolAccess::Network => ApprovalMode::Ask,
+        ToolAccess::Execute => ApprovalMode::Ask,
         ToolAccess::Write => {
             if auto_edit_write_operation_allowed(operation)
                 && zone.is_some_and(auto_edit_workspace_zone_allowed)
@@ -390,6 +419,7 @@ pub struct PermissionEvaluationContext {
     pub user_state_roots: Vec<PathBuf>,
     pub user_cache_roots: Vec<PathBuf>,
     pub effective_policy_cap: Option<EffectivePermissionPolicyCap>,
+    pub network_policy: NetworkPolicy,
 }
 
 /// A materialized permission cap candidate accepted by the decision lattice.
@@ -404,6 +434,10 @@ pub struct EffectivePermissionPolicyCap {
 pub struct PermissionDecision {
     pub mode: ApprovalMode,
     pub access: ToolAccess,
+    pub network_effect: Option<NetworkEffect>,
+    pub local_policy_decision: ApprovalMode,
+    pub network_policy_decision: ApprovalMode,
+    pub source_policy_decision: ApprovalMode,
     pub operation: ToolOperation,
     pub risk: PermissionRisk,
     pub subjects: Vec<ToolSubject>,
@@ -413,6 +447,8 @@ pub struct PermissionDecision {
     pub confirmation: Option<PermissionConfirmation>,
     pub snapshot_required: bool,
     pub command_permission_matches: Vec<CommandPermissionMatch>,
+    base_local_policy_decision: ApprovalMode,
+    external_directory_policy_decision: ApprovalMode,
 }
 
 impl PermissionDecision {
@@ -519,10 +555,58 @@ impl PermissionDecision {
         subject_risk_overlays: Vec<PathRiskOverlay>,
         external_directory_required: bool,
     ) -> Self {
-        let risk =
-            derive_permission_risk(access, operation, &subject_zones, &subject_risk_overlays);
-        let mode = apply_permission_mode_cap(policy_mode, mode, access);
-        let mode = apply_policy_risk_overlay(policy_mode, mode, operation, risk);
+        Self::new_with_policy_facets_operation_zones_and_overlays(
+            policy_mode,
+            mode,
+            ApprovalMode::Allow,
+            ApprovalMode::Allow,
+            ApprovalMode::Allow,
+            None,
+            operation,
+            access,
+            subjects,
+            subject_zones,
+            subject_risk_overlays,
+            external_directory_required,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_policy_facets_operation_zones_and_overlays(
+        policy_mode: PermissionMode,
+        local_policy_decision: ApprovalMode,
+        network_policy_decision: ApprovalMode,
+        delegated_source_policy_decision: ApprovalMode,
+        external_directory_policy_decision: ApprovalMode,
+        network_effect: Option<NetworkEffect>,
+        operation: ToolOperation,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+        subject_zones: Vec<PathTrustZone>,
+        subject_risk_overlays: Vec<PathRiskOverlay>,
+        external_directory_required: bool,
+    ) -> Self {
+        let risk = derive_permission_risk_with_network_effect(
+            access,
+            network_effect,
+            operation,
+            &subject_zones,
+            &subject_risk_overlays,
+        );
+        let base_local_policy_decision =
+            apply_permission_mode_cap(policy_mode, local_policy_decision, access);
+        let base_local_policy_decision =
+            apply_policy_risk_overlay(policy_mode, base_local_policy_decision, operation, risk);
+        let local_policy_decision = combine_modes(vec![
+            base_local_policy_decision,
+            external_directory_policy_decision,
+        ]);
+        let source_policy_decision = delegated_source_policy_decision;
+        let mode = combine_modes(vec![
+            local_policy_decision,
+            network_policy_decision,
+            source_policy_decision,
+        ]);
         let confirmation = confirmation_for_risk(risk, &subject_zones).or_else(|| {
             (access == ToolAccess::Write && subject_zones.contains(&PathTrustZone::External))
                 .then_some(PermissionConfirmation::TypePath)
@@ -531,6 +615,10 @@ impl PermissionDecision {
         Self {
             mode,
             access,
+            network_effect,
+            local_policy_decision,
+            network_policy_decision,
+            source_policy_decision,
             operation,
             risk,
             subjects,
@@ -540,7 +628,31 @@ impl PermissionDecision {
             confirmation,
             snapshot_required,
             command_permission_matches: Vec::new(),
+            base_local_policy_decision,
+            external_directory_policy_decision,
         }
+    }
+
+    pub(crate) fn recompute_mode(&mut self) {
+        self.mode = combine_modes(vec![
+            self.local_policy_decision,
+            self.network_policy_decision,
+            self.source_policy_decision,
+        ]);
+    }
+
+    pub(crate) fn request_external_directory_interactive_approval(&mut self) {
+        if !self.external_directory_required
+            || self.external_directory_policy_decision != ApprovalMode::Deny
+        {
+            return;
+        }
+        self.external_directory_policy_decision = ApprovalMode::Ask;
+        self.local_policy_decision = combine_modes(vec![
+            self.base_local_policy_decision,
+            self.external_directory_policy_decision,
+        ]);
+        self.recompute_mode();
     }
 }
 
@@ -639,11 +751,12 @@ impl<'a> PermissionPolicy<'a> {
         subjects: Vec<ToolSubject>,
         tool_default_mode: Option<ApprovalMode>,
     ) -> Result<PermissionDecision> {
-        self.decide_with_operation_and_default(
+        self.decide_with_operation_network_effect_and_default(
             spec,
             tool_name,
             access,
             infer_tool_operation(tool_name, access),
+            spec.network_effect,
             subjects,
             tool_default_mode,
         )
@@ -656,10 +769,36 @@ impl<'a> PermissionPolicy<'a> {
     /// Returns an error when one configured subject glob is invalid.
     pub fn decide_with_operation_and_default(
         &self,
+        spec: &ToolSpec,
+        tool_name: &str,
+        access: ToolAccess,
+        operation: ToolOperation,
+        subjects: Vec<ToolSubject>,
+        tool_default_mode: Option<ApprovalMode>,
+    ) -> Result<PermissionDecision> {
+        self.decide_with_operation_network_effect_and_default(
+            spec,
+            tool_name,
+            access,
+            operation,
+            spec.network_effect,
+            subjects,
+            tool_default_mode,
+        )
+    }
+
+    /// Resolves one tool call across independent local, network, and source policy facets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when one configured subject glob is invalid.
+    pub fn decide_with_operation_network_effect_and_default(
+        &self,
         _spec: &ToolSpec,
         tool_name: &str,
         access: ToolAccess,
         operation: ToolOperation,
+        network_effect: Option<NetworkEffect>,
         subjects: Vec<ToolSubject>,
         tool_default_mode: Option<ApprovalMode>,
     ) -> Result<PermissionDecision> {
@@ -673,18 +812,22 @@ impl<'a> PermissionPolicy<'a> {
             .iter()
             .any(|subject| subject.scope == ToolSubjectScope::External)
             && !self.config.external_directory.enabled;
+        let external_directory_policy_decision = {
+            let external_modes = subjects
+                .iter()
+                .filter(|subject| subject.scope == ToolSubjectScope::External)
+                .map(|subject| self.decide_external_subject(subject))
+                .collect::<Result<Vec<_>>>()?;
+            if external_modes.is_empty() {
+                ApprovalMode::Allow
+            } else {
+                combine_modes(external_modes)
+            }
+        };
         let command_decision = self.decide_command_permissions(tool_name, &subjects);
         let command_mode = command_decision.mode;
         let subject_modes = if subjects.is_empty() {
-            vec![self.decide_one_subject(
-                tool_name,
-                access,
-                operation,
-                tool_default_mode,
-                command_mode,
-                None,
-                None,
-            )?]
+            vec![self.decide_one_subject(tool_name, access, operation, command_mode, None, None)?]
         } else {
             subjects
                 .iter()
@@ -694,7 +837,6 @@ impl<'a> PermissionPolicy<'a> {
                         tool_name,
                         access,
                         operation,
-                        tool_default_mode,
                         command_mode,
                         Some(subject),
                         Some(zone),
@@ -703,18 +845,55 @@ impl<'a> PermissionPolicy<'a> {
                 .collect::<Result<Vec<_>>>()?
         };
 
-        let mut mode = combine_modes(subject_modes);
+        let mut local_policy_decision = combine_modes(subject_modes);
         if let Some(cap_mode) = self
             .context
             .and_then(|context| context.effective_policy_cap.as_ref())
             .map(|cap| cap.mode)
         {
-            mode = combine_modes(vec![mode, cap_mode]);
+            local_policy_decision = combine_modes(vec![local_policy_decision, cap_mode]);
         }
 
-        let mut decision = PermissionDecision::new_with_policy_mode_operation_zones_and_overlays(
+        let delegated_source_policy_decision = {
+            let source_modes = if subjects.is_empty() {
+                vec![
+                    if self.explicit_tool_policy_mode(tool_name, None)?.is_some() {
+                        ApprovalMode::Allow
+                    } else {
+                        tool_default_mode.unwrap_or(ApprovalMode::Allow)
+                    },
+                ]
+            } else {
+                subjects
+                    .iter()
+                    .map(|subject| {
+                        self.explicit_tool_policy_mode(tool_name, Some(subject))
+                            .map(|mode| {
+                                if mode.is_some() {
+                                    ApprovalMode::Allow
+                                } else {
+                                    tool_default_mode.unwrap_or(ApprovalMode::Allow)
+                                }
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            };
+            combine_modes(source_modes)
+        };
+        let network_policy_decision = evaluate_network_policy(
             self.config.mode,
-            mode,
+            network_effect,
+            self.context
+                .map_or(NetworkPolicy::Allow, |context| context.network_policy),
+        );
+
+        let mut decision = PermissionDecision::new_with_policy_facets_operation_zones_and_overlays(
+            self.config.mode,
+            local_policy_decision,
+            network_policy_decision,
+            delegated_source_policy_decision,
+            external_directory_policy_decision,
+            network_effect,
             operation,
             access,
             subjects,
@@ -743,32 +922,18 @@ impl<'a> PermissionPolicy<'a> {
         tool_name: &str,
         access: ToolAccess,
         operation: ToolOperation,
-        tool_default_mode: Option<ApprovalMode>,
         command_mode: Option<ApprovalMode>,
         subject: Option<&ToolSubject>,
         zone: Option<PathTrustZone>,
     ) -> Result<ApprovalMode> {
         let mut mode = self.config.mode.baseline_for(access, operation, zone);
-        if let Some(tool_default_mode) = tool_default_mode {
-            mode = tool_default_mode;
-        }
 
         let tool_mode = self.config.tools.get(tool_name).copied();
         if let Some(tool_mode) = tool_mode {
             mode = tool_mode;
         }
 
-        let matching_rule_modes = self
-            .rules
-            .iter()
-            .filter_map(|compiled| match compiled.matches(tool_name, subject) {
-                Ok(true) => Some(Ok(compiled.rule.mode)),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let explicit_tool_policy_mode = matching_rule_modes.last().copied().or(tool_mode);
+        let explicit_tool_policy_mode = self.explicit_tool_policy_mode(tool_name, subject)?;
         let tool_policy_mode = explicit_tool_policy_mode.unwrap_or(mode);
         let tool_policy_mode = match (command_mode, explicit_tool_policy_mode) {
             (Some(command_mode), Some(explicit_mode)) => {
@@ -778,17 +943,27 @@ impl<'a> PermissionPolicy<'a> {
             (None, _) => tool_policy_mode,
         };
 
-        let Some(subject) = subject else {
-            return Ok(tool_policy_mode);
-        };
-        if subject.scope == ToolSubjectScope::External {
-            Ok(combine_modes(vec![
-                tool_policy_mode,
-                self.decide_external_subject(subject)?,
-            ]))
-        } else {
-            Ok(tool_policy_mode)
-        }
+        Ok(tool_policy_mode)
+    }
+
+    fn explicit_tool_policy_mode(
+        &self,
+        tool_name: &str,
+        subject: Option<&ToolSubject>,
+    ) -> Result<Option<ApprovalMode>> {
+        let matching_rule_modes = self
+            .rules
+            .iter()
+            .filter_map(|compiled| match compiled.matches(tool_name, subject) {
+                Ok(true) => Some(Ok(compiled.rule.mode)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(matching_rule_modes
+            .last()
+            .copied()
+            .or_else(|| self.config.tools.get(tool_name).copied()))
     }
 
     fn decide_command_permissions(
@@ -881,7 +1056,6 @@ pub fn infer_tool_operation(tool_name: &str, access: ToolAccess) -> ToolOperatio
             ToolAccess::Read => ToolOperation::Read,
             ToolAccess::Write => ToolOperation::EditFile,
             ToolAccess::Execute => ToolOperation::ExecuteUnknownCommand,
-            ToolAccess::Network => ToolOperation::NetworkRequest,
         },
     }
 }
@@ -1106,6 +1280,17 @@ pub fn derive_permission_risk(
     zones: &[PathTrustZone],
     overlays: &[PathRiskOverlay],
 ) -> PermissionRisk {
+    derive_permission_risk_with_network_effect(access, None, operation, zones, overlays)
+}
+
+/// Derives permission risk while preserving independent network mutation uncertainty.
+pub fn derive_permission_risk_with_network_effect(
+    access: ToolAccess,
+    network_effect: Option<NetworkEffect>,
+    operation: ToolOperation,
+    zones: &[PathTrustZone],
+    overlays: &[PathRiskOverlay],
+) -> PermissionRisk {
     if (zones.iter().any(|zone| {
         matches!(
             zone,
@@ -1144,10 +1329,15 @@ pub fn derive_permission_risk(
         return PermissionRisk::Medium;
     }
 
-    match access {
+    let local_risk = match access {
         ToolAccess::Read => PermissionRisk::Low,
         ToolAccess::Write => PermissionRisk::Medium,
-        ToolAccess::Execute | ToolAccess::Network => PermissionRisk::High,
+        ToolAccess::Execute => PermissionRisk::High,
+    };
+    if network_effect.is_some() {
+        local_risk.max(PermissionRisk::High)
+    } else {
+        local_risk
     }
 }
 
@@ -1158,15 +1348,67 @@ pub fn apply_risk_overlay(mode: ApprovalMode, risk: PermissionRisk) -> ApprovalM
 
 /// Returns true when an interactive approval can safely be widened to a session-local grant.
 pub fn tool_approval_session_grant_available(decision: &PermissionDecision) -> bool {
-    tool_approval_session_grant_available_for_parts(
+    tool_approval_session_grant_available_for_facets(
         decision.access,
+        decision.network_effect,
         decision.operation,
         decision.risk,
         &decision.subjects,
         &decision.subject_zones,
         decision.confirmation.as_ref(),
         decision.snapshot_required,
+        decision.local_policy_decision,
+        decision.network_policy_decision,
+        decision.source_policy_decision,
     )
+}
+
+/// Returns true when an approval is local-only and can safely become a session grant.
+#[allow(clippy::too_many_arguments)]
+pub fn tool_approval_session_grant_available_for_facets(
+    access: ToolAccess,
+    network_effect: Option<NetworkEffect>,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    subjects: &[ToolSubject],
+    zones: &[PathTrustZone],
+    confirmation: Option<&PermissionConfirmation>,
+    snapshot_required: bool,
+    local_policy_decision: ApprovalMode,
+    network_policy_decision: ApprovalMode,
+    source_policy_decision: ApprovalMode,
+) -> bool {
+    let network_risk_is_consistent = network_effect.is_none() || risk >= PermissionRisk::High;
+    network_risk_is_consistent
+        && local_policy_decision == ApprovalMode::Ask
+        && network_policy_decision == ApprovalMode::Allow
+        && source_policy_decision == ApprovalMode::Allow
+        && tool_approval_session_grant_available_for_parts(
+            access,
+            operation,
+            risk,
+            subjects,
+            zones,
+            confirmation,
+            snapshot_required,
+        )
+}
+
+pub fn evaluate_network_policy(
+    permission_mode: PermissionMode,
+    effect: Option<NetworkEffect>,
+    policy: NetworkPolicy,
+) -> ApprovalMode {
+    match effect {
+        None => ApprovalMode::Allow,
+        Some(NetworkEffect::Read) => policy.approval_mode(),
+        Some(NetworkEffect::Mutate | NetworkEffect::Unknown)
+            if permission_mode == PermissionMode::ReadOnly =>
+        {
+            ApprovalMode::Deny
+        }
+        Some(NetworkEffect::Mutate | NetworkEffect::Unknown) => policy.approval_mode(),
+    }
 }
 
 /// Returns true when the supplied approval metadata can safely be widened to a session-local
@@ -1308,8 +1550,10 @@ fn apply_permission_mode_cap(
 ) -> ApprovalMode {
     match policy_mode {
         PermissionMode::ReadOnly if access != ToolAccess::Read => ApprovalMode::Deny,
-        PermissionMode::DangerFullAccess => ApprovalMode::Allow,
-        PermissionMode::ReadOnly | PermissionMode::Manual | PermissionMode::AutoEdit => mode,
+        PermissionMode::ReadOnly
+        | PermissionMode::Manual
+        | PermissionMode::AutoEdit
+        | PermissionMode::DangerFullAccess => mode,
     }
 }
 
@@ -1695,6 +1939,9 @@ pub fn combine_modes(modes: Vec<ApprovalMode>) -> ApprovalMode {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/network_permission_tests.rs"]
+mod network_tests;
 #[cfg(test)]
 #[path = "tests/permission_tests.rs"]
 mod tests;

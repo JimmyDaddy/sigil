@@ -6,21 +6,30 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
 async-trait.workspace = true
+encoding_rs.workspace = true
+futures.workspace = true
 globset.workspace = true
 ignore.workspace = true
 portable-pty.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 similar.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
 walkdir.workspace = true
+url.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 serial_test = "3"

@@ -12,14 +12,15 @@ use sigil_kernel::{
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
     AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DurableEventType, JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, ModelMessage,
-    MutationEventRecorder, PlanApprovalPermission, Provider, ReasoningEffort, RootConfig, Session,
-    SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry,
-    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext, ToolEffect,
-    ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResultMeta, VerificationScope,
-    WorkspaceMutationDetected, WorkspaceRootSnapshot,
+    DurableEventType, ExecutionCleanupStatus, JsonlSessionStore, McpElicitationDecision,
+    McpElicitationEntry, ModelMessage, MutationEventRecorder, PlanApprovalPermission, Provider,
+    ReasoningEffort, RootConfig, Session, SessionLogEntry, SessionRef, SessionStreamRecord,
+    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
+    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
+    ToolResultMeta, UserUrlCapabilityRegistrar, VerificationScope, WorkspaceMutationDetected,
+    WorkspaceRootSnapshot, project_user_message_for_persistence,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
@@ -442,7 +443,18 @@ fn approve_plan_appends_plan_approved_control() -> Result<()> {
     let root_config = test_root_config(temp.path(), "planned", "planned-model");
     let session_log_path = temp.path().join(".sigil/sessions/session-plan.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    let session = Session::new("planned", "planned-model").with_store(store);
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let capability_store = sigil_runtime::attach_session_url_capability_store(&mut session)?;
+    let registrar: Arc<dyn UserUrlCapabilityRegistrar> = capability_store.clone();
+    let projection = project_user_message_for_persistence(
+        "url-message",
+        "remember https://example.com/private?token=live-after-control",
+        Some(&registrar),
+    )?;
+    let source_id = projection.capability_registrations[0].source_id.clone();
+    session.append_user_message(projection.durable_message)?;
+    capability_store.commit_message("url-message")?;
+    let session_scope_id = session.session_scope_id().to_owned();
     let mut current_session = Some(session);
 
     let (entry, entries) = approve_plan(
@@ -480,6 +492,18 @@ fn approve_plan_appends_plan_approved_control() -> Result<()> {
                 if approved.scope.summary == "inspect and edit"
         )
     }));
+    assert!(
+        capability_store
+            .resolve(&session_scope_id, &source_id)
+            .is_ok(),
+        "control-operation reload must preserve the live session URL capability"
+    );
+    assert!(
+        current_session
+            .as_ref()
+            .and_then(Session::user_url_capability_registrar)
+            .is_some()
+    );
     Ok(())
 }
 
@@ -587,6 +611,10 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
     .map_err(anyhow::Error::msg)?;
 
     assert!(matches!(entry.status, TerminalTaskStatus::Cancelled));
+    assert!(matches!(
+        entry.cleanup.as_ref().map(|cleanup| cleanup.status),
+        Some(ExecutionCleanupStatus::Completed)
+    ));
     assert!(
         entry
             .output_preview

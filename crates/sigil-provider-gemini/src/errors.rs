@@ -16,6 +16,8 @@ pub enum GeminiProviderError {
     Blocked(String),
     #[error("Gemini response finished abnormally: {reason}{message}")]
     AbnormalFinish { reason: String, message: String },
+    #[error("Gemini returned grounding metadata for a request without hosted search")]
+    UnexpectedGroundingMetadata,
 }
 
 pub fn classify_status(status: u16, body: &str) -> GeminiProviderError {

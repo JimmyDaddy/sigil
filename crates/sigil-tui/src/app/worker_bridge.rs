@@ -125,7 +125,7 @@ impl AppState {
                     "thinking",
                     format!("thinking|{}", self.runtime.model_name),
                 );
-                self.push_event("run:start", prompt);
+                self.push_event("run:start", sigil_kernel::safe_persistence_text(&prompt));
             }
             WorkerMessage::SkillRunStarted { skill_id, prompt } => {
                 self.start_worker_run_phase(
@@ -134,7 +134,7 @@ impl AppState {
                     format!("skill|{skill_id}"),
                 );
                 self.push_timeline(TimelineRole::Notice, format!("skill {skill_id} started"));
-                self.push_event("skill:start", prompt);
+                self.push_event("skill:start", sigil_kernel::safe_persistence_text(&prompt));
             }
             WorkerMessage::PlanRunStarted { prompt } => {
                 self.start_worker_run_phase(
@@ -142,7 +142,7 @@ impl AppState {
                     "planning",
                     format!("plan|{}", self.runtime.model_name),
                 );
-                self.push_event("plan:start", prompt);
+                self.push_event("plan:start", sigil_kernel::safe_persistence_text(&prompt));
             }
             WorkerMessage::AgentRunStarted { profile_id, prompt } => {
                 self.start_worker_run_phase(
@@ -150,7 +150,7 @@ impl AppState {
                     format!("waiting for agent @{profile_id}"),
                     format!("agent|{profile_id}"),
                 );
-                self.push_event("agent:start", prompt);
+                self.push_event("agent:start", sigil_kernel::safe_persistence_text(&prompt));
             }
             WorkerMessage::AgentResultContinuationStarted { thread_ids } => {
                 self.start_worker_run_phase(
@@ -201,12 +201,13 @@ impl AppState {
                     "running follow-up",
                     format!("follow-up|{}", self.runtime.model_name),
                 );
-                if !self.timeline_has_user_prompt(&prompt) {
-                    self.push_timeline(TimelineRole::User, prompt.clone());
+                let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+                if !self.timeline_has_user_prompt(&safe_prompt) {
+                    self.push_timeline(TimelineRole::User, safe_prompt.clone());
                 }
                 self.push_event(
                     "follow-up:dispatch",
-                    format!("{} {}", queue_id.as_str(), prompt),
+                    format!("{} {}", queue_id.as_str(), safe_prompt),
                 );
             }
             WorkerMessage::AgentThreadEvent { thread_id, event } => {
@@ -250,7 +251,13 @@ impl AppState {
                     format!("planning task {task_id}"),
                     format!("task|{}", self.runtime.model_name),
                 );
-                self.push_event("task:start", format!("{task_id} {objective}"));
+                self.push_event(
+                    "task:start",
+                    format!(
+                        "{task_id} {}",
+                        sigil_kernel::safe_persistence_text(&objective)
+                    ),
+                );
             }
             WorkerMessage::RunFinished { result, entries } => {
                 self.clear_worker_run_state();

@@ -72,6 +72,24 @@ fn store_round_trips_json_lines_and_ignores_invalid_rows() -> Result<()> {
 }
 
 #[test]
+fn store_projects_sensitive_prompt_without_changing_live_history() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("input-history.jsonl");
+    let raw = "inspect https://example.com/private?signature=history-secret exactly";
+    let live_history = vec![raw.to_owned()];
+
+    write_input_history(&path, &live_history)?;
+
+    assert_eq!(live_history, vec![raw.to_owned()]);
+    let durable = fs::read_to_string(&path)?;
+    assert!(!durable.contains("history-secret"));
+    assert!(!durable.contains(raw));
+    let restored = read_input_history(&path, INPUT_HISTORY_LIMIT)?;
+    assert_eq!(restored, vec![sigil_kernel::safe_persistence_text(raw)]);
+    Ok(())
+}
+
+#[test]
 fn app_input_history_path_uses_resolved_state_file() {
     let config = crate::app::tests::common::test_config();
     let app = AppState::from_root_config(Path::new("sigil.toml"), &config);

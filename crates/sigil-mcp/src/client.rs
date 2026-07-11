@@ -1,7 +1,11 @@
 use super::*;
 
 pub(super) struct McpServerObservedIdentity {
+    /// Stable command/executable pin material used only for version pin validation.
     pub(super) command_fingerprint: String,
+    /// Exact runtime-keyed process binding used for permission subjects and approval continuity.
+    pub(super) process_authorization_fingerprint: String,
+    pub(super) declaration: Option<McpDeclarationLaunchMetadata>,
     pub(super) environment_grant_names: Vec<String>,
     pub(super) environment_static_fingerprint: String,
     pub(super) environment_live_fingerprint: String,
@@ -28,7 +32,7 @@ impl McpServerObservedIdentity {
         ToolSubject::mcp_trust_class_with_process_binding(
             server_name,
             trust_class,
-            &self.command_fingerprint,
+            &self.process_authorization_fingerprint,
             &self.environment_live_fingerprint,
         )
     }
@@ -196,9 +200,12 @@ impl McpClient {
         runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
         process_launcher: Arc<dyn McpProcessLauncher>,
         expected_process_subject: Option<&ToolSubject>,
+        network_admission: ExtensionProcessNetworkAdmission,
     ) -> Result<Arc<Self>> {
         let startup_deadline = McpOperationDeadline::from_secs(config.startup_timeout_secs);
-        let launch_request = McpProcessLaunchRequest::from_config(&config, working_dir)?;
+        let launch_request = process_launcher
+            .resolve_launch_request(&config, working_dir)?
+            .with_network_admission(network_admission);
         validate_expected_process_subject(&config, &launch_request, expected_process_subject)?;
         validate_mcp_static_pin(&config, &launch_request.launch_static_fingerprint)?;
         for name in launch_request.environment.grant_names() {
@@ -354,9 +361,16 @@ impl McpClient {
             name: String::new(),
             version: String::new(),
         });
+        let declaration = self._process_receipt.declaration.clone();
+        let process_authorization_fingerprint = declaration
+            .as_ref()
+            .map(|declaration| declaration.authorization_fingerprint.clone())
+            .unwrap_or_else(|| self._process_receipt.launch_static_fingerprint.clone());
         Ok(McpInitializeOutcome {
             identity: McpServerObservedIdentity {
                 command_fingerprint: self._process_receipt.launch_static_fingerprint.clone(),
+                process_authorization_fingerprint,
+                declaration,
                 environment_grant_names: self._process_receipt.environment_grant_names.clone(),
                 environment_static_fingerprint: self
                     ._process_receipt
@@ -1219,7 +1233,11 @@ fn validate_expected_process_subject(
     let observed = ToolSubject::mcp_trust_class_with_process_binding(
         &config.name,
         config.trust.trust_class.as_str(),
-        &request.launch_static_fingerprint,
+        request
+            .declaration
+            .as_ref()
+            .map(|declaration| declaration.authorization_fingerprint.as_str())
+            .unwrap_or(&request.launch_static_fingerprint),
         request.environment.live_fingerprint(),
     );
     if &observed == expected {

@@ -150,6 +150,7 @@ impl Tool for TerminalStartTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -259,6 +260,7 @@ impl Tool for TerminalReadTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -326,6 +328,7 @@ impl Tool for TerminalInputTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -452,6 +455,7 @@ impl Tool for TerminalResizeTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -513,6 +517,7 @@ impl Tool for TerminalCancelTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }

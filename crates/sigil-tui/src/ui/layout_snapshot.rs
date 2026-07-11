@@ -952,7 +952,7 @@ fn approval_header_line_count(view: &ApprovalModalView) -> u16 {
     };
     let change_set_lines = if view.change_set.is_some() { 2 } else { 0 };
     let source_agent_lines = u16::from(view.source_agent.is_some());
-    3u16.saturating_add(summary_lines)
+    4u16.saturating_add(summary_lines)
         .saturating_add(source_agent_lines)
         .saturating_add(change_set_lines)
 }

@@ -1994,6 +1994,7 @@ fn eval_security_path_distinguishes_read_only_and_approval_denials() {
         input_schema: json!({"type":"object"}),
         category: ToolCategory::Shell,
         access: ToolAccess::Execute,
+        network_effect: None,
         preview: ToolPreviewCapability::None,
     };
     let read_only_config = PermissionConfig {

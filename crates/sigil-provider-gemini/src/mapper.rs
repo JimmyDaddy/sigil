@@ -5,6 +5,7 @@ use sigil_kernel::{ProviderChunk, ProviderContinuationState, ToolCall, UsageStat
 
 use crate::{
     errors::GeminiProviderError,
+    hosted_search::{GeminiGroundingAccumulator, GeminiHostedInvocation},
     models::{GeminiFunctionCall, GeminiSafetyRating, GeminiStreamEnvelope, GeminiUsageMetadata},
 };
 
@@ -13,6 +14,9 @@ pub const GEMINI_THOUGHT_SIGNATURE_STATE_KIND: &str = "gemini.thought_signature"
 pub struct StreamMapper {
     latest_usage: Option<GeminiUsageMetadata>,
     next_synthetic_call_id: usize,
+    hosted_invocation: Option<GeminiHostedInvocation>,
+    hosted_started: bool,
+    grounding: GeminiGroundingAccumulator,
 }
 
 impl StreamMapper {
@@ -20,6 +24,16 @@ impl StreamMapper {
         Self {
             latest_usage: None,
             next_synthetic_call_id: 0,
+            hosted_invocation: None,
+            hosted_started: false,
+            grounding: GeminiGroundingAccumulator::new(),
+        }
+    }
+
+    pub fn with_hosted(invocation: GeminiHostedInvocation) -> Self {
+        Self {
+            hosted_invocation: Some(invocation),
+            ..Self::new()
         }
     }
 
@@ -42,17 +56,45 @@ impl StreamMapper {
                 &candidate.safety_ratings,
             )?;
             if let Some(content) = candidate.content {
-                for part in content.parts {
+                for (part_index, part) in content.parts.into_iter().enumerate() {
                     let thought_signature = part.thought_signature;
                     if let Some(text) = part.text
                         && !text.is_empty()
                     {
+                        if self.hosted_invocation.is_some() {
+                            self.grounding
+                                .record_text(candidate.index, part_index, &text)?;
+                        }
                         chunks.push(ProviderChunk::TextDelta(text));
                     }
                     if let Some(function_call) = part.function_call {
                         self.map_function_call(&mut chunks, function_call, thought_signature)?;
                     }
                 }
+            }
+            if let Some(metadata) = candidate.grounding_metadata {
+                let Some(invocation) = self.hosted_invocation.as_ref() else {
+                    return Err(GeminiProviderError::UnexpectedGroundingMetadata.into());
+                };
+                if !self.hosted_started {
+                    chunks.push(ProviderChunk::HostedToolStarted {
+                        authorization_id: invocation.authorization_id.clone(),
+                        invocation_id: invocation.invocation_id.clone(),
+                        kind: sigil_kernel::HostedToolKind::WebSearch,
+                    });
+                    self.hosted_started = true;
+                }
+                chunks.extend(
+                    self.grounding
+                        .map_metadata(candidate.index, metadata)?
+                        .into_iter()
+                        .map(|evidence| ProviderChunk::HostedEvidence {
+                            authorization_id: invocation.authorization_id.clone(),
+                            invocation_id: invocation.invocation_id.clone(),
+                            kind: sigil_kernel::HostedToolKind::WebSearch,
+                            evidence,
+                        }),
+                );
             }
         }
         Ok(chunks)

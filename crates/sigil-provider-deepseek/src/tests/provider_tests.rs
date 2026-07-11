@@ -48,6 +48,7 @@ fn request_body_injects_reasoning_replay_into_matching_assistant_message() -> Re
             input_schema: serde_json::json!({"type":"object"}),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }],
         temperature: None,
@@ -64,6 +65,7 @@ fn request_body_injects_reasoning_replay_into_matching_assistant_message() -> Re
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
     let body = build_chat_request(
         &request,
@@ -364,6 +366,7 @@ async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
     let chunks = provider
         .stream(request)
@@ -441,6 +444,7 @@ async fn provider_yields_first_delta_before_stream_finishes() -> Result<()> {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
     let mut stream = provider.stream(request).await?;
 
@@ -481,6 +485,7 @@ async fn provider_stream_ends_after_done_without_waiting_for_socket_close() -> R
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
     let mut stream = provider.stream(request).await?;
 
@@ -535,6 +540,7 @@ async fn provider_surfaces_invalid_chat_and_completion_events() -> Result<()> {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     };
     let error = provider
         .stream(request)
@@ -1335,6 +1341,7 @@ fn simple_chat_request(model_name: &str) -> sigil_kernel::CompletionRequest {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     }
 }
 

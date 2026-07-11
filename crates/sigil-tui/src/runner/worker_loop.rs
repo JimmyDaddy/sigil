@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -24,14 +24,14 @@ use sigil_kernel::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard,
-    SandboxProfileRequirement, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
+    SandboxProfileRequirement, SecretString, SequentialTaskOrchestrator, SequentialTaskRequest,
+    Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskRouteId, TaskRouteStatus,
     TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
     TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId,
     ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus,
     ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit,
-    VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrust,
+    UserUrlCapabilityRegistrar, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrust,
     WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, build_workspace_snapshot,
     default_user_config_dir, discover_candidate_checks_with_user_config, plan_draft_created_entry,
     plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, saturating_elapsed,
@@ -53,7 +53,10 @@ use super::{
         CompactionTrigger, McpActivationStatus, QueueMoveDirection, WorkerApprovalCommand,
         WorkerCommand, WorkerMessage,
     },
-    session_flow::{auto_compact_session, load_session, session_compacted_message},
+    session_flow::{
+        auto_compact_session, load_session, load_session_with_url_capability_attachment,
+        session_compacted_message,
+    },
 };
 
 mod active_run;
@@ -78,7 +81,7 @@ pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;
 pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;
 pub(in crate::runner) use provider_status::drain_provider_status_results;
 pub(in crate::runner) use queue_driver::{
-    append_agent_result_continuation_status_and_notify,
+    ExactConversationPromptStore, append_agent_result_continuation_status_and_notify,
     append_agent_result_continuation_status_entries, append_queue_failure_and_pause_and_notify,
     append_queue_status_and_notify, cancel_queued_conversation_input,
     edit_queued_conversation_input, mark_next_conversation_queue_item_dispatching,

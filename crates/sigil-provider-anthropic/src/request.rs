@@ -1,17 +1,46 @@
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
-use sigil_kernel::{CompletionRequest, MessageRole, ModelMessage, ToolCall, ToolSpec};
+use sigil_kernel::{
+    CompletionRequest, HostedToolRequest, MessageRole, ModelMessage, ToolCall, ToolSpec,
+};
 
-use crate::models::AnthropicMessagesRequest;
+use crate::{
+    hosted_search::{
+        ANTHROPIC_WEB_SEARCH_TOOL_TYPE, AnthropicHostedContinuationStore, ContinuationResolution,
+        hosted_web_search_request,
+    },
+    models::AnthropicMessagesRequest,
+};
 
+pub(crate) struct PreparedAnthropicMessagesRequest {
+    pub(crate) body: AnthropicMessagesRequest,
+    pub(crate) prior_hosted_invocations: std::collections::BTreeMap<String, String>,
+}
+
+#[cfg(test)]
 pub fn build_messages_request(
     request: &CompletionRequest,
     default_max_tokens: u32,
 ) -> Result<AnthropicMessagesRequest> {
+    Ok(build_messages_request_with_continuations(
+        request,
+        default_max_tokens,
+        &AnthropicHostedContinuationStore::default(),
+    )?
+    .body)
+}
+
+pub(crate) fn build_messages_request_with_continuations(
+    request: &CompletionRequest,
+    default_max_tokens: u32,
+    continuation_store: &AnthropicHostedContinuationStore,
+) -> Result<PreparedAnthropicMessagesRequest> {
     let mut system_parts = Vec::new();
     let mut messages = Vec::new();
     let mut pending_tool_results = Vec::new();
+    let mut prior_hosted_invocations = std::collections::BTreeMap::new();
+    let hosted_search = hosted_web_search_request(&request.hosted_tools)?;
     for message in &request.messages {
         match message.role {
             MessageRole::System => {
@@ -28,23 +57,41 @@ pub fn build_messages_request(
             }
             MessageRole::Assistant => {
                 flush_tool_results(&mut messages, &mut pending_tool_results);
-                messages.push(assistant_message_to_json(message)?);
+                match continuation_store
+                    .resolve_for_message(&request.continuation_states, &message.id)?
+                {
+                    ContinuationResolution::Live(blocks) => {
+                        collect_prior_hosted_invocations(
+                            &blocks,
+                            hosted_search,
+                            &mut prior_hosted_invocations,
+                        );
+                        messages.push(json!({"role": "assistant", "content": blocks}));
+                    }
+                    ContinuationResolution::Absent
+                    | ContinuationResolution::InterruptedOnRestart => {
+                        messages.push(assistant_message_to_json(message)?);
+                    }
+                }
             }
             MessageRole::Tool => pending_tool_results.push(tool_result_block(message)?),
         }
     }
     flush_tool_results(&mut messages, &mut pending_tool_results);
-    let tools = anthropic_tools(&request.tools);
+    let tools = anthropic_tools(&request.tools, hosted_search);
 
-    Ok(AnthropicMessagesRequest {
-        model: request.model_name.clone(),
-        messages,
-        max_tokens: request.max_tokens.unwrap_or(default_max_tokens),
-        stream: true,
-        system: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
-        tool_choice: tools.as_ref().map(|_| json!({"type": "auto"})),
-        tools,
-        temperature: request.temperature,
+    Ok(PreparedAnthropicMessagesRequest {
+        body: AnthropicMessagesRequest {
+            model: request.model_name.clone(),
+            messages,
+            max_tokens: request.max_tokens.unwrap_or(default_max_tokens),
+            stream: true,
+            system: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
+            tool_choice: tools.as_ref().map(|_| json!({"type": "auto"})),
+            tools,
+            temperature: request.temperature,
+        },
+        prior_hosted_invocations,
     })
 }
 
@@ -97,22 +144,67 @@ fn flush_tool_results(messages: &mut Vec<Value>, pending_tool_results: &mut Vec<
     }));
 }
 
-fn anthropic_tools(tools: &[ToolSpec]) -> Option<Vec<Value>> {
-    if tools.is_empty() {
+fn anthropic_tools(
+    tools: &[ToolSpec],
+    hosted_search: Option<&HostedToolRequest>,
+) -> Option<Vec<Value>> {
+    if tools.is_empty() && hosted_search.is_none() {
         return None;
     }
-    Some(
-        tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.input_schema,
-                })
-            })
-            .collect(),
-    )
+    let mut rendered = Vec::with_capacity(tools.len() + usize::from(hosted_search.is_some()));
+    if let Some(hosted_search) = hosted_search {
+        let mut hosted = serde_json::Map::new();
+        hosted.insert(
+            "type".to_owned(),
+            Value::String(ANTHROPIC_WEB_SEARCH_TOOL_TYPE.to_owned()),
+        );
+        hosted.insert("name".to_owned(), Value::String("web_search".to_owned()));
+        if let Some(max_uses) = hosted_search.limits.max_uses {
+            hosted.insert("max_uses".to_owned(), Value::from(max_uses));
+        }
+        if !hosted_search.limits.allowed_domains.is_empty() {
+            hosted.insert(
+                "allowed_domains".to_owned(),
+                serde_json::to_value(&hosted_search.limits.allowed_domains)
+                    .expect("validated domain filters serialize"),
+            );
+        }
+        if !hosted_search.limits.blocked_domains.is_empty() {
+            hosted.insert(
+                "blocked_domains".to_owned(),
+                serde_json::to_value(&hosted_search.limits.blocked_domains)
+                    .expect("validated domain filters serialize"),
+            );
+        }
+        rendered.push(Value::Object(hosted));
+    }
+    rendered.extend(tools.iter().map(|tool| {
+        json!({
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+        })
+    }));
+    Some(rendered)
+}
+
+fn collect_prior_hosted_invocations(
+    blocks: &[Value],
+    hosted_search: Option<&HostedToolRequest>,
+    prior: &mut std::collections::BTreeMap<String, String>,
+) {
+    let Some(authorization_id) = hosted_search.map(|request| request.authorization_id.as_str())
+    else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) == Some("server_tool_use")
+            && block.get("name").and_then(Value::as_str) == Some("web_search")
+            && let Some(id) = block.get("id").and_then(Value::as_str)
+        {
+            prior.insert(id.to_owned(), authorization_id.to_owned());
+        }
+    }
 }
 
 fn parse_tool_args(raw: &str) -> Result<Value> {

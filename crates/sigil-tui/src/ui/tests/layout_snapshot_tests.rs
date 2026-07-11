@@ -150,9 +150,14 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
             input_schema: json!({}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Optional,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),
@@ -295,9 +300,14 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
             input_schema: json!({}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Optional,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),
@@ -377,6 +387,8 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
         call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "write".to_owned(),
+        risk: sigil_kernel::PermissionRisk::Medium,
+        policy_label: "local:ask network:allow source:allow final:ask".to_owned(),
         preview_title: "Extremely wide preview title for approval layout sizing".to_owned(),
         preview_summary: "summary".to_owned(),
         change_set: None,
@@ -572,9 +584,14 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
             input_schema: json!({}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Optional,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),
@@ -599,6 +616,8 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "write".to_owned(),
+        risk: sigil_kernel::PermissionRisk::Medium,
+        policy_label: "local:ask network:allow source:allow final:ask".to_owned(),
         preview_title: "Title".to_owned(),
         preview_summary: "summary".to_owned(),
         change_set: None,
@@ -624,13 +643,13 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         session_grant_available: false,
     };
 
-    assert_eq!(approval_header_line_count(&view), 4);
+    assert_eq!(approval_header_line_count(&view), 5);
     assert_eq!(
         approval_header_line_count(&ApprovalModalView {
             source_agent: Some("Kernel Mapper · thread_1".to_owned()),
             ..view.clone()
         }),
-        5
+        6
     );
     assert_eq!(
         approval_header_line_count(&ApprovalModalView {
@@ -641,7 +660,7 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
             }),
             ..view.clone()
         }),
-        6
+        7
     );
     assert!(approval_file_row_hit_areas(Rect::new(0, 0, 20, 1), &view).is_empty());
     assert_eq!(
@@ -665,6 +684,6 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
 
     view.metadata_collapsed = false;
     view.preview_summary = "line one\nline two\nline three".to_owned();
-    assert_eq!(approval_header_line_count(&view), 6);
+    assert_eq!(approval_header_line_count(&view), 7);
     assert!(approval_modal_hit_areas(Rect::new(0, 0, 4, 4), &view).is_some());
 }

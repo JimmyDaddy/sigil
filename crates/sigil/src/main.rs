@@ -14,7 +14,8 @@ use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
 use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
     Agent, EventHandler, InteractionMode, JsonlSessionStore, MutationEventRecorder, ProviderChunk,
-    RootConfig, RunEvent, Session, UsageStats, resolve_workspace_root,
+    RootConfig, RunEvent, Session, UsageStats, WorkspaceTrust, resolve_workspace_root,
+    workspace_trust_from_entries,
 };
 use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
 use sigil_runtime::{
@@ -275,32 +276,41 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
     );
     let session_store = JsonlSessionStore::new(default_session_path(&sigil_paths.session_log_dir))?;
     let mutation_recorder = MutationEventRecorder::new(session_store.clone());
-
-    let provider = sigil_runtime::build_provider(&root_config)?;
-    let registry = sigil_runtime::build_tool_registry_with_mutation_recorder(
-        &root_config,
-        &provider.capabilities(),
-        workspace_root.clone(),
-        mutation_recorder,
-    )
-    .await?;
-    let agent = Agent::new(provider, registry);
-
-    let mut session = Session::load_from_store(
+    let (mut session, workspace_trust) = load_session_with_workspace_trust(
         root_config.agent.provider.clone(),
         root_config.agent.model.clone(),
         session_store,
+        &workspace_root,
     )?;
+    sigil_runtime::attach_session_url_capability_store(&mut session)?;
+
+    let provider = sigil_runtime::build_provider(&root_config)?;
+    let options = sigil_runtime::build_run_options(
+        &root_config,
+        workspace_root.clone(),
+        InteractionMode::Headless,
+    );
+    let registry =
+        sigil_runtime::build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission(
+            &root_config,
+            &provider.capabilities(),
+            workspace_root.clone(),
+            mutation_recorder,
+            workspace_trust,
+            sigil_kernel::ExtensionProcessNetworkAdmission::new(
+                options.permission_context.network_policy,
+                false,
+            ),
+        )
+        .await?;
+    let agent = Agent::new(provider, registry);
+
     let mut handler = StdoutEventHandler;
     let result = agent
         .run_with_input(
             &mut session,
             run_input_with_repo_context(&workspace_root, prompt),
-            sigil_runtime::build_run_options(
-                &root_config,
-                workspace_root,
-                InteractionMode::Headless,
-            ),
+            options,
             &mut handler,
         )
         .await?
@@ -312,6 +322,17 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
         eprintln!("session log: {}", path.display());
     }
     Ok(())
+}
+
+fn load_session_with_workspace_trust(
+    provider_name: impl Into<String>,
+    model_name: impl Into<String>,
+    session_store: JsonlSessionStore,
+    workspace_root: &Path,
+) -> Result<(Session, WorkspaceTrust)> {
+    let session = Session::load_from_store(provider_name, model_name, session_store)?;
+    let workspace_trust = workspace_trust_from_entries(session.entries(), workspace_root)?;
+    Ok((session, workspace_trust))
 }
 
 fn run_input_with_repo_context(
@@ -450,15 +471,31 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
             call,
             spec,
             subjects,
+            network_effect,
+            local_policy_decision,
+            network_policy_decision,
+            source_policy_decision,
+            risk,
             preview,
             ..
         } => {
+            let final_policy_decision = strictest_approval_mode([
+                local_policy_decision,
+                network_policy_decision,
+                source_policy_decision,
+            ]);
             let mut stderr = format!(
-                "[tool:approval] {} ({}) {} {} subjects={}\n",
+                "[tool:approval] {} ({}) {} {} network={} risk={} policy=local:{} network:{} source:{} final:{} subjects={}\n",
                 call.name,
                 call.id,
                 spec.category.as_str(),
                 spec.access.as_str(),
+                network_effect.map_or("none", sigil_kernel::NetworkEffect::as_str),
+                permission_risk_label(risk),
+                local_policy_decision.as_str(),
+                network_policy_decision.as_str(),
+                source_policy_decision.as_str(),
+                final_policy_decision.as_str(),
                 subjects
                     .iter()
                     .map(|subject| subject.normalized.as_str())
@@ -520,6 +557,26 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
         RunEvent::ContinuationState(_) | RunEvent::Control(_) | RunEvent::AssistantMessage(_) => {
             RenderedOutput::default()
         }
+    }
+}
+
+fn strictest_approval_mode(modes: [sigil_kernel::ApprovalMode; 3]) -> sigil_kernel::ApprovalMode {
+    if modes.contains(&sigil_kernel::ApprovalMode::Deny) {
+        sigil_kernel::ApprovalMode::Deny
+    } else if modes.contains(&sigil_kernel::ApprovalMode::Ask) {
+        sigil_kernel::ApprovalMode::Ask
+    } else {
+        sigil_kernel::ApprovalMode::Allow
+    }
+}
+
+fn permission_risk_label(risk: sigil_kernel::PermissionRisk) -> &'static str {
+    match risk {
+        sigil_kernel::PermissionRisk::Low => "low",
+        sigil_kernel::PermissionRisk::Medium => "medium",
+        sigil_kernel::PermissionRisk::High => "high",
+        sigil_kernel::PermissionRisk::Destructive => "destructive",
+        sigil_kernel::PermissionRisk::Protected => "protected",
     }
 }
 

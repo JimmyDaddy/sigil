@@ -55,7 +55,7 @@
 
 Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。
 
-Workspace trust 由启动时的 workspace trust gate 处理，不是 slash command。trust decision 会记录进 session audit log；它允许仓库本地 verification 候选检查被提升为 task readiness 可用的检查，但不会单独授予 shell、plugin、MCP 或文件写入权限。
+Workspace trust 由启动时的 workspace trust gate 处理，不是 slash command。trust decision 会记录进 session audit log；它允许仓库本地 verification 候选检查被提升为 task readiness 可用的检查，也允许精确匹配 workspace 且 `trust_required = true` 的 LSP 启动。它不会单独授予 shell、plugin、MCP 或文件写入权限，LSP 写工具仍需 diff 审批。
 
 `/model`、`/effort`、`/resume`、`/agent` 和 `/queue` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。`/agent rename` 会在输入新名字前展示 child agent 候选项。
 

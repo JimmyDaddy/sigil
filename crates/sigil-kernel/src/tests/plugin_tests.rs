@@ -218,6 +218,7 @@ fn plugin_capabilities_map_to_normal_tool_secret_egress_policy() {
     let hook = capabilities[2].policy_summary();
     assert_eq!(hook.tool_category, Some(crate::ToolCategory::Custom));
     assert_eq!(hook.tool_access, Some(crate::ToolAccess::Execute));
+    assert_eq!(hook.network_effect, Some(crate::NetworkEffect::Unknown));
     assert_eq!(hook.approval_default, Some(ApprovalMode::Ask));
     assert!(hook.execution_backend_required);
     assert!(hook.egress_logging);
@@ -226,12 +227,52 @@ fn plugin_capabilities_map_to_normal_tool_secret_egress_policy() {
 
     let mcp = capabilities[3].policy_summary();
     assert_eq!(mcp.tool_category, Some(crate::ToolCategory::Mcp));
-    assert_eq!(mcp.tool_access, Some(crate::ToolAccess::Network));
+    assert_eq!(mcp.tool_access, Some(crate::ToolAccess::Execute));
+    assert_eq!(mcp.network_effect, Some(crate::NetworkEffect::Unknown));
     assert_eq!(mcp.approval_default, Some(ApprovalMode::Ask));
     assert!(mcp.execution_backend_required);
     assert!(mcp.egress_logging);
     assert!(!mcp.allow_secrets);
     assert_eq!(mcp.mutation_effect, crate::ToolEffect::Unknown);
+}
+
+#[test]
+fn plugin_projection_preserves_extension_execute_and_unknown_network_policy() -> Result<()> {
+    let projection = PluginStateProjection::from_entries(&[SessionLogEntry::Control(
+        ControlEntry::PluginManifestCaptured(sample_snapshot()),
+    )]);
+    let snapshot = projection
+        .latest_manifest()
+        .expect("projected manifest should exist");
+
+    for capability in [&snapshot.capabilities[2], &snapshot.capabilities[3]] {
+        let policy = capability.policy_summary();
+        assert_eq!(policy.tool_access, Some(crate::ToolAccess::Execute));
+        assert_eq!(policy.network_effect, Some(crate::NetworkEffect::Unknown));
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_plugin_network_carrier_upcasts_to_extension_execute_only() -> Result<()> {
+    let legacy = serde_json::json!({
+        "tool_category": "mcp",
+        "tool_access": "network",
+        "approval_default": "ask",
+        "execution_backend_required": true,
+        "egress_logging": true,
+        "allow_secrets": false,
+        "mutation_effect": "unknown"
+    });
+    let policy: crate::PluginCapabilityPolicy = serde_json::from_value(legacy)?;
+    assert_eq!(policy.tool_access, Some(crate::ToolAccess::Execute));
+    assert_eq!(policy.network_effect, Some(crate::NetworkEffect::Unknown));
+
+    let serialized = serde_json::to_value(policy)?;
+    assert_eq!(serialized["tool_access"], "execute");
+    assert_eq!(serialized["network_effect"], "unknown");
+    assert_ne!(serialized["tool_access"], "network");
+    Ok(())
 }
 
 #[test]

@@ -231,13 +231,28 @@ pub(super) enum StreamPlan {
 #[derive(Clone)]
 pub(super) struct PlannedProvider {
     plans: Arc<Mutex<VecDeque<StreamPlan>>>,
+    stream_started: Option<mpsc::Sender<()>>,
 }
 
 impl PlannedProvider {
     pub(super) fn new(plans: Vec<StreamPlan>) -> Self {
         Self {
             plans: Arc::new(Mutex::new(VecDeque::from(plans))),
+            stream_started: None,
         }
+    }
+
+    pub(super) fn new_with_stream_start_signal(
+        plans: Vec<StreamPlan>,
+    ) -> (Self, mpsc::Receiver<()>) {
+        let (stream_started_tx, stream_started_rx) = mpsc::channel();
+        (
+            Self {
+                plans: Arc::new(Mutex::new(VecDeque::from(plans))),
+                stream_started: Some(stream_started_tx),
+            },
+            stream_started_rx,
+        )
     }
 }
 
@@ -261,6 +276,7 @@ impl TaskRoleProviderBuilder for PlannedRoleProviderBuilder {
     ) -> std::result::Result<Box<dyn Provider>, String> {
         Ok(Box::new(PlannedProvider {
             plans: Arc::clone(&self.plans),
+            stream_started: None,
         }))
     }
 }
@@ -303,6 +319,9 @@ impl Provider for PlannedProvider {
             .expect("plans mutex should not be poisoned")
             .pop_front()
             .unwrap_or(StreamPlan::Pending);
+        if let Some(stream_started) = &self.stream_started {
+            let _ = stream_started.send(());
+        }
         let stream: Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> = match plan {
             StreamPlan::Chunks(chunks) => {
                 Box::pin(stream::iter(chunks.into_iter().map(Ok::<_, anyhow::Error>)))
@@ -395,6 +414,7 @@ impl Tool for WriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }

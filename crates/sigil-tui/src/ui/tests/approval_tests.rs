@@ -58,6 +58,8 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
         call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "file write".to_owned(),
+        risk: sigil_kernel::PermissionRisk::Medium,
+        policy_label: "local:ask network:allow source:allow final:ask".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
         change_set: None,
@@ -107,6 +109,8 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
         call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "file write".to_owned(),
+        risk: sigil_kernel::PermissionRisk::Medium,
+        policy_label: "local:ask network:allow source:allow final:ask".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
         change_set: None,
@@ -150,6 +154,8 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
 
     assert!(hidden_text.contains("meta hidden"));
     assert!(hidden_text.contains("press M to expand"));
+    assert!(hidden_text.contains("risk medium"));
+    assert!(hidden_text.contains("policy local:ask network:allow source:allow final:ask"));
     assert!(empty_text.contains("No preview summary provided."));
     assert!(markdown_text.contains("bold line"));
     assert!(markdown_text.contains("code line"));
@@ -215,6 +221,8 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
         call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: "file write".to_owned(),
+        risk: sigil_kernel::PermissionRisk::Medium,
+        policy_label: "local:ask network:allow source:allow final:ask".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: String::new(),
         change_set: None,
@@ -339,22 +347,30 @@ fn plain_lines_text(lines: &[Line<'static>]) -> String {
 fn approval_header_lines_use_access_badges_and_hidden_metadata_hint() {
     let write_view = modal_view("file write");
     let read_view = modal_view("file read");
+    let high_view = ApprovalModalView {
+        risk: sigil_kernel::PermissionRisk::High,
+        ..modal_view("mcp read · network unknown")
+    };
 
     let write_lines = approval_header_lines(&write_view, 80);
     let read_lines = approval_header_lines(&read_view, 80);
+    let high_lines = approval_header_lines(&high_view, 80);
     let hidden_text = plain_line_text(
         &approval_header_lines(
             &ApprovalModalView {
                 metadata_collapsed: true,
                 changed_files: vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
-                ..modal_view("mcp network")
+                ..modal_view("mcp read · network unknown")
             },
             80,
-        )[2],
+        )[3],
     );
 
     assert_eq!(write_lines[0].spans[0].style.bg, Some(Color::Yellow));
     assert_eq!(read_lines[0].spans[0].style.bg, Some(Color::Green));
+    let risk_high = theme::default_palette().risk_high;
+    assert_eq!(high_lines[0].spans[0].style.bg, Some(risk_high));
+    assert_eq!(high_lines[2].spans[0].style.bg, Some(risk_high));
     assert!(hidden_text.contains("meta hidden"));
     assert!(hidden_text.contains("press M to expand"));
 }
@@ -376,11 +392,11 @@ fn approval_header_lines_handle_empty_and_multiline_summaries() {
         80,
     );
 
-    assert_eq!(plain_line_text(&empty[2]), "No preview summary provided.");
-    assert_eq!(multiline.len(), 6);
-    assert!(plain_line_text(&multiline[2]).contains("line one"));
-    assert!(plain_line_text(&multiline[3]).contains("line two"));
-    assert!(plain_line_text(&multiline[4]).contains("line three"));
+    assert_eq!(plain_line_text(&empty[3]), "No preview summary provided.");
+    assert_eq!(multiline.len(), 7);
+    assert!(plain_line_text(&multiline[3]).contains("line one"));
+    assert!(plain_line_text(&multiline[4]).contains("line two"));
+    assert!(plain_line_text(&multiline[5]).contains("line three"));
 }
 
 #[test]
@@ -439,7 +455,7 @@ fn approval_diff_status_line_handles_empty_hunks_without_diagnostics() {
         }],
         hunk_total: 0,
         active_hunk_index: 9,
-        ..modal_view("mcp network")
+        ..modal_view("mcp read · network unknown")
     }));
 
     assert!(text.contains("hunk 0/0"));
@@ -583,9 +599,14 @@ fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<
             input_schema: json!({"type":"object"}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),
@@ -640,9 +661,14 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
             input_schema: json!({"type":"object"}),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
         operation: sigil_kernel::ToolOperation::OverwriteFile,
         risk: sigil_kernel::PermissionRisk::Medium,
         subject_zones: Vec::new(),
@@ -694,10 +720,15 @@ fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::
             description: "Remote tool".to_owned(),
             input_schema: json!({"type":"object"}),
             category: ToolCategory::Mcp,
-            access: ToolAccess::Network,
+            access: ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Unknown),
             preview: ToolPreviewCapability::None,
         },
         subjects: Vec::new(),
+        network_effect: Some(sigil_kernel::NetworkEffect::Unknown),
+        local_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Ask,
         operation: sigil_kernel::ToolOperation::NetworkRequest,
         risk: sigil_kernel::PermissionRisk::High,
         subject_zones: Vec::new(),
@@ -726,6 +757,12 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
         call_id: "call-1".to_owned(),
         source_agent: None,
         access_label: access_label.to_owned(),
+        risk: if access_label.contains("read") {
+            sigil_kernel::PermissionRisk::Low
+        } else {
+            sigil_kernel::PermissionRisk::Medium
+        },
+        policy_label: "local:ask network:allow source:allow final:ask".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
         change_set: None,

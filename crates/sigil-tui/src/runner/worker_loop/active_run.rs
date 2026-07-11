@@ -7,6 +7,7 @@ pub(in crate::runner) struct ActiveRun {
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
     pub(in crate::runner) cancellation_owner: RunCancellationOwner,
     pub(in crate::runner) cancellation_recorder: RunCancellationRecorder,
+    pub(in crate::runner) url_capability_registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
 }
 
 const RUN_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,6 +47,7 @@ pub(in crate::runner) fn cancel_active_run(
     discarded_run_ids: &mut BTreeSet<u64>,
     reason: &str,
 ) {
+    let url_capability_registrar = active_run.url_capability_registrar.clone();
     elicitation_handler.set_audit_buffer(None);
     if !active_run.cancellation_owner.reserve_cancel() {
         let _ = message_tx.send(WorkerMessage::Notice(
@@ -137,10 +139,11 @@ pub(in crate::runner) fn cancel_active_run(
             }
         };
     if !request_persisted {
-        if let Ok(session) = load_session(
+        if let Ok(session) = load_active_run_session(
             &root_config.agent.provider,
             &root_config.agent.model,
             current_session_log_path,
+            url_capability_registrar.clone(),
         ) {
             *current_session = Some(session);
         }
@@ -168,10 +171,11 @@ pub(in crate::runner) fn cancel_active_run(
         )));
         return;
     }
-    match load_session(
+    match load_active_run_session(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
+        url_capability_registrar,
     ) {
         Ok(session) => {
             let mut session = session;
@@ -243,6 +247,23 @@ pub(in crate::runner) fn cancel_active_run(
             let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
         }
     }
+}
+
+fn load_active_run_session(
+    provider_name: &str,
+    model_name: &str,
+    session_log_path: &Path,
+    registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
+) -> std::result::Result<Session, String> {
+    let mut session = load_session(provider_name, model_name, session_log_path)
+        .map_err(|error| format!("failed to reload active-run session: {error:#}"))?;
+    let registrar = registrar.ok_or_else(|| {
+        "active run lost its session URL capability registrar attachment".to_owned()
+    })?;
+    session
+        .try_attach_user_url_capability_registrar(registrar)
+        .map_err(|error| format!("failed to restore active-run URL capabilities: {error:#}"))?;
+    Ok(session)
 }
 
 pub(in crate::runner) struct RunTaskResult {

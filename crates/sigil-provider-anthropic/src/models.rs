@@ -65,6 +65,22 @@ pub enum AnthropicContentBlock {
         #[serde(default)]
         input: Value,
     },
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: Value,
+    },
+    WebSearchToolResult {
+        tool_use_id: String,
+        content: AnthropicWebSearchToolResultContent,
+    },
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -87,6 +103,9 @@ pub enum AnthropicContentBlockDelta {
         #[serde(default)]
         signature: String,
     },
+    CitationsDelta {
+        citation: AnthropicCitation,
+    },
     #[serde(other)]
     Other,
 }
@@ -107,6 +126,51 @@ pub struct AnthropicUsage {
     pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub server_tool_use: Option<AnthropicServerToolUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AnthropicServerToolUsage {
+    #[serde(default)]
+    pub web_search_requests: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AnthropicWebSearchToolResultContent {
+    Results(Vec<AnthropicWebSearchResult>),
+    Error(AnthropicWebSearchToolResultError),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicWebSearchResult {
+    pub r#type: String,
+    pub url: String,
+    pub title: String,
+    pub encrypted_content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_age: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicWebSearchToolResultError {
+    pub r#type: String,
+    pub error_code: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicCitation {
+    WebSearchResultLocation {
+        url: String,
+        #[serde(default)]
+        title: Option<String>,
+        encrypted_index: String,
+        cited_text: String,
+    },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -107,6 +107,23 @@ Rules:
   summaries instead of per-hook command matrices, `/doctor` reports
   trust/effect/runtime hook issues, and session audit renders hook
   start/finish summaries with backend/status/output-size facts.
+- RFC-0021 E21.13 reuses the same static-manifest trust facts for plugin-owned
+  local stdio MCP declarations. It does not create a second trust plane:
+  runtime registration carries the reviewed manifest hash/version/capability
+  digest and latest trust decision into a non-serializable declaration,
+  re-attests before authorization and immediately before spawn using a
+  read-through durable session trust source rather than a cached trust snapshot, then delegates
+  the process to the existing MCP/ExecutionBackend lifecycle. Command cwd and
+  relative-path resolution come from the declaration execution base; safe
+  lifecycle metadata omits canonical plugin paths and raw command arguments.
+  Persisted pins use safe projection plus executable-content identity, while
+  exact path/command/argument identity is keyed and remains runtime-only;
+  post-start MCP surfaces and session grants retain that exact authorization
+  binding. Zero-spawn rejection still records safe declaration lifecycle facts.
+  Automatic plugin MCP startup/refresh remains disabled until the RFC-0002/
+  RFC-0003 external-process mutation recorder and product lifecycle gate are
+  connected; E21.13 exposes an explicit fallible registry API and E2E boundary
+  without widening the default product execution surface.
 
 Implementation progress:
 

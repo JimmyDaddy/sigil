@@ -4,7 +4,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject, ToolSubjectScope,
+    NetworkEffect, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject,
+    ToolSubjectScope,
 };
 
 use super::{
@@ -23,7 +24,15 @@ fn spec(access: ToolAccess) -> ToolSpec {
         input_schema: json!({"type":"object"}),
         category: ToolCategory::File,
         access,
+        network_effect: None,
         preview: ToolPreviewCapability::None,
+    }
+}
+
+fn network_spec(effect: NetworkEffect) -> ToolSpec {
+    ToolSpec {
+        network_effect: Some(effect),
+        ..spec(ToolAccess::Read)
     }
 }
 
@@ -291,7 +300,7 @@ fn read_only_mode_is_a_non_read_safety_cap() -> Result<()> {
 }
 
 #[test]
-fn auto_edit_allows_file_edits_and_readonly_shell_only() -> Result<()> {
+fn auto_edit_allows_file_edits_readonly_shell_and_network_policy_allow() -> Result<()> {
     let config = PermissionConfig {
         mode: PermissionMode::AutoEdit,
         ..PermissionConfig::default()
@@ -318,7 +327,7 @@ fn auto_edit_allows_file_edits_and_readonly_shell_only() -> Result<()> {
         None,
     )?;
     let network = PermissionPolicy::new(&config).decide(
-        &spec(ToolAccess::Network),
+        &network_spec(NetworkEffect::Unknown),
         "mcp__fake__echo",
         vec![ToolSubject::mcp_tool("mcp__fake__echo")],
     )?;
@@ -326,7 +335,8 @@ fn auto_edit_allows_file_edits_and_readonly_shell_only() -> Result<()> {
     assert_eq!(write.mode, ApprovalMode::Allow);
     assert_eq!(read_only_shell.mode, ApprovalMode::Allow);
     assert_eq!(shell.mode, ApprovalMode::Ask);
-    assert_eq!(network.mode, ApprovalMode::Ask);
+    assert_eq!(network.mode, ApprovalMode::Allow);
+    assert_eq!(network.risk, PermissionRisk::High);
     Ok(())
 }
 
@@ -445,6 +455,7 @@ fn permission_context_classifies_runtime_user_and_project_asset_roots() -> Resul
         user_state_roots: vec![state_root.clone()],
         user_cache_roots: vec![cache_root.clone()],
         effective_policy_cap: None,
+        network_policy: super::NetworkPolicy::Allow,
     };
     let config = PermissionConfig {
         mode: PermissionMode::AutoEdit,
@@ -529,6 +540,7 @@ fn permission_context_handles_caps_relative_roots_and_fallbacks() -> Result<()> 
             policy_hash: "cap".to_owned(),
             mode: ApprovalMode::Deny,
         }),
+        network_policy: super::NetworkPolicy::Allow,
     };
     let config = PermissionConfig::default();
     let policy = PermissionPolicy::new_with_context(&config, &context);
@@ -688,7 +700,7 @@ fn destructive_shell_operation_on_sigil_root_is_protected() -> Result<()> {
 }
 
 #[test]
-fn permission_execute_and_network_inherit_default_ask() -> Result<()> {
+fn permission_execute_defaults_to_ask_while_network_uses_independent_default_allow() -> Result<()> {
     let config = PermissionConfig::default();
     let execute = PermissionPolicy::new(&config).decide(
         &spec(ToolAccess::Execute),
@@ -696,13 +708,15 @@ fn permission_execute_and_network_inherit_default_ask() -> Result<()> {
         vec![ToolSubject::command("cargo test", "cargo test")],
     )?;
     let network = PermissionPolicy::new(&config).decide(
-        &spec(ToolAccess::Network),
+        &network_spec(NetworkEffect::Unknown),
         "mcp__fake__echo",
         vec![ToolSubject::mcp_tool("mcp__fake__echo")],
     )?;
 
     assert_eq!(execute.mode, ApprovalMode::Ask);
-    assert_eq!(network.mode, ApprovalMode::Ask);
+    assert_eq!(network.mode, ApprovalMode::Allow);
+    assert_eq!(network.network_policy_decision, ApprovalMode::Allow);
+    assert_eq!(network.risk, PermissionRisk::High);
     Ok(())
 }
 
@@ -722,35 +736,67 @@ fn permission_dynamic_access_can_downgrade_execute_to_read() -> Result<()> {
 }
 
 #[test]
-fn permission_tool_default_mode_is_between_mode_baseline_and_tool_rules() -> Result<()> {
+fn permission_tool_default_mode_is_delegated_source_not_local_baseline() -> Result<()> {
     let subjects = vec![
         ToolSubject::mcp_tool("mcp__fake__echo"),
         ToolSubject::mcp_trust_class("fake", "third_party"),
     ];
     let config = PermissionConfig::default();
     let server_default = PermissionPolicy::new(&config).decide_with_access_and_default(
-        &spec(ToolAccess::Network),
+        &network_spec(NetworkEffect::Unknown),
         "mcp__fake__echo",
-        ToolAccess::Network,
+        ToolAccess::Read,
         subjects.clone(),
         Some(ApprovalMode::Allow),
     )?;
 
     assert_eq!(server_default.mode, ApprovalMode::Allow);
+    assert_eq!(server_default.local_policy_decision, ApprovalMode::Allow);
+    assert_eq!(server_default.source_policy_decision, ApprovalMode::Allow);
+
+    let source_ask = PermissionPolicy::new(&config).decide_with_access_and_default(
+        &network_spec(NetworkEffect::Unknown),
+        "mcp__fake__echo",
+        ToolAccess::Read,
+        subjects.clone(),
+        Some(ApprovalMode::Ask),
+    )?;
+    assert_eq!(source_ask.local_policy_decision, ApprovalMode::Allow);
+    assert_eq!(source_ask.source_policy_decision, ApprovalMode::Ask);
+    assert_eq!(source_ask.mode, ApprovalMode::Ask);
+
+    let local_write_still_asks = PermissionPolicy::new(&config).decide_with_access_and_default(
+        &spec(ToolAccess::Write),
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("src/lib.rs", "src/lib.rs")],
+        Some(ApprovalMode::Allow),
+    )?;
+    assert_eq!(
+        local_write_still_asks.local_policy_decision,
+        ApprovalMode::Ask
+    );
+    assert_eq!(
+        local_write_still_asks.source_policy_decision,
+        ApprovalMode::Allow
+    );
+    assert_eq!(local_write_still_asks.mode, ApprovalMode::Ask);
 
     let tool_override = PermissionConfig {
         tools: BTreeMap::from([("mcp__fake__echo".to_owned(), ApprovalMode::Ask)]),
         ..PermissionConfig::default()
     };
     let explicit_tool = PermissionPolicy::new(&tool_override).decide_with_access_and_default(
-        &spec(ToolAccess::Network),
+        &network_spec(NetworkEffect::Unknown),
         "mcp__fake__echo",
-        ToolAccess::Network,
+        ToolAccess::Read,
         subjects.clone(),
         Some(ApprovalMode::Allow),
     )?;
 
     assert_eq!(explicit_tool.mode, ApprovalMode::Ask);
+    assert_eq!(explicit_tool.local_policy_decision, ApprovalMode::Ask);
+    assert_eq!(explicit_tool.source_policy_decision, ApprovalMode::Allow);
 
     let trust_rule = PermissionConfig {
         rules: vec![PermissionRule {
@@ -761,14 +807,16 @@ fn permission_tool_default_mode_is_between_mode_baseline_and_tool_rules() -> Res
         ..PermissionConfig::default()
     };
     let explicit_rule = PermissionPolicy::new(&trust_rule).decide_with_access_and_default(
-        &spec(ToolAccess::Network),
+        &network_spec(NetworkEffect::Unknown),
         "mcp__fake__echo",
-        ToolAccess::Network,
+        ToolAccess::Read,
         subjects,
         Some(ApprovalMode::Allow),
     )?;
 
     assert_eq!(explicit_rule.mode, ApprovalMode::Deny);
+    assert_eq!(explicit_rule.local_policy_decision, ApprovalMode::Deny);
+    assert_eq!(explicit_rule.source_policy_decision, ApprovalMode::Allow);
     Ok(())
 }
 
@@ -877,12 +925,12 @@ fn permission_tool_name_glob_rules_match_tools() -> Result<()> {
         ..PermissionConfig::default()
     };
     let deny = PermissionPolicy::new(&config).decide(
-        &spec(ToolAccess::Network),
+        &network_spec(NetworkEffect::Unknown),
         "mcp__files__read",
         vec![],
     )?;
     let allow = PermissionPolicy::new(&config).decide(
-        &spec(ToolAccess::Network),
+        &network_spec(NetworkEffect::Unknown),
         "mcp__docs__search",
         vec![],
     )?;

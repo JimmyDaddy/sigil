@@ -10,6 +10,8 @@ pub enum CodeIntelError {
     NoServerForPath { path: String },
     #[error("language server {server} is unavailable: {reason}")]
     ServerUnavailable { server: String, reason: String },
+    #[error("workspace trust is required before starting language server {server}")]
+    WorkspaceTrustRequired { server: String },
     #[error("language server {server} does not support {capability}")]
     UnsupportedCapability {
         server: String,

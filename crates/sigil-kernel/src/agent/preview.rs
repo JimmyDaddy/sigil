@@ -32,9 +32,13 @@ pub(super) struct ToolPreviewCapture {
 
 pub(super) fn preparation_policy_fingerprint(decision: &PermissionDecision) -> Result<String> {
     stable_json_hash(&json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": decision.mode,
         "access": decision.access,
+        "network_effect": decision.network_effect,
+        "local_policy_decision": decision.local_policy_decision,
+        "network_policy_decision": decision.network_policy_decision,
+        "source_policy_decision": decision.source_policy_decision,
         "operation": decision.operation,
         "risk": decision.risk,
         "subjects": decision.subjects,

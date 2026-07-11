@@ -283,6 +283,10 @@ impl<A> ApprovalHandler for SupervisorTaskApprovalRouteHandler<'_, A>
 where
     A: ApprovalHandler,
 {
+    fn approval_is_explicit_user_action(&self) -> bool {
+        self.inner.approval_is_explicit_user_action()
+    }
+
     fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval> {
         let task_route_id = task_route_id_for_call(
             &self.task_request.task.task_id,
@@ -395,16 +399,17 @@ fn build_child_session(
     if let Some(parent_path) = parent_session.store_path() {
         let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
         let store = JsonlSessionStore::new(child_session_ref.resolve(parent_dir))?;
-        return Session::load_from_store(
+        let mut session = Session::load_from_store(
             parent_session.provider_name(),
             parent_session.model_name(),
             store,
-        );
+        )?;
+        crate::attach_session_url_capability_store(&mut session)?;
+        return Ok(session);
     }
-    Ok(Session::new(
-        parent_session.provider_name(),
-        parent_session.model_name(),
-    ))
+    let mut session = Session::new(parent_session.provider_name(), parent_session.model_name());
+    crate::attach_session_url_capability_store(&mut session)?;
+    Ok(session)
 }
 
 pub(crate) fn task_child_status_from_outcome(

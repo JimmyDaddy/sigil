@@ -29,7 +29,8 @@ use crate::{
     ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
     ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
     ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, VerificationVerdict,
+    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
+    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
     VisibleCompletionState, WorkspaceMutationDetected, plan_text_hash,
 };
 
@@ -45,6 +46,30 @@ struct TerminalCancelAfterExternalWriteProvider {
 }
 struct NonDelegatingTextProvider {
     calls: Arc<AtomicUsize>,
+}
+
+#[derive(Default)]
+struct SessionUrlRegistrarProbe {
+    staged: AtomicUsize,
+    committed: AtomicUsize,
+    rolled_back: AtomicUsize,
+}
+
+impl UserUrlCapabilityRegistrar for SessionUrlRegistrarProbe {
+    fn stage(&self, _registration: UserUrlCapabilityRegistration) -> Result<()> {
+        self.staged.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn commit_message(&self, _durable_entry_id: &str) -> Result<()> {
+        self.committed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn rollback_message(&self, _durable_entry_id: &str) -> Result<()> {
+        self.rolled_back.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -482,6 +507,7 @@ impl Tool for EchoTool {
             }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -564,6 +590,7 @@ impl Tool for ForegroundTerminalTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -676,6 +703,7 @@ impl Tool for ReadPathTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -723,6 +751,7 @@ impl Tool for BashCargoCheckFamilyTool {
             }),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -775,6 +804,7 @@ impl Tool for AgentCategoryTool {
             }),
             category: ToolCategory::Agent,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -810,6 +840,7 @@ impl Tool for FailingAgentCategoryTool {
             }),
             category: ToolCategory::Agent,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -842,6 +873,7 @@ impl Tool for RunningSpawnAgentCategoryTool {
             }),
             category: ToolCategory::Agent,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -881,6 +913,7 @@ impl Tool for RunningAgentCategoryTool {
             }),
             category: ToolCategory::Agent,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -915,6 +948,7 @@ impl Tool for SideEffectTool {
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -948,6 +982,7 @@ impl Tool for WorkspaceMutatingCustomTool {
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Custom,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -980,6 +1015,7 @@ impl Tool for TerminalStartAuditTool {
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1032,6 +1068,7 @@ impl Tool for TerminalCancelAuditTool {
             input_schema: json!({"type": "object"}),
             category: ToolCategory::Shell,
             access: ToolAccess::Execute,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1090,6 +1127,7 @@ impl Tool for WriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -1194,6 +1232,7 @@ impl Tool for DefaultAllowWriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1264,6 +1303,7 @@ impl Tool for ExternalWriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -1512,6 +1552,7 @@ impl Tool for PreviewFailingWriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::Required,
         }
     }
@@ -1555,6 +1596,7 @@ impl Tool for PermissionAccessFailingWriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1604,6 +1646,7 @@ impl Tool for EgressAuditFailingWriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1653,6 +1696,7 @@ impl Tool for ExecuteFailingWriteTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -1994,6 +2038,7 @@ impl Tool for ExecuteFailingTool {
             input_schema: serde_json::json!({"type":"object"}),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -2023,6 +2068,7 @@ impl Tool for InvalidEgressTool {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Write,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }
     }
@@ -3295,7 +3341,8 @@ async fn agent_run_input_transient_context_does_not_append_user_message() -> Res
 }
 
 #[tokio::test]
-async fn agent_run_input_does_not_append_duplicate_tail_user_message() -> Result<()> {
+async fn agent_run_input_preserves_consecutive_same_content_as_distinct_user_entries() -> Result<()>
+{
     let captured = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
         CapturingTextProvider {
@@ -3340,7 +3387,7 @@ async fn agent_run_input_does_not_append_duplicate_tail_user_message() -> Result
                 )
             })
             .count(),
-        1
+        2
     );
     let requests = captured
         .lock()
@@ -3355,8 +3402,251 @@ async fn agent_run_input_does_not_append_duplicate_tail_user_message() -> Result
                     && message.content.as_deref() == Some("same prompt")
             })
             .count(),
-        1
+        2
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn safe_persistence_retry_reuses_durable_user_id_without_duplicate_append() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let input = AgentRunInput::user("same retry prompt");
+    let mut handler = crate::event::NoopEventHandler;
+    let options = || AgentRunOptions {
+        workspace_root: std::env::temp_dir(),
+        max_turns: Some(1),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig { enabled: false },
+        compaction_config: CompactionConfig::default(),
+    };
+
+    agent
+        .run_with_input(&mut session, input.clone(), options(), &mut handler)
+        .await?;
+    agent
+        .run_with_input(&mut session, input, options(), &mut handler)
+        .await?;
+
+    let users = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::User(message) => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].content.as_deref(), Some("same retry prompt"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn safe_persistence_user_url_is_exact_once_in_request_but_never_in_session_or_snapshot()
+-> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+    let raw_url = "https://example.com/report?token=known-secret&signature=abc";
+    let prompt = format!("inspect {raw_url}");
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user(prompt.clone()),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let durable_json = serde_json::to_string(session.entries())?;
+    assert!(!durable_json.contains("known-secret"));
+    assert!(!durable_json.contains("token="));
+    let requests = captured
+        .lock()
+        .map_err(|_| anyhow::anyhow!("captured requests lock poisoned"))?;
+    assert_eq!(requests.len(), 1);
+    let exact_users = requests[0]
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::User && message.content.as_deref() == Some(prompt.as_str())
+        })
+        .count();
+    assert_eq!(exact_users, 1);
+    let snapshots = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot)) => {
+                Some(snapshot)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!snapshots.is_empty());
+    assert!(
+        snapshots
+            .iter()
+            .all(|snapshot| !snapshot.materialized_text.contains("known-secret"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn safe_persistence_uses_session_url_registrar_across_distinct_turns_and_ownership_move()
+-> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let probe = Arc::new(SessionUrlRegistrarProbe::default());
+    let registrar: Arc<dyn UserUrlCapabilityRegistrar> = probe.clone();
+    let mut session = Session::new("mock-capturing", "mock-model");
+    session.try_attach_user_url_capability_registrar(registrar)?;
+    let mut handler = crate::event::NoopEventHandler;
+    let options = || AgentRunOptions {
+        workspace_root: std::env::temp_dir(),
+        max_turns: Some(1),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig { enabled: false },
+        compaction_config: CompactionConfig::default(),
+    };
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("inspect https://example.com/a?token=one"),
+            options(),
+            &mut handler,
+        )
+        .await?;
+    // The TUI moves Session into an async run and back between turns; the attachment must move
+    // with it without entering serde state.
+    session = std::convert::identity(session);
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("inspect https://example.com/b?token=two"),
+            options(),
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(probe.staged.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.committed.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.rolled_back.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(_))
+            ))
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn safe_persistence_follow_up_request_sees_source_id_without_raw_url_material() -> Result<()>
+{
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+    let options = || AgentRunOptions {
+        workspace_root: std::env::temp_dir(),
+        max_turns: Some(1),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig { enabled: false },
+        compaction_config: CompactionConfig::default(),
+    };
+    let raw_url = "https://example.com/report?token=known-follow-up-secret";
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user(format!("remember {raw_url}")),
+            options(),
+            &mut handler,
+        )
+        .await?;
+    let source_id = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(descriptor)) => {
+                Some(descriptor.source_id.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("durable source descriptor missing"))?;
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("fetch that source"),
+            options(),
+            &mut handler,
+        )
+        .await?;
+
+    let requests = captured
+        .lock()
+        .map_err(|_| anyhow::anyhow!("captured requests lock poisoned"))?;
+    assert_eq!(requests.len(), 2);
+    let follow_up_json = serde_json::to_string(&requests[1])?;
+    assert!(follow_up_json.contains(&source_id));
+    assert!(follow_up_json.contains("web-source"));
+    assert!(!follow_up_json.contains("known-follow-up-secret"));
+    assert!(!follow_up_json.contains("token="));
     Ok(())
 }
 
@@ -3986,6 +4276,7 @@ fn required_preview_file_spec(name: &str) -> crate::ToolSpec {
         input_schema: json!({"type":"object"}),
         category: ToolCategory::File,
         access: ToolAccess::Write,
+        network_effect: None,
         preview: ToolPreviewCapability::Required,
     }
 }
@@ -4236,6 +4527,72 @@ fn prepared_authority_identities_track_durable_source_entries() -> Result<()> {
     let replacement_grant = replacement_grant.expect("replacement session grant should match");
     let replacement_grant_identity = super::preparation_session_grant_identity(&replacement_grant)?;
     assert_ne!(first_grant_identity, replacement_grant_identity);
+    Ok(())
+}
+
+#[test]
+fn mcp_session_grant_does_not_reuse_after_exact_process_binding_changes() -> Result<()> {
+    let tool_name = "mcp__same_server__echo";
+    let approved_decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        tool_name,
+        ToolAccess::Read,
+        vec![ToolSubject::mcp_trust_class_with_process_binding(
+            "same-server",
+            "third_party",
+            "hmac-sha256:approved-manifest-command-base",
+            "hmac-sha256:environment",
+        )],
+        false,
+    );
+    let changed_decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        tool_name,
+        ToolAccess::Read,
+        vec![ToolSubject::mcp_trust_class_with_process_binding(
+            "same-server",
+            "third_party",
+            "hmac-sha256:changed-manifest-command-base",
+            "hmac-sha256:environment",
+        )],
+        false,
+    );
+    let call = ToolCall {
+        id: "mcp-approved-for-session".to_owned(),
+        name: tool_name.to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    let mut session = Session::new("mcp-grant-session", "mock-model");
+    let mut events = RecordingEventHandler::default();
+    super::append_tool_approval_session_grant(
+        &mut session,
+        &mut events,
+        &call,
+        &approved_decision,
+    )?;
+
+    let grant = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ToolApprovalSessionGrant(grant)) => Some(grant),
+            _ => None,
+        })
+        .expect("approved-for-session fixture should append a grant");
+    assert!(super::session_grant_covers_decision(
+        grant,
+        tool_name,
+        &approved_decision
+    ));
+    assert!(!super::session_grant_covers_decision(
+        grant,
+        tool_name,
+        &changed_decision
+    ));
+    let (changed, stale_grant) =
+        super::tool_session_grant_decision_override(&session, tool_name, changed_decision);
+    assert!(stale_grant.is_none());
+    assert_eq!(changed.mode, ApprovalMode::Ask);
     Ok(())
 }
 
@@ -5138,7 +5495,7 @@ async fn agent_returns_approval_required_in_headless_ask_mode() -> Result<()> {
 }
 
 #[tokio::test]
-async fn agent_uses_tool_default_permission_mode() -> Result<()> {
+async fn agent_tool_default_permission_mode_cannot_relax_local_baseline() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(DefaultAllowWriteTool {
@@ -5170,28 +5527,23 @@ async fn agent_uses_tool_default_permission_mode() -> Result<()> {
         .await?;
 
     assert_eq!(result.final_text, "done");
-    assert!(executed.load(Ordering::SeqCst));
+    assert!(!executed.load(Ordering::SeqCst));
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
                 if approval.call_id == "call-write-1"
                     && approval.action == ToolApprovalAuditAction::PolicyEvaluated
-                    && approval.policy_decision == ApprovalMode::Allow
+                    && approval.policy_decision == ApprovalMode::Ask
+                    && approval.local_policy_decision == ApprovalMode::Ask
+                    && approval.source_policy_decision == ApprovalMode::Allow
         )
     }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolEgress(egress))
-                if egress.call_id == "call-write-1"
-                    && egress.tool_name == "write_file"
-                    && egress.destination == "test:remote"
-                    && egress.operation == "write"
-                    && !egress.redacted
-        )
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(entry, SessionLogEntry::Control(ControlEntry::ToolEgress(egress))
+            if egress.call_id == "call-write-1")
     }));
-    assert!(!handler.events.iter().any(|event| {
+    assert!(handler.events.iter().any(|event| {
         matches!(event, RunEvent::ToolResult(result)
             if result.is_error() && result.content.contains("requires approval in headless mode"))
     }));
@@ -5855,7 +6207,10 @@ async fn agent_returns_invalid_input_when_egress_payload_audit_fails() -> Result
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
-                permission_config: PermissionConfig::default(),
+                permission_config: PermissionConfig {
+                    tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
+                    ..PermissionConfig::default()
+                },
                 permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
@@ -6089,8 +6444,9 @@ async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
             .payload
             .get("error")
             .and_then(Value::as_str)
-            .is_some_and(|error| error.contains("socket closed"))
+            .is_some_and(|error| error == "provider turn failed before a safe terminal result")
     );
+    assert!(!finalized.payload.to_string().contains("socket closed"));
     Ok(())
 }
 
@@ -6173,6 +6529,7 @@ fn path_tool_spec(name: &str, access: ToolAccess) -> crate::ToolSpec {
         }),
         category: ToolCategory::File,
         access,
+        network_effect: None,
         preview: ToolPreviewCapability::None,
     }
 }

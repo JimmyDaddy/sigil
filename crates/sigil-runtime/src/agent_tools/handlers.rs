@@ -30,6 +30,10 @@ impl EventHandler for ChatChildEventHandler<'_> {
                 call,
                 spec,
                 subjects,
+                network_effect,
+                local_policy_decision,
+                network_policy_decision,
+                source_policy_decision,
                 operation,
                 risk,
                 subject_zones,
@@ -41,6 +45,10 @@ impl EventHandler for ChatChildEventHandler<'_> {
                 call,
                 spec,
                 subjects,
+                network_effect,
+                local_policy_decision,
+                network_policy_decision,
+                source_policy_decision,
                 operation,
                 risk,
                 subject_zones,
@@ -75,6 +83,10 @@ impl ApprovalHandler for BackgroundApprovalHandler {
 }
 
 impl ApprovalHandler for ChatAgentApprovalRouteHandler<'_> {
+    fn approval_is_explicit_user_action(&self) -> bool {
+        self.inner.approval_is_explicit_user_action()
+    }
+
     fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval> {
         let route_id = agent_route_id_for_call(&self.source_thread_id, &call.id)?;
         self.parent_session

@@ -9,7 +9,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sigil_kernel::{CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig};
+use sigil_kernel::{
+    CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig, WorkspaceTrust,
+};
 use tokio::{
     io::AsyncReadExt,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
@@ -63,3 +65,7 @@ pub use status::{CodeIntelResponse, CodeIntelServerStatus, CodeIntelStatus, Quer
 #[cfg(test)]
 #[path = "../tests/service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/trust_tests.rs"]
+mod trust_tests;

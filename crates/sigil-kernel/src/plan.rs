@@ -408,12 +408,17 @@ pub fn plan_draft_created_entry(
     if plan_text.is_empty() {
         return Ok(None);
     }
-    let Some(structured) = structured_plan_draft(plan_text) else {
+    let Some(exact_structured) = structured_plan_draft(plan_text) else {
         return Ok(None);
     };
-    let plan_hash = plan_text_hash(plan_text);
-    let plan_id = plan_id_from_hash(&plan_hash)?;
+    let structured = safe_structured_plan_draft(exact_structured.clone());
     let inline_plan_text = render_structured_plan_text(&structured);
+    let plan_hash = if structured == exact_structured {
+        plan_text_hash(plan_text)
+    } else {
+        plan_text_hash(&inline_plan_text)
+    };
+    let plan_id = plan_id_from_hash(&plan_hash)?;
     let inline_text =
         (inline_plan_text.len() <= PLAN_INLINE_TEXT_MAX_BYTES).then_some(inline_plan_text);
     Ok(Some(PlanDraftCreatedEntry {
@@ -542,7 +547,7 @@ fn collapse_plan_workspace_paths(paths: BTreeSet<String>) -> Vec<String> {
     collapsed
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct StructuredPlanDraft {
     summary: String,
     steps: Vec<PlanDraftStep>,
@@ -550,6 +555,114 @@ struct StructuredPlanDraft {
     suggested_checks: Vec<PlanSuggestedCheck>,
     risk: Option<String>,
     notes: Vec<String>,
+}
+
+fn safe_structured_plan_draft(mut plan: StructuredPlanDraft) -> StructuredPlanDraft {
+    plan.summary = crate::safe_persistence_text(&plan.summary)
+        .chars()
+        .take(PLAN_SUMMARY_MAX_CHARS)
+        .collect();
+    plan.target_paths.retain(|path| {
+        crate::safe_persistence_text(path) == *path && !plan_identifier_has_secret_marker(path)
+    });
+    plan.risk = plan.risk.as_deref().map(crate::safe_persistence_text);
+    plan.notes = plan
+        .notes
+        .iter()
+        .map(|note| crate::safe_persistence_text(note))
+        .collect();
+    plan.suggested_checks = plan
+        .suggested_checks
+        .into_iter()
+        .filter_map(safe_plan_suggested_check)
+        .collect();
+
+    let mut step_ids = BTreeSet::new();
+    for (index, step) in plan.steps.iter_mut().enumerate() {
+        let safe_id = crate::safe_persistence_text(&step.step_id);
+        let id_seed = if safe_id == step.step_id && !plan_identifier_has_secret_marker(&safe_id) {
+            safe_id
+        } else {
+            format!("step_{}", index + 1)
+        };
+        step.step_id = unique_plan_step_id(&id_seed, index, &mut step_ids);
+        step.title = crate::safe_persistence_text(&step.title);
+        step.detail = step.detail.as_deref().map(crate::safe_persistence_text);
+        step.risk = step.risk.as_deref().map(crate::safe_persistence_text);
+        step.target_paths.retain(|path| {
+            crate::safe_persistence_text(path) == *path && !plan_identifier_has_secret_marker(path)
+        });
+        step.notes = step
+            .notes
+            .iter()
+            .map(|note| crate::safe_persistence_text(note))
+            .collect();
+        step.suggested_checks = step
+            .suggested_checks
+            .drain(..)
+            .filter_map(safe_plan_suggested_check)
+            .collect();
+    }
+    plan
+}
+
+fn safe_plan_suggested_check(mut check: PlanSuggestedCheck) -> Option<PlanSuggestedCheck> {
+    let safe_command = crate::safe_persistence_text(&check.command.command);
+    let safe_args = check
+        .command
+        .args
+        .iter()
+        .map(|arg| crate::safe_persistence_text(arg))
+        .collect::<Vec<_>>();
+    let safe_cwd = check
+        .command
+        .cwd
+        .as_ref()
+        .map(|cwd| PathBuf::from(crate::safe_persistence_text(&cwd.to_string_lossy())));
+    if safe_command != check.command.command
+        || safe_args != check.command.args
+        || safe_cwd != check.command.cwd
+    {
+        return None;
+    }
+    let safe_check_spec_id = crate::safe_persistence_text(&check.check_spec_id);
+    check.check_spec_id = if safe_check_spec_id == check.check_spec_id
+        && !plan_identifier_has_secret_marker(&safe_check_spec_id)
+    {
+        safe_check_spec_id
+    } else {
+        check_spec_id_from_command(&safe_command, &safe_args)
+    };
+    check.command.command = safe_command;
+    check.command.args = safe_args;
+    check.command.cwd = safe_cwd;
+    check.source_line = check
+        .source_line
+        .as_deref()
+        .map(crate::safe_persistence_text);
+    Some(check)
+}
+
+fn plan_identifier_has_secret_marker(value: &str) -> bool {
+    value
+        .split(['_', '-', '.', ':'])
+        .map(str::to_ascii_lowercase)
+        .any(|segment| {
+            matches!(
+                segment.as_str(),
+                "authorization"
+                    | "bearer"
+                    | "cookie"
+                    | "credential"
+                    | "password"
+                    | "secret"
+                    | "signature"
+                    | "sig"
+                    | "token"
+                    | "apikey"
+                    | "accesskey"
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]

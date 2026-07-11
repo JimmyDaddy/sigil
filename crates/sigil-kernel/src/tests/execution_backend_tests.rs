@@ -1,7 +1,12 @@
 use crate::{
     EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION, ExecutionBackendCapabilities, ExecutionBackendKind,
-    ExecutionOutputReceipt, ExecutionOutputStream, ExecutionReceipt, ExecutionStreamCapture,
-    ExecutionTerminationCause, ProcessEnvironmentPolicy,
+    ExecutionNetworkReceipt, ExecutionOutputReceipt, ExecutionOutputStream, ExecutionReceipt,
+    ExecutionSandboxProfile, ExecutionStreamCapture, ExecutionTerminationCause,
+    ExtensionProcessLaunchErrorCode, ExtensionProcessNetworkAdmission, NetworkEffect,
+    NetworkPolicy, ProcessEnvironmentPolicy,
+    validate_extension_process_isolation_with_network_policy,
+    validate_extension_process_network_admission,
+    validate_extension_process_network_receipt_with_policy,
 };
 
 #[test]
@@ -35,6 +40,134 @@ fn legacy_execution_receipt_derives_accurate_output_evidence() {
     assert_eq!(output.stderr.total_lines, 1);
     assert_eq!(output.combined_total_bytes, 7);
     assert_eq!(output.termination, ExecutionTerminationCause::TimedOut);
+}
+
+#[test]
+fn extension_network_deny_requires_proven_process_tree_isolation() {
+    let error = validate_extension_process_isolation_with_network_policy(
+        ExecutionSandboxProfile::Unconfined,
+        Some(NetworkEffect::Unknown),
+        NetworkPolicy::Deny,
+        ExecutionBackendCapabilities::default(),
+        &ExecutionNetworkReceipt::unknown("local backend"),
+        "plugin-hook",
+    )
+    .expect_err("unknown extension network effect must fail closed without isolation");
+    assert_eq!(
+        error.code,
+        ExtensionProcessLaunchErrorCode::NetworkIsolationUnavailable
+    );
+
+    let isolated = ExecutionBackendCapabilities {
+        network_isolation: true,
+        process_isolation: true,
+        ..ExecutionBackendCapabilities::default()
+    };
+    validate_extension_process_isolation_with_network_policy(
+        ExecutionSandboxProfile::Unconfined,
+        Some(NetworkEffect::Unknown),
+        NetworkPolicy::Deny,
+        isolated,
+        &ExecutionNetworkReceipt::denied("isolated process tree"),
+        "plugin-hook",
+    )
+    .expect("denied launch receipt with process-tree isolation should satisfy policy");
+}
+
+#[test]
+fn extension_network_allow_and_no_effect_do_not_invent_isolation_requirements() {
+    for (effect, policy) in [
+        (Some(NetworkEffect::Unknown), NetworkPolicy::Allow),
+        (None, NetworkPolicy::Deny),
+    ] {
+        validate_extension_process_isolation_with_network_policy(
+            ExecutionSandboxProfile::Unconfined,
+            effect,
+            policy,
+            ExecutionBackendCapabilities::default(),
+            &ExecutionNetworkReceipt::unknown("local backend"),
+            "extension",
+        )
+        .expect("independent policy should not require isolation for this case");
+    }
+}
+
+#[test]
+fn extension_network_deny_revalidates_completed_backend_receipt() {
+    let error = validate_extension_process_network_receipt_with_policy(
+        ExecutionSandboxProfile::Unconfined,
+        Some(NetworkEffect::Unknown),
+        NetworkPolicy::Deny,
+        &ExecutionNetworkReceipt::allowed("unexpected network allowance"),
+        "mcp-server",
+    )
+    .expect_err("deny policy requires a denied backend receipt");
+    assert_eq!(
+        error.code,
+        ExtensionProcessLaunchErrorCode::BackendReceiptInvalid
+    );
+}
+
+#[test]
+fn extension_network_admission_matrix_is_fail_closed_and_profile_aware() {
+    assert_eq!(
+        ExtensionProcessNetworkAdmission::default(),
+        ExtensionProcessNetworkAdmission::new(NetworkPolicy::Allow, false)
+    );
+
+    for effect in [
+        NetworkEffect::Read,
+        NetworkEffect::Mutate,
+        NetworkEffect::Unknown,
+    ] {
+        let error = validate_extension_process_network_admission(
+            ExecutionSandboxProfile::Unconfined,
+            Some(effect),
+            ExtensionProcessNetworkAdmission::new(NetworkPolicy::Ask, false),
+            ExecutionBackendCapabilities::default(),
+            &ExecutionNetworkReceipt::unknown("local backend"),
+            "extension",
+        )
+        .expect_err("ask admission without explicit approval must fail before spawn");
+        assert_eq!(
+            error.code,
+            ExtensionProcessLaunchErrorCode::NetworkApprovalRequired
+        );
+
+        validate_extension_process_network_admission(
+            ExecutionSandboxProfile::Unconfined,
+            Some(effect),
+            ExtensionProcessNetworkAdmission::new(NetworkPolicy::Ask, true),
+            ExecutionBackendCapabilities::default(),
+            &ExecutionNetworkReceipt::unknown("local backend"),
+            "extension",
+        )
+        .expect("explicit approval should satisfy the independent ask admission");
+    }
+
+    validate_extension_process_network_admission(
+        ExecutionSandboxProfile::Unconfined,
+        None,
+        ExtensionProcessNetworkAdmission::new(NetworkPolicy::Ask, false),
+        ExecutionBackendCapabilities::default(),
+        &ExecutionNetworkReceipt::unknown("local backend"),
+        "extension-without-network-effect",
+    )
+    .expect("no declared network effect should add no independent network gate");
+
+    let profile_error = validate_extension_process_network_admission(
+        ExecutionSandboxProfile::BuildOffline,
+        None,
+        ExtensionProcessNetworkAdmission::new(NetworkPolicy::Allow, false),
+        ExecutionBackendCapabilities::default(),
+        &ExecutionNetworkReceipt::unknown("local backend"),
+        "offline-extension",
+    )
+    .expect_err("profile validation must still run when no network effect is declared");
+    assert_eq!(
+        profile_error.code,
+        ExtensionProcessLaunchErrorCode::ProcessIsolationUnavailable
+    );
 }
 
 #[test]

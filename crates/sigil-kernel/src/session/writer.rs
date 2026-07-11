@@ -471,7 +471,7 @@ pub(super) struct LinearSessionWriter {
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SessionWriterFault {
+pub(crate) enum SessionWriterFault {
     ParentDirectorySync,
     PartialFirstRecord,
     BeforeSync,

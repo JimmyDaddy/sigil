@@ -330,10 +330,10 @@ rules = []
 
 | Mode | 用户理解 | 语义 |
 | --- | --- | --- |
-| `read-only` | 只看不改 | 读取默认允许；写入、执行、网络工具会被拒绝，即使低层覆盖尝试放行也不能放宽。 |
-| `manual` | 手动确认 | 读取默认允许；写入、执行、网络工具默认询问，除非命中特定 tool/rule/external-directory 策略。 |
-| `auto-edit` | 自动改文件 | Workspace 内文件编辑默认允许；shell 和网络工具默认仍询问。 |
-| `danger-full-access` | 高风险全放开 | 默认允许所有工具访问。名称中显式带 `danger`，避免误用。 |
+| `read-only` | 只看不改 | 本地读取默认允许；本地写入和进程执行会被拒绝，即使低层本地覆盖尝试放行也不能放宽。网络 effect 单独求值。 |
+| `manual` | 手动确认 | 本地读取默认允许；本地写入和执行默认询问，除非命中特定 tool/rule/external-directory 策略。 |
+| `auto-edit` | 自动改文件 | Workspace 内文件编辑默认允许；本地进程执行默认仍询问。 |
+| `danger-full-access` | 高风险本地全放开 | 默认允许本地访问。名称中显式带 `danger`，但它不能覆盖独立的网络 ask 或 deny。 |
 
 含义：
 
@@ -344,18 +344,21 @@ rules = []
 - workspace 外路径默认不可执行；开启 external directory 后仍会先经过 external-directory gate。
 - 临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`。它由 Sigil 用户态 cache root 承载，对模型显示为 `cache/tmp`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
 - headless `run` 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误。
+- 本地 access 与网络 effect 是正交的两条轴。工具分别声明本地 `Read` / `Write` / `Execute`，以及可选的网络 `Read` / `Mutate` / `Unknown` effect。`read-only` 只有在有效 `NetworkPolicy` 允许时才允许网络读取；网络修改或未知网络 effect 在 `read-only` 下仍会拒绝。`danger-full-access` 不能覆盖网络 `Ask` 或 `Deny`。
+- 当前版本不会提前公开新的 `[web]` 或 remote MCP 网络配置，也不会启用 WebFetch/WebSearch。现有通用 MCP 调用会保守分类为本地 `Read` 加 `NetworkEffect::Unknown`；原有 source/tool 审批仍参与最终的 `Deny > Ask > Allow` 求交。
 
 优先级：
 
 | 顺序 | 来源 | 职责 |
 | --- | --- | --- |
-| 1 | `mode` baseline | 用户可理解的顶层模式设置默认姿态；`read-only` 是非读硬上限，`danger-full-access` 是显式全放开。 |
-| 2 | 工具自身 default | runtime/tool 提供的默认值，例如可信只读命令降级。 |
-| 3 | `tools.<tool_name>` | 工具名覆盖。 |
-| 4 | `rules[]` | 命中的 tool/subject 规则；最后一条匹配规则生效，用文件顺序表达更具体的覆盖。 |
-| 5 | `commands.allow/ask/deny` | shell command 的匹配 pattern。command 分组内部按 `deny > ask > allow` 合并；command `allow` 可以放宽 `manual` 默认 shell ask，但不能覆盖显式 tool/rule ask 或 deny。 |
-| 6 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
-| 7 | Effective policy cap 和风险覆盖 | runtime cap、`read-only`、protected path、destructive operation 和 external-directory deny 仍是硬安全边界。 |
+| 1 | 本地 `mode` baseline | 用户可理解的顶层模式设置本地 Read/Write/Execute 姿态；`read-only` 是本地写入/执行硬上限。 |
+| 2 | 独立 network policy | runtime 对声明或动态 network effect 单独求值；本地 danger mode、plan approval 或 session grant 都不能放宽网络 `Ask` / `Deny`。 |
+| 3 | 工具/source default | runtime/tool 提供的 source policy，例如 MCP trust 审批或可信只读命令降级。 |
+| 4 | `tools.<tool_name>` | 工具名覆盖。 |
+| 5 | `rules[]` | 命中的 tool/subject 规则；最后一条匹配规则生效，用文件顺序表达更具体的覆盖。 |
+| 6 | `commands.allow/ask/deny` | shell command 的匹配 pattern。command 分组内部按 `deny > ask > allow` 合并；command `allow` 可以放宽 `manual` 默认 shell ask，但不能覆盖显式 tool/rule ask 或 deny。 |
+| 7 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
+| 8 | Effective policy cap 和风险覆盖 | runtime cap、本地 `read-only`、protected path、destructive operation 和 external-directory deny 仍是硬安全边界。最终结果取 local、network 和 source decision 中最严格的一项。 |
 
 ## Memory
 
@@ -436,11 +439,11 @@ auto_discover = true
 report_missing = true
 ```
 
-开启后，runtime 会注册只读 code intelligence 工具，以及用于 code action 和 symbol rename 的 LSP edit 工具。edit 工具属于 `Write` 工具，必须先展示 diff 审批，获批后才会改文件。TUI 可以用 `Alt-D` 对 git changed source files 触发 diagnostics 检查。
+开启后，runtime 会注册代码查询工具，以及用于 code action 和 symbol rename 的 LSP edit 工具。edit 工具属于 `Write` 工具，必须先展示 diff 审批，获批后才会改文件。Workspace trust 只控制配置的 LSP 进程能否启动，不会绕过工具权限或 diff 审批。TUI 可以用 `Alt-D` 对 git changed source files 触发 diagnostics 检查。
 
 `auto_discover = true` 时，Sigil 会按 workspace 自动发现常见语言和 PATH 上可用的安全 LSP server。手写 `code_intelligence.servers` 只作为高级覆盖或补充。
 
-TUI `/config` 面板里有 `Code Intel` 区块，可以调整 `enabled`、`server_startup` 和 `auto_discover`，并查看只读 trust 边界与 readiness 检查。readiness 行复用同一份本地 doctor 事实，所以缺 LSP command 时会在启动 language server 前先给出修复建议。
+TUI `/config` 面板里有 `Code Intel` 区块，可以调整 `enabled`、`server_startup` 和 `auto_discover`，并查看 LSP 进程 trust 边界、写操作审批要求与 readiness 检查。readiness 行复用同一份本地 doctor 事实，所以缺 LSP command 时会在启动 language server 前先给出修复建议。
 
 语言服务器示例：
 
@@ -454,6 +457,8 @@ file_extensions = ["rs"]
 startup_timeout_ms = 5000
 trust_required = true
 ```
+
+`trust_required` 默认是 `true`。这类 server 只有在当前 session 内存在与当前 workspace 精确匹配的 durable `Trusted` decision 时才会启动；`Unknown`、`Restricted` 和 `Denied` 都会在解析 command 或 spawn 进程前 fail-closed。因此，全新的 `sigil run` session 不能启动要求 trust 的 LSP；只有明确接受该进程启动风险时，才应设置 `trust_required = false` 关闭这道 gate。没有 LSP 进程时仍可使用 Rust Tree-sitter fallback；无论采用哪种设置，LSP 写工具都继续要求正常的 diff 审批。
 
 ## Terminal
 

@@ -149,7 +149,7 @@ fn tool_subject_context_label(subject: &ToolSubject) -> String {
 
 fn truncate_context_value(value: &str) -> String {
     const MAX_CHARS: usize = 180;
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = crate::safe_persistence_text(value);
     if normalized.chars().count() <= MAX_CHARS {
         return normalized;
     }
@@ -241,6 +241,10 @@ fn append_tool_approval_audit_with_source(
         call_id: call.id.clone(),
         tool_name: call.name.clone(),
         access: decision.access,
+        network_effect: decision.network_effect,
+        local_policy_decision: decision.local_policy_decision,
+        network_policy_decision: decision.network_policy_decision,
+        source_policy_decision: decision.source_policy_decision,
         operation: Some(decision.operation),
         risk: Some(decision.risk),
         subjects: audit_subjects(&decision.subjects),
@@ -268,6 +272,7 @@ pub(super) fn append_tool_approval_session_grant<H: EventHandler>(
         call_id: call.id.clone(),
         tool_name: call.name.clone(),
         access: decision.access,
+        network_effect: decision.network_effect,
         operation: decision.operation,
         risk: decision.risk,
         subjects: audit_subjects(&decision.subjects),

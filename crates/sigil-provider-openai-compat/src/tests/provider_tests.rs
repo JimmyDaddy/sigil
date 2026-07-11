@@ -411,6 +411,7 @@ fn test_request() -> CompletionRequest {
         background: false,
         store: false,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     }
 }
 

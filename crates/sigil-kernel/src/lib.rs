@@ -6,12 +6,16 @@ pub mod changeset;
 pub mod config;
 pub mod context_engine;
 pub mod conversation_queue;
+pub mod egress;
 pub mod eval;
 pub mod event;
 pub mod execution_backend;
+pub mod external;
+pub mod hosted;
 pub mod memory;
 pub mod mutation;
 pub mod permission;
+pub mod persistence;
 pub mod plan;
 pub mod plugin;
 pub mod process_environment;
@@ -31,6 +35,7 @@ pub mod terminal_task;
 pub mod time;
 pub mod tool;
 pub mod verification;
+pub mod web_budget;
 pub mod write_isolation;
 
 pub use agent::{
@@ -105,6 +110,15 @@ pub use conversation_queue::{
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
     ConversationInputTarget, ConversationQueueItemProjection, ConversationQueueProjection,
 };
+pub use egress::{
+    DisclosurePresentationError, DisclosurePresentationReceipt, EgressAuditError,
+    EgressAuditRecorder, EgressBindingOrigin, EgressDataCategory, EgressDisclosureKind,
+    EgressDisclosurePresented, EgressDisclosurePresenter, EgressNetworkRoute,
+    HostedAuthorizationScope, HostedToolAuthorization, HostedToolOutcome, HostedToolTerminalStatus,
+    McpTransportAuthorization, PreEgressDisclosure, QueryEgressOutcome, QueryEgressStarted,
+    QueryEgressTerminalStatus, SharedEgressDisclosurePresenter, WebFetchTransportAuthorization,
+    WebQueryEgressClass, WebSearchFailureClass, validate_disclosure_receipt,
+};
 pub use eval::{
     EvalCase, EvalCaseId, EvalCaseProvenance, EvalCaseRunner, EvalCaseRunnerOptions,
     EvalEvidenceId, EvalEvidenceKind, EvalEvidenceRef, EvalFailure, EvalFailureKind,
@@ -137,7 +151,23 @@ pub use execution_backend::{
     ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxProfileSpec,
     ExecutionSandboxStrategyConfig, ExecutionStrategyConfig, ExecutionStrategyMode,
     ExecutionStreamCapture, ExecutionTerminationCause, ExecutionTimeoutSource,
-    validate_extension_process_isolation, validate_extension_process_network_receipt,
+    ExtensionProcessNetworkAdmission, validate_extension_process_isolation,
+    validate_extension_process_isolation_with_network_policy,
+    validate_extension_process_network_admission, validate_extension_process_network_receipt,
+    validate_extension_process_network_receipt_with_policy,
+};
+pub use external::{
+    CitationSupport, ExternalEvidenceLevel, ExternalProvenanceEntry, ExternalSourceRecord,
+    ExternalTrust, SourceCacheStatus, SourceFreshness, ToolRestartPolicy,
+    is_unsafe_external_control, sha256_hex, strip_terminal_control_sequences,
+};
+pub use hosted::{
+    FinalizedHostedCitation, FinalizedHostedTurn, HostedCitationCandidate, HostedCitationFidelity,
+    HostedConstraintEnforcement, HostedEvidence, HostedEvidenceProcessor,
+    HostedFinalizationContext, HostedQueryVisibility, HostedRequestWireState,
+    HostedSourceCandidate, HostedSourceFidelity, HostedToolKind, HostedToolLimits,
+    HostedToolRequest, HostedToolRequestError, HostedToolSupport, HostedTurnBuffer,
+    HostedTurnBufferLimits, HostedTurnError, HostedWebSearchCapability, HostedWireStateError,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
@@ -159,11 +189,24 @@ pub use mutation::{
 pub use permission::{
     ApprovalMode, CommandPermissionConfig, CommandPermissionGroup, CommandPermissionMatch,
     EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
-    PathTrustZone, PermissionConfig, PermissionConfirmation, PermissionDecision,
+    NetworkPolicy, PathTrustZone, PermissionConfig, PermissionConfirmation, PermissionDecision,
     PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionRisk, PermissionRule,
     ToolOperation, apply_risk_overlay, classify_path_trust_zone, derive_permission_risk,
-    infer_tool_operation, tool_approval_session_grant_available,
+    derive_permission_risk_with_network_effect, evaluate_network_policy, infer_tool_operation,
+    tool_approval_session_grant_available, tool_approval_session_grant_available_for_facets,
     tool_approval_session_grant_available_for_parts,
+};
+pub use persistence::{
+    CanonicalWebUrlPersistenceProjection, DEFAULT_WEB_URL_CAPABILITY_TTL_MS,
+    HostedIntentPersistenceProjection, MAX_PROVIDER_TURN_TOOL_ARGS_BYTES,
+    MAX_PROVIDER_TURN_TOOL_CALLS, MAX_STREAMED_TOOL_ARGS_BYTES, MAX_TOOL_CALL_ID_BYTES,
+    MAX_TOOL_CALL_NAME_BYTES, SafePersistenceError, ToolCallPersistenceProjection,
+    TransientMessageOverlay, UserMessagePersistenceProjection, UserUrlCapabilityRegistrar,
+    UserUrlCapabilityRegistration, WebUrlCapabilityDescriptor, WebUrlProvenanceKind,
+    apply_exact_message_overlays, canonical_web_url_persistence_projection,
+    project_message_for_persistence, project_tool_call_for_persistence,
+    project_user_message_for_persistence, project_user_message_for_persistence_with_nonce,
+    project_user_message_for_persistence_with_nonce_and_issued_at, safe_persistence_text,
 };
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,
@@ -275,14 +318,15 @@ pub use terminal_task::{
 };
 pub use time::saturating_elapsed;
 pub use tool::{
-    PreparedToolAuditBinding, PreparedToolCall, PreparedToolExecution, ScopedToolRegistry, Tool,
-    ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit,
-    ToolError, ToolErrorKind, ToolExecutionId, ToolLifecycleOwner, ToolMutationTracking,
-    ToolPreparation, ToolPreparationBinding, ToolPreparationDraft, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolPreviewFileSnapshot, ToolPreviewSnapshot,
-    ToolProgressEvent, ToolProgressSink, ToolReceiptMetadata, ToolReceiptReplayDecision,
-    ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
-    ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    NetworkEffect, PreparedToolAuditBinding, PreparedToolCall, PreparedToolExecution,
+    ScopedToolRegistry, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats,
+    ToolEgressAudit, ToolError, ToolErrorKind, ToolExecutionId, ToolLifecycleOwner,
+    ToolMutationTracking, ToolPreparation, ToolPreparationBinding, ToolPreparationDraft,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewFileSnapshot,
+    ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink, ToolReceiptMetadata,
+    ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope,
 };
 pub use verification::{
     ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,
@@ -307,7 +351,12 @@ pub use verification::{
     build_workspace_snapshot_for_event, check_specs_from_user_config, default_scope_excludes,
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
     record_plugin_verification_hook_receipt, run_verification_check, stable_workspace_id,
-    verification_check_run_id,
+    verification_check_run_id, workspace_trust_from_entries,
+};
+pub use web_budget::{
+    WebBudgetByteKind, WebBudgetError, WebBudgetReservation, WebBudgetReservationKind,
+    WebBudgetReservationRequest, WebConcurrencyPermit, WebTaskTreeBudget, WebTaskTreeBudgetLimits,
+    WebTaskTreeBudgetSnapshot,
 };
 pub use write_isolation::{
     IsolatedChangeSetProduced, IsolatedWorkspaceBackend, IsolatedWorkspaceCreated, MergeDecision,

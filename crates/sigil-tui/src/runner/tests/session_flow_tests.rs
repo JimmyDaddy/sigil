@@ -64,6 +64,9 @@ fn session_compacted_message_includes_provider_and_model() -> Result<()> {
         compacted_message_count: 5,
         retained_tail_message_count: 2,
         task_memory: None,
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     };
     let message =
         session_compacted_message(&path, &session, record.clone(), CompactionTrigger::Manual);
@@ -97,6 +100,9 @@ fn session_compacted_message_captures_entries() -> Result<()> {
         compacted_message_count: 0,
         retained_tail_message_count: 0,
         task_memory: None,
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     };
     let message = session_compacted_message(
         &path,
@@ -131,6 +137,9 @@ fn session_compacted_message_uses_trigger_enum() {
         compacted_message_count: 0,
         retained_tail_message_count: 0,
         task_memory: None,
+        external_trust: None,
+        external_provenance_message_ids: Vec::new(),
+        external_source_ids: Vec::new(),
     };
 
     let manual =

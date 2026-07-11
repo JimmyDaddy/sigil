@@ -22,13 +22,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
         role_provider_builder,
     } = mcp_handlers;
     let mut current_session_log_path = session_log_path;
-    let mut current_session = match load_session(
+    let mut exact_conversation_prompts = ExactConversationPromptStore::new();
+    let mut current_session = match load_session_with_url_capability_attachment(
         &root_config.agent.provider,
         &root_config.agent.model,
         &current_session_log_path,
+        None,
     ) {
         Ok(mut session) => {
-            mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
+            mark_stale_dispatching_conversation_queue_items(
+                &mut session,
+                &exact_conversation_prompts,
+                &message_tx,
+            );
             Some(session)
         }
         Err(error) => {
@@ -121,10 +127,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             elicitation_handler.set_audit_buffer(None);
             active_run = None;
-            current_session = match load_session(
+            current_session = match load_session_with_url_capability_attachment(
                 task_result.session.provider_name(),
                 task_result.session.model_name(),
                 &current_session_log_path,
+                Some(&task_result.session),
             ) {
                 Ok(session) => Some(session),
                 Err(error) => {
@@ -403,8 +410,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }
 
         if active_run.is_none()
-            && let Some(queued) =
-                mark_next_conversation_queue_item_dispatching(&mut current_session, &message_tx)
+            && let Some(queued) = mark_next_conversation_queue_item_dispatching(
+                &mut current_session,
+                &mut exact_conversation_prompts,
+                &message_tx,
+            )
         {
             active_run = start_queued_conversation_run(
                 &runtime,
@@ -435,6 +445,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }) => match queue_conversation_input(
                 &current_session_log_path,
                 &mut current_session,
+                &mut exact_conversation_prompts,
                 prompt,
                 kind,
                 target,
@@ -451,6 +462,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match cancel_queued_conversation_input(
                     &current_session_log_path,
                     &mut current_session,
+                    &mut exact_conversation_prompts,
                     queue_id,
                 ) {
                     Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
@@ -466,6 +478,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }) => match edit_queued_conversation_input(
                 &current_session_log_path,
                 &mut current_session,
+                &mut exact_conversation_prompts,
                 queue_id,
                 prompt,
                 reasoning_effort,
@@ -565,6 +578,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     match queue_conversation_input(
                         &current_session_log_path,
                         &mut current_session,
+                        &mut exact_conversation_prompts,
                         prompt,
                         kind,
                         ConversationInputTarget::MainThread,
@@ -585,13 +599,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 };
 
+                let safe_started_prompt = sigil_kernel::safe_persistence_text(&prompt);
                 let started = if plan_mode {
                     WorkerMessage::PlanRunStarted {
-                        prompt: prompt.clone(),
+                        prompt: safe_started_prompt,
                     }
                 } else {
                     WorkerMessage::RunStarted {
-                        prompt: prompt.clone(),
+                        prompt: safe_started_prompt,
                     }
                 };
                 let _ = message_tx.send(started);
@@ -638,6 +653,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     .register_task()
                     .expect("new root cancellation owner must admit its first task");
 
+                let url_capability_registrar = run_session.user_url_capability_registrar();
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -703,6 +719,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    url_capability_registrar,
                 });
             }
             Ok(WorkerCommand::InvokeAgentProfile {
@@ -724,8 +741,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 };
                 let mut run_session = run_session;
+                let safe_parent_prompt = sigil_kernel::safe_persistence_text(&parent_prompt);
                 if let Err(error) =
-                    run_session.append_user_message(ModelMessage::user(parent_prompt.clone()))
+                    run_session.append_user_message(ModelMessage::user(safe_parent_prompt.clone()))
                 {
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                         "failed to persist agent invocation prompt: {error:#}"
@@ -736,7 +754,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
 
                 let _ = message_tx.send(WorkerMessage::AgentRunStarted {
                     profile_id: profile_id.clone(),
-                    prompt: parent_prompt,
+                    prompt: safe_parent_prompt,
                 });
 
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
@@ -775,6 +793,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     Some(cancellation_handle.clone()),
                 );
 
+                let url_capability_registrar = run_session.user_url_capability_registrar();
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let profile_id_for_summary = profile_id.clone();
@@ -836,6 +855,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    url_capability_registrar,
                 });
             }
             Ok(WorkerCommand::InvokeInlineSkill {
@@ -876,7 +896,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let prompt = skill_invocation_prompt(&skill_id, &arguments);
                 let _ = message_tx.send(WorkerMessage::SkillRunStarted {
                     skill_id: skill_id.clone(),
-                    prompt: prompt.clone(),
+                    prompt: sigil_kernel::safe_persistence_text(&prompt),
                 });
 
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
@@ -912,6 +932,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     .register_task()
                     .expect("new root cancellation owner must admit its first task");
 
+                let url_capability_registrar = run_session.user_url_capability_registrar();
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -962,6 +983,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    url_capability_registrar,
                 });
             }
             Ok(WorkerCommand::InvokeChildSessionSkill {
@@ -1024,7 +1046,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let objective = skill_child_session_objective(&skill_id, &arguments);
                 let _ = message_tx.send(WorkerMessage::TaskRunStarted {
                     task_id: task_id_value.clone(),
-                    objective: objective.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&objective),
                 });
 
                 let handler = ChannelEventHandler::new(message_tx.clone());
@@ -1049,6 +1071,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 };
 
+                let url_capability_registrar = run_session.user_url_capability_registrar();
                 let handle = spawn_skill_child_run(
                     &runtime,
                     SkillChildRunSpawn {
@@ -1082,6 +1105,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    url_capability_registrar,
                 });
             }
             Ok(WorkerCommand::SubmitTask { prompt }) => {
@@ -1124,7 +1148,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
                 let _ = message_tx.send(WorkerMessage::TaskRunStarted {
                     task_id: task_id_value.clone(),
-                    objective: prompt.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&prompt),
                 });
 
                 let handler = ChannelEventHandler::new(message_tx.clone());
@@ -1149,6 +1173,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 };
 
+                let url_capability_registrar = run_session.user_url_capability_registrar();
                 let handle = spawn_task_run(
                     &runtime,
                     TaskRunSpawn {
@@ -1179,6 +1204,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    url_capability_registrar,
                 });
             }
             Ok(WorkerCommand::ContinueTask { task_id, guidance }) => {
@@ -1220,7 +1246,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
                 let _ = message_tx.send(WorkerMessage::TaskRunStarted {
                     task_id: task_id_value.clone(),
-                    objective: objective.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&objective),
                 });
 
                 let handler = ChannelEventHandler::new(message_tx.clone());
@@ -1245,6 +1271,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 };
 
+                let url_capability_registrar = run_session.user_url_capability_registrar();
                 let handle = spawn_task_continue(
                     &runtime,
                     TaskContinueSpawn {
@@ -1276,6 +1303,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    url_capability_registrar,
                 });
             }
             Ok(WorkerCommand::ApprovalDecision { call_id, approved }) => {
@@ -1493,7 +1521,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
                 let _ = message_tx.send(WorkerMessage::TaskRunStarted {
                     task_id: created.task_id_value.clone(),
-                    objective: created.objective.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&created.objective),
                 });
                 let handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
@@ -1516,6 +1544,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         continue;
                     }
                 };
+                let url_capability_registrar = run_session.user_url_capability_registrar();
                 let handle = spawn_task_run(
                     &runtime,
                     TaskRunSpawn {
@@ -1545,6 +1574,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                     cancellation_owner,
                     cancellation_recorder,
+                    url_capability_registrar,
                 });
             }
             Ok(WorkerCommand::RejectPlan {
@@ -1924,7 +1954,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     .as_ref()
                     .and_then(Session::mutation_event_recorder);
                 match runtime.block_on(
-                    sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder(
+                    sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder_and_network_admission(
                         agent.tool_registry_mut(),
                         &root_config,
                         &provider_capabilities,
@@ -1933,6 +1963,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         elicitation_handler.clone(),
                         mcp_event_handler.clone(),
                         mutation_recorder,
+                        sigil_kernel::ExtensionProcessNetworkAdmission::new(
+                            options.permission_context.network_policy,
+                            false,
+                        ),
                     ),
                 ) {
                     Ok(result) if result.matched_servers == 0 => {
@@ -2003,13 +2037,25 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
-                match load_session(
+                match load_session_with_url_capability_attachment(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &session_log_path,
+                    current_session.as_ref(),
                 ) {
                     Ok(mut session) => {
-                        mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
+                        let same_logical_session =
+                            current_session.as_ref().is_some_and(|current| {
+                                current.session_scope_id() == session.session_scope_id()
+                            });
+                        if !same_logical_session {
+                            exact_conversation_prompts.clear();
+                        }
+                        mark_stale_dispatching_conversation_queue_items(
+                            &mut session,
+                            &exact_conversation_prompts,
+                            &message_tx,
+                        );
                         if current_session.as_ref().is_some_and(|session| {
                             session_workspace_is_trusted(session, &workspace_root)
                         }) {
@@ -2050,13 +2096,25 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
-                match load_session(
+                match load_session_with_url_capability_attachment(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &session_log_path,
+                    current_session.as_ref(),
                 ) {
                     Ok(mut session) => {
-                        mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
+                        let same_logical_session =
+                            current_session.as_ref().is_some_and(|current| {
+                                current.session_scope_id() == session.session_scope_id()
+                            });
+                        if !same_logical_session {
+                            exact_conversation_prompts.clear();
+                        }
+                        mark_stale_dispatching_conversation_queue_items(
+                            &mut session,
+                            &exact_conversation_prompts,
+                            &message_tx,
+                        );
                         if current_session.as_ref().is_some_and(|session| {
                             session_workspace_is_trusted(session, &workspace_root)
                         }) {

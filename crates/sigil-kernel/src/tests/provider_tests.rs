@@ -154,6 +154,139 @@ fn tool_call_stream_accumulator_keeps_event_id_when_provider_id_arrives_late() {
     ));
 }
 
+#[test]
+fn tool_call_stream_accumulator_caps_sequential_completed_call_count() {
+    let mut accumulator = ToolCallStreamAccumulator::new();
+    let mut chunks = Vec::new();
+
+    for index in 0..crate::MAX_PROVIDER_TURN_TOOL_CALLS {
+        accumulator.append_delta(
+            &mut chunks,
+            index,
+            Some(format!("call-{index}")),
+            Some("echo".to_owned()),
+            Some("{}".to_owned()),
+        );
+        accumulator.complete_open_calls(&mut chunks, ToolCallCompletionIdPolicy::RequireProviderId);
+    }
+    accumulator.append_delta(
+        &mut chunks,
+        crate::MAX_PROVIDER_TURN_TOOL_CALLS,
+        Some("call-overflow".to_owned()),
+        Some("echo".to_owned()),
+        Some("{}".to_owned()),
+    );
+
+    assert!(matches!(
+        chunks.last(),
+        Some(ProviderChunk::ToolCallStreamError(
+            crate::SafePersistenceError::ToolCallStreamInvalid { .. }
+        ))
+    ));
+    let chunk_count = chunks.len();
+    accumulator.append_delta(
+        &mut chunks,
+        crate::MAX_PROVIDER_TURN_TOOL_CALLS + 1,
+        Some("ignored-after-terminal".to_owned()),
+        Some("echo".to_owned()),
+        Some("{}".to_owned()),
+    );
+    assert_eq!(chunks.len(), chunk_count);
+}
+
+#[test]
+fn tool_call_stream_accumulator_caps_monotonic_aggregate_across_completed_calls() {
+    let mut accumulator = ToolCallStreamAccumulator::new();
+    let mut chunks = Vec::new();
+    let per_call = crate::MAX_STREAMED_TOOL_ARGS_BYTES;
+    let completed_calls = crate::MAX_PROVIDER_TURN_TOOL_ARGS_BYTES / per_call;
+
+    for index in 0..completed_calls {
+        accumulator.append_delta(
+            &mut chunks,
+            index,
+            Some(format!("aggregate-{index}")),
+            Some("echo".to_owned()),
+            Some("x".repeat(per_call)),
+        );
+        accumulator.complete_open_calls(&mut chunks, ToolCallCompletionIdPolicy::RequireProviderId);
+    }
+    accumulator.append_delta(
+        &mut chunks,
+        completed_calls,
+        Some("aggregate-overflow".to_owned()),
+        Some("echo".to_owned()),
+        Some("x".to_owned()),
+    );
+    assert!(matches!(
+        chunks.last(),
+        Some(ProviderChunk::ToolCallStreamError(
+            crate::SafePersistenceError::ToolArgsTooLarge {
+                limit_bytes: crate::MAX_PROVIDER_TURN_TOOL_ARGS_BYTES,
+                ..
+            }
+        ))
+    ));
+
+    accumulator.clear();
+    let before = chunks.len();
+    accumulator.append_delta(
+        &mut chunks,
+        0,
+        Some("after-clear".to_owned()),
+        Some("echo".to_owned()),
+        Some("{}".to_owned()),
+    );
+    assert!(
+        chunks.len() > before,
+        "clear must release raw buffers and terminal latch"
+    );
+}
+
+#[test]
+fn provider_chunk_debug_redacts_raw_deltas_and_completed_arguments() {
+    let secret = "known-tool-secret";
+    for chunk in [
+        ProviderChunk::TextDelta(secret.to_owned()),
+        ProviderChunk::ReasoningDelta(secret.to_owned()),
+        ProviderChunk::ToolCallArgsDelta {
+            id: format!("authorization:{secret}"),
+            delta: format!(r#"{{"token":"{secret}"}}"#),
+        },
+        ProviderChunk::ToolCallStart {
+            id: format!("https://example.com/?token={secret}"),
+            name: format!("secret-token-{secret}"),
+        },
+        ProviderChunk::ToolCallComplete(ToolCall {
+            id: format!("authorization:{secret}"),
+            name: format!("secret-token-{secret}"),
+            args_json: format!(r#"{{"token":"{secret}"}}"#),
+        }),
+    ] {
+        assert!(!format!("{chunk:?}").contains(secret));
+    }
+}
+
+#[test]
+fn tool_call_stream_accumulator_debug_never_exposes_buffered_identity_or_arguments() {
+    let secret = "known-buffered-secret";
+    let mut accumulator = ToolCallStreamAccumulator::new();
+    let mut chunks = Vec::new();
+    accumulator.append_delta(
+        &mut chunks,
+        0,
+        Some("call-safe".to_owned()),
+        Some("webfetch".to_owned()),
+        Some(format!(r#"{{"token":"{secret}"}}"#)),
+    );
+
+    let debug = format!("{accumulator:?}");
+    assert!(!debug.contains(secret));
+    assert!(!debug.contains("call-safe"));
+    assert!(!debug.contains("webfetch"));
+    assert!(debug.contains("total_args_bytes"));
+}
+
 struct BoxedProviderFixture;
 
 #[async_trait]
@@ -218,6 +351,7 @@ async fn boxed_provider_delegates_name_capabilities_and_stream() -> Result<()> {
                 background: false,
                 store: false,
                 deterministic_materialization: true,
+                hosted_tools: Vec::new(),
             })
             .await?,
     )

@@ -39,6 +39,10 @@ impl ChannelApprovalHandler {
 }
 
 impl ApprovalHandler for ChannelApprovalHandler {
+    fn approval_is_explicit_user_action(&self) -> bool {
+        true
+    }
+
     fn approve_tool_call(&mut self, call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
         let started = Instant::now();
         loop {

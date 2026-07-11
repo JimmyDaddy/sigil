@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -41,6 +42,8 @@ mod tool_audit;
 mod tool_results;
 #[cfg(test)]
 use approval_policy::active_plan_approval;
+#[cfg(test)]
+use approval_policy::session_grant_covers_decision;
 use approval_policy::{
     active_plan_approval_authority, interactive_external_directory_approval_override,
     plan_approval_decision_override, tool_session_grant_decision_override,
@@ -55,7 +58,7 @@ use preview::{
 use provider_stream::collect_provider_turn;
 use readiness::append_agent_run_readiness;
 pub use readiness::projected_agent_run_readiness;
-use run_lifecycle::append_run_lifecycle_events;
+use run_lifecycle::{append_failed_run_lifecycle_events, append_run_lifecycle_events};
 use task_plan::{
     append_tool_ignored_after_task_plan_acceptance, handle_task_plan_update_call,
     task_plan_update_call_is_accepted,
@@ -139,56 +142,147 @@ pub struct AgentRunResult {
 }
 
 /// Input contract for one agent run.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentRunInput {
     pub persisted_user_message: Option<String>,
+    pub persisted_user_message_id: Option<String>,
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
     cancellation: Option<RunCancellationHandle>,
     cancellation_terminal_authority: bool,
+    source_capability_nonce: Option<String>,
+    url_capability_issued_at_ms: Option<u64>,
+    user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
+    hosted_tools: Vec<crate::HostedToolRequest>,
+    hosted_evidence_processor: Option<Arc<dyn crate::HostedEvidenceProcessor>>,
+}
+
+impl fmt::Debug for AgentRunInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentRunInput")
+            .field(
+                "persisted_user_message",
+                &self.persisted_user_message.as_ref().map(|_| "[redacted]"),
+            )
+            .field("persisted_user_message_id", &self.persisted_user_message_id)
+            .field("transient_context_count", &self.transient_context.len())
+            .field("runtime_context", &self.runtime_context)
+            .field("task_plan_update", &self.task_plan_update)
+            .field("agent_delegation", &self.agent_delegation)
+            .field("cancellation", &self.cancellation)
+            .field(
+                "user_url_capability_registrar",
+                &self
+                    .user_url_capability_registrar
+                    .as_ref()
+                    .map(|_| "configured"),
+            )
+            .field("hosted_tools", &self.hosted_tools)
+            .field(
+                "hosted_evidence_processor",
+                &self
+                    .hosted_evidence_processor
+                    .as_ref()
+                    .map(|_| "configured"),
+            )
+            .finish()
+    }
 }
 
 impl AgentRunInput {
     pub fn user(prompt: impl Into<String>) -> Self {
+        let message_id = uuid::Uuid::new_v4().to_string();
         Self {
             persisted_user_message: Some(prompt.into()),
+            persisted_user_message_id: Some(message_id),
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
             cancellation: None,
             cancellation_terminal_authority: true,
+            source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
+            url_capability_issued_at_ms: Some(unix_time_ms()),
+            user_url_capability_registrar: None,
+            hosted_tools: Vec::new(),
+            hosted_evidence_processor: None,
         }
     }
 
     pub fn transient(prompt: impl Into<String>, transient_context: Vec<ModelMessage>) -> Self {
+        let message_id = uuid::Uuid::new_v4().to_string();
         Self {
             persisted_user_message: Some(prompt.into()),
+            persisted_user_message_id: Some(message_id),
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
             cancellation: None,
             cancellation_terminal_authority: true,
+            source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
+            url_capability_issued_at_ms: Some(unix_time_ms()),
+            user_url_capability_registrar: None,
+            hosted_tools: Vec::new(),
+            hosted_evidence_processor: None,
         }
     }
 
     pub fn without_persisted_user_message(transient_context: Vec<ModelMessage>) -> Self {
         Self {
             persisted_user_message: None,
+            persisted_user_message_id: None,
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
             cancellation: None,
             cancellation_terminal_authority: true,
+            source_capability_nonce: None,
+            url_capability_issued_at_ms: None,
+            user_url_capability_registrar: None,
+            hosted_tools: Vec::new(),
+            hosted_evidence_processor: None,
         }
     }
 
     pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
         self.task_plan_update = Some(context);
+        self
+    }
+
+    /// Enables provider-hosted tools with a mandatory process-local evidence finalizer.
+    #[must_use]
+    pub fn with_hosted_tools(
+        mut self,
+        hosted_tools: Vec<crate::HostedToolRequest>,
+        processor: Arc<dyn crate::HostedEvidenceProcessor>,
+    ) -> Self {
+        self.hosted_tools = hosted_tools;
+        self.hosted_evidence_processor = Some(processor);
+        self
+    }
+
+    /// Declares hosted kinds independently so missing finalizer injection fails closed.
+    #[must_use]
+    pub fn with_hosted_tool_requests(
+        mut self,
+        hosted_tools: Vec<crate::HostedToolRequest>,
+    ) -> Self {
+        self.hosted_tools = hosted_tools;
+        self
+    }
+
+    /// Injects the process-local hosted finalizer independently from request selection.
+    #[must_use]
+    pub fn with_hosted_evidence_processor(
+        mut self,
+        processor: Arc<dyn crate::HostedEvidenceProcessor>,
+    ) -> Self {
+        self.hosted_evidence_processor = Some(processor);
         self
     }
 
@@ -202,6 +296,16 @@ impl AgentRunInput {
         requirement: AgentDelegationRequirement,
     ) -> Self {
         self.agent_delegation = Some(requirement);
+        self
+    }
+
+    /// Binds the runtime-owned live URL capability store to this kernel projection boundary.
+    #[must_use]
+    pub fn with_user_url_capability_registrar(
+        mut self,
+        registrar: Arc<dyn crate::UserUrlCapabilityRegistrar>,
+    ) -> Self {
+        self.user_url_capability_registrar = Some(registrar);
         self
     }
 
@@ -601,13 +705,24 @@ where
     {
         let AgentRunInput {
             persisted_user_message,
+            persisted_user_message_id,
             mut transient_context,
             runtime_context,
             task_plan_update,
             agent_delegation,
             cancellation,
             cancellation_terminal_authority,
+            source_capability_nonce,
+            url_capability_issued_at_ms,
+            user_url_capability_registrar,
+            hosted_tools,
+            hosted_evidence_processor,
         } = input;
+        // An explicit per-run registrar is useful for constrained callers and tests; production
+        // sessions fall back to their non-serializable session-scoped runtime attachment so live
+        // capabilities survive normal multi-turn ownership moves.
+        let user_url_capability_registrar =
+            user_url_capability_registrar.or_else(|| session.user_url_capability_registrar());
 
         if cancellation
             .as_ref()
@@ -619,10 +734,92 @@ where
         session.reconcile_prepared_mutations(&options.workspace_root)?;
         session.reconcile_unfinished_write_tool_executions(&options.workspace_root)?;
 
-        if let Some(message) = persisted_user_message
-            && !last_provider_visible_user_message_matches(session, &message)
-        {
-            session.append_user_message(ModelMessage::user(message))?;
+        let mut current_run_overlays = Vec::new();
+        if let Some(message) = persisted_user_message {
+            let durable_message_id = persisted_user_message_id
+                .ok_or_else(|| anyhow!("persisted user message is missing its durable entry id"))?;
+            let projection = crate::project_user_message_for_persistence_with_nonce_and_issued_at(
+                durable_message_id,
+                message.clone(),
+                source_capability_nonce.as_deref(),
+                url_capability_issued_at_ms.ok_or_else(|| {
+                    anyhow!("persisted user message is missing its URL capability issue time")
+                })?,
+                user_url_capability_registrar.as_ref(),
+            )?;
+            let existing_by_id = session.entries().iter().find_map(|entry| match entry {
+                SessionLogEntry::User(existing) if existing.id == projection.durable_message.id => {
+                    Some(existing)
+                }
+                _ => None,
+            });
+            if let Some(existing) = existing_by_id {
+                if existing.content != projection.durable_message.content {
+                    rollback_user_capabilities(
+                        user_url_capability_registrar.as_ref(),
+                        &projection.durable_message.id,
+                    )?;
+                    return Err(anyhow!(
+                        "durable user message id already exists with different safe content"
+                    ));
+                }
+            } else if let Err(error) =
+                session.append_user_message(projection.durable_message.clone())
+            {
+                let rollback_error = rollback_user_capabilities(
+                    user_url_capability_registrar.as_ref(),
+                    &projection.durable_message.id,
+                )
+                .err();
+                return Err(error.context(match rollback_error {
+                    Some(rollback_error) => format!(
+                        "failed to append safe user message; capability rollback also failed: {rollback_error:#}"
+                    ),
+                    None => "failed to append safe user message".to_owned(),
+                }));
+            }
+
+            for registration in &projection.capability_registrations {
+                let descriptor = registration.durable_descriptor(session.session_scope_id());
+                descriptor.validate()?;
+                let already_recorded = session.entries().iter().any(|entry| {
+                    matches!(
+                        entry,
+                        SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(existing))
+                            if existing == &descriptor
+                    )
+                });
+                if !already_recorded
+                    && let Err(error) =
+                        session.append_control(ControlEntry::WebUrlCapabilityDescriptor(descriptor))
+                {
+                    let rollback_error = rollback_user_capabilities(
+                        user_url_capability_registrar.as_ref(),
+                        &projection.durable_message.id,
+                    )
+                    .err();
+                    return Err(error.context(match rollback_error {
+                            Some(rollback_error) => format!(
+                                "failed to append URL capability descriptor; rollback also failed: {rollback_error:#}"
+                            ),
+                            None => "failed to append URL capability descriptor".to_owned(),
+                        }));
+                }
+            }
+            if let Some(registrar) = user_url_capability_registrar.as_ref()
+                && let Err(error) = registrar.commit_message(&projection.durable_message.id)
+            {
+                let rollback_error = registrar
+                    .rollback_message(&projection.durable_message.id)
+                    .err();
+                return Err(error.context(match rollback_error {
+                        Some(rollback_error) => format!(
+                            "failed to commit URL capabilities; rollback also failed: {rollback_error:#}"
+                        ),
+                        None => "failed to commit URL capabilities".to_owned(),
+                    }));
+            }
+            current_run_overlays.push(projection.overlay);
         }
 
         let permission_policy = PermissionPolicy::new_with_context(
@@ -677,7 +874,7 @@ where
             if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
             }
-            let request = session.build_request_with_transient_messages_and_context(
+            let mut request = session.build_request_with_transient_messages_context_and_overlays(
                 &options.workspace_root,
                 &options.memory_config,
                 tool_specs,
@@ -686,11 +883,13 @@ where
                 options.traffic_partition_key.clone(),
                 &transient_context,
                 runtime_context.clone(),
+                &current_run_overlays,
             )?;
+            request.hosted_tools.clone_from(&hosted_tools);
 
             let provider_effect =
                 begin_run_effect(cancellation.as_ref(), RunEffectKind::ProviderRequest)?;
-            let provider_turn = collect_provider_turn(
+            let provider_turn_result = collect_provider_turn(
                 &self.provider,
                 session,
                 request,
@@ -698,18 +897,36 @@ where
                 total_tool_calls,
                 handler,
                 cancellation.as_ref(),
+                hosted_evidence_processor.as_ref(),
             )
-            .await?;
+            .await;
             drop(provider_effect);
+            let provider_turn = match provider_turn_result {
+                Ok(provider_turn) => provider_turn,
+                Err(error) => {
+                    append_failed_run_lifecycle_events(
+                        session,
+                        "provider_stream_error",
+                        total_tool_calls,
+                        "provider turn failed before a safe terminal result",
+                    )?;
+                    return Err(error);
+                }
+            };
             let assistant_text = provider_turn.assistant_text;
-            let completed_calls = provider_turn.completed_calls;
+            let completed_calls = provider_turn
+                .completed_calls
+                .into_iter()
+                .map(crate::ToolCallPersistenceProjection::into_exact_call)
+                .collect::<Vec<_>>();
             let pending_states = provider_turn.pending_states;
+            let hosted_finalized = provider_turn.hosted_finalized;
 
             append_reasoning_trace(session, &provider_turn.reasoning_trace)?;
 
             if !completed_calls.is_empty() {
                 total_tool_calls += completed_calls.len();
-                append_tool_preamble_message(
+                let tool_preamble_overlay = append_tool_preamble_message(
                     session,
                     handler,
                     tools,
@@ -717,9 +934,14 @@ where
                     &completed_calls,
                     pending_states,
                 )?;
+                current_run_overlays.push(tool_preamble_overlay);
 
                 let mut tool_ctx =
-                    ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs);
+                    ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs)
+                        .with_network_authorization(
+                            options.permission_context.network_policy,
+                            false,
+                        );
                 if let Some(cancellation) = cancellation.as_ref() {
                     tool_ctx = tool_ctx.with_cancellation(cancellation.clone());
                 }
@@ -733,6 +955,9 @@ where
                 });
                 let mut accepted_task_plan = false;
                 for mut call in completed_calls {
+                    let safe_call =
+                        crate::project_tool_call_for_persistence(call.clone())?.durable_call;
+                    let mut explicit_network_approval = false;
                     if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
                         append_tool_ignored_after_task_plan_acceptance(
                             session,
@@ -829,6 +1054,21 @@ where
                                 continue;
                             }
                         };
+                        let network_effect = match tools.permission_network_effect(&tool_ctx, &call)
+                        {
+                            Ok(network_effect) => network_effect,
+                            Err(error) => {
+                                append_invalid_tool_input_result(
+                                    session,
+                                    handler,
+                                    &mut outcome,
+                                    &call,
+                                    &subjects,
+                                    error,
+                                )?;
+                                continue;
+                            }
+                        };
                         let operation = match tools.permission_operation(&tool_ctx, &call) {
                             Ok(operation) => operation,
                             Err(error) => {
@@ -858,14 +1098,16 @@ where
                                     continue;
                                 }
                             };
-                        let decision = permission_policy.decide_with_operation_and_default(
-                            spec,
-                            &call.name,
-                            access,
-                            operation,
-                            subjects.clone(),
-                            tool_default_mode,
-                        )?;
+                        let decision = permission_policy
+                            .decide_with_operation_network_effect_and_default(
+                                spec,
+                                &call.name,
+                                access,
+                                operation,
+                                network_effect,
+                                subjects.clone(),
+                                tool_default_mode,
+                            )?;
                         let pre_plan_decision =
                             interactive_external_directory_approval_override(&options, decision);
                         let plan_authority =
@@ -983,9 +1225,13 @@ where
                                     preview_hash.clone(),
                                 )?;
                                 handler.handle(RunEvent::ToolApprovalRequested {
-                                    call: call.clone(),
+                                    call: safe_call.clone(),
                                     spec: spec.clone(),
                                     subjects: decision.subjects.clone(),
+                                    network_effect: decision.network_effect,
+                                    local_policy_decision: decision.local_policy_decision,
+                                    network_policy_decision: decision.network_policy_decision,
+                                    source_policy_decision: decision.source_policy_decision,
                                     operation: decision.operation,
                                     risk: decision.risk,
                                     subject_zones: decision.subject_zones.clone(),
@@ -996,9 +1242,64 @@ where
                                         .clone(),
                                     preview,
                                 })?;
-                                let approval = approval_handler.approve_tool_call(&call, spec)?;
+                                let approval =
+                                    approval_handler.approve_tool_call(&safe_call, spec)?;
+                                let approval_is_explicit_user_action =
+                                    approval_handler.approval_is_explicit_user_action();
+                                let approval_would_allow = matches!(
+                                    &approval,
+                                    ToolApproval::Approve
+                                        | ToolApproval::ApproveForSession
+                                        | ToolApproval::ApproveWithArgs { .. }
+                                );
+                                if approval_would_allow
+                                    && decision.network_policy_decision == ApprovalMode::Ask
+                                    && !approval_is_explicit_user_action
+                                {
+                                    let reason =
+                                        "network approval requires an explicit user action"
+                                            .to_owned();
+                                    append_tool_approval_audit(
+                                        session,
+                                        &call,
+                                        &decision,
+                                        ToolApprovalAuditAction::Resolved,
+                                        None,
+                                        Some(reason.clone()),
+                                        preview_hash,
+                                    )?;
+                                    handler.handle(RunEvent::ToolApprovalResolved {
+                                        call_id: call.id.clone(),
+                                        approved: false,
+                                        reason: Some(reason.clone()),
+                                    })?;
+                                    let mut result = ToolResult::error(
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                        ToolErrorKind::ApprovalDenied,
+                                        reason,
+                                    );
+                                    attach_tool_call_context(
+                                        &mut result,
+                                        &call,
+                                        &decision.subjects,
+                                    );
+                                    record_and_emit_tool_result(
+                                        session,
+                                        handler,
+                                        &mut outcome,
+                                        result,
+                                    )?;
+                                    continue;
+                                }
+                                let approval_is_explicit_network_user_action =
+                                    approval_is_explicit_user_action
+                                        && decision.network_effect.is_some()
+                                        && decision.network_policy_decision == ApprovalMode::Ask;
                                 match approval {
                                     ToolApproval::Approve => {
+                                        explicit_network_approval =
+                                            approval_is_explicit_network_user_action;
                                         append_tool_approval_audit(
                                             session,
                                             &call,
@@ -1057,6 +1358,8 @@ where
                                             )?;
                                             continue;
                                         }
+                                        explicit_network_approval =
+                                            approval_is_explicit_network_user_action;
                                         append_tool_approval_audit(
                                             session,
                                             &call,
@@ -1117,7 +1420,126 @@ where
                                             )?;
                                             continue;
                                         }
-                                        call.args_json = args_json;
+                                        let mut approved_call = call.clone();
+                                        approved_call.args_json = args_json;
+                                        let reevaluate_approved_call = || -> Result<_> {
+                                            let approved_subjects = tools
+                                                .permission_subjects(&tool_ctx, &approved_call)?;
+                                            let approved_access = tools
+                                                .permission_access(&tool_ctx, &approved_call)?;
+                                            let approved_network_effect = tools
+                                                .permission_network_effect(
+                                                    &tool_ctx,
+                                                    &approved_call,
+                                                )?;
+                                            let approved_operation = tools
+                                                .permission_operation(&tool_ctx, &approved_call)?;
+                                            let approved_default_mode = tools
+                                                .permission_default_mode(
+                                                    &tool_ctx,
+                                                    &approved_call,
+                                                )?;
+                                            let approved_decision = permission_policy
+                                                .decide_with_operation_network_effect_and_default(
+                                                    spec,
+                                                    &approved_call.name,
+                                                    approved_access,
+                                                    approved_operation,
+                                                    approved_network_effect,
+                                                    approved_subjects,
+                                                    approved_default_mode,
+                                                )?;
+                                            let approved_decision =
+                                                interactive_external_directory_approval_override(
+                                                    &options,
+                                                    approved_decision,
+                                                );
+                                            let approved_decision = plan_approval_decision_override(
+                                                session,
+                                                spec,
+                                                approved_decision,
+                                            );
+                                            Ok(tool_session_grant_decision_override(
+                                                session,
+                                                &approved_call.name,
+                                                approved_decision,
+                                            )
+                                            .0)
+                                        };
+                                        let approved_decision = reevaluate_approved_call();
+                                        let approved_decision = match approved_decision {
+                                            Ok(decision) => decision,
+                                            Err(error) => {
+                                                let reason = format!(
+                                                    "approval-time argument changes could not be re-evaluated: {error}"
+                                                );
+                                                append_tool_approval_audit(
+                                                    session,
+                                                    &approved_call,
+                                                    &decision,
+                                                    ToolApprovalAuditAction::Resolved,
+                                                    Some(ToolApprovalUserDecision::Denied),
+                                                    Some(reason.clone()),
+                                                    preview_hash,
+                                                )?;
+                                                handler.handle(RunEvent::ToolApprovalResolved {
+                                                    call_id: approved_call.id.clone(),
+                                                    approved: false,
+                                                    reason: Some(reason),
+                                                })?;
+                                                append_invalid_tool_input_result(
+                                                    session,
+                                                    handler,
+                                                    &mut outcome,
+                                                    &approved_call,
+                                                    &decision.subjects,
+                                                    error,
+                                                )?;
+                                                continue;
+                                            }
+                                        };
+                                        if approved_decision != decision {
+                                            let reason = "approval-time argument changes altered the permission scope; preview and approval must be repeated"
+                                                .to_owned();
+                                            append_tool_approval_audit(
+                                                session,
+                                                &approved_call,
+                                                &approved_decision,
+                                                ToolApprovalAuditAction::Resolved,
+                                                Some(ToolApprovalUserDecision::Denied),
+                                                Some(reason.clone()),
+                                                preview_hash,
+                                            )?;
+                                            handler.handle(RunEvent::ToolApprovalResolved {
+                                                call_id: approved_call.id.clone(),
+                                                approved: false,
+                                                reason: Some(reason.clone()),
+                                            })?;
+                                            let mut result = ToolResult::error(
+                                                approved_call.id.clone(),
+                                                approved_call.name.clone(),
+                                                ToolErrorKind::ApprovalDenied,
+                                                reason,
+                                            );
+                                            attach_tool_call_context(
+                                                &mut result,
+                                                &approved_call,
+                                                &approved_decision.subjects,
+                                            );
+                                            record_and_emit_tool_result(
+                                                session,
+                                                handler,
+                                                &mut outcome,
+                                                result,
+                                            )?;
+                                            continue;
+                                        }
+                                        call = approved_call;
+                                        execution_subjects = approved_decision.subjects.clone();
+                                        explicit_network_approval = approval_is_explicit_user_action
+                                            && approved_decision.network_effect.is_some()
+                                            && approved_decision.network_policy_decision
+                                                == ApprovalMode::Ask;
                                         append_tool_approval_audit(
                                             session,
                                             &call,
@@ -1259,14 +1681,16 @@ where
                             .as_ref()
                             .expect("prepared tools must retain their execution spec");
                         let access = tools.permission_access(&tool_ctx, &call)?;
+                        let network_effect = tools.permission_network_effect(&tool_ctx, &call)?;
                         let operation = tools.permission_operation(&tool_ctx, &call)?;
                         let tool_default_mode = tools.permission_default_mode(&tool_ctx, &call)?;
                         let current_decision = permission_policy
-                            .decide_with_operation_and_default(
+                            .decide_with_operation_network_effect_and_default(
                                 spec,
                                 &call.name,
                                 access,
                                 operation,
+                                network_effect,
                                 execution_subjects.clone(),
                                 tool_default_mode,
                             )?;
@@ -1332,6 +1756,10 @@ where
                     let execution_started = Instant::now();
                     let execution_tool_ctx = tool_ctx
                         .clone()
+                        .with_network_authorization(
+                            options.permission_context.network_policy,
+                            explicit_network_approval,
+                        )
                         .with_approved_subjects(execution_subjects.clone());
                     let mut result = if let Some(prepared) = prepared_tool_call {
                         let (current_policy_fingerprint, current_approval_identity) =
@@ -1544,6 +1972,28 @@ where
             claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
             let final_message_id =
                 append_final_answer_message(session, handler, &assistant_text, pending_states)?;
+            if let Some(finalized) = hosted_finalized {
+                let final_safe_text = session
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        SessionLogEntry::Assistant(message) if message.id == final_message_id => {
+                            message.content.as_deref()
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+                    .to_owned();
+                let provenance = finalized.to_provenance(
+                    session.session_scope_id().to_owned(),
+                    final_message_id.clone(),
+                    &final_safe_text,
+                );
+                if !provenance.sources.is_empty() || !provenance.citations.is_empty() {
+                    session.append_external_provenance(provenance)?;
+                }
+            }
 
             outcome.tool_calls = total_tool_calls;
             append_run_lifecycle_events(
@@ -1613,19 +2063,18 @@ fn reasoning_trace_note(trace: String) -> ControlEntry {
     }
 }
 
-fn last_provider_visible_user_message_matches(session: &Session, message: &str) -> bool {
-    session
-        .entries()
-        .iter()
-        .rev()
-        .find_map(|entry| match entry {
-            SessionLogEntry::User(user) => Some(user.content.as_deref() == Some(message)),
-            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResult(_) => Some(false),
-            SessionLogEntry::Control(_) => None,
-        })
-        .unwrap_or(false)
+fn rollback_user_capabilities(
+    registrar: Option<&Arc<dyn crate::UserUrlCapabilityRegistrar>>,
+    durable_message_id: &str,
+) -> Result<()> {
+    registrar.map_or(Ok(()), |registrar| {
+        registrar.rollback_message(durable_message_id)
+    })
 }
 
+#[cfg(test)]
+#[path = "tests/network_approval_override_tests.rs"]
+mod network_approval_tests;
 #[cfg(test)]
 #[path = "tests/agent_tests.rs"]
 mod tests;

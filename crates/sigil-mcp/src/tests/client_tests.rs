@@ -386,13 +386,7 @@ while True:
     let pid = fs::read_to_string(&grandchild_pid)?.trim().parse::<u32>()?;
     let mut process_gone = false;
     for _ in 0..20 {
-        let status = Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await?;
-        if !status.success() {
+        if !crate::process_group::process_has_live_effect(pid)? {
             process_gone = true;
             break;
         }
@@ -704,13 +698,7 @@ while True:
     let pid = fs::read_to_string(&pid_file)?.trim().parse::<u32>()?;
     let mut reaped = false;
     for _ in 0..40 {
-        let status = Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await?;
-        if !status.success() {
+        if !crate::process_group::process_has_live_effect(pid)? {
             reaped = true;
             break;
         }
@@ -764,14 +752,8 @@ while True:
     let descendant_pid = fs::read_to_string(&descendant_pid_file)?
         .trim()
         .parse::<u32>()?;
-    let status = Command::new("kill")
-        .args(["-0", &descendant_pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await?;
     assert!(
-        !status.success(),
+        !crate::process_group::process_has_live_effect(descendant_pid)?,
         "zero-surface registration must not orphan its process-group descendant"
     );
     Ok(())

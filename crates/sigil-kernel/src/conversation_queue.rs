@@ -2,12 +2,45 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     agent_thread::AgentThreadId,
     provider::ReasoningEffort,
     session::{ControlEntry, SessionLogEntry},
 };
+
+/// Durable hash prefix proving that dispatch requires process-local exact prompt material.
+pub const CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX: &str = "exact-required:";
+
+/// Secret-safe durable projection for one queued or edited conversation prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationPromptPersistenceProjection {
+    pub safe_prompt: String,
+    pub prompt_hash: String,
+    pub exact_prompt_required: bool,
+}
+
+#[must_use]
+pub fn project_conversation_prompt_for_persistence(
+    raw_prompt: &str,
+) -> ConversationPromptPersistenceProjection {
+    let safe_prompt = crate::safe_persistence_text(raw_prompt);
+    let exact_prompt_required = safe_prompt != raw_prompt;
+    let mut hasher = Sha256::new();
+    hasher.update(safe_prompt.as_bytes());
+    let safe_hash = format!("sha256:{:x}", hasher.finalize());
+    let prompt_hash = if exact_prompt_required {
+        format!("{CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX}{safe_hash}")
+    } else {
+        format!("safe:{safe_hash}")
+    };
+    ConversationPromptPersistenceProjection {
+        safe_prompt,
+        prompt_hash,
+        exact_prompt_required,
+    }
+}
 
 /// Stable identifier for one queued conversation input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -178,22 +211,34 @@ impl ConversationQueueProjection {
 
         match control {
             ControlEntry::ConversationInputQueued(queued) => {
+                let mut queued = queued.clone();
+                let safe = project_conversation_prompt_for_persistence(&queued.prompt);
+                if safe.exact_prompt_required {
+                    queued.prompt = safe.safe_prompt;
+                    queued.prompt_hash = safe.prompt_hash;
+                }
                 if !indexed.contains_key(&queued.queue_id) {
                     order.push(queued.queue_id.clone());
                 }
                 indexed.insert(
                     queued.queue_id.clone(),
                     ConversationQueueItemProjection {
-                        queued: queued.clone(),
+                        queued,
                         status: ConversationInputStatus::Queued,
                         reason: None,
                     },
                 );
             }
             ControlEntry::ConversationInputEdited(edited) => {
+                let safe = project_conversation_prompt_for_persistence(&edited.prompt);
                 if let Some(item) = indexed.get_mut(&edited.queue_id) {
-                    item.queued.prompt_hash = edited.prompt_hash.clone();
-                    item.queued.prompt = edited.prompt.clone();
+                    if safe.exact_prompt_required {
+                        item.queued.prompt_hash = safe.prompt_hash;
+                        item.queued.prompt = safe.safe_prompt;
+                    } else {
+                        item.queued.prompt_hash = edited.prompt_hash.clone();
+                        item.queued.prompt = edited.prompt.clone();
+                    }
                     item.queued.reasoning_effort = edited.reasoning_effort.clone();
                 }
             }

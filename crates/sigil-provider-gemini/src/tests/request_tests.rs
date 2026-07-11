@@ -1,7 +1,7 @@
 use serde_json::json;
 use sigil_kernel::{
-    CompletionRequest, ModelMessage, ProviderContinuationState, ToolAccess, ToolCall, ToolCategory,
-    ToolPreviewCapability, ToolSpec,
+    CompletionRequest, HostedToolKind, HostedToolLimits, HostedToolRequest, ModelMessage,
+    ProviderContinuationState, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
 use super::*;
@@ -23,6 +23,7 @@ fn completion_request(messages: Vec<ModelMessage>) -> CompletionRequest {
             }),
             category: ToolCategory::File,
             access: ToolAccess::Read,
+            network_effect: None,
             preview: ToolPreviewCapability::None,
         }],
         temperature: Some(0.4),
@@ -34,7 +35,17 @@ fn completion_request(messages: Vec<ModelMessage>) -> CompletionRequest {
         background: false,
         store: true,
         deterministic_materialization: true,
+        hosted_tools: Vec::new(),
     }
+}
+
+fn hosted_request() -> HostedToolRequest {
+    HostedToolRequest::new(
+        "auth-gemini",
+        HostedToolKind::WebSearch,
+        HostedToolLimits::default(),
+    )
+    .expect("hosted request fixture should be valid")
 }
 
 #[test]
@@ -162,4 +173,63 @@ fn build_generate_content_request_rejects_invalid_function_args_and_orphan_resul
     let orphan = completion_request(vec![ModelMessage::tool("call-missing", "ok")]);
     let error = build_generate_content_request(&orphan).expect_err("orphan result should fail");
     assert!(error.to_string().contains("no matching tool call"));
+}
+
+#[test]
+fn build_generate_content_request_maps_hosted_search_google_search_tool() -> anyhow::Result<()> {
+    let mut request = completion_request(vec![ModelMessage::user("search")]);
+    request.tools.clear();
+    request.hosted_tools.push(hosted_request());
+
+    let body = build_generate_content_request(&request)?;
+    let serialized = serde_json::to_value(body)?;
+
+    assert_eq!(serialized["tools"], json!([{"google_search": {}}]));
+    assert!(serialized.to_string().contains("google_search"));
+    assert!(!serialized.to_string().contains("functionDeclarations"));
+    assert!(!serialized.to_string().contains("google_search_retrieval"));
+    Ok(())
+}
+
+#[test]
+fn build_generate_content_request_rejects_unsupported_hosted_search_limits_and_local_tool_mix() {
+    let mut mixed = completion_request(vec![ModelMessage::user("search")]);
+    mixed.model_name = "gemini-2.5-flash".to_owned();
+    mixed.hosted_tools.push(hosted_request());
+    let error = build_generate_content_request(&mixed).expect_err("local tool mix should fail");
+    assert!(error.to_string().contains("local function declarations"));
+
+    let mut limited = completion_request(vec![ModelMessage::user("search")]);
+    limited.tools.clear();
+    let hosted = HostedToolRequest::new(
+        "auth-gemini-limited",
+        HostedToolKind::WebSearch,
+        HostedToolLimits {
+            max_uses: Some(1),
+            ..HostedToolLimits::default()
+        },
+    )
+    .expect("limited hosted request fixture should be valid");
+    limited.hosted_tools.push(hosted);
+    let error = build_generate_content_request(&limited).expect_err("limit should fail closed");
+    assert!(error.to_string().contains("does not enforce"));
+}
+
+#[test]
+fn build_generate_content_request_allows_gemini_three_hosted_search_and_functions()
+-> anyhow::Result<()> {
+    let mut request = completion_request(vec![ModelMessage::user("search")]);
+    request.model_name = "gemini-3.5-flash".to_owned();
+    request.hosted_tools.push(hosted_request());
+
+    let body = build_generate_content_request(&request)?;
+    let serialized = serde_json::to_value(body)?;
+
+    assert_eq!(serialized["tools"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        serialized["tools"][0]["functionDeclarations"][0]["name"],
+        "read_file"
+    );
+    assert_eq!(serialized["tools"][1], json!({"google_search": {}}));
+    Ok(())
 }

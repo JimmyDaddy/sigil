@@ -27,6 +27,14 @@ pub trait ApprovalHandler {
     /// Returns an error when approval state cannot be produced, such as channel shutdown,
     /// UI failure, or policy backend failure.
     fn approve_tool_call(&mut self, call: &ToolCall, spec: &ToolSpec) -> Result<ToolApproval>;
+
+    /// Reports whether approvals returned by this handler represent an explicit user action.
+    ///
+    /// Automated and test handlers remain `false` by default. Interactive route adapters must
+    /// opt in and should forward this property when wrapping another handler.
+    fn approval_is_explicit_user_action(&self) -> bool {
+        false
+    }
 }
 
 /// Approval policy that unconditionally approves every tool call.

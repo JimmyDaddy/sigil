@@ -51,6 +51,7 @@ pub enum ContextSource {
     SessionArchive,
     TaskDigest,
     ExtensionProvided,
+    ExternalSource,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -62,6 +63,7 @@ pub enum ContextTrustLevel {
     UntrustedRepositoryData,
     ToolObservation,
     ExtensionProvided,
+    ExternalUntrusted,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
