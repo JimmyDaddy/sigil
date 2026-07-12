@@ -4,6 +4,8 @@ use sigil_kernel::{
     ToolRegistry, ToolRestartPolicy,
 };
 
+use crate::ProxyEnvironment;
+
 use super::*;
 
 struct AcceptingPresenter;
@@ -95,4 +97,73 @@ model = "test"
     assert!(spec.description.contains("used directly"));
     assert!(spec.description.contains("Do not automatically fan out"));
     assert!(spec.description.contains("explicitly asks"));
+}
+
+#[test]
+fn configured_websearch_query_disclosure_uses_the_remote_mcp_origin() {
+    let config: RootConfig = toml::from_str(
+        r#"[agent]
+provider = "deepseek"
+model = "test"
+
+[web]
+proxy_mode = "direct"
+search_route = "mcp"
+
+[web.search_mcp]
+server = "search"
+tool = "search"
+
+[[mcp_servers]]
+name = "search"
+transport = "streamable_http"
+url = "https://search.example.test/mcp"
+startup = "lazy"
+"#,
+    )
+    .expect("root config should parse");
+    let binding = config.web.search_mcp.as_ref().expect("configured binding");
+
+    let destination = configured_query_egress_destination(&config, binding)
+        .expect("configured remote MCP should have a safe query destination");
+
+    assert_eq!(
+        destination.safe_logical_destination,
+        "https://search.example.test/"
+    );
+    assert_eq!(
+        destination.safe_transport_destination,
+        "https://search.example.test/"
+    );
+    assert_eq!(destination.route, EgressNetworkRoute::Direct);
+}
+
+#[test]
+fn bundled_websearch_query_disclosure_uses_the_environment_proxy_route() {
+    let config: RootConfig = toml::from_str(
+        r#"[agent]
+provider = "deepseek"
+model = "test"
+"#,
+    )
+    .expect("root config should parse");
+
+    let destination = query_egress_destination_with_proxy(
+        &config,
+        Url::parse(BUNDLED_SEARCH_ENDPOINT).expect("bundled endpoint"),
+        ProxyEnvironment::from_values(
+            None,
+            Some(SecretString::new("http://proxy.example.test:8080")),
+            None,
+            None,
+        ),
+    )
+    .expect("bundled route should use the configured proxy");
+
+    assert_eq!(destination.safe_logical_destination, "https://mcp.exa.ai/");
+    assert_eq!(
+        destination.safe_transport_destination,
+        "http://proxy.example.test:8080/"
+    );
+    assert_eq!(destination.route, EgressNetworkRoute::ProxyRemote);
 }

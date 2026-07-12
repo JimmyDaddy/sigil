@@ -14,8 +14,8 @@ use sigil_kernel::{
     SecretString, Tool, ToolAccess, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
     ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
     ToolSubject, UserUrlCapabilityRegistration, WebBudgetReservationKind,
-    WebBudgetReservationRequest, WebQueryEgressClass, WebSearchFailureClass, WebSearchRoute,
-    WebTaskTreeBudget, WebUrlProvenanceKind,
+    WebBudgetReservationRequest, WebQueryEgressClass, WebSearchFailureClass, WebSearchMcpConfig,
+    WebSearchRoute, WebTaskTreeBudget, WebUrlProvenanceKind,
 };
 use sigil_mcp::{
     McpRemoteTool, McpSearchAdapterKind, McpStableSearchEligibility, classify_mcp_search_binding,
@@ -23,7 +23,7 @@ use sigil_mcp::{
 };
 use url::Url;
 
-use crate::stable_mcp_search::BundledExaSearchConnector;
+use crate::stable_mcp_search::{BUNDLED_SEARCH_ENDPOINT, BundledExaSearchConnector};
 use crate::{
     BundledExaAuthorizerFactory, EgressOrderingCoordinator,
     RuntimeMcpStreamableHttpDestinationAuthorizer, RuntimeMcpTransportAttemptFactory,
@@ -234,6 +234,18 @@ impl WebSearchTool {
             .ok_or_else(|| anyhow!("websearch requires an active logical session scope"))?
             .to_owned();
         let root_run_id = budget.root_run_id().to_owned();
+        let query_destination = match query_egress_destination(
+            &self.root_config,
+            Url::parse(BUNDLED_SEARCH_ENDPOINT).expect("bundled search endpoint is a valid URL"),
+        ) {
+            Ok(destination) => destination,
+            Err(_) => {
+                return Ok(unavailable(
+                    call_id,
+                    WebSearchFailureClass::ConfigurationInvalid,
+                ));
+            }
+        };
         let cancellation = ctx.cancellation_handle();
         let admission_is_live: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
             cancellation
@@ -244,6 +256,8 @@ impl WebSearchTool {
             budget: Arc::clone(&budget),
             root_run_id: root_run_id.clone(),
             surface: "tui_or_cli".to_owned(),
+            safe_transport_destination: query_destination.safe_transport_destination,
+            route: query_destination.route,
         });
         let permits = Arc::new(RuntimeStableSearchQueryPermitFactory::new(
             EgressOrderingCoordinator::new(recorder.clone(), Some(Arc::clone(&self.presenter))),
@@ -282,6 +296,16 @@ impl WebSearchTool {
             .search_mcp
             .as_ref()
             .expect("configured route checked");
+        let query_destination =
+            match configured_query_egress_destination(&self.root_config, binding) {
+                Ok(destination) => destination,
+                Err(_) => {
+                    return Ok(unavailable(
+                        call_id,
+                        WebSearchFailureClass::ConfigurationInvalid,
+                    ));
+                }
+            };
         let provider_name = mcp_provider_tool_name_candidate(
             &binding.server,
             &binding.tool,
@@ -328,16 +352,21 @@ impl WebSearchTool {
             budget,
             root_run_id,
             surface: "tui_or_cli".to_owned(),
+            safe_transport_destination: query_destination.safe_transport_destination,
+            route: query_destination.route,
         };
         let identity = WebSearchConnectorIdentity {
             origin: crate::McpSearchBindingOrigin::UserConfigured,
-            safe_destination: format!("mcp:{}", binding.server),
+            safe_destination: query_destination.safe_logical_destination,
             server_identity_fingerprint: sha256(&format!("server:{}", binding.server)),
             tool_schema_fingerprint: sigil_mcp::mcp_tool_schema_fingerprint(&descriptor),
             codec_id: None,
             disclosure_id: None,
         };
-        let attempt = attempts.next_attempt(&request, &identity).await?;
+        let attempt = match attempts.next_attempt(&request, &identity).await {
+            Ok(attempt) => attempt,
+            Err(error) => return Ok(connector_error(call_id, error)),
+        };
         let cancellation = ctx.cancellation_handle();
         let permit = EgressOrderingCoordinator::new(recorder, Some(Arc::clone(&self.presenter)))
             .authorize_query(
@@ -395,10 +424,69 @@ impl WebSearchTool {
     }
 }
 
+struct QueryEgressDestination {
+    safe_logical_destination: String,
+    safe_transport_destination: String,
+    route: EgressNetworkRoute,
+}
+
+fn configured_query_egress_destination(
+    root_config: &RootConfig,
+    binding: &WebSearchMcpConfig,
+) -> Result<QueryEgressDestination> {
+    let server = root_config
+        .mcp_servers
+        .iter()
+        .find(|server| server.name == binding.server)
+        .ok_or_else(|| anyhow!("configured websearch MCP server is missing"))?;
+    let remote = server
+        .streamable_http()
+        .ok_or_else(|| anyhow!("configured websearch MCP server must use streamable_http"))?;
+    let endpoint = Url::parse(&remote.url)
+        .map_err(|_| anyhow!("configured websearch MCP endpoint is invalid"))?;
+    crate::remote_mcp::enforce_allowed_domain(root_config, &endpoint)?;
+    query_egress_destination(root_config, endpoint)
+}
+
+fn query_egress_destination(
+    root_config: &RootConfig,
+    endpoint: Url,
+) -> Result<QueryEgressDestination> {
+    query_egress_destination_with_proxy(
+        root_config,
+        endpoint,
+        crate::remote_mcp::proxy_environment(root_config),
+    )
+}
+
+fn query_egress_destination_with_proxy(
+    root_config: &RootConfig,
+    endpoint: Url,
+    proxy_environment: crate::ProxyEnvironment,
+) -> Result<QueryEgressDestination> {
+    let guard = WebDestinationGuard::new(
+        crate::SystemWebDestinationResolver,
+        crate::remote_mcp::destination_policy(root_config)?,
+        proxy_environment,
+    );
+    let preview = guard.preview(endpoint)?;
+    Ok(QueryEgressDestination {
+        safe_logical_destination: preview.safe_logical_destination().to_owned(),
+        safe_transport_destination: preview.safe_transport_destination().to_owned(),
+        route: if preview.is_proxy_remote() {
+            EgressNetworkRoute::ProxyRemote
+        } else {
+            EgressNetworkRoute::Direct
+        },
+    })
+}
+
 struct RuntimeQueryAttemptFactory {
     budget: Arc<WebTaskTreeBudget>,
     root_run_id: String,
     surface: String,
+    safe_transport_destination: String,
+    route: EgressNetworkRoute,
 }
 
 #[async_trait]
@@ -426,7 +514,10 @@ impl StableSearchQueryAttemptFactory for RuntimeQueryAttemptFactory {
                 kind: WebBudgetReservationKind::ClientSearchCall,
             })
             .map_err(|_| connector_failure(WebSearchFailureClass::BudgetExhausted))?;
-        let profile_fingerprint = sha256(&format!("websearch-profile\0{route_fingerprint}"));
+        let profile_fingerprint = sha256(&format!(
+            "websearch-profile\0{route_fingerprint}\0{}\0{:?}",
+            self.safe_transport_destination, self.route
+        ));
         let disclosure = PreEgressDisclosure::new(
             EgressDisclosureKind::Query,
             Some(request.correlation_id.clone()),
@@ -436,8 +527,8 @@ impl StableSearchQueryAttemptFactory for RuntimeQueryAttemptFactory {
             route_fingerprint.clone(),
             profile_fingerprint,
             identity.safe_destination.clone(),
-            identity.safe_destination.clone(),
-            EgressNetworkRoute::Direct,
+            self.safe_transport_destination.clone(),
+            self.route,
             vec![EgressDataCategory::SearchQuery],
         )
         .map_err(|_| connector_failure(WebSearchFailureClass::DisclosureFailed))?;

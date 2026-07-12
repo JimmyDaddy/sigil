@@ -12,6 +12,7 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "scripts/coverage.sh"
+      - "scripts/tui-web-pty-acceptance.py"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
@@ -21,6 +22,7 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "scripts/coverage.sh"
+      - "scripts/tui-web-pty-acceptance.py"
 
 permissions:
   contents: read
@@ -144,10 +146,44 @@ jobs:
       - name: cargo clippy --locked --all-targets -- -D warnings
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  tui-web-v1-pty-acceptance:
+    name: TUI Web V1 PTY acceptance
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build production Sigil binary
+        run: cargo build --locked -p sigil
+
+      - name: Run deterministic Web V1 real-PTY acceptance
+        run: timeout 150s python3 scripts/tui-web-pty-acceptance.py --binary target/debug/sigil
+
+      - name: Upload Web V1 PTY acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-web-v1-pty-acceptance
+          path: .repo-local-dev/tui-smoke/tui-web-pty-acceptance-*
+          if-no-files-found: warn
+          retention-days: 7
+
   coverage:
     needs:
       - test
       - clippy
+      - tui-web-v1-pty-acceptance
     runs-on: ubuntu-latest
 
     steps:

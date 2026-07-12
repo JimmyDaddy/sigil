@@ -28,7 +28,7 @@ use crate::{
 
 const BUNDLED_PROFILE_ID: &str = "builtin:exa-anonymous";
 const BUNDLED_DISCLOSURE_ID: &str = "exa-anonymous-2026-06-29";
-const BUNDLED_ENDPOINT: &str = "https://mcp.exa.ai/mcp";
+pub(crate) const BUNDLED_SEARCH_ENDPOINT: &str = "https://mcp.exa.ai/mcp";
 const BUNDLED_SERVER_NAME: &str = "exa-search-server";
 const BUNDLED_SERVER_VERSION: &str = "3.2.1";
 const BUNDLED_TOOL_NAME: &str = "web_search_exa";
@@ -130,7 +130,7 @@ struct RuntimeBundledExaTransportFactory {
 #[async_trait]
 impl StableMcpSearchTransportFactory for RuntimeBundledExaTransportFactory {
     async fn connect(&self) -> Result<Arc<dyn StableMcpSearchTransport>, McpStreamableHttpError> {
-        let endpoint = SecretString::new(BUNDLED_ENDPOINT);
+        let endpoint = SecretString::new(BUNDLED_SEARCH_ENDPOINT);
         let prepared = PreparedMcpStreamableHttpHeaders::prepare(
             endpoint.clone(),
             &McpStreamableHttpHeaderConfig::default(),
@@ -760,7 +760,7 @@ fn safe_plain_text(value: &str, redactor: &SecretRedactor) -> String {
 
 pub(crate) fn bundled_profile_fingerprint() -> String {
     sha256(&format!(
-        "{BUNDLED_PROFILE_ID}\0{BUNDLED_ENDPOINT}\0{BUNDLED_DISCLOSURE_ID}\0{BUNDLED_ADAPTER_ID}\0{EXA_TEXT_V1_CODEC_ID}"
+        "{BUNDLED_PROFILE_ID}\0{BUNDLED_SEARCH_ENDPOINT}\0{BUNDLED_DISCLOSURE_ID}\0{BUNDLED_ADAPTER_ID}\0{EXA_TEXT_V1_CODEC_ID}"
     ))
 }
 

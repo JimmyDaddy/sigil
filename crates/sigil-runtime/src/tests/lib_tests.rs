@@ -18,12 +18,12 @@ use sigil_kernel::{
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionNetworkReceipt,
     ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
     InteractionMode, JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup,
-    McpServerTrustPolicy, MemoryConfig, NetworkEffect, PermissionConfig, ProviderCapabilities,
-    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionConfig,
-    SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool,
-    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolLifecycleOwner,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubjectKind, WorkspaceConfig, WorkspaceTrust,
+    McpServerTrustPolicy, MemoryConfig, MutationEventRecorder, NetworkEffect, PermissionConfig,
+    ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig,
+    Session, SessionConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
+    SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory,
+    ToolContext, ToolLifecycleOwner, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind, WorkspaceConfig, WorkspaceTrust,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -2669,6 +2669,42 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     assert_eq!(payload["status"], "already_ready");
     assert_eq!(payload["matched_servers"], 1);
     assert_eq!(payload["added_tools"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_activate_server_uses_its_own_lifecycle_mutation_evidence() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(mcp_server_config! {
+        name: "lifecycle-owned".to_owned(),
+        command: std::env::current_exe()?.display().to_string(),
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    });
+    let workspace = tempfile::tempdir()?;
+    let registry = build_tool_registry_without_eager_mcp_with_workspace_trust(
+        &config,
+        &provider.capabilities(),
+        workspace.path().to_path_buf(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        WorkspaceTrust::Trusted,
+    )?;
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let context = ToolContext::new(workspace.path(), 5)
+        .with_mutation_recorder(MutationEventRecorder::new(store));
+    let activation = ToolCall {
+        id: "activate-lifecycle-owned".to_owned(),
+        name: "mcp_activate_server".to_owned(),
+        args_json: json!({ "server_name": "lifecycle-owned" }).to_string(),
+    };
+
+    assert!(
+        registry
+            .execution_mutation_profile(&context, &activation)?
+            .is_none()
+    );
     Ok(())
 }
 

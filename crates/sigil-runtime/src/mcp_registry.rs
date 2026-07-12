@@ -1329,6 +1329,14 @@ impl Tool for McpActivateServerTool {
         mcp_activation_tool_spec()
     }
 
+    fn mutation_tracking(&self) -> sigil_kernel::ToolMutationTracking {
+        // Local stdio activation records its own pre/post-start lifecycle scan in sigil-mcp,
+        // while remote activation cannot mutate the workspace. A second generic unknown-mutation
+        // scan would not add evidence and prevents the stable websearch wrapper from activating
+        // its already-approved configured binding.
+        sigil_kernel::ToolMutationTracking::None
+    }
+
     fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
         Ok(ToolOperation::NetworkRequest)
     }
