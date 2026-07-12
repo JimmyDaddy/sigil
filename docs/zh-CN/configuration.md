@@ -344,21 +344,52 @@ rules = []
 - workspace 外路径默认不可执行；开启 external directory 后仍会先经过 external-directory gate。
 - 临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`。它由 Sigil 用户态 cache root 承载，对模型显示为 `cache/tmp`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
 - headless `run` 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误。
-- 本地 access 与网络 effect 是正交的两条轴。工具分别声明本地 `Read` / `Write` / `Execute`，以及可选的网络 `Read` / `Mutate` / `Unknown` effect。`read-only` 只有在有效 `NetworkPolicy` 允许时才允许网络读取；网络修改或未知网络 effect 在 `read-only` 下仍会拒绝。`danger-full-access` 不能覆盖网络 `Ask` 或 `Deny`。
-- 当前版本不会提前公开新的 `[web]` 或 remote MCP 网络配置，也不会启用 WebFetch/WebSearch。现有通用 MCP 调用会保守分类为本地 `Read` 加 `NetworkEffect::Unknown`；原有 source/tool 审批仍参与最终的 `Deny > Ask > Allow` 求交。
+- 本地 access 与网络 effect 是正交的两条轴。工具分别声明本地 `Read` / `Write` / `Execute`，以及可选的网络 `Read` / `Mutate` / `Unknown` effect。`NetworkEndpoint` 不属于 external-directory path；`read-only` 只有在有效 `NetworkPolicy` 允许时才允许网络读取，网络修改或未知网络 effect 在 `read-only` 下仍会拒绝。`danger-full-access` 不能覆盖网络 `Ask` 或 `Deny`。
+- `[web]` 是 stable web search 与用户根 Streamable HTTP MCP 共用的网络策略。通用本地 stdio MCP 调用仍保守分类为本地 `Read` 加 `NetworkEffect::Unknown`；source/tool 审批继续参与最终的 `Deny > Ask > Allow` 求交。
 
 优先级：
 
 | 顺序 | 来源 | 职责 |
 | --- | --- | --- |
 | 1 | 本地 `mode` baseline | 用户可理解的顶层模式设置本地 Read/Write/Execute 姿态；`read-only` 是本地写入/执行硬上限。 |
-| 2 | 独立 network policy | runtime 对声明或动态 network effect 单独求值；本地 danger mode、plan approval 或 session grant 都不能放宽网络 `Ask` / `Deny`。 |
+| 2 | 独立 network policy | runtime 对声明或动态 network effect 单独求值；`Deny` 永不可放宽。交互式只读 `NetworkRequest` 的 `Ask` 可以由用户显式选择 `Allow session`，grant 只覆盖同一 tool 与 session，并继续经过 destination guard、disclosure 和 audit。 |
 | 3 | 工具/source default | runtime/tool 提供的 source policy，例如 MCP trust 审批或可信只读命令降级。 |
 | 4 | `tools.<tool_name>` | 工具名覆盖。 |
 | 5 | `rules[]` | 命中的 tool/subject 规则；最后一条匹配规则生效，用文件顺序表达更具体的覆盖。 |
 | 6 | `commands.allow/ask/deny` | shell command 的匹配 pattern。command 分组内部按 `deny > ask > allow` 合并；command `allow` 可以放宽 `manual` 默认 shell ask，但不能覆盖显式 tool/rule ask 或 deny。 |
-| 7 | `external_directory` | workspace 外 subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。 |
+| 7 | `external_directory` | workspace 外 `Path` subject 的额外 gate：未启用即 deny；启用后用命中的 external rules，否则用 `external_directory.default_mode`。网络 endpoint 不进入该 gate。 |
 | 8 | Effective policy cap 和风险覆盖 | runtime cap、本地 `read-only`、protected path、destructive operation 和 external-directory deny 仍是硬安全边界。最终结果取 local、network 和 source decision 中最严格的一项。 |
+
+## Web 搜索与网络
+
+alpha 默认启用 stable web search，并允许网络访问。`auto` 优先使用当前精确模型支持的 provider-hosted search；否则用户显式指定的 MCP binding 具有权威性，只有 binding 不存在时才允许使用内置匿名 Exa MCP profile。
+
+```toml
+[web]
+enabled = true
+network_mode = "allow" # allow | ask | deny
+search_route = "auto"  # auto | provider_hosted | mcp | bundled | disabled
+max_results = 8
+max_query_chars = 512
+max_query_bytes = 2048
+
+[web.bundled_search]
+enabled = true
+```
+
+使用自有兼容 MCP tool 替换 bundled search：
+
+```toml
+[web.search_mcp]
+server = "my-search"
+tool = "search"
+```
+
+该 binding fail-closed：连接、identity、schema、permission 或 tool 失败时都不会回退到 bundled Exa。bundled route 会把规范化后的完整 query 发送到 `https://mcp.exa.ai/mcp`；Exa 与网络路径可观察 query 以及源 IP/代理出口 IP。Sigil 不为此 route 提供 API key，也不承诺 quota 或 SLA；query 出站前会阻止已识别 secret 与高置信个人数据。可通过 `enabled = false`、`search_route = "disabled"` 或 `network_mode = "deny"` 关闭。
+
+provider-hosted search 会对每个 provider request 独立授权和披露。因为它没有普通 client tool 的审批回合，`network_mode = "ask"` 对 hosted search 保持 fail-closed；configured/bundled client search 仍走常规 tool approval。
+
+`network_mode = "allow"` 时，只读 client `websearch` / `webfetch` 不逐次询问，但每次出站仍执行 disclosure、durable audit、SSRF/DNS 与 budget 检查。`network_mode = "ask"` 时，审批面提供 `Allow once`、`Allow session` 和 `Deny`；session grant 只放宽当前 tool 的只读网络 facet，不覆盖 source trust、网络写入/Unknown、不同 tool 或任何 `Deny`。
 
 ## Memory
 

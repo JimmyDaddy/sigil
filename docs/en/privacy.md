@@ -63,6 +63,12 @@ allow_secrets = false
 
 With `allow_secrets = false`, Sigil blocks recognized secret-like egress for MCP calls and resources. Keep this default unless the server genuinely needs secret material and you trust it.
 
+## Web Search Data
+
+Provider-hosted search lets the selected model provider generate and execute search queries; Sigil may only receive the provider-reported query after execution. Configured MCP search sends the normalized query to the exact server/tool binding. The bundled anonymous route sends it to `https://mcp.exa.ai/mcp` without a Sigil-supplied API key. “Anonymous” describes authentication only: Exa and the network path can still observe query data and the source or proxy egress IP. As of July 12, 2026, Exa's public [privacy policy](https://exa.ai/privacy-policy) says Query Data may be used to improve its products, including training and fine-tuning its models; its public [security documentation](https://exa.ai/docs/reference/security) presents Zero Data Retention as an enterprise/customized capability. Sigil therefore does not assume ZDR and does not guarantee free-tier quota, retention, processing region, availability, or SLA for this route.
+
+Before client-side query egress, Sigil blocks recognized configured secrets and high-confidence email, phone, SSN, and payment-card patterns. Returned text is treated as external/untrusted and sanitized before persistence or model use. Disable the feature with `[web].enabled = false`, `search_route = "disabled"`, or `network_mode = "deny"`; use `[web.search_mcp]` to choose your own compatible MCP binding.
+
 ## Doctor Output
 
 Doctor reports:

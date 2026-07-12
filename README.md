@@ -71,6 +71,7 @@ sigil doctor
 - Honors explicit ordinary-chat requests to delegate to a subagent before accepting a final answer.
 - Lets trusted agent profiles be invoked directly with `@profile <prompt>` or trusted profile slash names.
 - Connects stdio MCP servers under explicit trust, approval, and secret-egress policy.
+- Provides capability-backed `webfetch` and stable `websearch` routes with independent network policy, durable egress disclosure, and external-source provenance.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 
 ## Daily Workflow
@@ -117,7 +118,8 @@ Sigil treats tool execution as auditable state, not hidden side effects.
 | OpenAI-compatible | `[providers.openai_compat]` | Chat Completions-compatible `/v1` endpoints. | [OpenAI-compatible guide](docs/en/provider-openai-compatible.md) |
 | Anthropic | `[providers.anthropic]` | Claude models through Anthropic Messages streaming. | [Anthropic guide](docs/en/provider-anthropic.md) |
 | Gemini | `[providers.gemini]` | Gemini models through `streamGenerateContent`. | [Gemini guide](docs/en/provider-gemini.md) |
-| MCP servers | `[[mcp_servers]]` | External stdio tools with explicit trust policy. | [MCP guide](docs/en/mcp.md) |
+| Web data tools | `[web]` | Provider-hosted/configured/bundled search and exact capability-backed fetch. | [Configuration](docs/en/configuration.md#web-search-and-network) |
+| MCP servers | `[[mcp_servers]]` | External stdio or user-root Streamable HTTP tools with explicit trust and egress policy. | [MCP guide](docs/en/mcp.md) |
 | Code intelligence | `[code_intelligence]` | LSP-backed symbols, references, diagnostics, actions, and rename previews. | [Configuration](docs/en/configuration.md) |
 
 ## Find The Right Doc

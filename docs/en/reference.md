@@ -111,6 +111,7 @@ Use the [Provider guide](providers.md) for the supported provider values, model 
 | `[workspace]` | Workspace root |
 | `[agent]` | Shared agent runtime settings |
 | `[permission]` | Default approval policy |
+| `[web]` | Stable search route, network policy, destination rules, and budgets |
 | `[memory]` | Workspace memory loading |
 | `[compaction]` | Context compaction thresholds |
 | `[task]` | Planned task behavior and role settings |
@@ -118,10 +119,19 @@ Use the [Provider guide](providers.md) for the supported provider values, model 
 | `[code_intelligence]` | LSP and code intelligence tools |
 | `[terminal]` | Mouse, OSC52 clipboard, and scroll behavior |
 | `[appearance]` | TUI theme, usage cost currency, and semantic color overrides |
-| `[[mcp_servers]]` | stdio MCP server configuration |
+| `[[mcp_servers]]` | Explicit `stdio` or user-root `streamable_http` MCP server configuration |
 
 See [Sigil Configuration Guide](configuration.md) for examples.
 Provider and model selection, `[providers.*]` blocks, and authentication variables are indexed in the [Provider guide](providers.md).
+
+## Web Tool Inputs
+
+| Tool | Required input | Important boundary |
+| --- | --- | --- |
+| `websearch` | `query`; optional `max_results` | Route resolution is provider-hosted, authoritative configured MCP, or bundled Exa. A failed selected route does not silently change destination. |
+| `webfetch` | `source_id`; optional `format` (`markdown` or `text`) and `max_content_bytes` | Accepts only a session-local exact URL capability; it does not accept a novel raw `url` argument. |
+
+Both tools are `Read` operations with an independent `NetworkRead` effect. `[web].network_mode = "deny"` blocks them even if the local permission mode is permissive. `ask` requires an explicit interactive action and therefore fails closed in headless/eager contexts that cannot ask.
 
 ## Approval Outcomes
 

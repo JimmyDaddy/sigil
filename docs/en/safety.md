@@ -149,6 +149,14 @@ pin_version = false
 
 Start with `approval_default = "ask"` and `allow_secrets = false`. Only loosen those settings after confirming what the server can read, write, and transmit.
 
+## Web Search Safety
+
+`websearch` is local `Read` plus network `Read`. Configured and bundled client routes pass ordinary tool permission and a pre-egress query disclosure; every remote MCP HTTP message also receives its own transport disclosure. Provider-hosted search is authorized per provider request and suppresses the client `websearch` tool for that run. A configured search binding is authoritative when selected: failure never silently falls back to bundled Exa.
+
+A public `NetworkEndpoint` is distinct from a workspace-external file path and does not enter `permission.external_directory`. With network `Allow`, read-only `websearch` / `webfetch` calls do not ask per request. With network `Ask`, `Allow session` relaxes only `NetworkEffect::Read` for the same tool; it never overrides source trust, network mutation/Unknown, another tool, or `Deny`. Destination guard, per-message disclosure, durable audit, and budgets still run when a grant is reused.
+
+Treat search results as untrusted input. They may contain prompt injection, hostile markup, misleading claims, or unsafe URLs. Sigil sanitizes and bounds returned content, but the model must still verify important claims and should fetch only session-proven URL/source capabilities. It must not fan out across multiple results when search snippets are sufficient; `webfetch` is reserved for an explicit request to read a page or one specific necessary fact missing from the snippets.
+
 ## Secrets
 
 Prefer environment variables for provider credentials. Choose the provider first, then use its exact variable from the [provider authentication map](providers.md#authentication-priority); there is no provider-neutral API key variable.

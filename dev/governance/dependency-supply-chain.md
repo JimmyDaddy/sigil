@@ -2,7 +2,7 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
-## WebFetch 内部传输（E21.9）
+## WebFetch 受控传输（E21.9 / E21.17 public cutover）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
 |---|---|---|---|---|---|
@@ -25,10 +25,20 @@ E21.14 复用 workspace 已有的 `reqwest`、`url`、`futures`、`regex`、`sha
 |---|---|---|---|---|---|
 | `unicode-normalization` | `0.1.25`；默认 feature | `sigil-runtime/web_search_connector` | 在query的secret/PII扫描、字符/byte cap和durable disclosure之前执行NFC正规化，避免等价Unicode序列绕过exact wire与审计绑定 | `MIT OR Apache-2.0`；`unicode-rs/unicode-normalization` | 只处理bounded query文本；不做locale相关改写，不读取环境或外部数据 |
 
-E21.15 其余实现复用workspace已有的`sigil-mcp` Streamable HTTP core、`url`、`sha2`、`serde_json`与`tokio`。runtime-private bundled profile使用固定HTTPS endpoint、空header配置和空client capabilities；不读取`EXA_API_KEY`，且E21.17前没有RootConfig、默认route或用户文档入口。
+E21.15 其余实现复用workspace已有的`sigil-mcp` Streamable HTTP core、`url`、`sha2`、`serde_json`与`tokio`。E21.17 public cutover 后，bundled profile 仍使用固定 HTTPS endpoint、空 header 配置和空 client capabilities，且不读取 `EXA_API_KEY`；只有 stable `websearch` wrapper 可触发该惰性 profile，不注册 bundled raw MCP tools。
 
 ## Anthropic hosted continuation（E21.12）
 
 E21.12 没有引入新的 workspace 第三方包。`sigil-provider-anthropic` 新增直接复用 workspace 已锁定的 `uuid`，仅生成 process-local continuation handle；handle 不携带query、URL、title、`encrypted_content`或`encrypted_index`，重启后不可恢复并按`InterruptOnRestart`安全降级。HTTP、SSE、序列化和secret carrier继续复用既有`reqwest`、`serde_json`、`sigil-kernel`契约，没有增加第二套client或加密实现。
 
-本台账只证明当前内部/test-only实现的版本、feature、许可和安全用途已经人工核对。E21.17 原子公开前仍必须运行并保存依赖维护性、许可和漏洞扫描证据；任一 supply-chain gate 未完成都不得开放 public WebFetch/remote MCP 配置或宣称 Web V1 ready。
+## 发布前扫描与显式例外（E21.17）
+
+2026-07-12 使用 `cargo-audit 0.22.2` 与 `cargo-deny 0.20.2` 对启用 all-features 的 workspace 依赖图执行扫描。首次扫描发现 `crossbeam-epoch 0.9.18`、`quinn-proto 0.11.14` 与经 `syntect` 默认 plist feature 引入的 `quick-xml 0.39.4` 存在已公开漏洞。处置如下：
+
+- 将兼容依赖更新至 `crossbeam-epoch 0.9.20`、`quinn-proto 0.11.16`；
+- 将 `syntect 5.3.0` 改为关闭默认 feature，仅启用 `parsing,default-syntaxes,default-themes,regex-onig`，并将 `two-face 0.5.1` 对齐到 `syntect-onig`；这移除了不被 Sigil 使用的 plist/`quick-xml` 与 `yaml-rust` 依赖路径；
+- `deny.toml` 限制依赖来源为 crates.io registry，执行许可白名单检查，并将重复版本保留为 warning 供后续收敛。
+
+复扫结果为 `cargo audit` 零已知漏洞；`cargo deny check` 的 advisories、bans、licenses、sources 四项均通过。当前唯一显式 advisory 例外是 `RUSTSEC-2025-0141`：`syntect` 只用 `bincode 1.3.3` 反序列化其版本固定、编译进二进制的 syntax/theme dump，Sigil 不把用户或网络输入交给 bincode。该例外必须随 `syntect` 升级复核并在上游迁移后删除。
+
+上述证据覆盖 E21.17 public WebFetch、stable websearch 与 user-root Streamable HTTP MCP cutover；最终发布结论仍以同一工作区的完整测试、Clippy、格式、文档和站点 gate 全绿为前提。

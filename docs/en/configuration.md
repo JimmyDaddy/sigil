@@ -344,21 +344,52 @@ Meaning:
 - Paths outside the workspace are disabled by default; if external directories are enabled, they still go through the external-directory gate.
 - Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`. It is backed by Sigil's per-user cache root and shown to the model as `cache/tmp`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
 - In headless `run`, final `ask` decisions are returned to the model as structured `approval_required` tool errors instead of being executed silently.
-- Local access and network effect are independent axes. A tool declares local `Read` / `Write` / `Execute` plus an optional network `Read` / `Mutate` / `Unknown` effect. `read-only` permits a network read only when the effective `NetworkPolicy` permits it, while network mutation or an unknown network effect remains denied in `read-only`. `danger-full-access` cannot override network `Ask` or `Deny`.
-- This release does not expose a new `[web]` or remote-MCP network configuration and does not enable WebFetch/WebSearch. Existing generic MCP calls are classified conservatively as local `Read` plus `NetworkEffect::Unknown`; their existing source/tool approval still participates in the final `Deny > Ask > Allow` decision.
+- Local access and network effect are independent axes. A tool declares local `Read` / `Write` / `Execute` plus an optional network `Read` / `Mutate` / `Unknown` effect. A `NetworkEndpoint` is not an external-directory path. `read-only` permits a network read only when the effective `NetworkPolicy` permits it, while network mutation or an unknown network effect remains denied in `read-only`. `danger-full-access` cannot override network `Ask` or `Deny`.
+- `[web]` is the single network policy for stable web search and user-root Streamable HTTP MCP. Generic local stdio MCP calls remain conservatively classified as local `Read` plus `NetworkEffect::Unknown`; source/tool approval still participates in the final `Deny > Ask > Allow` decision.
 
 Precedence:
 
 | Order | Source | Responsibility |
 | --- | --- | --- |
 | 1 | Local `mode` baseline | The user-facing top-level mode sets the local Read/Write/Execute posture; `read-only` is a hard local write/execute cap. |
-| 2 | Independent network policy | The runtime evaluates the declared/dynamic network effect separately; network `Ask` or `Deny` cannot be widened by local danger mode, plan approval, or a session grant. |
+| 2 | Independent network policy | The runtime evaluates the declared/dynamic network effect separately; `Deny` can never be widened. For an interactive read-only `NetworkRequest`, the user may explicitly choose `Allow session`; the grant covers only the same tool and session and still passes destination guard, disclosure, and audit. |
 | 3 | Tool/source-provided default | Runtime/tool-specific source policy, such as MCP trust approval or a trusted read-only command downgrade. |
 | 4 | `tools.<tool_name>` | Tool-name override. |
 | 5 | `rules[]` | Matching tool/subject rules; the last matching rule wins, preserving file-order specificity. |
 | 6 | `commands.allow/ask/deny` | Matching command patterns for shell commands. Within command groups, `deny > ask > allow`; command `allow` can widen the default `manual` shell ask, but it cannot override explicit tool/rule ask or deny. |
-| 7 | `external_directory` | Extra gate for workspace-external subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. |
+| 7 | `external_directory` | Extra gate for workspace-external `Path` subjects: disabled means deny; enabled uses matching external rules or `external_directory.default_mode`. Network endpoints do not enter this gate. |
 | 8 | Effective policy cap and risk overlays | Runtime caps, local `read-only`, protected paths, destructive operations, and external-directory denial remain hard safety boundaries. The final result is the strictest local, network, and source decision. |
+
+## Web Search And Network
+
+The alpha default enables stable web search with network access allowed. `auto` uses an exact-model provider-hosted search capability when available; otherwise an explicitly configured MCP binding is authoritative, and only an absent binding may use the bundled anonymous Exa MCP profile.
+
+```toml
+[web]
+enabled = true
+network_mode = "allow" # allow | ask | deny
+search_route = "auto"  # auto | provider_hosted | mcp | bundled | disabled
+max_results = 8
+max_query_chars = 512
+max_query_bytes = 2048
+
+[web.bundled_search]
+enabled = true
+```
+
+To replace bundled search with your own compatible MCP tool:
+
+```toml
+[web.search_mcp]
+server = "my-search"
+tool = "search"
+```
+
+That binding is fail-closed: connection, identity, schema, permission, or tool failure never falls back to bundled Exa. The bundled route sends the exact normalized query to `https://mcp.exa.ai/mcp`; Exa and the network path can observe the query and source/proxy egress IP. It uses no Sigil-supplied API key, has no quota or availability guarantee, and blocks recognized secrets and high-confidence personal data before query egress. Set `enabled = false`, `search_route = "disabled"`, or `network_mode = "deny"` to disable it.
+
+Provider-hosted search is authorized and disclosed independently for every provider request. `network_mode = "ask"` remains fail-closed for hosted search because it has no ordinary client-tool approval round trip; configured/bundled client search still uses normal tool approval.
+
+With `network_mode = "allow"`, read-only client `websearch` / `webfetch` calls do not ask per request, while every egress still passes disclosure, durable audit, SSRF/DNS, and budget checks. With `network_mode = "ask"`, the approval surface offers `Allow once`, `Allow session`, and `Deny`; a session grant relaxes only the current tool's read-only network facet, never source trust, network mutation/Unknown, another tool, or any `Deny`.
 
 ## Memory
 

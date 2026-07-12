@@ -111,6 +111,7 @@ Sigil 按以下顺序解析 config：
 | `[workspace]` | Workspace root |
 | `[agent]` | 共享 agent runtime 设置 |
 | `[permission]` | 默认审批策略 |
+| `[web]` | Stable search route、网络策略、destination rule 与预算 |
 | `[memory]` | Workspace memory loading |
 | `[compaction]` | Context compaction 阈值 |
 | `[task]` | Planned task 行为和 role settings |
@@ -118,10 +119,19 @@ Sigil 按以下顺序解析 config：
 | `[code_intelligence]` | LSP 和 code intelligence tools |
 | `[terminal]` | Mouse、OSC52 clipboard 和 scroll 行为 |
 | `[appearance]` | TUI 主题、usage cost currency 和语义颜色覆盖 |
-| `[[mcp_servers]]` | stdio MCP server 配置 |
+| `[[mcp_servers]]` | 显式 `stdio` 或用户根 `streamable_http` MCP server 配置 |
 
 示例见 [Sigil 配置指南](configuration.md)。
 Provider 与 model 选择、`[providers.*]` block 和认证环境变量统一由 [Provider 指南](providers.md)索引。
+
+## Web Tool 输入
+
+| Tool | 必填输入 | 关键边界 |
+| --- | --- | --- |
+| `websearch` | `query`；可选 `max_results` | Route 由 provider-hosted、authoritative configured MCP 或 bundled Exa 解析；已选 route 失败后不会静默换 destination。 |
+| `webfetch` | `source_id`；可选 `format`（`markdown`/`text`）和 `max_content_bytes` | 只接受 session-local 精确 URL capability，不接受新造的 raw `url` 参数。 |
+
+两个工具都是带独立 `NetworkRead` effect 的 `Read` 操作。即使本地 permission mode 较宽松，`[web].network_mode = "deny"` 仍会阻断；`ask` 必须来自显式交互动作，因此在无法询问的 headless/eager 场景会 fail closed。
 
 ## Approval Outcomes
 

@@ -149,6 +149,14 @@ pin_version = false
 
 从 `approval_default = "ask"` 和 `allow_secrets = false` 开始。只有确认 server 能读取、写入和发送什么之后，再放宽这些设置。
 
+## Web Search 安全
+
+`websearch` 属于本地 `Read` 加网络 `Read`。Configured 与 bundled client route 会经过普通 tool permission 和 query pre-egress disclosure；remote MCP 的每条 HTTP message 还会单独获得 transport disclosure。Provider-hosted search 按 provider request 独立授权，并在该 run 内隐藏 client `websearch` tool。Configured search binding 一旦被选择就具有权威性：失败时不会静默回退到 bundled Exa。
+
+公网 `NetworkEndpoint` 与 workspace 外文件路径是不同 subject，不进入 `permission.external_directory`。网络 `Allow` 下只读 `websearch` / `webfetch` 不逐次确认；网络 `Ask` 下，`Allow session` 只放宽同一 tool 的 `NetworkEffect::Read`，不会覆盖 source trust、网络写入/Unknown、不同 tool 或 `Deny`。无论是否复用 grant，destination guard、逐消息 disclosure、durable audit 与 budget 都继续执行。
+
+搜索结果必须按不可信输入处理，其中可能包含 prompt injection、恶意 markup、误导性陈述或危险 URL。Sigil 会清洗并限制返回内容，但模型仍应验证重要事实，并且只 fetch 当前 session 已证明的 URL/source capability。搜索摘要已足够时不得默认对多个结果批量 fetch；只有用户明确要求读取页面或缺少一个具体必要事实时才进入 `webfetch`。
+
 ## Secrets
 
 Provider 凭据优先使用环境变量。先选择 provider，再使用 [provider 认证映射](providers.md#认证优先级)中的准确变量；不存在对所有 provider 通用的 API key 环境变量。

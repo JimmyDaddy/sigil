@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Configuration](configuration.md) · [Troubleshooting](troubleshooting.md) · [简体中文](../zh-CN/mcp.md)
 
-Sigil can connect stdio MCP servers as external tool providers. Connected MCP tools, resources, and prompts enter the same tool registry and use the same approval, activity, session control, and secret egress rules as built-in tools.
+Sigil can connect local stdio and user-root Streamable HTTP MCP servers as external tool providers. Connected MCP tools, resources, and prompts enter the same tool registry and use the same approval, activity, session control, and secret-egress rules as built-in tools. Plugin manifests remain stdio-only.
 
 Start conservative: configure one server, keep `approval_default = "ask"`, run `/doctor`, and only loosen trust settings after you understand what the server can read or mutate.
 
@@ -11,6 +11,7 @@ Start conservative: configure one server, keep `approval_default = "ask"`, run `
 ```toml
 [[mcp_servers]]
 name = "filesystem"
+transport = "stdio"
 command = "node"
 args = ["/absolute/path/to/server.js"]
 startup_timeout_secs = 5
@@ -35,6 +36,31 @@ mcp__filesystem__read_file
 
 Name conflicts or overly long names get a stable hash suffix.
 
+## Streamable HTTP
+
+Remote MCP is allowed only in the user root config and must use HTTPS. Header names are public config metadata, while credential values should normally come from environment variables:
+
+```toml
+[[mcp_servers]]
+name = "my-search"
+transport = "streamable_http"
+url = "https://mcp.example.com/mcp"
+startup = "lazy"
+env_http_headers = { "X-API-Key" = "MY_SEARCH_API_KEY" }
+# bearer_token_env_var = "MY_MCP_BEARER_TOKEN"
+# client_capabilities = ["roots", "elicitation"]
+
+[mcp_servers.trust]
+trust_class = "third_party"
+approval_default = "ask"
+egress_logging = true
+allow_secrets = false
+```
+
+Every protocol message receives a fresh durable transport authorization and disclosure before DNS or socket activity. Direct connections validate and pin the complete resolved address set; environment-proxy routes identify the proxy destination as `proxy_remote`. Redirects and OAuth challenges are not followed in V1.
+
+`roots` exposes only the canonical workspace root as a `file:` URI. `elicitation` accepts only bounded forms through the existing TUI form/audit flow; URL elicitation, sampling, and tasks remain unsupported. Headless CLI activation fails closed when an interactive form has no handler. `/doctor` and `/config` display only safe origins, header/environment names, capabilities, and fingerprint state—never resolved credentials.
+
 ## Process Environment and Credentials
 
 Local stdio MCP processes do not inherit Sigil's full environment. Sigil clears the parent environment before spawn, adds a small allowlisted runtime baseline such as `PATH`, locale, temporary-directory, and required Windows system variables, and then injects only names explicitly listed in the user root config:
@@ -42,6 +68,7 @@ Local stdio MCP processes do not inherit Sigil's full environment. Sigil clears 
 ```toml
 [[mcp_servers]]
 name = "credentialed-search"
+transport = "stdio"
 command = "/absolute/path/to/search-mcp"
 args = ["--stdio"]
 inherit_env = ["MY_MCP_API_KEY"]
@@ -56,7 +83,7 @@ allow_secrets = false
 
 Variables such as `HOME`, `SSH_AUTH_SOCK`, proxy settings, provider keys, and cloud credentials are not inherited automatically. Prefer an absolute `command` path for executables outside the baseline `PATH`.
 
-Only user root `[[mcp_servers]]` entries may use `inherit_env`. Plugin manifests cannot request environment or credential grants; discovery rejects that field with `plugin_mcp_environment_grant_not_supported`. Move a credentialed plugin-declared server into the user root config instead.
+Only user root `[[mcp_servers]]` entries may use `inherit_env` or declare Streamable HTTP. Plugin manifests cannot request environment/credential grants or remote transport; discovery returns typed remediation directing remote MCP to root config.
 
 Sigil stores and displays grant names, source metadata, and static/live fingerprint status, never the resolved value. The live fingerprint uses a process-random key and cannot be used as an offline secret verifier. If a granted value changes or disappears, the old MCP process binding is invalidated and the server must be restarted or refreshed.
 
@@ -127,6 +154,7 @@ When `pin_version` is enabled, provide the expected identity:
 ```toml
 [[mcp_servers]]
 name = "filesystem"
+transport = "stdio"
 command = "node"
 args = ["/absolute/path/to/server.js"]
 startup = "eager"
@@ -139,7 +167,7 @@ allow_secrets = false
 pin_version = true
 
 [mcp_servers.trust.pinned]
-command_fingerprint = "sha256:..."
+transport_fingerprint = "sha256:..."
 protocol_version = "2025-06-18"
 server_name = "filesystem"
 server_version = "1.0.0"

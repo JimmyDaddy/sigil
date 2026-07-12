@@ -71,6 +71,7 @@ sigil doctor
 - 普通 chat 明确要求子 agent 时，会在最终回答前强制等待有效 agent 结果。
 - 受信任的 agent profile 可通过 `@profile <prompt>` 或受信任的 profile slash name 直接调用。
 - 按显式 trust、approval 和 secret-egress policy 接入 stdio MCP server。
+- 提供 capability-backed `webfetch` 与 stable `websearch` route，并执行独立 network policy、durable egress disclosure 和 external-source provenance。
 - 可选开启 code intelligence，支持符号、引用、诊断、code action 和 rename preview。
 
 ## 日常工作流
@@ -117,7 +118,8 @@ Sigil 把工具执行视为可审计状态，而不是隐藏副作用。
 | OpenAI-compatible | `[providers.openai_compat]` | 兼容 Chat Completions 的 `/v1` endpoint。 | [OpenAI-compatible 指南](docs/zh-CN/provider-openai-compatible.md) |
 | Anthropic | `[providers.anthropic]` | 通过 Anthropic Messages streaming 使用 Claude 模型。 | [Anthropic 指南](docs/zh-CN/provider-anthropic.md) |
 | Gemini | `[providers.gemini]` | 通过 `streamGenerateContent` 使用 Gemini 模型。 | [Gemini 指南](docs/zh-CN/provider-gemini.md) |
-| MCP server | `[[mcp_servers]]` | 带显式 trust policy 的外部 stdio 工具。 | [MCP 指南](docs/zh-CN/mcp.md) |
+| Web data tools | `[web]` | Provider-hosted/configured/bundled search 与精确 capability-backed fetch。 | [配置](docs/zh-CN/configuration.md#web-搜索与网络) |
+| MCP server | `[[mcp_servers]]` | 带显式 trust 与 egress policy 的外部 stdio 或用户根 Streamable HTTP 工具。 | [MCP 指南](docs/zh-CN/mcp.md) |
 | Code intelligence | `[code_intelligence]` | LSP-backed 符号、引用、诊断、action 和 rename preview。 | [配置指南](docs/zh-CN/configuration.md) |
 
 ## 按任务找文档

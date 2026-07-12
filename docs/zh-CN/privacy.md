@@ -63,6 +63,12 @@ allow_secrets = false
 
 `allow_secrets = false` 时，Sigil 会阻断识别到的 MCP secret-like egress。除非 server 确实需要 secret material 且你信任它，否则保持默认。
 
+## Web Search 数据
+
+Provider-hosted search 由所选模型 provider 生成并执行 query；Sigil 可能只能在执行后收到 provider 上报的 query。Configured MCP search 会把规范化 query 发送到精确 server/tool binding。Bundled anonymous route 会在不使用 Sigil-supplied API key 的情况下发送到 `https://mcp.exa.ai/mcp`。“Anonymous”只描述认证方式：Exa 与网络路径仍可观察 Query Data 以及源 IP/代理出口 IP。截至 2026-07-12，Exa 的公开[隐私政策](https://exa.ai/privacy-policy)说明 Query Data 可能用于改进产品，包括训练和微调其模型；其公开[安全文档](https://exa.ai/docs/reference/security)把 Zero Data Retention 列为企业/定制能力。因此 Sigil 不假设该匿名 route 具有 ZDR，也不承诺 free-tier quota、retention、处理 region、availability 或 SLA。
+
+Client-side query 出站前，Sigil 会阻止已识别的配置 secret，以及高置信 email、phone、SSN 和 payment-card pattern。返回文本按 external/untrusted 处理，并在持久化或进入模型前清洗。可通过 `[web].enabled = false`、`search_route = "disabled"` 或 `network_mode = "deny"` 关闭；使用 `[web.search_mcp]` 选择自有兼容 MCP binding。
+
 ## Doctor Output
 
 Doctor 会报告：
