@@ -84,6 +84,8 @@ The link is emitted only after validating that the receipt is applicable to the 
 
 Manual rerun resolves the current scope and exact `TrustedCheckSpec` from the verification projection. It uses the existing execution backend, policy hash, trust decision, timeout and check-run lifecycle. It appends queued/running/terminal records before exposing a final card.
 
+The kernel rerun request carries only the task/step identity, check id/hash, policy hash and observed snapshot id. The runtime supplies the authoritative workspace root separately; a UI or protocol payload cannot redirect a task-bound check into another directory. Preflight rejects scope, policy, spec, snapshot, duplicate-running and already-satisfied bindings before appending `Queued`.
+
 If current state has drifted since the card was rendered, the worker rejects the request and refreshes the projection. It never runs a lookalike id, stale hash, untrusted candidate, or a check in another task/session scope.
 
 ## 7. TUI Surface

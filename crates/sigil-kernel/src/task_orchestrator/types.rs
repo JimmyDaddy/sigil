@@ -26,6 +26,24 @@ pub struct SequentialTaskStepOutput {
     pub outcome: AgentRunOutcome,
 }
 
+/// Exact projection binding required to rerun one trusted task verification check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskVerificationRerunRequest {
+    pub task_id: TaskId,
+    pub step_id: TaskStepId,
+    pub check_spec_id: CheckSpecId,
+    pub check_spec_hash: String,
+    pub policy_hash: PolicyHash,
+    pub workspace_snapshot_id: WorkspaceSnapshotId,
+}
+
+/// Durable terminal records produced by one exact task verification rerun.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskVerificationRerunOutput {
+    pub check_run: VerificationCheckRunEntry,
+    pub verification: VerificationRecordedEntry,
+}
+
 /// Input passed from the task orchestrator to a runtime-owned child-session runner.
 #[derive(Debug, Clone)]
 pub struct TaskChildSessionRunRequest {

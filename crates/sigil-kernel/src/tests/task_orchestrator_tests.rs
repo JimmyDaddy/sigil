@@ -21,24 +21,26 @@ use crate::{
     ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
     SessionLogEntry, SessionRef, SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME,
     TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
-    TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolCall, ToolCategory, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
-    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId,
-    WriteLeaseReleaseStatus, WriteLeaseScope, stable_workspace_id, write_file_with_mutation,
+    TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
+    TaskVerificationRerunRequest, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
+    ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
+    stable_workspace_id, write_file_with_mutation,
 };
 
 use super::{
     StepRunOutput, TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
     child_status_from_output, decode_changeset_only_child_output,
     durable_workspace_mutation_evidence, latest_relevant_successful_verification_sequence,
-    planner_prompt, relevant_verification_receipts, route_id_for_call, run_status_from_step_status,
-    run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
-    step_terminal_reason, task_status_from_step_status, task_step_auto_run_policy,
-    task_step_default_policy, task_step_readiness,
+    planner_prompt, relevant_verification_receipts, rerun_task_verification_check,
+    route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
+    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
+    task_status_from_step_status, task_step_auto_run_policy, task_step_default_policy,
+    task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -126,6 +128,114 @@ where
         options,
         readiness,
     ))
+}
+
+struct TaskVerificationRerunFixture {
+    _temp: tempfile::TempDir,
+    workspace: PathBuf,
+    session: Session,
+    request: TaskVerificationRerunRequest,
+}
+
+fn task_verification_rerun_fixture() -> Result<TaskVerificationRerunFixture> {
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    let task_request = SequentialTaskRequest {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: step_id.clone(),
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: Some("write note".to_owned()),
+        role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
+    };
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let workspace = std::fs::canonicalize(workspace)?;
+    std::fs::write(workspace.join("note.txt"), "current\n")?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "rustc".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "rustc-version",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    let check_spec = trusted.check_spec.clone();
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task(task_id.as_str().to_owned()),
+            trusted,
+            "event-config",
+        ),
+    ))?;
+    let mut policy = crate::VerificationPolicy::no_checks_required("task_step_default");
+    policy.required_checks = vec![check_spec.clone()];
+    policy.completion_criteria = crate::CompletionCriteria::AllRequiredChecks;
+    policy.timeout_ms = Some(60_000);
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(
+            EvidenceScope::Task(task_id.as_str().to_owned()),
+            policy,
+            "event-policy",
+        )?,
+    ))?;
+    let mut options = options();
+    options.workspace_root = workspace.clone();
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            changed_files: vec!["note.txt".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
+    };
+    let readiness = task_step_readiness(
+        &session,
+        &task_request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+    session.append_control(ControlEntry::ReadinessEvaluated(readiness.clone()))?;
+    let request = TaskVerificationRerunRequest {
+        task_id,
+        step_id,
+        check_spec_id: check_spec.check_spec_id,
+        check_spec_hash: check_spec.check_spec_hash,
+        policy_hash: readiness
+            .policy_hash
+            .expect("task readiness should bind the policy"),
+        workspace_snapshot_id: readiness
+            .workspace_snapshot_id
+            .expect("changed task readiness should bind the workspace snapshot"),
+    };
+    Ok(TaskVerificationRerunFixture {
+        _temp: temp,
+        workspace,
+        session,
+        request,
+    })
 }
 
 impl crate::EventHandler for RecordingEventHandler {
@@ -3646,6 +3756,166 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
     );
     assert_eq!(latest_run.timeout_ms, Some(60_000));
     assert!(latest_run.receipt_id.is_some());
+    Ok(())
+}
+
+#[test]
+fn exact_task_verification_rerun_reuses_durable_check_lifecycle() -> Result<()> {
+    let TaskVerificationRerunFixture {
+        _temp,
+        workspace,
+        mut session,
+        request,
+    } = task_verification_rerun_fixture()?;
+    let mut handler = RecordingEventHandler::default();
+    let backend = FakeTaskExecutionBackend;
+
+    let output = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        &backend,
+        &workspace,
+        &request,
+    ))?;
+
+    assert_eq!(
+        output.check_run.status,
+        crate::VerificationCheckRunStatus::Succeeded
+    );
+    assert_eq!(
+        output.verification.receipt.binding.check_spec_hash,
+        request.check_spec_hash
+    );
+    assert_eq!(
+        output.verification.receipt.binding.workspace_snapshot_id,
+        request.workspace_snapshot_id
+    );
+    let statuses = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::VerificationCheckRun(run)) => Some(run.status),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        vec![
+            crate::VerificationCheckRunStatus::Queued,
+            crate::VerificationCheckRunStatus::Running,
+            crate::VerificationCheckRunStatus::Succeeded,
+        ]
+    );
+    assert_eq!(
+        handler
+            .events
+            .iter()
+            .filter(|event| matches!(event, RunEvent::Control(_)))
+            .count(),
+        4
+    );
+    let error = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        &backend,
+        &workspace,
+        &request,
+    ))
+    .expect_err("a successful rendered binding must not execute twice");
+    assert!(error.to_string().contains("already succeeded"));
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::VerificationCheckRun(_))
+            ))
+            .count(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_task_verification_rerun_rejects_workspace_drift_before_queue() -> Result<()> {
+    let TaskVerificationRerunFixture {
+        _temp,
+        workspace,
+        mut session,
+        request,
+    } = task_verification_rerun_fixture()?;
+    std::fs::write(workspace.join("note.txt"), "changed after render\n")?;
+    let mut handler = RecordingEventHandler::default();
+    let backend = FakeTaskExecutionBackend;
+
+    let error = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        &backend,
+        &workspace,
+        &request,
+    ))
+    .expect_err("workspace drift must reject the rendered rerun binding");
+
+    assert!(error.to_string().contains("workspace changed"));
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::VerificationCheckRun(_))
+    )));
+    assert!(handler.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn exact_task_verification_rerun_rejects_policy_and_spec_drift() -> Result<()> {
+    let TaskVerificationRerunFixture {
+        _temp,
+        workspace,
+        mut session,
+        request,
+    } = task_verification_rerun_fixture()?;
+    let mut changed_policy = crate::VerificationPolicy::no_checks_required("task_step_default");
+    changed_policy.allow_unverified_completion = true;
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(
+            EvidenceScope::Task(request.task_id.as_str().to_owned()),
+            changed_policy,
+            "event-policy-changed",
+        )?,
+    ))?;
+    let mut handler = RecordingEventHandler::default();
+    let backend = FakeTaskExecutionBackend;
+    let error = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        &backend,
+        &workspace,
+        &request,
+    ))
+    .expect_err("policy drift must reject the rendered rerun binding");
+    assert!(error.to_string().contains("policy changed"));
+
+    let TaskVerificationRerunFixture {
+        _temp,
+        workspace,
+        mut session,
+        mut request,
+    } = task_verification_rerun_fixture()?;
+    request.check_spec_hash = "stale-check-spec-hash".to_owned();
+    let error = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut handler,
+        &backend,
+        &workspace,
+        &request,
+    ))
+    .expect_err("check spec drift must reject the rendered rerun binding");
+    assert!(error.to_string().contains("verification check changed"));
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::VerificationCheckRun(_))
+    )));
     Ok(())
 }
 

@@ -68,98 +68,308 @@ where
             .iter()
             .find_map(|scope| projection.check_spec(scope, &check_id))
             .ok_or_else(|| anyhow!("missing trusted verification check spec {check_id}"))?;
-        let check_spec = &check_entry.trusted_check.check_spec;
-        let run_id = verification_check_run_id(
-            &step_scope,
-            check_spec,
-            policy_hash.as_deref(),
-            readiness.workspace_snapshot_id.as_deref(),
-            session.next_stream_sequence_hint()?,
-        )?;
-        append_task_control(
+        execute_task_verification_check(
             session,
             handler,
-            ControlEntry::VerificationCheckRun(
-                VerificationCheckRunEntry::new(
-                    run_id.clone(),
-                    step_scope.clone(),
-                    check_spec,
-                    VerificationCheckRunStatus::Queued,
-                )
-                .with_timeout_ms(policy.timeout_ms),
-            ),
-        )?;
-        append_task_control(
-            session,
-            handler,
-            ControlEntry::VerificationCheckRun(
-                VerificationCheckRunEntry::new(
-                    run_id.clone(),
-                    step_scope.clone(),
-                    check_spec,
-                    VerificationCheckRunStatus::Running,
-                )
-                .with_timeout_ms(policy.timeout_ms),
-            ),
-        )?;
-        let recorded = match run_verification_check(
-            session,
             execution_backend,
-            VerificationCheckRunRequest {
-                workspace_root: options.workspace_root.clone(),
-                scope: step_scope.clone(),
-                trusted_check: check_entry.trusted_check.clone(),
-                policy: policy.clone(),
-                policy_hash: policy_hash.clone(),
+            TaskVerificationExecution {
+                workspace_root: &options.workspace_root,
+                scope: &step_scope,
+                trusted_check: &check_entry.trusted_check,
+                policy: &policy,
+                policy_hash: policy_hash.as_deref(),
+                workspace_snapshot_id: readiness.workspace_snapshot_id.as_deref(),
                 workspace_trust,
-                workspace_trust_snapshot_id: workspace_trust_snapshot_id.clone(),
-                workspace_trust_approval_event_id: None,
-                workspace_trust_sandbox_decision_id: None,
+                workspace_trust_snapshot_id: &workspace_trust_snapshot_id,
             },
         )
-        .await
-        {
-            Ok(recorded) => recorded,
-            Err(error) => {
-                append_task_control(
-                    session,
-                    handler,
-                    ControlEntry::VerificationCheckRun(
-                        VerificationCheckRunEntry::new(
-                            run_id,
-                            step_scope.clone(),
-                            check_spec,
-                            VerificationCheckRunStatus::Errored,
-                        )
-                        .with_timeout_ms(policy.timeout_ms)
-                        .with_error(error.to_string()),
-                    ),
-                )?;
-                return Err(error);
-            }
-        };
-        let recorded_receipt = recorded.receipt.clone();
-        append_task_control(
-            session,
-            handler,
-            ControlEntry::VerificationRecorded(recorded),
-        )?;
-        append_task_control(
-            session,
-            handler,
-            ControlEntry::VerificationCheckRun(
-                VerificationCheckRunEntry::new(
-                    run_id,
-                    step_scope.clone(),
-                    check_spec,
-                    VerificationCheckRunStatus::Running,
-                )
-                .with_timeout_ms(policy.timeout_ms)
-                .with_terminal_receipt(&recorded_receipt),
-            ),
-        )?;
+        .await?;
     }
     Ok(true)
+}
+
+/// Reruns one task verification check only when its rendered projection binding is still current.
+///
+/// The request is rejected before appending a queued lifecycle record when the task/step scope,
+/// trusted check hash, policy hash, or workspace snapshot has drifted.
+///
+/// # Errors
+///
+/// Returns an error when the binding is stale, the check is not currently eligible, trust is not
+/// satisfied, durable lifecycle records cannot be appended, or the existing verification runner
+/// cannot execute the check.
+pub async fn rerun_task_verification_check<H>(
+    session: &mut Session,
+    handler: &mut H,
+    execution_backend: &dyn ExecutionBackend,
+    workspace_root: &Path,
+    request: &TaskVerificationRerunRequest,
+) -> Result<TaskVerificationRerunOutput>
+where
+    H: EventHandler + Send,
+{
+    let projection = session.verification_state_projection();
+    let step_scope = task_step_evidence_scope(&request.task_id, &request.step_id);
+    let task_scope = EvidenceScope::Task(request.task_id.as_str().to_owned());
+    let workspace_id = stable_workspace_id(workspace_root)?;
+    let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
+    let readiness = projection
+        .latest_readiness(&step_scope)
+        .ok_or_else(|| anyhow!("missing current verification readiness for {step_scope:?}"))?;
+    if readiness.policy_hash.as_deref() != Some(request.policy_hash.as_str()) {
+        bail!("verification policy changed since the rerun action was rendered");
+    }
+    if readiness.workspace_snapshot_id.as_deref() != Some(request.workspace_snapshot_id.as_str()) {
+        bail!("verification workspace snapshot changed since the rerun action was rendered");
+    }
+
+    let policy_entry = projection
+        .latest_policy(&step_scope)
+        .or_else(|| projection.latest_policy(&task_scope));
+    let policy = policy_entry
+        .map(|entry| entry.policy.clone())
+        .unwrap_or_else(|| {
+            task_step_default_policy(&projection, &step_scope, &task_scope, &workspace_scope)
+        });
+    let current_policy_hash = match policy_entry {
+        Some(entry) => entry.policy_hash.clone(),
+        None => policy.stable_hash()?,
+    };
+    if current_policy_hash != request.policy_hash {
+        bail!("verification policy changed since the rerun action was rendered");
+    }
+
+    let scopes = [step_scope.clone(), task_scope, workspace_scope];
+    let check_entry = scopes
+        .iter()
+        .find_map(|scope| projection.check_spec(scope, &request.check_spec_id))
+        .ok_or_else(|| {
+            anyhow!(
+                "missing trusted verification check spec {}",
+                request.check_spec_id
+            )
+        })?;
+    let check_spec = &check_entry.trusted_check.check_spec;
+    if check_spec.check_spec_hash != request.check_spec_hash {
+        bail!("verification check changed since the rerun action was rendered");
+    }
+    if !policy.required_checks.iter().any(|check| {
+        check.check_spec_id == request.check_spec_id
+            && check.check_spec_hash == request.check_spec_hash
+    }) {
+        bail!("verification check is not required by the current policy");
+    }
+
+    let latest_run = latest_task_check_run(
+        session,
+        &step_scope,
+        &request.check_spec_id,
+        &request.check_spec_hash,
+    );
+    if latest_run.is_some_and(|run| {
+        matches!(
+            run.status,
+            VerificationCheckRunStatus::Queued | VerificationCheckRunStatus::Running
+        )
+    }) {
+        bail!("verification check is already queued or running");
+    }
+    if latest_run.is_some_and(|run| run.status == VerificationCheckRunStatus::Succeeded) {
+        bail!("verification check already succeeded for the rendered binding");
+    }
+    let action_allows_run =
+        readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .any(|action| match action {
+                RequiredAction::RunCheck { check_spec_id }
+                | RequiredAction::ReRunNonWritingCheck { check_spec_id } => {
+                    check_spec_id == &request.check_spec_id
+                }
+                _ => false,
+            });
+    let retryable_terminal = latest_run.is_some_and(|run| {
+        matches!(
+            run.status,
+            VerificationCheckRunStatus::Failed | VerificationCheckRunStatus::Inconclusive
+        )
+    });
+    if !action_allows_run && !retryable_terminal {
+        bail!("verification check is not eligible for rerun in the current task scope");
+    }
+
+    let current_snapshot = build_workspace_snapshot(
+        workspace_root,
+        workspace_id.clone(),
+        &policy.verification_scope,
+        0,
+    )?;
+    if current_snapshot.workspace_snapshot_id.as_deref()
+        != Some(request.workspace_snapshot_id.as_str())
+    {
+        bail!("verification workspace changed since the rerun action was rendered");
+    }
+
+    let trust_entry = projection.workspace_trust.get(&workspace_id);
+    let workspace_trust = trust_entry
+        .map(|entry| entry.trust)
+        .unwrap_or(WorkspaceTrust::Unknown);
+    let workspace_trust_snapshot_id = trust_entry
+        .map(|entry| entry.workspace_trust_snapshot_id.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    execute_task_verification_check(
+        session,
+        handler,
+        execution_backend,
+        TaskVerificationExecution {
+            workspace_root,
+            scope: &step_scope,
+            trusted_check: &check_entry.trusted_check,
+            policy: &policy,
+            policy_hash: Some(&request.policy_hash),
+            workspace_snapshot_id: Some(&request.workspace_snapshot_id),
+            workspace_trust,
+            workspace_trust_snapshot_id: &workspace_trust_snapshot_id,
+        },
+    )
+    .await
+}
+
+struct TaskVerificationExecution<'a> {
+    workspace_root: &'a Path,
+    scope: &'a EvidenceScope,
+    trusted_check: &'a TrustedCheckSpec,
+    policy: &'a VerificationPolicy,
+    policy_hash: Option<&'a str>,
+    workspace_snapshot_id: Option<&'a str>,
+    workspace_trust: WorkspaceTrust,
+    workspace_trust_snapshot_id: &'a str,
+}
+
+async fn execute_task_verification_check<H>(
+    session: &mut Session,
+    handler: &mut H,
+    execution_backend: &dyn ExecutionBackend,
+    execution: TaskVerificationExecution<'_>,
+) -> Result<TaskVerificationRerunOutput>
+where
+    H: EventHandler + Send,
+{
+    let TaskVerificationExecution {
+        workspace_root,
+        scope,
+        trusted_check,
+        policy,
+        policy_hash,
+        workspace_snapshot_id,
+        workspace_trust,
+        workspace_trust_snapshot_id,
+    } = execution;
+    let check_spec = &trusted_check.check_spec;
+    let run_id = verification_check_run_id(
+        scope,
+        check_spec,
+        policy_hash,
+        workspace_snapshot_id,
+        session.next_stream_sequence_hint()?,
+    )?;
+    let queued = VerificationCheckRunEntry::new(
+        run_id.clone(),
+        scope.clone(),
+        check_spec,
+        VerificationCheckRunStatus::Queued,
+    )
+    .with_timeout_ms(policy.timeout_ms);
+    append_task_control(session, handler, ControlEntry::VerificationCheckRun(queued))?;
+    let running = VerificationCheckRunEntry::new(
+        run_id.clone(),
+        scope.clone(),
+        check_spec,
+        VerificationCheckRunStatus::Running,
+    )
+    .with_timeout_ms(policy.timeout_ms);
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::VerificationCheckRun(running),
+    )?;
+    let verification = match run_verification_check(
+        session,
+        execution_backend,
+        VerificationCheckRunRequest {
+            workspace_root: workspace_root.to_path_buf(),
+            scope: scope.clone(),
+            trusted_check: trusted_check.clone(),
+            policy: policy.clone(),
+            policy_hash: policy_hash.map(str::to_owned),
+            workspace_trust,
+            workspace_trust_snapshot_id: workspace_trust_snapshot_id.to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+        },
+    )
+    .await
+    {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            append_task_control(
+                session,
+                handler,
+                ControlEntry::VerificationCheckRun(
+                    VerificationCheckRunEntry::new(
+                        run_id,
+                        scope.clone(),
+                        check_spec,
+                        VerificationCheckRunStatus::Errored,
+                    )
+                    .with_timeout_ms(policy.timeout_ms)
+                    .with_error(error.to_string()),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    let receipt = verification.receipt.clone();
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::VerificationRecorded(verification.clone()),
+    )?;
+    let check_run = VerificationCheckRunEntry::new(
+        run_id,
+        scope.clone(),
+        check_spec,
+        VerificationCheckRunStatus::Running,
+    )
+    .with_timeout_ms(policy.timeout_ms)
+    .with_terminal_receipt(&receipt);
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::VerificationCheckRun(check_run.clone()),
+    )?;
+    Ok(TaskVerificationRerunOutput {
+        check_run,
+        verification,
+    })
+}
+
+fn latest_task_check_run<'a>(
+    session: &'a Session,
+    scope: &EvidenceScope,
+    check_spec_id: &str,
+    check_spec_hash: &str,
+) -> Option<&'a VerificationCheckRunEntry> {
+    session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::VerificationCheckRun(run)) = entry else {
+            return None;
+        };
+        (run.scope == *scope
+            && run.check_spec_id == check_spec_id
+            && run.check_spec_hash == check_spec_hash)
+            .then_some(run)
+    })
 }
 
 pub(super) fn task_step_auto_run_policy(

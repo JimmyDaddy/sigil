@@ -311,7 +311,8 @@ pub use task_memory::{
 pub use task_orchestrator::{
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
     SequentialTaskStepOutput, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, changeset_only_child_contract_prompt,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskVerificationRerunOutput,
+    TaskVerificationRerunRequest, changeset_only_child_contract_prompt,
     changeset_only_child_tool_registry, changeset_only_child_tool_scope,
     decode_changeset_only_child_output, validate_changeset_only_parent_snapshot_unchanged_for_task,
 };

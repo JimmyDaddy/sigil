@@ -11,19 +11,20 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
-    ApprovalHandler, ChangeSet, CheckPromotion, CheckpointRestored, CompletionCriteria,
-    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler, EvidenceScope,
-    ExecutionBackend, ExecutionMutationProfile, FileType, JsonlSessionStore, MergeReviewId,
-    MergeReviewRequested, ModelMessage, MutationCommitted, MutationPrepared, MutationReconciled,
-    MutationResolution, MutationSubject, Provider, ReadinessEvaluatedEntry, ReadinessInput,
-    RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry, SessionStreamRecord,
-    StoredEvent, ToolAccess, ToolCategory, ToolErrorKind, ToolExecutionStatus, ToolRegistry,
-    ToolRegistryScope, ToolResultMeta, ToolSpec, VerificationAutoRunPolicy,
-    VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
-    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationVerdict,
-    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationEvidence, WorkspaceTrust, WriteIsolationMode, WriteLeaseAcquired,
-    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope,
+    ApprovalHandler, ChangeSet, CheckPromotion, CheckSpecId, CheckpointRestored,
+    CompletionCriteria, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler,
+    EvidenceScope, ExecutionBackend, ExecutionMutationProfile, FileType, JsonlSessionStore,
+    MergeReviewId, MergeReviewRequested, ModelMessage, MutationCommitted, MutationPrepared,
+    MutationReconciled, MutationResolution, MutationSubject, Provider, ReadinessEvaluatedEntry,
+    ReadinessInput, RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry,
+    SessionStreamRecord, StoredEvent, ToolAccess, ToolCategory, ToolErrorKind, ToolExecutionStatus,
+    ToolRegistry, ToolRegistryScope, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationAutoRunPolicy, VerificationCheckRunEntry, VerificationCheckRunRequest,
+    VerificationCheckRunStatus, VerificationPolicy, VerificationReceipt, VerificationRecordedEntry,
+    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationEvidence, WorkspaceSnapshotId, WorkspaceTrust,
+    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus,
+    WriteLeaseReleased, WriteLeaseScope, build_workspace_snapshot,
     build_workspace_snapshot_for_event, evaluate_readiness, run_verification_check,
     session::ControlEntry,
     stable_event_uuid, stable_workspace_id,
@@ -33,6 +34,7 @@ use crate::{
         TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
         TaskStepStatus,
     },
+    verification::PolicyHash,
     verification_check_run_id,
 };
 #[cfg(test)]
@@ -67,7 +69,7 @@ pub use runner::SequentialTaskOrchestrator;
 pub use types::{
     SequentialTaskRequest, SequentialTaskRunOutput, SequentialTaskStepOutput,
     TaskChildChangeSetArtifact, TaskChildChangeSetProposal, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest,
+    TaskChildSessionRunRequest, TaskVerificationRerunOutput, TaskVerificationRerunRequest,
 };
 
 use changeset_only::{
@@ -82,6 +84,7 @@ use prompts::{
     executor_step_prompt, normalize_task_guidance, planner_prompt, subagent_step_prompt,
     task_continue_reason,
 };
+pub use readiness::rerun_task_verification_check;
 use readiness::{
     append_task_readiness, run_task_step_verification_checks, task_step_auto_run_policy,
     task_step_failure_readiness_nonblocking, task_step_readiness_nonblocking,
