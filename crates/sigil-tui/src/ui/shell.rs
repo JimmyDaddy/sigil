@@ -15,6 +15,7 @@ use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
 use super::{
     approval::render_approval_modal,
     composer::{composer_cursor_origin, render_agent_panel_with_theme, render_input_with_theme},
+    egress_disclosure::{egress_disclosure_layout, render_active_egress_disclosure_card},
     geometry::inset_rect,
     info_rail::render_info_rail_with_theme,
     layout_snapshot::shell_layout,
@@ -29,6 +30,7 @@ use super::{
 };
 
 pub fn render(frame: &mut Frame, app: &AppState) {
+    app.begin_egress_disclosure_frame();
     let theme = theme::resolve_for_app(app);
     if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {
         render_setup(frame, app);
@@ -51,7 +53,8 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     );
 
     let view_model = UiViewModel::from_app(app);
-    let live_inner = inset_rect(shell.live_panel, 1, 0);
+    let (egress_disclosure, live_panel) = egress_disclosure_layout(shell.live_panel, app);
+    let live_inner = inset_rect(live_panel, 1, 0);
     let live_transcript_rows = live_inner
         .height
         .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
@@ -59,11 +62,14 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         .max(1) as usize;
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 
-    render_live_panel_with_theme(frame, shell.live_panel, &live_view_model, &theme);
+    if let Some(area) = egress_disclosure {
+        let _ = render_active_egress_disclosure_card(frame, area, app, &theme);
+    }
+    render_live_panel_with_theme(frame, live_panel, &live_view_model, &theme);
     render_input_with_theme(frame, shell.composer, &view_model.composer, &theme);
     render_agent_panel_with_theme(frame, shell.agent_panel, &view_model.composer, &theme);
     render_footer_status(frame, shell.footer, &view_model.footer, &theme);
-    render_slash_selector_overlay_with_theme(frame, shell.live_panel, shell.composer, app, &theme);
+    render_slash_selector_overlay_with_theme(frame, live_panel, shell.composer, app, &theme);
     if shell.info_rail.width > 0 {
         render_info_rail_with_theme(frame, shell.info_rail, &view_model.info_rail, &theme);
     }

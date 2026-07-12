@@ -202,6 +202,7 @@ impl EventHandler for AppState {
                 );
             }
             RunEvent::ToolResult(result) => {
+                self.clear_recent_egress_disclosure();
                 let is_agent_tool = agent_tool_name(&result.tool_name);
                 if !is_agent_tool {
                     self.runtime.run_phase = RunPhase::Tool(result.tool_name.clone());

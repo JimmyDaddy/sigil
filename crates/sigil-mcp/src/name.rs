@@ -10,8 +10,29 @@ pub fn mcp_provider_tool_name_prefix(server_name: &str) -> String {
     format!("mcp__{}__", sanitize_provider_name_part(server_name))
 }
 
+/// Returns the collision-free first provider-visible candidate for one exact MCP identity.
+///
+/// Registries may choose a different hashed suffix only when another tool already occupies this
+/// candidate. Callers must therefore verify the returned name exists before dispatching it.
+#[must_use]
+pub fn mcp_provider_tool_name_candidate(
+    server_name: &str,
+    original_name: &str,
+    max_provider_name_chars: usize,
+) -> String {
+    let mut used = BTreeSet::new();
+    McpToolName::new(
+        server_name,
+        original_name,
+        max_provider_name_chars,
+        &mut used,
+    )
+    .provider_name
+}
+
 impl McpToolName {
-    pub(super) fn new(
+    /// Builds a collision-safe provider-visible name for one exact MCP server/tool identity.
+    pub fn new(
         server_name: &str,
         original_name: &str,
         max_provider_name_chars: usize,

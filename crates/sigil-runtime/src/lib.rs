@@ -19,6 +19,8 @@ pub use sigil_mcp::{
     McpElicitationRequest, McpElicitationResponse, McpListChangedKind, McpListChangedNotification,
     McpProcessCoverage, McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest,
     McpProcessLauncher, McpProgressNotification, McpRuntimeEventHandler, McpToolRegistrationReport,
+    mcp_transport_static_fingerprint, unsupported_mcp_elicitation_handler,
+    unsupported_mcp_runtime_event_handler,
 };
 use sigil_provider_anthropic::{
     AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV, anthropic_capabilities,
@@ -35,9 +37,15 @@ use sigil_provider_openai_compat::{
 };
 use tokio::process::Command;
 
+#[cfg(test)]
+#[macro_use]
+#[path = "tests/mcp_config_macros.rs"]
+mod mcp_config_macros;
+
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
 mod provider_factory; // provider construction, capabilities, and secrets.
+mod remote_mcp; // user-root Streamable HTTP activation and raw tool adapters.
 mod run_options; // shared run options and scoped tool registry views.
 
 pub mod agent_profile_registry;
@@ -47,9 +55,9 @@ pub mod context;
 pub mod context_window;
 pub mod doctor;
 pub mod egress_ordering;
-#[allow(dead_code)] // Fully implemented E21.15 codec remains unreachable until E21.17 cutover.
 mod exa_text_v1;
 pub mod hosted_finalizer;
+mod hosted_web_search;
 pub mod mcp_declaration;
 pub mod paths;
 pub mod plugins;
@@ -64,7 +72,9 @@ mod stable_mcp_search;
 pub mod streamable_http;
 pub mod url_capability;
 pub mod web_destination;
+mod web_fetch_tool;
 pub mod web_search_connector;
+mod web_search_tool;
 pub mod webfetch;
 pub use agent_profile_registry::{
     AgentProfileIndexContext, AgentProfileRegistry, BUILD_PROFILE_ID, EXPLORE_PROFILE_ID,
@@ -144,6 +154,7 @@ pub use provider_status::{
     BalanceSnapshot, ProviderStatusTaskManager, ProviderStatusTaskResult,
     fetch_provider_balance_snapshot, fetch_remote_model_ids,
 };
+pub use remote_mcp::{activate_eager_remote_mcp_server, activate_remote_mcp_server};
 pub use session_control::{append_session_control_entries, current_unix_time_ms};
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
@@ -157,6 +168,7 @@ pub use stable_mcp_search::{
 pub use streamable_http::{
     QueuedRuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpAttempt,
     RuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpDestinationAuthorizer,
+    RuntimeMcpTransportAttemptFactory,
 };
 pub use url_capability::{
     DEFAULT_URL_CAPABILITY_CAPACITY, DEFAULT_URL_CAPABILITY_TTL, UrlCapabilityLookupError,
@@ -172,7 +184,8 @@ pub use web_search_connector::{
     PreparedMcpSearchLease, SourceProjection, SourceProjectionUnavailableReason,
     StableMcpRouteSelection, WebSearchConnector, WebSearchConnectorError,
     WebSearchConnectorIdentity, WebSearchFailure, WebSearchProtocolFailureKind, WebSearchRequest,
-    WebSearchResponse, generic_query_arguments, normalize_web_search_query,
+    WebSearchResponse, WebSearchSourceCapability, generic_query_arguments,
+    normalize_web_search_query,
 };
 pub use webfetch::{
     WebFetchExecutionError, WebFetchExecutionOutcome, WebFetchExecutionRequest, WebFetchExecutor,
@@ -186,9 +199,9 @@ pub use mcp_registry::{
     activate_lazy_mcp_tools_detailed_with_mcp_handlers,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder_and_network_admission,
-    build_configured_execution_backend, build_tool_registry,
-    build_tool_registry_with_mcp_elicitation, build_tool_registry_with_mcp_handlers,
-    build_tool_registry_with_mutation_recorder,
+    attach_remote_mcp_activation_presenter, build_configured_execution_backend,
+    build_tool_registry, build_tool_registry_with_mcp_elicitation,
+    build_tool_registry_with_mcp_handlers, build_tool_registry_with_mutation_recorder,
     build_tool_registry_with_mutation_recorder_and_workspace_trust,
     build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission,
     build_tool_registry_without_eager_mcp,

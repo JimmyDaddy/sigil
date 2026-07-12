@@ -259,6 +259,7 @@ pub(super) async fn run_background_chat_agent(
     mailbox_rx: mpsc::Receiver<AgentMailboxMessage>,
     event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
 ) -> Result<BackgroundChatAgentResult> {
+    let web_task_tree_budget = initial_input.web_task_tree_budget();
     let mut handler = BackgroundChatChildEventHandler {
         thread_id: thread_id.clone(),
         sink: event_sink.clone(),
@@ -304,10 +305,14 @@ pub(super) async fn run_background_chat_agent(
             "Parent agent sent follow-up instructions while this child agent was active.\n\n{}",
             prompts.join("\n\n")
         );
+        let mut followup_input = sigil_kernel::AgentRunInput::user(followup_prompt);
+        if let Some(budget) = web_task_tree_budget.as_ref() {
+            followup_input = followup_input.with_web_task_tree_budget(Arc::clone(budget));
+        }
         latest_output = match child_agent
             .run_with_approval_input(
                 &mut child_session,
-                sigil_kernel::AgentRunInput::user(followup_prompt),
+                followup_input,
                 child_options.clone(),
                 &mut handler,
                 &mut approval_handler,

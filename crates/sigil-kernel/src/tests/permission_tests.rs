@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::{
     NetworkEffect, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject,
-    ToolSubjectScope,
+    ToolSubjectKind, ToolSubjectScope,
 };
 
 use super::{
@@ -47,6 +47,16 @@ fn external_path_subject(path: PathBuf) -> ToolSubject {
         Some(path),
         ToolSubjectScope::External,
     )
+}
+
+fn external_network_endpoint_subject(url: &str) -> ToolSubject {
+    ToolSubject {
+        kind: ToolSubjectKind::NetworkEndpoint,
+        original: url.to_owned(),
+        normalized: url.to_owned(),
+        canonical_path: None,
+        scope: ToolSubjectScope::External,
+    }
 }
 
 fn command_subject(command: &str) -> ToolSubject {
@@ -998,6 +1008,34 @@ fn permission_external_directory_disabled_denies_external_subjects() -> Result<(
 
     assert_eq!(decision.mode, ApprovalMode::Deny);
     assert!(decision.external_directory_required);
+    Ok(())
+}
+
+#[test]
+fn external_network_endpoint_does_not_enter_the_external_directory_gate() -> Result<()> {
+    let subject = external_network_endpoint_subject("https://example.com/docs");
+    for mode in [PermissionMode::Manual, PermissionMode::AutoEdit] {
+        let config = PermissionConfig {
+            mode,
+            ..PermissionConfig::default()
+        };
+        let decision = PermissionPolicy::new(&config)
+            .decide_with_operation_network_effect_and_default(
+                &network_spec(NetworkEffect::Read),
+                "webfetch",
+                ToolAccess::Read,
+                ToolOperation::NetworkRequest,
+                Some(NetworkEffect::Read),
+                vec![subject.clone()],
+                None,
+            )?;
+
+        assert_eq!(decision.local_policy_decision, ApprovalMode::Allow);
+        assert_eq!(decision.network_policy_decision, ApprovalMode::Allow);
+        assert_eq!(decision.mode, ApprovalMode::Allow);
+        assert!(!decision.external_directory_required);
+        assert_eq!(decision.subject_zones, [PathTrustZone::Unknown]);
+    }
     Ok(())
 }
 

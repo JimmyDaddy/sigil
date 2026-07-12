@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use sigil_kernel::{
-    ExternalEvidenceLevel, ExternalSourceRecord, FinalizedHostedCitation, FinalizedHostedTurn,
-    HostedEvidence, HostedEvidenceProcessor, HostedFinalizationContext, HostedToolTerminalStatus,
-    HostedTurnBuffer, HostedTurnError, SourceCacheStatus, SourceFreshness,
+    DEFAULT_WEB_URL_CAPABILITY_TTL_MS, ExternalEvidenceLevel, ExternalSourceRecord,
+    FinalizedHostedCitation, FinalizedHostedTurn, HostedEvidence, HostedEvidenceProcessor,
+    HostedFinalizationContext, HostedToolTerminalStatus, HostedTurnBuffer, HostedTurnError,
+    SourceCacheStatus, SourceFreshness, UserUrlCapabilityRegistration, WebUrlProvenanceKind,
     canonical_web_url_persistence_projection, safe_persistence_text,
 };
 
@@ -43,6 +44,7 @@ impl HostedEvidenceProcessor for HostedEvidenceFinalizer {
         let safe_text = safe_persistence_text(buffer.text());
         let safe_reasoning = safe_persistence_text(buffer.reasoning());
         let mut sources = Vec::new();
+        let mut url_capability_registrations = Vec::new();
         let mut source_ids = BTreeMap::new();
         let mut citation_candidates = Vec::new();
         let mut query_observed = false;
@@ -75,6 +77,20 @@ impl HostedEvidenceProcessor for HostedEvidenceFinalizer {
                         candidate.provider_source_id().to_owned(),
                         source.source_id.clone(),
                     );
+                    let issued_at_ms = crate::current_unix_time_ms();
+                    url_capability_registrations.push(UserUrlCapabilityRegistration {
+                        source_id: source.source_id.clone(),
+                        durable_entry_id: "pending-hosted-final-message".to_owned(),
+                        raw_canonical_url: projection.raw_canonical_url,
+                        safe_display_url: source.safe_display_url.clone(),
+                        restart_policy: projection.restart_policy,
+                        replayable_canonical_url: projection.replayable_canonical_url,
+                        originating_call_id: None,
+                        provenance: WebUrlProvenanceKind::WebSearchResult,
+                        issued_at_ms,
+                        expires_at_ms: issued_at_ms
+                            .saturating_add(DEFAULT_WEB_URL_CAPABILITY_TTL_MS),
+                    });
                     sources.push(source);
                 }
                 HostedEvidence::Citation(candidate) => citation_candidates.push(candidate),
@@ -105,6 +121,7 @@ impl HostedEvidenceProcessor for HostedEvidenceFinalizer {
             reasoning_trace: safe_reasoning,
             sources,
             citations,
+            url_capability_registrations,
             hosted_used: buffer.hosted_used(),
             query_observed,
         })

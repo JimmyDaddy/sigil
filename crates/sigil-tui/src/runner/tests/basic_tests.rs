@@ -814,7 +814,7 @@ fn spawn_agent_worker_reports_eager_mcp_failure_without_stopping_worker() -> Res
             "api_key": "test-key"
         }),
     );
-    root_config.mcp_servers.push(McpServerConfig {
+    root_config.mcp_servers.push(mcp_server_config! {
         name: "required-eager".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         startup: McpServerStartup::Eager,
@@ -995,7 +995,7 @@ fn activate_lazy_mcp_reports_failed_status_for_required_server_error() -> Result
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
     let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    root_config.mcp_servers.push(McpServerConfig {
+    root_config.mcp_servers.push(mcp_server_config! {
         name: "required-lazy".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         startup: McpServerStartup::Lazy,
@@ -1040,7 +1040,7 @@ fn activate_lazy_mcp_reports_ready_status_when_server_registers_tools() -> Resul
 
     let session_log_path = temp.path().join(".sigil/sessions/session-ready-lazy.jsonl");
     let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    root_config.mcp_servers.push(McpServerConfig {
+    root_config.mcp_servers.push(mcp_server_config! {
         name: "ready-lazy".to_owned(),
         command: "python3".to_owned(),
         args: vec![script_path.to_string_lossy().to_string()],

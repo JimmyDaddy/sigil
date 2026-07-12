@@ -71,6 +71,7 @@ version = "{version}"
 
 [[mcp_servers]]
 name = "server"
+transport = "stdio"
 command = {command:?}
 args = [{args}]
 startup = "lazy"
@@ -214,7 +215,7 @@ fn plugin_declaration_with_expected_facts(
 fn mcp_declaration_promotes_legacy_root_without_losing_declared_name() {
     let workspace = tempfile::tempdir().expect("workspace should create");
     let declarations = resolve_user_root_mcp_declarations(
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "root-server".to_owned(),
             command: "fixture-command".to_owned(),
             ..McpServerConfig::default()
@@ -238,7 +239,7 @@ fn mcp_declaration_promotes_legacy_root_without_losing_declared_name() {
 fn mcp_declaration_rejects_root_reserved_namespace_and_duplicate_names() {
     let workspace = tempfile::tempdir().expect("workspace should create");
     let reserved = resolve_user_root_mcp_declarations(
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "builtin:exa-anonymous".to_owned(),
             command: "fixture-command".to_owned(),
             ..McpServerConfig::default()
@@ -250,12 +251,12 @@ fn mcp_declaration_rejects_root_reserved_namespace_and_duplicate_names() {
 
     let duplicate = resolve_user_root_mcp_declarations(
         &[
-            McpServerConfig {
+            mcp_server_config! {
                 name: "same".to_owned(),
                 command: "fixture-command".to_owned(),
                 ..McpServerConfig::default()
             },
-            McpServerConfig {
+            mcp_server_config! {
                 name: "same".to_owned(),
                 command: "fixture-command".to_owned(),
                 ..McpServerConfig::default()
@@ -283,7 +284,7 @@ fn mcp_declaration_constructor_enforces_plugin_attestation_one_to_one() {
     let workspace = tempfile::tempdir().expect("workspace should create");
     let user = ResolvedMcpServerDeclaration::new(
         "root".to_owned(),
-        McpServerConfig {
+        mcp_server_config! {
             name: "root".to_owned(),
             command: "fixture-command".to_owned(),
             ..McpServerConfig::default()
@@ -311,7 +312,7 @@ fn mcp_declaration_builtin_origin_does_not_imply_none_execution_base() {
     });
     write_executable(&executable, fixture_executable_body());
     let local = ResolvedMcpServerDeclaration::builtin_release_profile(
-        McpServerConfig {
+        mcp_server_config! {
             name: "builtin:local-fixture".to_owned(),
             command: executable.to_string_lossy().into_owned(),
             ..McpServerConfig::default()
@@ -330,7 +331,7 @@ fn mcp_declaration_builtin_origin_does_not_imply_none_execution_base() {
     );
 
     let none = ResolvedMcpServerDeclaration::builtin_release_profile(
-        McpServerConfig {
+        mcp_server_config! {
             name: "builtin:remote-fixture".to_owned(),
             command: "definitely-missing-command".to_owned(),
             ..McpServerConfig::default()
@@ -362,7 +363,7 @@ fn mcp_declaration_stable_pin_is_path_safe_while_exact_authorization_binds_base(
     let release_digest = format!("sha256:{:064x}", 13);
     let make_declaration = |root: &Path, executable: &Path| {
         ResolvedMcpServerDeclaration::builtin_release_profile(
-            McpServerConfig {
+            mcp_server_config! {
                 name: "builtin:path-safe-pin".to_owned(),
                 command: executable.to_string_lossy().into_owned(),
                 args: vec!["relative-argument.txt".to_owned()],
@@ -446,7 +447,14 @@ fn mcp_declaration_resolves_bare_node_with_plugin_cwd_and_preserves_relative_arg
             .canonicalize()
             .expect("plugin root should resolve")
     );
-    assert_eq!(declaration.config().args, ["server.js"]);
+    assert_eq!(
+        declaration
+            .config()
+            .stdio()
+            .expect("plugin declaration should remain stdio")
+            .1,
+        ["server.js"]
+    );
 }
 
 #[test]
@@ -465,7 +473,14 @@ fn mcp_declaration_resolves_relative_and_absolute_commands_without_interpreting_
             .canonicalize()
             .expect("relative executable should canonicalize")
     );
-    assert_eq!(relative.config().args, ["relative-input.txt"]);
+    assert_eq!(
+        relative
+            .config()
+            .stdio()
+            .expect("relative declaration should remain stdio")
+            .1,
+        ["relative-input.txt"]
+    );
 
     let absolute_executable = workspace.path().join(if cfg!(windows) {
         "absolute-server.cmd"
@@ -485,7 +500,14 @@ fn mcp_declaration_resolves_relative_and_absolute_commands_without_interpreting_
             .canonicalize()
             .expect("absolute executable should canonicalize")
     );
-    assert_eq!(absolute.config().args, ["still-relative.txt"]);
+    assert_eq!(
+        absolute
+            .config()
+            .stdio()
+            .expect("absolute declaration should remain stdio")
+            .1,
+        ["still-relative.txt"]
+    );
 }
 
 #[cfg(unix)]
@@ -518,7 +540,7 @@ fn mcp_declaration_rejects_execution_base_identity_replacement() {
     );
     write_executable(&replacement.join("bin/server"), fixture_executable_body());
     let declaration = ResolvedMcpServerDeclaration::user_root(
-        McpServerConfig {
+        mcp_server_config! {
             name: "workspace-server".to_owned(),
             command: "./bin/server".to_owned(),
             ..McpServerConfig::default()
@@ -636,7 +658,7 @@ fn mcp_declaration_safe_projection_excludes_paths_commands_args_and_plain_digest
     let command_secret = "low-entropy-command-secret";
     let arg_secret = "low-entropy-arg-secret";
     let declaration = ResolvedMcpServerDeclaration::user_root(
-        McpServerConfig {
+        mcp_server_config! {
             name: "safe".to_owned(),
             command: command_secret.to_owned(),
             args: vec![arg_secret.to_owned()],
@@ -689,7 +711,7 @@ fn mcp_declaration_safe_projection_sanitizes_untrusted_root_and_builtin_labels()
     let workspace = tempfile::tempdir().expect("workspace should create");
     let malicious_root_name = "/Users/example\napi_key=sk-secret-value";
     let root = ResolvedMcpServerDeclaration::user_root(
-        McpServerConfig {
+        mcp_server_config! {
             name: malicious_root_name.to_owned(),
             command: "fixture-command".to_owned(),
             ..McpServerConfig::default()
@@ -700,7 +722,7 @@ fn mcp_declaration_safe_projection_sanitizes_untrusted_root_and_builtin_labels()
     let profile_secret = "C:\\private\\authorization-token";
     let release_secret = "secret-release-token";
     let builtin = ResolvedMcpServerDeclaration::builtin_release_profile(
-        McpServerConfig {
+        mcp_server_config! {
             name: "builtin:safe-fixture".to_owned(),
             command: "fixture-command".to_owned(),
             ..McpServerConfig::default()
@@ -741,7 +763,7 @@ fn mcp_declaration_safe_projection_sanitizes_untrusted_root_and_builtin_labels()
     assert!(!origin_debug.contains(release_secret));
 
     let unsafe_error = ResolvedMcpServerDeclaration::user_root(
-        McpServerConfig {
+        mcp_server_config! {
             name: "builtin:/private\nauthorization=debug-secret".to_owned(),
             command: "fixture-command".to_owned(),
             ..McpServerConfig::default()

@@ -759,6 +759,8 @@ pub struct FinalizedHostedTurn {
     pub reasoning_trace: String,
     pub sources: Vec<ExternalSourceRecord>,
     pub citations: Vec<FinalizedHostedCitation>,
+    /// Exact URL registrations consumed before the final assistant message becomes durable.
+    pub url_capability_registrations: Vec<crate::UserUrlCapabilityRegistration>,
     pub hosted_used: bool,
     pub query_observed: bool,
 }

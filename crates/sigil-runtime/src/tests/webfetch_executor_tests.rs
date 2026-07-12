@@ -10,9 +10,9 @@ use std::{
 use sigil_kernel::{
     DisclosurePresentationError, DisclosurePresentationReceipt, DurableEventType,
     EgressDisclosurePresenter, ExternalEvidenceLevel, JsonlSessionStore, PreEgressDisclosure,
-    SecretString, Session, SessionStreamRecord, UserUrlCapabilityRegistrar,
-    UserUrlCapabilityRegistration, WebBudgetReservationKind, WebBudgetReservationRequest,
-    WebTaskTreeBudget, WebTaskTreeBudgetLimits, WebUrlProvenanceKind,
+    SecretString, Session, SessionStreamRecord, UserUrlCapabilityLookupError,
+    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, WebBudgetReservationKind,
+    WebBudgetReservationRequest, WebTaskTreeBudget, WebTaskTreeBudgetLimits, WebUrlProvenanceKind,
     canonical_web_url_persistence_projection,
 };
 use sigil_tools_builtin::{
@@ -21,7 +21,9 @@ use sigil_tools_builtin::{
 use tempfile::tempdir;
 
 use super::*;
-use crate::{ProxyEnvironment, WebDestinationGuardPolicy, WebDestinationResolver};
+use crate::{
+    ProxyEnvironment, WebDestinationGuardPolicy, WebDestinationResolver, WebUrlCapabilityStore,
+};
 
 const SESSION: &str = "webfetch-session";
 const SOURCE: &str = "src_00000000000000000000000000000001";
@@ -215,7 +217,7 @@ async fn missing_or_stale_presenter_and_source_mismatch_produce_zero_dns_and_tra
     assert!(matches!(
         result,
         Err(WebFetchExecutionError::Capability(
-            UrlCapabilityLookupError::NotFound
+            UserUrlCapabilityLookupError::NotFound
         ))
     ));
     assert_eq!(resolver.calls(), 0);
@@ -396,8 +398,9 @@ impl Fixture {
         resolver: FakeResolver,
         transport: FakeTransport,
     ) -> WebFetchExecutor<FakeResolver, FakeTransport> {
+        let capabilities: Arc<dyn UserUrlCapabilityRegistrar> = self.capabilities.clone();
         WebFetchExecutor::new(
-            Arc::clone(&self.capabilities),
+            capabilities,
             self.ordering.clone(),
             WebDestinationGuard::new(
                 resolver,
@@ -460,7 +463,8 @@ fn budget() -> Arc<WebTaskTreeBudget> {
     WebTaskTreeBudget::new(
         "webfetch-root",
         WebTaskTreeBudgetLimits {
-            max_logical_calls: 4,
+            max_fetch_calls: 4,
+            max_client_search_calls: 4,
             max_hosted_requests: 4,
             max_network_attempts: 8,
             max_wire_bytes: 8 * 1024 * 1024,
@@ -485,7 +489,7 @@ fn reservation_for(budget: &Arc<WebTaskTreeBudget>) -> WebBudgetReservation {
             attempt_id: "webfetch-attempt".to_owned(),
             route_lease_id: "webfetch-route-lease".to_owned(),
             route_fingerprint: "route-fingerprint".to_owned(),
-            kind: WebBudgetReservationKind::LogicalCall,
+            kind: WebBudgetReservationKind::FetchCall,
         })
         .expect("reservation should create")
 }

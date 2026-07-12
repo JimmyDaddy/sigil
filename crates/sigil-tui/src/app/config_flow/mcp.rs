@@ -28,7 +28,7 @@ pub(super) fn render_section(app: &AppState, lines: &mut Vec<String>, config_sta
     lines.push(String::new());
     lines.push("Enter next server · Down actions · footer activate/refresh".to_owned());
     lines.push(render_config_hint_row(
-        "MCP command, args, and timeout are edited in the config file",
+        "Transport-specific fields are edited in the config file; this view never shows resolved secret values",
     ));
     lines.extend(render_config_selection_details(config_state));
 }

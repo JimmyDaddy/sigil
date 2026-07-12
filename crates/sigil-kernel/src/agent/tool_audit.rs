@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -12,16 +12,16 @@ use crate::{
     ToolExecutionStatus, ToolPreview, ToolResult, ToolResultMeta, ToolResultStatus,
     ToolSubjectAudit,
     event::EventHandler,
-    permission::PermissionDecision,
+    permission::{PermissionDecision, tool_approval_session_grant_shape},
     provider::ToolCall,
     time::saturating_elapsed,
-    tool::{ToolSubject, ToolSubjectScope},
+    tool::{ToolSubject, ToolSubjectKind, ToolSubjectScope},
 };
 
 pub(super) fn has_external_subject(subjects: &[ToolSubject]) -> bool {
-    subjects
-        .iter()
-        .any(|subject| subject.scope == ToolSubjectScope::External)
+    subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.scope == ToolSubjectScope::External
+    })
 }
 
 pub(super) fn attach_tool_call_context(
@@ -268,6 +268,8 @@ pub(super) fn append_tool_approval_session_grant<H: EventHandler>(
     call: &ToolCall,
     decision: &PermissionDecision,
 ) -> Result<()> {
+    let shape = tool_approval_session_grant_shape(decision)
+        .ok_or_else(|| anyhow!("tool approval decision cannot be widened to a session grant"))?;
     let control = ControlEntry::ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry {
         call_id: call.id.clone(),
         tool_name: call.name.clone(),
@@ -277,6 +279,8 @@ pub(super) fn append_tool_approval_session_grant<H: EventHandler>(
         risk: decision.risk,
         subjects: audit_subjects(&decision.subjects),
         subject_zones: decision.subject_zones.clone(),
+        facets: shape.facets,
+        scope: shape.scope,
         expires: ToolApprovalSessionGrantExpiry::Session,
         granted_at_ms: super::unix_time_ms(),
     });

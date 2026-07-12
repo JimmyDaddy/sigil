@@ -556,6 +556,7 @@ fn root_config_with_checks(
         appearance: Default::default(),
         task: TaskConfig::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
     }
 }

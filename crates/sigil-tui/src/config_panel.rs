@@ -29,6 +29,8 @@ pub(crate) use display::{
 pub(crate) use field::ConfigField;
 pub(crate) use footer_action::ConfigFooterAction;
 pub(crate) use mcp_server::McpServerDraft;
+#[cfg(test)]
+pub(crate) use mcp_server::McpTransportDraft;
 use provider::ProviderFieldDraft;
 #[cfg(test)]
 pub(crate) use provider::cycle_provider_name;
@@ -68,6 +70,10 @@ pub(crate) struct ConfigDraft {
     pub(crate) model_request_timeout_secs: String,
     pub(crate) model_request_stream_idle_timeout_secs: String,
     pub(crate) permission_mode: PermissionMode,
+    pub(crate) web_enabled: bool,
+    pub(crate) web_network_mode: sigil_kernel::NetworkPolicy,
+    pub(crate) web_search_route: sigil_kernel::WebSearchRoute,
+    pub(crate) web_bundled_search_enabled: bool,
     pub(crate) verification_auto_run: VerificationAutoRunPolicy,
     pub(crate) memory_enabled: bool,
     pub(crate) compaction_enabled: bool,

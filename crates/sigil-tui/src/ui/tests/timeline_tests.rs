@@ -561,7 +561,7 @@ fn render_timeline_entry_lines_show_phase_tool_streaming_and_unknown_blocks() {
                 text: "streaming".to_owned(),
             },
             "streaming",
-            "writing the reply",
+            "receiving response",
         ),
         (
             TimelineEntry {
@@ -585,7 +585,7 @@ fn render_timeline_entry_lines_show_phase_default_summaries_without_detail() {
     for (kind, expected) in [
         ("thinking", "reasoning"),
         ("tool", "running tool"),
-        ("streaming", "writing the reply"),
+        ("streaming", "receiving response"),
     ] {
         let entry = TimelineEntry {
             role: TimelineRole::Phase,

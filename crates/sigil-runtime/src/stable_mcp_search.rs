@@ -445,6 +445,7 @@ impl WebSearchConnector for ConfiguredStableMcpSearchConnector {
                         WebSearchResponse {
                             safe_model_content,
                             sources: Vec::new(),
+                            source_capabilities: Vec::new(),
                             source_projection: SourceProjection::Unavailable {
                                 reason: SourceProjectionUnavailableReason::GenericAdapterNoSourceContract,
                             },
@@ -757,7 +758,7 @@ fn safe_plain_text(value: &str, redactor: &SecretRedactor) -> String {
     projected[..end].to_owned()
 }
 
-fn bundled_profile_fingerprint() -> String {
+pub(crate) fn bundled_profile_fingerprint() -> String {
     sha256(&format!(
         "{BUNDLED_PROFILE_ID}\0{BUNDLED_ENDPOINT}\0{BUNDLED_DISCLOSURE_ID}\0{BUNDLED_ADAPTER_ID}\0{EXA_TEXT_V1_CODEC_ID}"
     ))

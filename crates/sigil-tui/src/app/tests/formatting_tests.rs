@@ -316,6 +316,32 @@ fn format_tool_result_block_redacted_keeps_full_preview_payloads_for_expansion()
 }
 
 #[test]
+fn format_websearch_result_keeps_search_content_visible_in_the_tool_card() -> Result<()> {
+    let content =
+        "Title: Rust release notes\nURL: https://www.rust-lang.org/\nText: Stable release details";
+    let payload: serde_json::Value = serde_json::from_str(&format_tool_result_block_redacted(
+        &ToolResult::ok(
+            "call-websearch",
+            "websearch",
+            content,
+            ToolResultMeta::default(),
+        ),
+        None,
+        &SecretRedactor::empty(),
+    ))?;
+
+    assert_eq!(payload["tool_name"], "websearch");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["preview_lines"][0], "Title: Rust release notes");
+    assert_eq!(
+        payload["preview_lines"][1],
+        "URL: https://www.rust-lang.org/"
+    );
+    assert_eq!(payload["hidden_lines"], 0);
+    Ok(())
+}
+
+#[test]
 fn format_terminal_task_block_redacted_summarizes_failed_and_exited_statuses() -> Result<()> {
     let failed: serde_json::Value = serde_json::from_str(&format_terminal_task_block_redacted(
         &format_terminal_entry(

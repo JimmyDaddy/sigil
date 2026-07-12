@@ -403,6 +403,7 @@ approval = "ask"
 
 [[mcp_servers]]
 name = "repo-tools"
+transport = "stdio"
 command = "node"
 args = ["server.js"]
 startup = "lazy"
@@ -579,7 +580,7 @@ fn config_empty_mcp_reports_no_selection_and_preserves_explicit_footer_navigatio
 #[test]
 fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         command: "mcp-filesystem".to_owned(),
         required: false,
@@ -622,7 +623,7 @@ fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
 #[test]
 fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         command: "mcp-filesystem".to_owned(),
         required: false,
@@ -675,7 +676,7 @@ fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
 #[test]
 fn config_mcp_footer_refreshes_saved_eager_server() -> Result<()> {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "eager".to_owned(),
         command: "mcp-eager".to_owned(),
         startup: McpServerStartup::Eager,
@@ -728,7 +729,7 @@ fn config_mcp_footer_refreshes_saved_eager_server() -> Result<()> {
 #[test]
 fn config_mcp_footer_activate_refreshes_failed_lazy_server() -> Result<()> {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         command: "mcp-filesystem".to_owned(),
         required: false,
@@ -832,10 +833,10 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/12 · provider settings");
+    assert_eq!(lines[0], "Provider 1/13 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] permissions memory compaction mcp appearance"
+        "[provider] permissions web memory compaction mcp appearance"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -1254,7 +1255,7 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Code Intel 6/12 · LSP readiness"));
+    assert!(detail.contains("Code Intel 7/13 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
     assert!(detail.contains("Server startup: lazy"));
@@ -1285,7 +1286,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Terminal 7/12 · terminal integration"));
+    assert!(detail.contains("Terminal 8/13 · terminal integration"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("- Keyboard enhancement: auto"));
     assert!(detail.contains("- Mouse capture: yes"));
@@ -1314,7 +1315,7 @@ fn config_appearance_step_shows_theme_and_scope() {
     let detail = app.config_detail_lines().join("\n");
     let nav = app.config_nav_lines().join("\n");
 
-    assert!(detail.contains("Appearance 8/12 · TUI theme"));
+    assert!(detail.contains("Appearance 9/13 · TUI theme"));
     assert!(nav.contains("Appearance: Enter cycle"));
     assert!(nav.contains("Appearance: color overrides in sigil.toml"));
     assert!(detail.contains("[theme]"));
@@ -1756,7 +1757,7 @@ slash_names = ["review-agent"]
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Agents 9/12 · agent profiles"));
+    assert!(detail.contains("Agents 10/13 · agent profiles"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 5 agents"));
     assert!(detail.contains("- Compatibility: 0 agents"));
@@ -2496,7 +2497,7 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Plugins 11/12 · plugin trust review"));
+    assert!(detail.contains("Plugins 12/13 · plugin trust review"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 1 plugins"));
     assert!(detail.contains("- Selected: 1 of 1"));
@@ -2624,6 +2625,7 @@ approval = "allow"
 
 [[mcp_servers]]
 name = "tools-1"
+transport = "stdio"
 command = "node"
 args = ["server-1.js"]
 startup = "lazy"
@@ -2631,6 +2633,7 @@ required = false
 
 [[mcp_servers]]
 name = "tools-2"
+transport = "stdio"
 command = "node"
 args = ["server-2.js"]
 startup = "lazy"
@@ -2638,6 +2641,7 @@ required = false
 
 [[mcp_servers]]
 name = "tools-3"
+transport = "stdio"
 command = "node"
 args = ["server-3.js"]
 startup = "eager"
@@ -2645,6 +2649,7 @@ required = true
 
 [[mcp_servers]]
 name = "tools-4"
+transport = "stdio"
 command = "node"
 args = ["server-4.js"]
 startup = "eager"
@@ -3246,7 +3251,7 @@ fn config_mcp_server_creation_stays_config_file_only() -> Result<()> {
     let detail = app.config_detail_lines().join("\n");
     assert!(detail.contains("No MCP servers configured"));
     assert!(detail.contains("Add MCP servers in ~/.sigil/sigil.toml"));
-    assert!(detail.contains("MCP command, args, and timeout are edited in the config file"));
+    assert!(detail.contains("Transport-specific fields are edited in the config file"));
     assert!(!detail.contains("Command"));
     assert!(!detail.contains("Arguments"));
     assert!(!detail.contains("args_csv:"));
@@ -3717,7 +3722,7 @@ fn config_permission_and_mcp_details_render_rule_and_pin_summaries() -> Result<(
         },
     ];
     config.mcp_servers = vec![
-        sigil_kernel::McpServerConfig {
+        mcp_server_config! {
             name: "off".to_owned(),
             command: "mcp-off".to_owned(),
             trust: sigil_kernel::McpServerTrustPolicy {
@@ -3727,13 +3732,15 @@ fn config_permission_and_mcp_details_render_rule_and_pin_summaries() -> Result<(
             },
             ..Default::default()
         },
-        sigil_kernel::McpServerConfig {
+        mcp_server_config! {
             name: "pinned".to_owned(),
             command: "mcp-pinned".to_owned(),
             trust: sigil_kernel::McpServerTrustPolicy {
                 pin_version: true,
                 pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                    command_fingerprint: "sha256:abc".to_owned(),
+                    transport_fingerprint:
+                        "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                            .to_owned(),
                     protocol_version: "2024-11-05".to_owned(),
                     server_name: "pinned".to_owned(),
                     server_version: "1.0.0".to_owned(),
@@ -3743,7 +3750,7 @@ fn config_permission_and_mcp_details_render_rule_and_pin_summaries() -> Result<(
             },
             ..Default::default()
         },
-        sigil_kernel::McpServerConfig {
+        mcp_server_config! {
             name: "missing".to_owned(),
             command: "mcp-missing".to_owned(),
             trust: sigil_kernel::McpServerTrustPolicy {
@@ -3840,12 +3847,12 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
     assert_eq!(app.config_section_title(), Some("Provider"));
 
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         command: "mcp-filesystem".to_owned(),
         ..Default::default()
     });
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "git".to_owned(),
         command: "mcp-git".to_owned(),
         ..Default::default()
@@ -3937,7 +3944,7 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
 fn config_mcp_enter_cycles_server_and_footer_activates_selected_server() -> Result<()> {
     let mut config = test_config();
     for name in ["env-ready", "env-missing"] {
-        config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        config.mcp_servers.push(mcp_server_config! {
             name: name.to_owned(),
             command: "mcp-probe".to_owned(),
             startup: McpServerStartup::Lazy,
@@ -4041,7 +4048,7 @@ fn config_mcp_enter_cycles_server_and_footer_activates_selected_server() -> Resu
 fn config_mcp_server_selector_renders_selected_position() {
     let mut config = test_config();
     for index in 0..8 {
-        config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        config.mcp_servers.push(mcp_server_config! {
             name: format!("mcp-{index}"),
             command: "mcp-probe".to_owned(),
             startup: McpServerStartup::Lazy,

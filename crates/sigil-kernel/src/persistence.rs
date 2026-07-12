@@ -209,6 +209,120 @@ pub trait UserUrlCapabilityRegistrar: Send + Sync {
     fn stage(&self, registration: UserUrlCapabilityRegistration) -> Result<()>;
     fn commit_message(&self, durable_entry_id: &str) -> Result<()>;
     fn rollback_message(&self, durable_entry_id: &str) -> Result<()>;
+
+    /// Resolves one exact, process-local URL capability for a network tool.
+    ///
+    /// The default is deliberately fail-closed so persistence-only test registrars and embedders
+    /// cannot accidentally turn a safe display URL back into an executable destination.
+    fn resolve(
+        &self,
+        _session_scope_id: &str,
+        _source_id: &str,
+    ) -> std::result::Result<ResolvedUserUrlCapability, UserUrlCapabilityLookupError> {
+        Err(UserUrlCapabilityLookupError::NotFound)
+    }
+}
+
+/// Stable lookup outcomes for one process-local URL capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum UserUrlCapabilityLookupError {
+    #[error("url capability was not found")]
+    NotFound,
+    #[error("url capability has expired")]
+    Expired,
+    #[error("url capability was evicted")]
+    Evicted,
+    #[error("sensitive URL is not replayable after restart")]
+    InterruptedOnRestart,
+}
+
+impl UserUrlCapabilityLookupError {
+    /// Stable machine code for tool-result projection.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Expired => "expired",
+            Self::Evicted => "evicted",
+            Self::InterruptedOnRestart => "sensitive_url_not_replayable",
+        }
+    }
+}
+
+/// Secret-bearing exact URL capability returned only after a session-scoped lookup succeeds.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedUserUrlCapability {
+    session_scope_id: String,
+    source_id: String,
+    raw_canonical_url: SecretString,
+    safe_display_url: String,
+    restart_policy: ToolRestartPolicy,
+    provenance: WebUrlProvenanceKind,
+}
+
+impl ResolvedUserUrlCapability {
+    #[must_use]
+    pub fn new(
+        session_scope_id: impl Into<String>,
+        source_id: impl Into<String>,
+        raw_canonical_url: SecretString,
+        safe_display_url: impl Into<String>,
+        restart_policy: ToolRestartPolicy,
+        provenance: WebUrlProvenanceKind,
+    ) -> Self {
+        Self {
+            session_scope_id: session_scope_id.into(),
+            source_id: source_id.into(),
+            raw_canonical_url,
+            safe_display_url: safe_display_url.into(),
+            restart_policy,
+            provenance,
+        }
+    }
+
+    #[must_use]
+    pub fn session_scope_id(&self) -> &str {
+        &self.session_scope_id
+    }
+
+    #[must_use]
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    #[must_use]
+    pub fn raw_canonical_url(&self) -> &SecretString {
+        &self.raw_canonical_url
+    }
+
+    #[must_use]
+    pub fn safe_display_url(&self) -> &str {
+        &self.safe_display_url
+    }
+
+    #[must_use]
+    pub fn restart_policy(&self) -> ToolRestartPolicy {
+        self.restart_policy
+    }
+
+    #[must_use]
+    pub fn provenance(&self) -> WebUrlProvenanceKind {
+        self.provenance
+    }
+}
+
+impl fmt::Debug for ResolvedUserUrlCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedUserUrlCapability")
+            .field("session_scope_id", &self.session_scope_id)
+            .field("source_id", &self.source_id)
+            .field("raw_canonical_url", &"[redacted]")
+            .field("safe_display_url", &self.safe_display_url)
+            .field("restart_policy", &self.restart_policy)
+            .field("provenance", &self.provenance)
+            .finish()
+    }
 }
 
 /// Non-serializable exact replacement for one safe durable provider-visible message.

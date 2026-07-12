@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use sigil_kernel::{
-    ExternalEvidenceLevel, ExternalSourceRecord, SecretRedactor, SourceCacheStatus,
+    ExternalEvidenceLevel, ExternalSourceRecord, SecretRedactor, SecretString, SourceCacheStatus,
     SourceFreshness, ToolRestartPolicy, canonical_web_url_persistence_projection,
     safe_persistence_text, sha256_hex, strip_terminal_control_sequences,
 };
@@ -9,6 +9,7 @@ use url::Url;
 
 use crate::web_search_connector::{
     SourceProjection, SourceProjectionUnavailableReason, WebSearchResponse,
+    WebSearchSourceCapability,
 };
 
 pub(crate) const EXA_TEXT_V1_CODEC_ID: &str = "exa_text_v1";
@@ -57,6 +58,7 @@ pub(crate) fn decode_exa_text_v1(
     }
 
     let mut sources = Vec::new();
+    let mut source_capabilities = Vec::new();
     let mut safe_records = Vec::new();
     let mut seen_urls = BTreeSet::new();
     for (rank, candidate) in normalized
@@ -110,6 +112,12 @@ pub(crate) fn decode_exa_text_v1(
             safe_single_line(record.published, redactor, MAX_TITLE_BYTES),
             record.body_label,
         ));
+        source_capabilities.push(WebSearchSourceCapability {
+            source_id: source.source_id.clone(),
+            raw_canonical_url: SecretString::new(canonical_url),
+            safe_display_url: source.safe_display_url.clone(),
+            restart_policy,
+        });
         sources.push(source);
     }
 
@@ -131,6 +139,7 @@ pub(crate) fn decode_exa_text_v1(
             valid_records: sources.len(),
         },
         sources,
+        source_capabilities,
     }
 }
 
@@ -198,6 +207,7 @@ fn unavailable(
     WebSearchResponse {
         safe_model_content,
         sources: Vec::new(),
+        source_capabilities: Vec::new(),
         source_projection: SourceProjection::Unavailable { reason },
     }
 }

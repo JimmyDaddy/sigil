@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use sigil_kernel::{
     DEFAULT_WEB_URL_CAPABILITY_TTL_MS, EgressDataCategory, EgressDisclosureKind,
     EgressNetworkRoute, ExternalEvidenceLevel, ExternalSourceRecord, SourceCacheStatus,
-    SourceFreshness, UserUrlCapabilityRegistration, WebBudgetReservation,
-    WebFetchTransportAuthorization, WebUrlProvenanceKind, canonical_web_url_persistence_projection,
-    sha256_hex,
+    SourceFreshness, UserUrlCapabilityLookupError, UserUrlCapabilityRegistrar,
+    UserUrlCapabilityRegistration, WebBudgetReservation, WebFetchTransportAuthorization,
+    WebUrlProvenanceKind, canonical_web_url_persistence_projection, sha256_hex,
 };
 use sigil_tools_builtin::{
     WebFetchAuthorizedDialPlan, WebFetchError, WebFetchFetchedResponse, WebFetchFormat,
@@ -17,8 +17,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    EgressOrderingCoordinator, EgressOrderingError, UrlCapabilityLookupError, WebDestinationError,
-    WebDestinationGuard, WebDestinationResolver, WebUrlCapabilityStore, current_unix_time_ms,
+    EgressOrderingCoordinator, EgressOrderingError, WebDestinationError, WebDestinationGuard,
+    WebDestinationResolver, current_unix_time_ms,
 };
 
 const MAX_SAME_ORIGIN_REDIRECTS: usize = 5;
@@ -84,7 +84,7 @@ impl std::fmt::Debug for WebFetchExecutionOutcome {
 #[derive(Debug, Error)]
 pub enum WebFetchExecutionError {
     #[error("webfetch URL capability lookup failed: {0}")]
-    Capability(#[from] UrlCapabilityLookupError),
+    Capability(#[from] UserUrlCapabilityLookupError),
     #[error("webfetch URL capability contains an invalid exact URL")]
     InvalidCapabilityUrl,
     #[error("webfetch exceeded the same-origin redirect limit")]
@@ -126,7 +126,7 @@ impl WebFetchHopTransport for WebFetchTransport {
 }
 
 pub struct WebFetchExecutor<R, T> {
-    capabilities: Arc<WebUrlCapabilityStore>,
+    capabilities: Arc<dyn UserUrlCapabilityRegistrar>,
     ordering: EgressOrderingCoordinator,
     destination_guard: WebDestinationGuard<R>,
     transport: T,
@@ -136,7 +136,7 @@ impl<R, T> std::fmt::Debug for WebFetchExecutor<R, T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WebFetchExecutor")
-            .field("session_scope_id", &self.capabilities.session_scope_id())
+            .field("capabilities", &"configured")
             .finish_non_exhaustive()
     }
 }
@@ -148,7 +148,7 @@ where
 {
     #[must_use]
     pub fn new(
-        capabilities: Arc<WebUrlCapabilityStore>,
+        capabilities: Arc<dyn UserUrlCapabilityRegistrar>,
         ordering: EgressOrderingCoordinator,
         destination_guard: WebDestinationGuard<R>,
         transport: T,

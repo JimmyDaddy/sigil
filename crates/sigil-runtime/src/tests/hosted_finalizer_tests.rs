@@ -193,6 +193,7 @@ async fn gemini_hosted_provider_evidence_finalizes_to_safe_source_and_unicode_ci
     let input = AgentRunInput::user("search").with_hosted_tools(vec![hosted], processor);
     let workspace = tempfile::tempdir()?;
     let mut session = Session::new("gemini", "gemini-2.5-flash");
+    let capability_store = crate::attach_session_url_capability_store(&mut session)?;
     let mut handler = GeminiRecordingHandler {
         events: Arc::clone(&events),
     };
@@ -231,6 +232,14 @@ async fn gemini_hosted_provider_evidence_finalizes_to_safe_source_and_unicode_ci
     assert_eq!(provenance[0].citations.len(), 1);
     assert_eq!(provenance[0].citations[0].start_byte, 0);
     assert_eq!(provenance[0].citations[0].end_byte, 7);
+    let capability = capability_store.resolve(
+        session.session_scope_id(),
+        &provenance[0].sources[0].source_id,
+    )?;
+    assert_eq!(
+        capability.raw_canonical_url().expose_secret(),
+        "https://example.com/path?token=raw"
+    );
     let durable = serde_json::to_string(session.entries())?;
     assert!(!durable.contains("raw query"));
     assert!(!durable.contains("token=raw"));

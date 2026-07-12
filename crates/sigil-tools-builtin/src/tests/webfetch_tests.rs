@@ -364,7 +364,7 @@ fn reservation_for(budget: &Arc<WebTaskTreeBudget>) -> WebBudgetReservation {
             attempt_id: "webfetch-attempt".to_owned(),
             route_lease_id: "webfetch-route-lease".to_owned(),
             route_fingerprint: "webfetch-route-fingerprint".to_owned(),
-            kind: WebBudgetReservationKind::LogicalCall,
+            kind: WebBudgetReservationKind::FetchCall,
         })
         .expect("budget reservation should succeed");
     reservation
@@ -380,7 +380,8 @@ fn test_budget() -> Arc<WebTaskTreeBudget> {
     WebTaskTreeBudget::new(
         "webfetch-root",
         WebTaskTreeBudgetLimits {
-            max_logical_calls: 8,
+            max_fetch_calls: 8,
+            max_client_search_calls: 8,
             max_hosted_requests: 8,
             max_network_attempts: 16,
             max_wire_bytes: 32 * 1024 * 1024,

@@ -5,14 +5,15 @@ use super::{
     McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
     SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
     SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement, ThemeId,
-    UsageCostCurrency, default_user_config_dir, default_user_config_path, preferred_config_path,
+    UsageCostCurrency, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchRoute,
+    default_user_config_dir, default_user_config_path, preferred_config_path,
     preferred_config_path_for_known_paths, resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind,
     ExecutionCapability, ExecutionIsolationPolicy, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, MultiAgentMode, SkillConfig, StorageConfig, StorageRoot, TaskConfig,
-    TaskMode, WorkspaceConfig,
+    ExecutionSandboxProfile, McpRemoteClientCapability, MultiAgentMode, SkillConfig, StorageConfig,
+    StorageRoot, TaskConfig, TaskMode, WorkspaceConfig,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -102,6 +103,95 @@ fallback_context_window_tokens = 128000
             .lines()
             .any(|line| line.trim_start().starts_with("context_window_tokens ="))
     );
+}
+
+#[test]
+fn web_config_defaults_and_explicit_policy_roundtrip() {
+    let defaults: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+"#,
+    )
+    .expect("root config should load Web V1 alpha defaults");
+    assert!(defaults.web.enabled);
+    assert!(defaults.web.bundled_search.enabled);
+    assert_eq!(defaults.web.search_route, WebSearchRoute::Auto);
+    assert_eq!(defaults.web.allowed_ports, vec![80, 443]);
+
+    let configured: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[web]
+enabled = false
+network_mode = "deny"
+allow_http = false
+proxy_mode = "direct"
+redirect_policy = "deny"
+search_route = "disabled"
+max_query_chars = 128
+allowed_domains = ["docs.example.com"]
+blocked_domains = ["private.example.com"]
+
+[web.bundled_search]
+enabled = false
+"#,
+    )
+    .expect("explicit Web V1 policy should load");
+    assert!(!configured.web.enabled);
+    assert_eq!(configured.web.network_mode, crate::NetworkPolicy::Deny);
+    assert_eq!(configured.web.proxy_mode, WebProxyMode::Direct);
+    assert_eq!(configured.web.redirect_policy, WebRedirectPolicy::Deny);
+    assert_eq!(configured.web.search_route, WebSearchRoute::Disabled);
+    assert_eq!(configured.web.max_query_chars, 128);
+    assert!(!configured.web.bundled_search.enabled);
+
+    let rendered = toml::to_string_pretty(&configured).expect("root config should serialize");
+    assert!(rendered.contains("[web]"));
+    assert!(rendered.contains("search_route = \"disabled\""));
+}
+
+#[test]
+fn web_policy_cap_only_tightens_the_root_policy() {
+    let config = super::WebConfig::default();
+    let cap = WebPolicyCap {
+        enabled: Some(false),
+        bundled_search_enabled: Some(false),
+        network_mode: Some(crate::NetworkPolicy::Ask),
+        allowed_routes: Some([WebSearchRoute::Mcp].into_iter().collect()),
+        allowed_domains: Some(["docs.example.com".to_owned()].into_iter().collect()),
+        blocked_domains: ["private.example.com".to_owned()].into_iter().collect(),
+        max_query_chars: Some(128),
+        max_query_bytes: Some(256),
+        max_client_searches_per_run: Some(1),
+        max_hosted_enabled_provider_requests_per_run: Some(2),
+        max_network_attempts_per_run: Some(3),
+        max_concurrent_requests: Some(1),
+    };
+
+    let effective = config.meet_policy_cap(&cap);
+    assert!(!effective.enabled);
+    assert!(!effective.bundled_search_enabled);
+    assert_eq!(effective.network_mode, crate::NetworkPolicy::Ask);
+    assert_eq!(
+        effective.allowed_routes,
+        [WebSearchRoute::Mcp].into_iter().collect()
+    );
+    assert_eq!(
+        effective.allowed_domains,
+        ["docs.example.com".to_owned()].into_iter().collect()
+    );
+    assert!(effective.blocked_domains.contains("private.example.com"));
+    assert_eq!(effective.max_query_chars, 128);
+    assert_eq!(effective.max_query_bytes, 256);
+    assert_eq!(effective.max_client_searches_per_run, 1);
+    assert_eq!(effective.max_hosted_enabled_provider_requests_per_run, 2);
+    assert_eq!(effective.max_network_attempts_per_run, 3);
+    assert_eq!(effective.max_concurrent_requests, 1);
 }
 
 #[test]
@@ -473,6 +563,7 @@ fn root_config_save_roundtrips() {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     };
 
@@ -509,6 +600,7 @@ fn root_config_save_handles_paths_without_parent() {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     };
 
@@ -765,6 +857,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
         },
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     };
 
@@ -986,6 +1079,7 @@ model = "deepseek-v4-flash"
 
 [[mcp_servers]]
 name = "required-filesystem"
+transport = "stdio"
 command = "node"
 args = ["/srv/filesystem.js"]
 inherit_env = ["SIGIL_MCP_TOKEN", "MCP_REGION", "SIGIL_MCP_TOKEN"]
@@ -993,6 +1087,7 @@ startup_timeout_secs = 7
 
 [[mcp_servers]]
 name = "optional-third-party"
+transport = "stdio"
 command = "uvx"
 args = ["third-party-mcp"]
 startup_timeout_secs = 3
@@ -1007,7 +1102,7 @@ allow_secrets = false
 pin_version = true
 
 [mcp_servers.trust.pinned]
-command_fingerprint = "sha256:abc"
+transport_fingerprint = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 protocol_version = "2024-11-05"
 server_name = "third-party"
 server_version = "1.2.3"
@@ -1019,7 +1114,10 @@ server_version = "1.2.3"
 
     let required = &config.mcp_servers[0];
     assert!(required.required);
-    assert_eq!(required.inherit_env, vec!["MCP_REGION", "SIGIL_MCP_TOKEN"]);
+    assert_eq!(
+        required.stdio().expect("stdio config").2,
+        ["MCP_REGION", "SIGIL_MCP_TOKEN"]
+    );
     assert_eq!(required.startup, McpServerStartup::Eager);
     assert_eq!(required.trust.trust_class, McpTrustClass::SelfHosted);
     assert_eq!(required.trust.approval_default, ApprovalMode::Ask);
@@ -1040,7 +1138,10 @@ server_version = "1.2.3"
         .pinned
         .as_ref()
         .expect("pinned identity should parse");
-    assert_eq!(pinned.command_fingerprint, "sha256:abc");
+    assert_eq!(
+        pinned.transport_fingerprint,
+        "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    );
     assert_eq!(pinned.protocol_version, "2024-11-05");
     assert_eq!(pinned.server_name, "third-party");
     assert_eq!(pinned.server_version, "1.2.3");
@@ -1059,6 +1160,7 @@ model = "deepseek-v4-flash"
 
 [[mcp_servers]]
 name = "invalid-env"
+transport = "stdio"
 command = "node"
 inherit_env = ["BAD-NAME"]
 "#,
@@ -1066,6 +1168,148 @@ inherit_env = ["BAD-NAME"]
     .expect_err("invalid inherit_env should fail");
 
     assert!(error.to_string().contains("[A-Za-z_][A-Za-z0-9_]*"));
+}
+
+#[test]
+fn root_mcp_flat_transport_variants_roundtrip_without_inference() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[[mcp_servers]]
+name = "local"
+transport = "stdio"
+command = "node"
+args = ["server.js"]
+inherit_env = ["MCP_TOKEN"]
+
+[[mcp_servers]]
+name = "remote"
+transport = "streamable_http"
+url = "https://mcp.example.test/mcp"
+http_headers = { X-Client = "sigil-alpha" }
+env_http_headers = { X-Api-Key = "MCP_API_KEY" }
+client_capabilities = ["roots", "elicitation"]
+startup = "lazy"
+required = false
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("flat MCP variants should parse");
+    assert_eq!(config.mcp_servers[0].transport_name(), "stdio");
+    let remote = config.mcp_servers[1]
+        .streamable_http()
+        .expect("remote transport should parse");
+    assert_eq!(remote.url, "https://mcp.example.test/mcp");
+    assert_eq!(remote.http_headers["X-Client"], "sigil-alpha");
+    assert_eq!(remote.env_http_headers["X-Api-Key"], "MCP_API_KEY");
+    assert!(
+        remote
+            .client_capabilities
+            .contains(&McpRemoteClientCapability::Roots)
+    );
+    assert!(
+        remote
+            .client_capabilities
+            .contains(&McpRemoteClientCapability::ElicitationForm)
+    );
+
+    let encoded = toml::to_string(&config).expect("flat MCP variants should serialize");
+    assert!(encoded.contains("transport = \"stdio\""));
+    assert!(encoded.contains("transport = \"streamable_http\""));
+    let decoded: RootConfig = toml::from_str(&encoded).expect("roundtrip should parse");
+    assert_eq!(decoded.mcp_servers, config.mcp_servers);
+}
+
+#[test]
+fn root_mcp_flat_transport_rejects_missing_unknown_and_cross_variant_fields() {
+    for (case, body, expected) in [
+        (
+            "missing transport",
+            "name = \"legacy\"\ncommand = \"node\"",
+            "transport",
+        ),
+        (
+            "unknown transport",
+            "name = \"unknown\"\ntransport = \"sse\"\nurl = \"https://mcp.example.test/mcp\"",
+            "unknown variant",
+        ),
+        (
+            "stdio remote field",
+            "name = \"cross\"\ntransport = \"stdio\"\ncommand = \"node\"\nurl = \"https://mcp.example.test/mcp\"",
+            "unknown field `url`",
+        ),
+        (
+            "remote stdio field",
+            "name = \"cross\"\ntransport = \"streamable_http\"\nurl = \"https://mcp.example.test/mcp\"\ncommand = \"node\"",
+            "unknown field `command`",
+        ),
+    ] {
+        let raw = format!(
+            "[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\n{body}\n"
+        );
+        let error = toml::from_str::<RootConfig>(&raw).expect_err(case);
+        assert!(
+            error.to_string().contains(expected),
+            "{case}: expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn root_remote_mcp_rejects_unsafe_headers_capabilities_and_legacy_pin() {
+    for (body, expected) in [
+        (
+            "http_headers = { Authorization = \"Bearer secret\" }",
+            "must reference an environment variable",
+        ),
+        (
+            "http_headers = { X-Client = \"sigil\" }\nenv_http_headers = { x-client = \"MCP_TOKEN\" }",
+            "configured more than once",
+        ),
+        (
+            "client_capabilities = [\"roots\", \"roots\"]",
+            "duplicate streamable_http client_capabilities",
+        ),
+        ("client_capabilities = [\"sampling\"]", "unknown variant"),
+        (
+            "bearer_token_env_var = \"BAD-NAME\"",
+            "[A-Za-z_][A-Za-z0-9_]*",
+        ),
+    ] {
+        let raw = format!(
+            "[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\nname = \"remote\"\ntransport = \"streamable_http\"\nurl = \"https://mcp.example.test/mcp\"\n{body}\n"
+        );
+        let error =
+            toml::from_str::<RootConfig>(&raw).expect_err("unsafe remote MCP config should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+
+    let legacy_pin = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[[mcp_servers]]
+name = "legacy-pin"
+transport = "stdio"
+command = "node"
+
+[mcp_servers.trust]
+pin_version = true
+
+[mcp_servers.trust.pinned]
+command_fingerprint = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+protocol_version = "2025-06-18"
+server_name = "legacy"
+server_version = "1.0.0"
+"#;
+    let error =
+        toml::from_str::<RootConfig>(legacy_pin).expect_err("legacy command_fingerprint must fail");
+    assert!(error.to_string().contains("transport_fingerprint"));
 }
 
 #[test]
@@ -1826,6 +2070,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     };
 

@@ -292,6 +292,7 @@ impl HostedEvidenceProcessor for VisibilityCheckingProcessor {
             reasoning_trace: "safe reasoning".to_owned(),
             sources: Vec::new(),
             citations: Vec::new(),
+            url_capability_registrations: Vec::new(),
             hosted_used: true,
             query_observed: false,
         })

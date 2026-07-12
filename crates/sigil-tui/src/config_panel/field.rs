@@ -14,6 +14,10 @@ pub(crate) enum ConfigField {
     #[allow(dead_code)]
     ProviderFimModel,
     PermissionMode,
+    WebEnabled,
+    WebNetworkMode,
+    WebSearchRoute,
+    WebBundledSearchEnabled,
     // Verification auto-run is a policy-file concern. Task status owns
     // immediate run/retry actions in the product surface.
     #[allow(dead_code)]
@@ -74,6 +78,12 @@ impl ConfigField {
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
     const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionMode];
+    const WEB_FIELDS: [Self; 4] = [
+        Self::WebEnabled,
+        Self::WebNetworkMode,
+        Self::WebSearchRoute,
+        Self::WebBundledSearchEnabled,
+    ];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
         Self::CompactionEnabled,
@@ -99,6 +109,7 @@ impl ConfigField {
             ConfigSection::Provider => &Self::PROVIDER_FIELDS,
             ConfigSection::Storage => &Self::STORAGE_FIELDS,
             ConfigSection::Permissions => &Self::PERMISSION_FIELDS,
+            ConfigSection::Web => &Self::WEB_FIELDS,
             ConfigSection::Memory => &Self::MEMORY_FIELDS,
             ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
             ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
@@ -125,6 +136,10 @@ impl ConfigField {
             Self::ProviderBaseUrl => "base_url",
             Self::ProviderFimModel => "fim_model",
             Self::PermissionMode => "mode",
+            Self::WebEnabled => "enabled",
+            Self::WebNetworkMode => "network_mode",
+            Self::WebSearchRoute => "search_route",
+            Self::WebBundledSearchEnabled => "bundled_search",
             Self::VerificationAutoRun => "checks",
             Self::MemoryEnabled => "enabled",
             Self::CompactionEnabled => "enabled",
@@ -164,6 +179,10 @@ impl ConfigField {
             Self::ProviderBaseUrl => "Endpoint",
             Self::ProviderFimModel => "FIM model",
             Self::PermissionMode => "Mode",
+            Self::WebEnabled => "Web tools",
+            Self::WebNetworkMode => "Network mode",
+            Self::WebSearchRoute => "Search route",
+            Self::WebBundledSearchEnabled => "Bundled Exa",
             Self::VerificationAutoRun => "Checks",
             Self::MemoryEnabled => "Memory",
             Self::CompactionEnabled => "Auto compact",
@@ -218,6 +237,16 @@ impl ConfigField {
             }
             Self::PermissionMode => {
                 "Local safety mode for Read/Write/Execute. Network effects use an independent policy that local danger mode cannot widen."
+            }
+            Self::WebEnabled => "Registers public webfetch/websearch product tools for new runs.",
+            Self::WebNetworkMode => {
+                "Independent network effect policy. Ask requires an explicit user action; Deny sends no Web egress."
+            }
+            Self::WebSearchRoute => {
+                "Selects provider-hosted, configured MCP, bundled Exa, automatic resolution, or disabled search."
+            }
+            Self::WebBundledSearchEnabled => {
+                "Allows the pinned anonymous Exa MCP profile only when no configured search binding is authoritative."
             }
             Self::VerificationAutoRun => {
                 "Controls whether trusted project checks may start automatically after writes."
@@ -320,6 +349,8 @@ impl ConfigField {
             Self::ProviderName => "Enter cycle",
             Self::ProviderApiKey => "Enter input",
             Self::PermissionMode
+            | Self::WebNetworkMode
+            | Self::WebSearchRoute
             | Self::VerificationAutoRun
             | Self::CodeIntelServerStartup
             | Self::AppearanceTheme
@@ -328,6 +359,8 @@ impl ConfigField {
             Self::AppearanceColorGroup | Self::AppearanceColorToken => "Enter cycle",
             Self::McpName => "Enter cycle",
             Self::MemoryEnabled
+            | Self::WebEnabled
+            | Self::WebBundledSearchEnabled
             | Self::CompactionEnabled
             | Self::CodeIntelEnabled
             | Self::CodeIntelAutoDiscover

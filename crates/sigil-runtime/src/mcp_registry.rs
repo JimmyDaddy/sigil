@@ -141,7 +141,18 @@ pub async fn register_mcp_server_declarations(
     declarations: &[ResolvedMcpServerDeclaration],
     options: McpDeclarationRegistrationOptions,
 ) -> Result<McpToolRegistrationReport> {
-    let servers = declarations
+    let stdio_declarations = declarations
+        .iter()
+        .filter(|declaration| declaration.config().stdio().is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    if stdio_declarations.is_empty() {
+        return Ok(McpToolRegistrationReport {
+            process_launch_receipts: Vec::new(),
+            lifecycle_owners: Vec::new(),
+        });
+    }
+    let servers = stdio_declarations
         .iter()
         .map(|declaration| declaration.config().clone())
         .collect::<Vec<_>>();
@@ -153,10 +164,10 @@ pub async fn register_mcp_server_declarations(
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(options.elicitation_handler)
             .with_runtime_event_handler(options.runtime_event_handler)
-            .with_pre_spawn_safe_metadata(declaration_pre_spawn_safe_metadata(declarations))
+            .with_pre_spawn_safe_metadata(declaration_pre_spawn_safe_metadata(&stdio_declarations))
             .with_process_launcher(declaration_mcp_process_launcher(
                 root_config,
-                declarations,
+                &stdio_declarations,
                 options.plugin_trust_source,
             )?)
             .with_network_admission(options.network_admission);
@@ -879,7 +890,12 @@ impl McpProcessLauncher for DeclarationAwareMcpProcessLauncher {
                 request.server_name
             )
         })?;
-        if request.args != declaration.config().args {
+        let declaration_args = declaration
+            .config()
+            .stdio()
+            .map(|(_, args, _)| args)
+            .ok_or_else(|| anyhow!("remote MCP declaration cannot use stdio process launcher"))?;
+        if request.args != declaration_args {
             return Err(McpRegistrationError {
                 code: McpRegistrationErrorCode::McpDeclarationBindingChanged,
                 declared_name: declaration.declared_name().to_owned(),
@@ -1216,10 +1232,50 @@ pub(super) fn register_lazy_mcp_activation_tool(
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 ) {
+    if !root_config.mcp_servers.iter().any(|server| {
+        server.startup == McpServerStartup::Lazy || server.streamable_http().is_some()
+    }) {
+        return;
+    }
+    registry.register(Arc::new(McpActivateServerTool {
+        registry: registry.clone(),
+        root_config: root_config.clone(),
+        provider_capabilities: provider_capabilities.clone(),
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        remote_presenter: None,
+    }));
+}
+
+/// Replaces the default fail-closed activation tool with one bound to a concrete product-surface
+/// disclosure presenter. This is required before a user-root Streamable HTTP server can connect.
+pub fn attach_remote_mcp_activation_presenter(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+) {
+    crate::web_fetch_tool::register_web_fetch_tool(registry, root_config, Arc::clone(&presenter));
+    crate::web_search_tool::register_web_search_tool(
+        registry,
+        root_config,
+        provider_capabilities.tool_name_max_chars,
+        Arc::clone(&presenter),
+    );
+    registry.set_run_input_preparer(Arc::new(
+        crate::hosted_web_search::HostedWebSearchInputPreparer::new(
+            root_config.clone(),
+            Arc::clone(&presenter),
+        ),
+    ));
     if !root_config
         .mcp_servers
         .iter()
-        .any(|server| server.startup == McpServerStartup::Lazy)
+        .any(|server| server.streamable_http().is_some())
     {
         return;
     }
@@ -1230,6 +1286,7 @@ pub(super) fn register_lazy_mcp_activation_tool(
         workspace_root,
         elicitation_handler,
         runtime_event_handler,
+        remote_presenter: Some(presenter),
     }));
 }
 
@@ -1241,6 +1298,7 @@ struct McpActivateServerTool {
     workspace_root: PathBuf,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    remote_presenter: Option<Arc<dyn sigil_kernel::EgressDisclosurePresenter>>,
 }
 
 fn mcp_activation_tool_spec() -> ToolSpec {
@@ -1273,6 +1331,14 @@ impl Tool for McpActivateServerTool {
 
     fn permission_operation(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolOperation> {
         Ok(ToolOperation::NetworkRequest)
+    }
+
+    fn permission_access(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
+        let server_name = required_server_name(args)?;
+        Ok(self
+            .lazy_server(server_name)
+            .filter(|server| server.streamable_http().is_some())
+            .map_or(ToolAccess::Execute, |_| ToolAccess::Read))
     }
 
     fn permission_network_effect(
@@ -1319,7 +1385,38 @@ impl Tool for McpActivateServerTool {
         if !server.trust.egress_logging {
             return Ok(None);
         }
-        let environment = sigil_kernel::resolve_extension_process_environment(&server.inherit_env)?;
+        let Some((_, _, inherit_env)) = server.stdio() else {
+            let remote = server
+                .streamable_http()
+                .expect("non-stdio MCP server is streamable HTTP");
+            return Ok(Some(ToolEgressAudit {
+                destination: format!("mcp:{server_name}"),
+                operation: "server/activate".to_owned(),
+                payload: json!({
+                    "server": server_name,
+                    "transport": "streamable_http",
+                    "safe_destination": crate::mcp_stdio_boundary_summary(
+                        &self.root_config,
+                        &self.workspace_root,
+                        server,
+                    ),
+                    "header_names": remote
+                        .http_headers
+                        .keys()
+                        .chain(remote.env_http_headers.keys())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    "credential_environment_names": remote
+                        .env_http_headers
+                        .values()
+                        .chain(remote.bearer_token_env_var.iter())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                }),
+                redacted: true,
+            }));
+        };
+        let environment = sigil_kernel::resolve_extension_process_environment(inherit_env)?;
         let (_, declaration) = user_root_mcp_launch_binding(server, &self.workspace_root)?;
         Ok(Some(ToolEgressAudit {
             destination: format!("mcp:{server_name}"),
@@ -1361,6 +1458,31 @@ impl Tool for McpActivateServerTool {
         }
 
         let mut registry = self.registry.clone();
+        if let Some(server) = self.lazy_server(server_name)
+            && server.streamable_http().is_some()
+        {
+            let presenter = self.remote_presenter.clone().ok_or_else(|| {
+                anyhow!("remote MCP activation requires a concrete disclosure presenter")
+            })?;
+            let added_tools = crate::activate_remote_mcp_server(
+                &mut registry,
+                &self.root_config,
+                server,
+                self.provider_capabilities.tool_name_max_chars,
+                &ctx,
+                presenter,
+                Arc::clone(&self.elicitation_handler),
+            )
+            .await?;
+            return Ok(activation_result(
+                call_id,
+                server_name,
+                "ready",
+                1,
+                added_tools,
+                &[],
+            ));
+        }
         let expected_process_subject = ctx
             .approved_subjects()
             .iter()
@@ -1395,10 +1517,10 @@ impl Tool for McpActivateServerTool {
 
 impl McpActivateServerTool {
     fn lazy_server(&self, server_name: &str) -> Option<&McpServerConfig> {
-        self.root_config
-            .mcp_servers
-            .iter()
-            .find(|server| server.name == server_name && server.startup == McpServerStartup::Lazy)
+        self.root_config.mcp_servers.iter().find(|server| {
+            server.name == server_name
+                && (server.startup == McpServerStartup::Lazy || server.streamable_http().is_some())
+        })
     }
 
     fn registered_tool_count(&self, server_name: &str) -> usize {
@@ -1417,14 +1539,16 @@ fn mcp_server_process_network_effect(
     if network_policy != NetworkPolicy::Deny {
         return Some(NetworkEffect::Unknown);
     }
-    let Ok(environment) = sigil_kernel::resolve_extension_process_environment(&server.inherit_env)
-    else {
+    let Some((command, args, inherit_env)) = server.stdio() else {
+        return Some(NetworkEffect::Read);
+    };
+    let Ok(environment) = sigil_kernel::resolve_extension_process_environment(inherit_env) else {
         return Some(NetworkEffect::Unknown);
     };
     let Ok(plan) = sigil_tools_builtin::long_lived_stdio_process_plan(
         execution,
-        &server.command,
-        &server.args,
+        command,
+        args,
         workspace_root,
         &environment,
     ) else {
@@ -1450,7 +1574,13 @@ fn mcp_server_process_subjects(
     server: &McpServerConfig,
     workspace_root: &std::path::Path,
 ) -> Result<Vec<ToolSubject>> {
-    let environment = sigil_kernel::resolve_extension_process_environment(&server.inherit_env)?;
+    let Some((_, _, inherit_env)) = server.stdio() else {
+        return Ok(vec![
+            mcp_server_subject(&server.name),
+            ToolSubject::mcp_trust_class(server.name.clone(), server.trust.trust_class.as_str()),
+        ]);
+    };
+    let environment = sigil_kernel::resolve_extension_process_environment(inherit_env)?;
     let (_, binding) = user_root_mcp_launch_binding(server, workspace_root)?;
     Ok(vec![
         mcp_server_subject(&server.name),
@@ -1555,15 +1685,17 @@ pub fn mcp_stdio_boundary_summary(
     workspace_root: &std::path::Path,
     server: &McpServerConfig,
 ) -> String {
-    let environment = match sigil_kernel::resolve_extension_process_environment(&server.inherit_env)
-    {
+    let Some((command, args, inherit_env)) = server.stdio() else {
+        return "streamable HTTP; local stdio sandbox does not apply".to_owned();
+    };
+    let environment = match sigil_kernel::resolve_extension_process_environment(inherit_env) {
         Ok(environment) => environment,
         Err(error) => return format!("unsupported: {error}"),
     };
     match sigil_tools_builtin::long_lived_stdio_process_plan(
         &root_config.execution,
-        &server.command,
-        &server.args,
+        command,
+        args,
         workspace_root,
         &environment,
     ) {

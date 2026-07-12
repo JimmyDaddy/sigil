@@ -54,6 +54,7 @@ name = "Fixture"
 version = "1.0.0"
 
 [[mcp_servers]]
+transport = "stdio"
 name = "server"
 command = "./bin/server"
 startup = "eager"
@@ -142,6 +143,7 @@ name = "Fixture"
 version = "1.0.0"
 
 [[mcp_servers]]
+transport = "stdio"
 name = "server"
 command = "./bin/server"
 startup = "eager"
@@ -207,7 +209,7 @@ fn declaration_launcher_rejects_replaced_workspace_execution_base_identity() {
     let workspace = fixture.path().join("workspace");
     fs::create_dir(&workspace).expect("workspace should create");
     let declaration = ResolvedMcpServerDeclaration::user_root(
-        sigil_kernel::McpServerConfig {
+        mcp_server_config! {
             name: "root-server".to_owned(),
             command: "./bin/server".to_owned(),
             ..sigil_kernel::McpServerConfig::default()

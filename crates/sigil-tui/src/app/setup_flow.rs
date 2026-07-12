@@ -350,6 +350,7 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
             DEFAULT_SETUP_PROVIDER_KEY.to_owned(),
             provider_value,
         )]),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     })
 }

@@ -32,10 +32,10 @@ use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 
 use super::{
     ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher, SecretSource,
-    activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_plan_prompt_tool_registry,
-    build_provider, build_role_provider, build_role_run_options, build_role_skill_tool_registry,
-    build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
-    build_tool_registry_without_eager_mcp,
+    activate_eager_remote_mcp_server, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
+    build_plan_prompt_tool_registry, build_provider, build_role_provider, build_role_run_options,
+    build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
+    build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust, launch_planned_mcp_process,
     load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
     provider_capabilities_for_name, provider_capability_view,
@@ -133,6 +133,7 @@ fn test_root_config(provider: &str) -> RootConfig {
                 }),
             ),
         ]),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }
@@ -1209,7 +1210,7 @@ async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<(
     ] {
         let marker = temp.path().join(format!("refresh-{label}-spawned"));
         let mut config = test_root_config("deepseek");
-        config.mcp_servers.push(McpServerConfig {
+        config.mcp_servers.push(mcp_server_config! {
             name: format!("refresh-{label}"),
             command: "sh".to_owned(),
             args: vec![
@@ -1661,7 +1662,7 @@ while True:
     )?;
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.display().to_string()],
@@ -1723,7 +1724,7 @@ while True:
 async fn explicit_optional_lazy_activation_fails_instead_of_reporting_empty_ready() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "optional-missing".to_owned(),
         command: "/definitely/missing/optional-lazy-mcp".to_owned(),
         startup: McpServerStartup::Lazy,
@@ -1787,7 +1788,7 @@ while True:
 
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.display().to_string()],
@@ -1854,12 +1855,14 @@ while True:
     let long_name = format!("long-{}", "server".repeat(40));
     let servers = ["a-b".to_owned(), "a_b".to_owned(), long_name.clone()]
         .into_iter()
-        .map(|name| McpServerConfig {
-            args: vec![script.display().to_string(), name.clone()],
-            name,
-            command: "python3".to_owned(),
-            startup_timeout_secs: 5,
-            ..McpServerConfig::default()
+        .map(|name| {
+            mcp_server_config! {
+                args: vec![script.display().to_string(), name.clone()],
+                name,
+                command: "python3".to_owned(),
+                startup_timeout_secs: 5,
+                ..McpServerConfig::default()
+            }
         })
         .collect::<Vec<_>>();
     let mut config = test_root_config("deepseek");
@@ -2004,7 +2007,7 @@ while True:
 
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    let server = McpServerConfig {
+    let server = mcp_server_config! {
         name: "poisoned".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.display().to_string()],
@@ -2109,7 +2112,7 @@ while True:
 
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    let server = McpServerConfig {
+    let server = mcp_server_config! {
         name: "healthy-retired".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.display().to_string()],
@@ -2191,7 +2194,7 @@ while True:
 
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "rollback".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.display().to_string()],
@@ -2265,7 +2268,7 @@ async fn generation_shutdown_attempts_every_distinct_owner_after_failure() {
 async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         startup_timeout_secs: 5,
@@ -2327,7 +2330,7 @@ while True:
 "#,
     )?;
     let provider = build_provider(&test_root_config("deepseek"))?;
-    let healthy = McpServerConfig {
+    let healthy = mcp_server_config! {
         name: "optional-refresh".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.display().to_string()],
@@ -2339,7 +2342,7 @@ while True:
     sigil_mcp::register_mcp_tools(&mut registry, std::slice::from_ref(&healthy)).await?;
 
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         command: "/definitely/missing/optional-mcp-server".to_owned(),
         ..healthy
     });
@@ -2399,7 +2402,7 @@ async fn refresh_mcp_server_tools_returns_zero_for_unknown_server() -> Result<()
 async fn activate_lazy_mcp_tools_ignores_nonmatching_server_name() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         startup: McpServerStartup::Lazy,
@@ -2425,7 +2428,7 @@ async fn activate_lazy_mcp_tools_ignores_nonmatching_server_name() -> Result<()>
 async fn activate_lazy_mcp_tools_returns_zero_when_optional_server_is_skipped() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "optional-lazy".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         required: false,
@@ -2452,7 +2455,7 @@ async fn activate_lazy_mcp_tools_returns_zero_when_optional_server_is_skipped() 
 async fn activate_lazy_mcp_tools_detailed_reports_matched_servers() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "optional-lazy".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         required: false,
@@ -2499,7 +2502,7 @@ fn build_tool_registry_without_eager_mcp_keeps_local_tools_when_required_eager_i
 -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "required-eager".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         startup: McpServerStartup::Eager,
@@ -2523,7 +2526,7 @@ fn build_tool_registry_without_eager_mcp_keeps_local_tools_when_required_eager_i
 async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
         command: std::env::current_exe()?.display().to_string(),
         startup: McpServerStartup::Lazy,
@@ -2673,7 +2676,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
 fn mcp_activate_server_tool_respects_disabled_egress_logging() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
-    config.mcp_servers.push(McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "quiet-lazy".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         startup: McpServerStartup::Lazy,
@@ -2706,12 +2709,244 @@ fn mcp_activate_server_tool_respects_disabled_egress_logging() -> Result<()> {
     Ok(())
 }
 
+struct EagerRemoteReceiptPresenter;
+
+#[async_trait]
+impl sigil_kernel::EgressDisclosurePresenter for EagerRemoteReceiptPresenter {
+    async fn present(
+        &self,
+        disclosure: sigil_kernel::PreEgressDisclosure,
+    ) -> std::result::Result<
+        sigil_kernel::DisclosurePresentationReceipt,
+        sigil_kernel::DisclosurePresentationError,
+    > {
+        disclosure.presentation_receipt("runtime-eager-remote-fixture-v1")
+    }
+}
+
+async fn read_fixture_http_request(socket: &mut tokio::net::TcpStream) -> Result<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = socket.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let content_length = String::from_utf8_lossy(&buffer[..header_end])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if buffer.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+async fn write_fixture_http_response(
+    socket: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: Option<&str>,
+    body: &str,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut head = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    if let Some(content_type) = content_type {
+        head.push_str(&format!("Content-Type: {content_type}\r\n"));
+    }
+    head.push_str("\r\n");
+    socket.write_all(head.as_bytes()).await?;
+    socket.write_all(body.as_bytes()).await?;
+    Ok(())
+}
+
+fn eager_remote_config(
+    host: &str,
+    port: u16,
+    network_mode: sigil_kernel::NetworkPolicy,
+) -> RootConfig {
+    let mut config = test_root_config("deepseek");
+    config.web.enabled = true;
+    config.web.network_mode = network_mode;
+    config.web.allow_http = true;
+    config.web.proxy_mode = sigil_kernel::WebProxyMode::Direct;
+    config.web.allowed_ports = vec![port];
+    config.web.allowed_private_hosts.clear();
+    config.web.allowed_private_cidrs.clear();
+    config.mcp_servers.push(McpServerConfig {
+        name: "remote-eager".to_owned(),
+        transport: sigil_kernel::McpServerTransportConfig::StreamableHttp(
+            sigil_kernel::McpStreamableHttpConfig {
+                url: format!("http://{host}:{port}/mcp"),
+                http_headers: BTreeMap::new(),
+                env_http_headers: BTreeMap::new(),
+                bearer_token_env_var: None,
+                client_capabilities: Default::default(),
+            },
+        ),
+        startup: McpServerStartup::Eager,
+        required: true,
+        trust: McpServerTrustPolicy {
+            approval_default: ApprovalMode::Allow,
+            ..McpServerTrustPolicy::default()
+        },
+        ..McpServerConfig::default()
+    });
+    config
+}
+
+fn eager_remote_recorder(temp: &tempfile::TempDir) -> Result<sigil_kernel::EgressAuditRecorder> {
+    let store = JsonlSessionStore::new(temp.path().join("eager-remote-session.jsonl"))?;
+    Ok(Session::new("deepseek", "test")
+        .with_store(store)
+        .egress_audit_recorder()?)
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn eager_remote_streamable_http_activates_real_transport_and_registers_tools() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_port = listener.local_addr()?.port();
+    let server = tokio::spawn(async move {
+        let responses = [
+            (
+                "200 OK",
+                Some("application/json"),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "runtime-eager-fixture", "version": "1.0.0" }
+                    }
+                })
+                .to_string(),
+            ),
+            ("202 Accepted", None, String::new()),
+            (
+                "200 OK",
+                Some("application/json"),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "tools": [{
+                            "name": "echo",
+                            "description": "Echo fixture",
+                            "inputSchema": { "type": "object" }
+                        }]
+                    }
+                })
+                .to_string(),
+            ),
+        ];
+        let mut requests = Vec::new();
+        for (status, content_type, body) in responses {
+            let (mut socket, _) = listener.accept().await?;
+            requests.push(read_fixture_http_request(&mut socket).await?);
+            write_fixture_http_response(&mut socket, status, content_type, &body).await?;
+        }
+        Result::<Vec<String>>::Ok(requests)
+    });
+
+    let temp = tempfile::tempdir()?;
+    let _environment_guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("environment lock");
+    let proxy = format!("http://127.0.0.1:{proxy_port}");
+    let _environment = EnvScope::set_owned(&[
+        ("HTTP_PROXY", proxy.clone()),
+        ("http_proxy", proxy),
+        ("NO_PROXY", String::new()),
+        ("no_proxy", String::new()),
+    ]);
+    let mut config = eager_remote_config("fixture.invalid", 80, sigil_kernel::NetworkPolicy::Allow);
+    config.web.proxy_mode = sigil_kernel::WebProxyMode::Environment;
+    let mut registry = ToolRegistry::new();
+    let added = activate_eager_remote_mcp_server(
+        &mut registry,
+        &config,
+        "remote-eager",
+        128,
+        temp.path().to_path_buf(),
+        eager_remote_recorder(&temp)?,
+        Arc::new(EagerRemoteReceiptPresenter),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+    )
+    .await?;
+
+    assert_eq!(added, 1);
+    assert!(registry.spec_for("mcp__remote_eager__echo").is_some());
+    let requests = server.await??;
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].contains("\"method\":\"initialize\""));
+    assert!(requests[1].contains("\"method\":\"notifications/initialized\""));
+    assert!(requests[2].contains("\"method\":\"tools/list\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn eager_remote_ask_policy_fails_before_socket_activity() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let temp = tempfile::tempdir()?;
+    let config = eager_remote_config("127.0.0.1", port, sigil_kernel::NetworkPolicy::Ask);
+    let mut registry = ToolRegistry::new();
+    let error = activate_eager_remote_mcp_server(
+        &mut registry,
+        &config,
+        "remote-eager",
+        128,
+        temp.path().to_path_buf(),
+        eager_remote_recorder(&temp)?,
+        Arc::new(EagerRemoteReceiptPresenter),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+    )
+    .await
+    .expect_err("ask must fail closed without an interactive approval surface");
+
+    assert!(error.to_string().contains("web.network_mode = allow"));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "eager ask rejection must happen before socket activity"
+    );
+    Ok(())
+}
+
 struct EnvScope {
     saved: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl EnvScope {
     fn set_many(values: &[(&'static str, &'static str)]) -> Self {
+        let mut saved = Vec::with_capacity(values.len());
+        for (name, value) in values {
+            saved.push((*name, env::var_os(name)));
+            // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+            unsafe { env::set_var(name, value) };
+        }
+        Self { saved }
+    }
+
+    fn set_owned(values: &[(&'static str, String)]) -> Self {
         let mut saved = Vec::with_capacity(values.len());
         for (name, value) in values {
             saved.push((*name, env::var_os(name)));

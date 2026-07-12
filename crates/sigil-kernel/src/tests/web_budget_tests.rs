@@ -7,7 +7,8 @@ use super::*;
 
 fn limits() -> WebTaskTreeBudgetLimits {
     WebTaskTreeBudgetLimits {
-        max_logical_calls: 3,
+        max_fetch_calls: 3,
+        max_client_search_calls: 3,
         max_hosted_requests: 2,
         max_network_attempts: 4,
         max_wire_bytes: 10,
@@ -24,7 +25,14 @@ fn request(correlation: &str) -> WebBudgetReservationRequest {
         attempt_id: format!("attempt-{correlation}"),
         route_lease_id: format!("lease-{correlation}"),
         route_fingerprint: "route-fingerprint".to_owned(),
-        kind: WebBudgetReservationKind::LogicalCall,
+        kind: WebBudgetReservationKind::ClientSearchCall,
+    }
+}
+
+fn fetch_request(correlation: &str) -> WebBudgetReservationRequest {
+    WebBudgetReservationRequest {
+        kind: WebBudgetReservationKind::FetchCall,
+        ..request(correlation)
     }
 }
 
@@ -52,6 +60,8 @@ fn provisional_reservation_refunds_before_wire_and_committed_counts_never_refund
     assert!(committed.refund_pre_wire().is_err());
     let snapshot = budget.snapshot().expect("snapshot");
     assert_eq!(snapshot.logical_calls, 1);
+    assert_eq!(snapshot.fetch_calls, 0);
+    assert_eq!(snapshot.client_search_calls, 1);
     assert_eq!(snapshot.network_attempts, 1);
 }
 
@@ -169,4 +179,55 @@ fn budget_exhaustion_requests_cooperative_root_cancellation() {
             .is_err()
     );
     assert!(cancellation.is_cancel_requested());
+}
+
+#[test]
+fn fetch_and_client_search_limits_are_independent() {
+    let mut separate_limits = limits();
+    separate_limits.max_fetch_calls = 1;
+    separate_limits.max_client_search_calls = 1;
+    let budget = WebTaskTreeBudget::new("root-run", separate_limits, None).expect("budget");
+
+    let mut fetch = budget
+        .reserve(fetch_request("fetch-one"))
+        .expect("first fetch reservation");
+    fetch.commit_call().expect("first fetch commit");
+    assert!(matches!(
+        budget.reserve(fetch_request("fetch-two")),
+        Err(WebBudgetError::Exhausted {
+            dimension: "fetch_calls"
+        })
+    ));
+
+    let separate_budget =
+        WebTaskTreeBudget::new("separate-root", separate_limits, None).expect("budget");
+    let mut fetch = separate_budget
+        .reserve(fetch_request("fetch"))
+        .expect("fetch reservation");
+    fetch.commit_call().expect("fetch commit");
+    let mut search = separate_budget
+        .reserve(request("search"))
+        .expect("search remains independently available");
+    search.commit_call().expect("search commit");
+    let snapshot = separate_budget.snapshot().expect("snapshot");
+    assert_eq!(snapshot.logical_calls, 2);
+    assert_eq!(snapshot.fetch_calls, 1);
+    assert_eq!(snapshot.client_search_calls, 1);
+
+    let search_first_budget =
+        WebTaskTreeBudget::new("search-first-root", separate_limits, None).expect("budget");
+    let mut search = search_first_budget
+        .reserve(request("search-first"))
+        .expect("search reservation");
+    search.commit_call().expect("search commit");
+    let mut fetch = search_first_budget
+        .reserve(fetch_request("fetch-after-search"))
+        .expect("fetch remains independently available");
+    fetch.commit_call().expect("fetch commit");
+    assert!(matches!(
+        search_first_budget.reserve(request("search-second")),
+        Err(WebBudgetError::Exhausted {
+            dimension: "client_search_calls"
+        })
+    ));
 }

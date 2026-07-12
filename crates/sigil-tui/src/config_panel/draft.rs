@@ -34,6 +34,10 @@ impl ConfigDraft {
             model_request_timeout_secs: model_request_fields.request_timeout_secs,
             model_request_stream_idle_timeout_secs: model_request_fields.stream_idle_timeout_secs,
             permission_mode: root_config.permission.mode,
+            web_enabled: root_config.web.enabled,
+            web_network_mode: root_config.web.network_mode,
+            web_search_route: root_config.web.search_route,
+            web_bundled_search_enabled: root_config.web.bundled_search.enabled,
             verification_auto_run: root_config.verification.auto_run,
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
@@ -156,6 +160,10 @@ impl ConfigDraft {
         root_config.agent.provider = provider_name.to_owned();
         root_config.agent.model = model.to_owned();
         root_config.permission.mode = self.permission_mode;
+        root_config.web.enabled = self.web_enabled;
+        root_config.web.network_mode = self.web_network_mode;
+        root_config.web.search_route = self.web_search_route;
+        root_config.web.bundled_search.enabled = self.web_bundled_search_enabled;
         root_config.verification.auto_run = self.verification_auto_run;
         root_config.memory.enabled = self.memory_enabled;
         root_config.compaction.enabled = self.compaction_enabled;

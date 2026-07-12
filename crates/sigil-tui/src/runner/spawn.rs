@@ -6,8 +6,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use sigil_kernel::{
-    Agent, ExtensionProcessNetworkAdmission, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MutationEventRecorder, ProviderCapabilities, RootConfig, SessionLogEntry, WorkspaceTrust,
+    Agent, EgressAuditRecorder, EgressDisclosurePresenter, ExtensionProcessNetworkAdmission,
+    InteractionMode, JsonlSessionStore, McpServerStartup, MutationEventRecorder,
+    ProviderCapabilities, RootConfig, Session, SessionLogEntry, WorkspaceTrust,
     workspace_trust_from_entries,
 };
 use sigil_runtime::{McpElicitationHandler, McpRuntimeEventHandler};
@@ -78,6 +79,20 @@ pub fn spawn_agent_worker(
                         return;
                     }
                 };
+            let disclosure_presenter: Arc<dyn EgressDisclosurePresenter> = Arc::new(
+                super::egress_disclosure_bridge::ChannelEgressDisclosurePresenter::new(
+                    message_tx.clone(),
+                ),
+            );
+            sigil_runtime::attach_remote_mcp_activation_presenter(
+                &mut registry,
+                &root_config,
+                &provider_capabilities,
+                workspace_root.clone(),
+                elicitation_handler.clone(),
+                mcp_event_handler.clone(),
+                Arc::clone(&disclosure_presenter),
+            );
             if let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
                 &mut registry,
                 &root_config,
@@ -87,9 +102,21 @@ pub fn spawn_agent_worker(
                 let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                 return;
             }
-            let mutation_recorder =
-                match JsonlSessionStore::new(&session_log_path).map(MutationEventRecorder::new) {
-                    Ok(recorder) => recorder,
+            let (mutation_recorder, egress_recorder) =
+                match JsonlSessionStore::new(&session_log_path) {
+                    Ok(store) => {
+                        let recorder_session =
+                            Session::new("runtime", "eager-mcp").with_store(store.clone());
+                        let egress_recorder = match recorder_session.egress_audit_recorder() {
+                            Ok(recorder) => recorder,
+                            Err(error) => {
+                                let _ =
+                                    message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                                return;
+                            }
+                        };
+                        (MutationEventRecorder::new(store), egress_recorder)
+                    }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                         return;
@@ -105,6 +132,8 @@ pub fn spawn_agent_worker(
                 elicitation_handler.clone(),
                 mcp_event_handler.clone(),
                 mutation_recorder,
+                egress_recorder,
+                disclosure_presenter,
                 extension_network_admission,
             );
             let agent = Arc::new(Agent::new(provider, registry));
@@ -151,6 +180,8 @@ fn spawn_eager_mcp_startup_tasks(
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     mcp_event_handler: Arc<ChannelMcpRuntimeEventHandler>,
     mutation_recorder: MutationEventRecorder,
+    egress_recorder: EgressAuditRecorder,
+    disclosure_presenter: Arc<dyn EgressDisclosurePresenter>,
     network_admission: ExtensionProcessNetworkAdmission,
 ) {
     for server in root_config
@@ -177,21 +208,44 @@ fn spawn_eager_mcp_startup_tasks(
         let elicitation_handler: Arc<dyn McpElicitationHandler> = elicitation_handler.clone();
         let mcp_event_handler: Arc<dyn McpRuntimeEventHandler> = mcp_event_handler.clone();
         let mutation_recorder = mutation_recorder.clone();
+        let egress_recorder = egress_recorder.clone();
+        let disclosure_presenter = Arc::clone(&disclosure_presenter);
+        let is_remote = server.streamable_http().is_some();
 
         runtime.spawn(async move {
-            match sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
-                &mut registry,
-                &root_config,
-                &provider_capabilities,
-                workspace_root,
-                &server_name,
-                elicitation_handler,
-                mcp_event_handler,
-                Some(mutation_recorder),
-                network_admission,
-            )
-            .await
-            {
+            let activation = if is_remote {
+                sigil_runtime::activate_eager_remote_mcp_server(
+                    &mut registry,
+                    &root_config,
+                    &server_name,
+                    provider_capabilities.tool_name_max_chars,
+                    workspace_root,
+                    egress_recorder,
+                    disclosure_presenter,
+                    elicitation_handler,
+                )
+                .await
+                .map(|added_tools| sigil_runtime::McpRefreshResult {
+                    matched_servers: 1,
+                    added_tools,
+                    removed_tools: 0,
+                    process_launch_receipts: Vec::new(),
+                })
+            } else {
+                sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
+                    &mut registry,
+                    &root_config,
+                    &provider_capabilities,
+                    workspace_root,
+                    &server_name,
+                    elicitation_handler,
+                    mcp_event_handler,
+                    Some(mutation_recorder),
+                    network_admission,
+                )
+                .await
+            };
+            match activation {
                 Ok(result) => {
                     let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                         server_name: Some(server_name.clone()),

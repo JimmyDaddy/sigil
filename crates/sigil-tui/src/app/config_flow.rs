@@ -23,7 +23,7 @@ use sigil_kernel::{
     PluginCapability, PluginManifestSnapshot, PluginStateProjection, PluginTrustDecision,
     PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
     SkillTrustState, SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope,
-    VerificationStateProjection, WorkspaceTrust, default_user_config_dir,
+    VerificationStateProjection, WebSearchRoute, WorkspaceTrust, default_user_config_dir,
     discover_candidate_checks_with_user_config, stable_workspace_id,
 };
 use sigil_runtime::{
@@ -68,6 +68,7 @@ mod storage_detail;
 mod terminal;
 mod verification;
 mod verification_detail;
+mod web;
 
 use agent_detail::*;
 use code_intel_detail::*;
@@ -215,6 +216,9 @@ impl AppState {
             }
             ConfigSection::Permissions => {
                 permissions::render_section(self, &mut lines, config_state);
+            }
+            ConfigSection::Web => {
+                web::render_section(&mut lines, config_state);
             }
             ConfigSection::Memory => {
                 memory::render_section(self, &mut lines, config_state);
@@ -653,6 +657,33 @@ impl AppState {
                         ConfigField::PermissionMode => {
                             config_state.draft.permission_mode =
                                 cycle_permission_mode(config_state.draft.permission_mode);
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::WebEnabled => {
+                            config_state.draft.web_enabled = !config_state.draft.web_enabled;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::WebNetworkMode => {
+                            config_state.draft.web_network_mode =
+                                cycle_network_policy(config_state.draft.web_network_mode);
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::WebSearchRoute => {
+                            config_state.draft.web_search_route =
+                                cycle_web_search_route(config_state.draft.web_search_route);
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::WebBundledSearchEnabled => {
+                            config_state.draft.web_bundled_search_enabled =
+                                !config_state.draft.web_bundled_search_enabled;
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
@@ -1831,6 +1862,26 @@ pub(super) fn cycle_permission_mode(mode: PermissionMode) -> PermissionMode {
         PermissionMode::Manual => PermissionMode::AutoEdit,
         PermissionMode::AutoEdit => PermissionMode::DangerFullAccess,
         PermissionMode::DangerFullAccess => PermissionMode::ReadOnly,
+    }
+}
+
+pub(super) fn cycle_network_policy(
+    policy: sigil_kernel::NetworkPolicy,
+) -> sigil_kernel::NetworkPolicy {
+    match policy {
+        sigil_kernel::NetworkPolicy::Allow => sigil_kernel::NetworkPolicy::Ask,
+        sigil_kernel::NetworkPolicy::Ask => sigil_kernel::NetworkPolicy::Deny,
+        sigil_kernel::NetworkPolicy::Deny => sigil_kernel::NetworkPolicy::Allow,
+    }
+}
+
+pub(super) fn cycle_web_search_route(route: WebSearchRoute) -> WebSearchRoute {
+    match route {
+        WebSearchRoute::Auto => WebSearchRoute::ProviderHosted,
+        WebSearchRoute::ProviderHosted => WebSearchRoute::Mcp,
+        WebSearchRoute::Mcp => WebSearchRoute::Bundled,
+        WebSearchRoute::Bundled => WebSearchRoute::Disabled,
+        WebSearchRoute::Disabled => WebSearchRoute::Auto,
     }
 }
 

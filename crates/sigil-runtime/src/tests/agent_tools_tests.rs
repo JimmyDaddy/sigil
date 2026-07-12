@@ -2858,6 +2858,8 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
             risk: PermissionRisk::Medium,
             subjects: Vec::new(),
             subject_zones: Vec::new(),
+            facets: vec![sigil_kernel::ToolApprovalSessionGrantFacet::Local],
+            scope: sigil_kernel::ToolApprovalSessionGrantScope::ExactSubjects,
             expires: sigil_kernel::ToolApprovalSessionGrantExpiry::Session,
             granted_at_ms: 1,
         },
@@ -4895,6 +4897,7 @@ fn root_config() -> RootConfig {
                 "base_url": "https://example.com",
             }),
         )]),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }

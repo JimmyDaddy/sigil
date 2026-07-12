@@ -13,6 +13,54 @@ fn approval_request_stores_preview() -> Result<()> {
 }
 
 #[test]
+fn read_only_network_approval_exposes_session_grant_scope() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-webfetch".to_owned(),
+            name: "webfetch".to_owned(),
+            args_json: r#"{"source_id":"src_1"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "webfetch".to_owned(),
+            description: "Fetch a page".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Search,
+            access: ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Read),
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: vec![sigil_kernel::ToolSubject {
+            kind: sigil_kernel::ToolSubjectKind::NetworkEndpoint,
+            original: "https://example.com/docs".to_owned(),
+            normalized: "https://example.com/docs".to_owned(),
+            canonical_path: None,
+            scope: sigil_kernel::ToolSubjectScope::External,
+        }],
+        network_effect: Some(sigil_kernel::NetworkEffect::Read),
+        local_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        network_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        operation: sigil_kernel::ToolOperation::NetworkRequest,
+        risk: sigil_kernel::PermissionRisk::High,
+        subject_zones: vec![sigil_kernel::PathTrustZone::Unknown],
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        preview: None,
+    })?;
+
+    let pending = app.approval.pending.as_ref().expect("pending approval");
+    assert!(pending.session_grant_available);
+    assert!(
+        app.approval_preview_lines()
+            .join("\n")
+            .contains("session_grant=read-only network access for this tool")
+    );
+    Ok(())
+}
+
+#[test]
 fn approval_request_projects_source_agent_route() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let source_thread_id = sigil_kernel::AgentThreadId::new("thread_1")?;

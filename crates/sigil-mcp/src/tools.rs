@@ -213,7 +213,7 @@ impl Tool for McpTool {
     }
 }
 
-pub(super) fn mcp_command_fingerprint(command: &str, args: &[String]) -> Result<String> {
+pub(super) fn mcp_transport_fingerprint(command: &str, args: &[String]) -> Result<String> {
     let encoded = serde_json::to_vec(&json!({
         "command": command,
         "args": args,
@@ -240,11 +240,69 @@ pub(super) struct McpLaunchStaticBinding {
 /// Returns an error when environment grants cannot be resolved, the working directory or executable
 /// cannot be resolved, executable bytes cannot be read, or fingerprint material cannot be encoded.
 pub fn mcp_launch_static_fingerprint(config: &McpServerConfig) -> Result<String> {
-    if config.inherit_env.is_empty() {
-        return mcp_command_fingerprint(&config.command, &config.args);
+    let (command, args, inherit_env) = config
+        .stdio()
+        .ok_or_else(|| anyhow!("remote MCP config has no stdio launch fingerprint"))?;
+    if inherit_env.is_empty() {
+        return mcp_transport_fingerprint(command, args);
     }
     let working_dir = std::env::current_dir().context("failed to resolve MCP fingerprint cwd")?;
     mcp_launch_static_fingerprint_at(config, &working_dir)
+}
+
+/// Computes the transport-neutral static identity used by MCP version pins.
+///
+/// Stdio retains the resolved launch identity (including an explicitly granted environment and
+/// executable identity when applicable). Streamable HTTP binds the normalized endpoint, literal
+/// non-secret header values, environment-variable source names, bearer source name, and sorted
+/// client capabilities. Resolved environment values are deliberately excluded; the live HMAC
+/// fingerprint binds those values per process.
+pub fn mcp_transport_static_fingerprint(config: &McpServerConfig) -> Result<String> {
+    let Some(remote) = config.streamable_http() else {
+        return mcp_launch_static_fingerprint(config);
+    };
+    let endpoint = url::Url::parse(&remote.url).context("failed to parse remote MCP endpoint")?;
+    let literal_headers = remote
+        .http_headers
+        .iter()
+        .map(|(name, value)| {
+            json!({
+                "name": name.to_ascii_lowercase(),
+                "source": "literal",
+                "value": value,
+            })
+        })
+        .collect::<Vec<_>>();
+    let environment_headers = remote
+        .env_http_headers
+        .iter()
+        .map(|(name, environment_name)| {
+            json!({
+                "name": name.to_ascii_lowercase(),
+                "source": "environment",
+                "environment_name": environment_name,
+            })
+        })
+        .collect::<Vec<_>>();
+    let capabilities = remote
+        .client_capabilities
+        .iter()
+        .map(|capability| match capability {
+            sigil_kernel::McpRemoteClientCapability::Roots => "roots",
+            sigil_kernel::McpRemoteClientCapability::ElicitationForm => "elicitation",
+        })
+        .collect::<Vec<_>>();
+    let encoded = serde_json::to_vec(&json!({
+        "version": "sigil.mcp.transport-pin.v1",
+        "transport": "streamable_http",
+        "url": endpoint.to_string(),
+        "literal_headers": literal_headers,
+        "environment_headers": environment_headers,
+        "bearer_token_env_var": remote.bearer_token_env_var,
+        "client_capabilities": capabilities,
+    }))
+    .context("failed to serialize remote MCP transport fingerprint material")?;
+    Ok(format!("sha256:{:x}", Sha256::digest(&encoded)))
 }
 
 /// Computes the pre-spawn MCP launch fingerprint relative to an explicit execution base.
@@ -257,10 +315,13 @@ pub fn mcp_launch_static_fingerprint_at(
     config: &McpServerConfig,
     working_dir: &Path,
 ) -> Result<String> {
-    if config.inherit_env.is_empty() {
-        return mcp_command_fingerprint(&config.command, &config.args);
+    let (command, args, inherit_env) = config
+        .stdio()
+        .ok_or_else(|| anyhow!("remote MCP config has no stdio launch fingerprint"))?;
+    if inherit_env.is_empty() {
+        return mcp_transport_fingerprint(command, args);
     }
-    let environment = resolve_extension_process_environment(&config.inherit_env)?;
+    let environment = resolve_extension_process_environment(inherit_env)?;
     Ok(mcp_launch_static_binding(config, working_dir, &environment)?.fingerprint)
 }
 
@@ -307,10 +368,13 @@ pub(super) fn mcp_launch_static_binding(
     working_dir: &Path,
     environment: &ResolvedProcessEnvironment,
 ) -> Result<McpLaunchStaticBinding> {
-    if config.inherit_env.is_empty() {
+    let (command, args, inherit_env) = config
+        .stdio()
+        .ok_or_else(|| anyhow!("remote MCP config cannot produce a stdio launch binding"))?;
+    if inherit_env.is_empty() {
         return Ok(McpLaunchStaticBinding {
-            fingerprint: mcp_command_fingerprint(&config.command, &config.args)?,
-            executable: PathBuf::from(&config.command),
+            fingerprint: mcp_transport_fingerprint(command, args)?,
+            executable: PathBuf::from(command),
             working_dir: None,
         });
     }
@@ -320,12 +384,12 @@ pub(super) fn mcp_launch_static_binding(
             working_dir.display()
         )
     })?;
-    let executable = resolve_mcp_executable(&config.command, &canonical_working_dir, environment)?;
+    let executable = resolve_mcp_executable(command, &canonical_working_dir, environment)?;
     let executable_digest = digest_mcp_executable(&executable)?;
     let encoded = serde_json::to_vec(&json!({
         "version": EXTENSION_ENVIRONMENT_POLICY_VERSION,
-        "command": config.command,
-        "args": config.args,
+        "command": command,
+        "args": args,
         "working_dir": canonical_working_dir.to_string_lossy(),
         "environment_static_fingerprint": environment.static_fingerprint(),
         "executable": {

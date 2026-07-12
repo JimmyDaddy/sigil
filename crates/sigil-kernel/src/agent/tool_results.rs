@@ -4,9 +4,10 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::{
+    ExternalProvenanceEntry, ExternalTrust,
     event::{EventHandler, RunEvent},
     provider::ToolCall,
-    session::{Session, ToolExecutionStatus},
+    session::{ControlEntry, Session, ToolExecutionStatus},
     tool::{ToolErrorKind, ToolResult, ToolResultStatus, ToolSubject},
 };
 
@@ -31,12 +32,83 @@ where
 pub(super) fn emit_tool_result<H>(
     session: &mut Session,
     handler: &mut H,
-    result: ToolResult,
+    mut result: ToolResult,
 ) -> Result<()>
 where
     H: EventHandler,
 {
-    session.append_tool_message(result.to_model_message())?;
+    let mut registrations = std::mem::take(&mut result.url_capability_registrations);
+    let external_sources = std::mem::take(&mut result.external_sources);
+    let message = result.to_model_message();
+    for registration in registrations.iter_mut() {
+        registration.durable_entry_id.clone_from(&message.id);
+    }
+    let registrar = session.user_url_capability_registrar();
+    if !registrations.is_empty() {
+        let registrar = registrar.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("tool result produced URL capabilities without a session registrar")
+        })?;
+        for registration in registrations.iter() {
+            if let Err(error) = registrar.stage(registration.clone()) {
+                let _ = registrar.rollback_message(&message.id);
+                return Err(error);
+            }
+        }
+    }
+    if let Err(error) = session.append_tool_message(message.clone()) {
+        if !registrations.is_empty()
+            && let Some(registrar) = registrar.as_ref()
+        {
+            let _ = registrar.rollback_message(&message.id);
+        }
+        return Err(error);
+    }
+    for registration in registrations.iter() {
+        let descriptor = registration.durable_descriptor(session.session_scope_id());
+        descriptor.validate()?;
+        let control = ControlEntry::WebUrlCapabilityDescriptor(descriptor);
+        if let Err(error) = session.append_control(control.clone()) {
+            if !registrations.is_empty()
+                && let Some(registrar) = registrar.as_ref()
+            {
+                let _ = registrar.rollback_message(&message.id);
+            }
+            return Err(error);
+        }
+        handler.handle(RunEvent::Control(control))?;
+    }
+    if !external_sources.is_empty() {
+        let provenance = ExternalProvenanceEntry {
+            session_scope_id: session.session_scope_id().to_owned(),
+            message_id: message.id.clone(),
+            trust: ExternalTrust::ExternalUntrusted,
+            sources: *external_sources,
+            citations: Vec::new(),
+        };
+        provenance.validate_against_message(&message)?;
+        let control = ControlEntry::ExternalProvenance(provenance);
+        if let Err(error) = session.append_control(control.clone()) {
+            if !registrations.is_empty()
+                && let Some(registrar) = registrar.as_ref()
+            {
+                let _ = registrar.rollback_message(&message.id);
+            }
+            return Err(error);
+        }
+        handler.handle(RunEvent::Control(control))?;
+    }
+    if !registrations.is_empty()
+        && let Some(registrar) = registrar.as_ref()
+        && let Err(error) = registrar.commit_message(&message.id)
+    {
+        let rollback_error = registrar.rollback_message(&message.id).err();
+        return Err(error.context(match rollback_error {
+            Some(rollback_error) => format!(
+                "failed to commit tool-result URL capabilities; rollback also failed: {rollback_error:#}"
+            ),
+            None => "failed to commit tool-result URL capabilities".to_owned(),
+        }));
+    }
     handler.handle(RunEvent::ToolResult(result))
 }
 

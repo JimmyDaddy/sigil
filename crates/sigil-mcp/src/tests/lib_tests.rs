@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     sync::{Arc, Mutex},
     time::Duration,
@@ -27,6 +28,61 @@ use super::{
     activate_lazy_mcp_tools, register_mcp_tools, register_mcp_tools_with_options,
     unsupported_mcp_runtime_event_handler,
 };
+
+macro_rules! set_mcp_server_config_field {
+    ($config:ident, command, $value:expr) => {
+        let sigil_kernel::McpServerTransportConfig::Stdio { command, .. } = &mut $config.transport
+        else {
+            panic!("test MCP config must use stdio transport");
+        };
+        *command = $value;
+    };
+    ($config:ident, args, $value:expr) => {
+        let sigil_kernel::McpServerTransportConfig::Stdio { args, .. } = &mut $config.transport
+        else {
+            panic!("test MCP config must use stdio transport");
+        };
+        *args = $value;
+    };
+    ($config:ident, inherit_env, $value:expr) => {
+        let sigil_kernel::McpServerTransportConfig::Stdio { inherit_env, .. } =
+            &mut $config.transport
+        else {
+            panic!("test MCP config must use stdio transport");
+        };
+        *inherit_env = $value;
+    };
+    ($config:ident, $field:ident, $value:expr) => {
+        $config.$field = $value;
+    };
+}
+
+macro_rules! mcp_server_config {
+    (.. $base:expr $(,)?) => {{
+        let base: McpServerConfig = $base;
+        base
+    }};
+    ($field:ident: $value:expr, $($rest:tt)*) => {{
+        let mut config = mcp_server_config!($($rest)*);
+        set_mcp_server_config_field!(config, $field, $value);
+        config
+    }};
+    ($field:ident, $($rest:tt)*) => {{
+        let mut config = mcp_server_config!($($rest)*);
+        set_mcp_server_config_field!(config, $field, $field);
+        config
+    }};
+    ($field:ident: $value:expr $(,)?) => {{
+        let mut config = McpServerConfig::default();
+        set_mcp_server_config_field!(config, $field, $value);
+        config
+    }};
+    ($field:ident $(,)?) => {{
+        let mut config = McpServerConfig::default();
+        set_mcp_server_config_field!(config, $field, $field);
+        config
+    }};
+}
 
 async fn register_mcp_tools_with_capabilities(
     registry: &mut ToolRegistry,
@@ -166,7 +222,7 @@ fn write_fake_server_script(path: &std::path::Path, body: &str) -> Result<()> {
 
 #[tokio::test]
 async fn registration_rejects_duplicate_exact_server_names_before_launch() -> Result<()> {
-    let duplicate = McpServerConfig {
+    let duplicate = mcp_server_config! {
         name: "duplicate".to_owned(),
         command: "/must/not/be/launched".to_owned(),
         ..McpServerConfig::default()
@@ -473,7 +529,7 @@ fn mcp_environment_grant_is_orthogonal_to_payload_secret_policy() -> Result<()> 
         return Ok(());
     }
     for allow_secrets in [false, true] {
-        let config = McpServerConfig {
+        let config = mcp_server_config! {
             name: "orthogonal".to_owned(),
             command: "sh".to_owned(),
             inherit_env: vec!["HOME".to_owned()],
@@ -491,7 +547,7 @@ fn mcp_environment_grant_is_orthogonal_to_payload_secret_policy() -> Result<()> 
 
 #[test]
 fn missing_mcp_environment_grant_is_typed_pre_spawn_configuration_error() {
-    let config = McpServerConfig {
+    let config = mcp_server_config! {
         name: "missing-env".to_owned(),
         command: "definitely-must-not-spawn".to_owned(),
         inherit_env: vec!["SIGIL_E21_ENV_THAT_MUST_NOT_EXIST_7F33".to_owned()],
@@ -516,7 +572,7 @@ async fn pre_spawn_failure_records_lifecycle_without_launch_receipt() -> Result<
     let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let error = register_mcp_tools_with_options(
         &mut ToolRegistry::new(),
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "missing-env-audit".to_owned(),
             command: "sh".to_owned(),
             args: vec!["-c".to_owned(), format!("touch {}", marker.display())],
@@ -643,7 +699,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "credential-echo".to_owned(),
             command: "python3".to_owned(),
             args: vec![
@@ -785,7 +841,7 @@ while True:
     )?;
     let error = register_mcp_tools(
         &mut ToolRegistry::new(),
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "credential-error".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().into_owned()],
@@ -810,7 +866,7 @@ async fn stale_environment_binding_rejects_inbound_notification_before_handler()
     let handler = Arc::new(RecordingMcpRuntimeEventHandler::default());
     let runtime_handler: Arc<dyn McpRuntimeEventHandler> = handler.clone();
     let mut client = super::client::McpClient::spawn(
-        McpServerConfig {
+        mcp_server_config! {
             name: "binding".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().into_owned()],
@@ -903,7 +959,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "fake".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -989,7 +1045,7 @@ while True:
 
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "quiet".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -1068,7 +1124,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_options(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "lifecycle".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -1171,7 +1227,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_options(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "zero-surface".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().into_owned()],
@@ -1280,7 +1336,7 @@ while True:
         .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone()));
     let error = register_mcp_tools_with_options(
         &mut ToolRegistry::new(),
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "post-spawn-audit-failure".to_owned(),
             command: "python3".to_owned(),
             args: vec![
@@ -1351,7 +1407,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "version".to_owned(),
             command: "python3".to_owned(),
             args: vec![
@@ -1392,7 +1448,7 @@ sys.exit(7)
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_options(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "crashy".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -1467,7 +1523,7 @@ sys.exit(7)
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_options(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "crashy".to_owned(),
             command: "python3".to_owned(),
             args: vec![
@@ -1586,7 +1642,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_options(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "cwd".to_owned(),
             command: "python3".to_owned(),
             args: vec![
@@ -1649,7 +1705,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "docs".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -1767,7 +1823,7 @@ while True:
 
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "quiet-docs".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -1833,7 +1889,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "invalid-docs".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -1947,7 +2003,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_capabilities_roots_and_secrets(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "docs".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -2042,7 +2098,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "prompts".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -2148,7 +2204,7 @@ while True:
 
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "quiet-prompts".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -2277,7 +2333,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_capabilities_roots_and_secrets(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "prompt-secret".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -2378,7 +2434,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "prompt-errors".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -2529,7 +2585,7 @@ fn mcp_output_metadata_bounds_remote_names_and_identity_arrays() {
     let redactor = SecretRedactor::empty();
     let long = "x".repeat(1024 * 1024);
     let identity = super::McpServerObservedIdentity {
-        command_fingerprint: long.clone(),
+        transport_fingerprint: long.clone(),
         process_authorization_fingerprint: long.clone(),
         declaration: None,
         environment_grant_names: (0..1_000)
@@ -2610,7 +2666,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "large".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -2689,7 +2745,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_options(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "events".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -2785,18 +2841,55 @@ fn mcp_runtime_notification_helpers_parse_edge_payloads() {
     assert!(super::mcp_list_changed_kind("notifications/other").is_none());
 }
 
+#[test]
+fn remote_transport_fingerprint_binds_source_metadata_without_resolving_secrets() -> Result<()> {
+    let mut config = McpServerConfig {
+        name: "remote".to_owned(),
+        transport: sigil_kernel::McpServerTransportConfig::StreamableHttp(
+            sigil_kernel::McpStreamableHttpConfig {
+                url: "https://mcp.example.test/mcp".to_owned(),
+                http_headers: BTreeMap::from([("X-Client".to_owned(), "sigil-alpha".to_owned())]),
+                env_http_headers: BTreeMap::from([(
+                    "X-Api-Key".to_owned(),
+                    "SIGIL_TEST_MISSING_REMOTE_MCP_SECRET".to_owned(),
+                )]),
+                bearer_token_env_var: None,
+                client_capabilities: BTreeSet::from([
+                    sigil_kernel::McpRemoteClientCapability::Roots,
+                ]),
+            },
+        ),
+        ..McpServerConfig::default()
+    };
+    let first = super::mcp_transport_static_fingerprint(&config)?;
+    assert!(first.starts_with("sha256:"));
+    assert_eq!(first.len(), 71);
+
+    let remote = match &mut config.transport {
+        sigil_kernel::McpServerTransportConfig::StreamableHttp(remote) => remote,
+        sigil_kernel::McpServerTransportConfig::Stdio { .. } => unreachable!(),
+    };
+    remote.env_http_headers.insert(
+        "X-Api-Key".to_owned(),
+        "SIGIL_TEST_MISSING_REMOTE_MCP_SECRET_ROTATED".to_owned(),
+    );
+    let changed_source = super::mcp_transport_static_fingerprint(&config)?;
+    assert_ne!(changed_source, first);
+    Ok(())
+}
+
 #[tokio::test]
 async fn pinned_mcp_server_registers_when_identity_matches() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let script = temp.path().join("pinned_mcp_server.py");
     write_identity_server_script(&script, "sigil-test-server", "1.2.3")?;
     let args = vec![script.to_string_lossy().to_string()];
-    let command_fingerprint = super::mcp_command_fingerprint("python3", &args)?;
+    let transport_fingerprint = super::mcp_transport_fingerprint("python3", &args)?;
 
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "pinned".to_owned(),
             command: "python3".to_owned(),
             args,
@@ -2804,7 +2897,7 @@ async fn pinned_mcp_server_registers_when_identity_matches() -> Result<()> {
             trust: McpServerTrustPolicy {
                 pin_version: true,
                 pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                    command_fingerprint,
+                    transport_fingerprint,
                     protocol_version: "2024-11-05".to_owned(),
                     server_name: "sigil-test-server".to_owned(),
                     server_version: "1.2.3".to_owned(),
@@ -2839,13 +2932,13 @@ async fn pinned_mcp_server_registers_when_identity_matches() -> Result<()> {
 fn mcp_launch_static_fingerprint_preserves_empty_grant_compatibility_and_binds_names() -> Result<()>
 {
     let args = vec!["server.py".to_owned()];
-    let legacy = super::mcp_command_fingerprint("python3", &args)?;
-    let empty = sigil_mcp_launch_fingerprint(McpServerConfig {
+    let legacy = super::mcp_transport_fingerprint("python3", &args)?;
+    let empty = sigil_mcp_launch_fingerprint(mcp_server_config! {
         command: "python3".to_owned(),
         args: args.clone(),
         ..McpServerConfig::default()
     })?;
-    let granted = sigil_mcp_launch_fingerprint(McpServerConfig {
+    let granted = sigil_mcp_launch_fingerprint(mcp_server_config! {
         command: "python3".to_owned(),
         args,
         inherit_env: vec!["HOME".to_owned()],
@@ -2908,7 +3001,7 @@ fn process_launch_request_debug_hides_command_cwd_environment_and_args() -> Resu
     let command_secret = temp.path().join("private-command-secret");
     let argument_secret = "private-argument-secret";
     let request = McpProcessLaunchRequest::from_config(
-        &McpServerConfig {
+        &mcp_server_config! {
             name: "debug-safe".to_owned(),
             command: command_secret.to_string_lossy().into_owned(),
             args: vec![argument_secret.to_owned()],
@@ -2918,7 +3011,7 @@ fn process_launch_request_debug_hides_command_cwd_environment_and_args() -> Resu
     )?;
 
     let debug = format!("{request:?}");
-    let static_fingerprint = super::mcp_command_fingerprint(
+    let static_fingerprint = super::mcp_transport_fingerprint(
         &command_secret.to_string_lossy(),
         &[argument_secret.to_owned()],
     )?;
@@ -2946,7 +3039,7 @@ async fn credentialed_static_pin_rejects_replaced_executable_before_spawn() -> R
     permissions.set_mode(0o755);
     fs::set_permissions(&executable, permissions)?;
 
-    let mut config = McpServerConfig {
+    let mut config = mcp_server_config! {
         name: "executable-pin".to_owned(),
         command: executable.to_string_lossy().into_owned(),
         inherit_env: vec!["HOME".to_owned()],
@@ -2957,7 +3050,7 @@ async fn credentialed_static_pin_rejects_replaced_executable_before_spawn() -> R
     config.trust = McpServerTrustPolicy {
         pin_version: true,
         pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-            command_fingerprint: fingerprint,
+            transport_fingerprint: fingerprint,
             protocol_version: "2025-06-18".to_owned(),
             server_name: "expected".to_owned(),
             server_version: "1".to_owned(),
@@ -2979,7 +3072,7 @@ async fn credentialed_static_pin_rejects_replaced_executable_before_spawn() -> R
     assert!(
         error
             .to_string()
-            .contains("pre-spawn command_fingerprint mismatch")
+            .contains("pre-spawn transport_fingerprint mismatch")
     );
     assert!(
         !marker.exists(),
@@ -3002,7 +3095,7 @@ fn credentialed_launch_resolves_relative_executable_against_working_dir() -> Res
     let mut permissions = fs::metadata(&executable)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&executable, permissions)?;
-    let config = McpServerConfig {
+    let config = mcp_server_config! {
         name: "relative".to_owned(),
         command: "./server".to_owned(),
         inherit_env: vec!["HOME".to_owned()],
@@ -3028,7 +3121,7 @@ fn interpreter_launch_pin_binds_argument_text_but_not_script_contents() -> Resul
     let temp = tempfile::tempdir()?;
     let script = temp.path().join("server.py");
     fs::write(&script, "print('first')\n")?;
-    let config = McpServerConfig {
+    let config = mcp_server_config! {
         name: "interpreter-boundary".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.to_string_lossy().into_owned()],
@@ -3039,7 +3132,7 @@ fn interpreter_launch_pin_binds_argument_text_but_not_script_contents() -> Resul
     fs::write(&script, "print('second')\n")?;
     let changed_script = super::mcp_launch_static_fingerprint_at(&config, temp.path())?;
     let changed_args = super::mcp_launch_static_fingerprint_at(
-        &McpServerConfig {
+        &mcp_server_config! {
             args: vec!["different.py".to_owned()],
             ..config
         },
@@ -3075,7 +3168,7 @@ async fn changed_approved_process_binding_rejects_before_spawn() -> Result<()> {
     let mut permissions = fs::metadata(&executable)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&executable, permissions)?;
-    let config = McpServerConfig {
+    let config = mcp_server_config! {
         name: "binding-change".to_owned(),
         command: executable.to_string_lossy().into_owned(),
         inherit_env: vec!["HOME".to_owned()],
@@ -3116,14 +3209,14 @@ fn sigil_mcp_launch_fingerprint(config: McpServerConfig) -> Result<String> {
 async fn mismatched_static_pin_rejects_before_process_spawn() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let marker = temp.path().join("must-not-exist");
-    let config = McpServerConfig {
+    let config = mcp_server_config! {
         name: "pre-spawn-pin".to_owned(),
         command: "sh".to_owned(),
         args: vec!["-c".to_owned(), format!("touch {}", marker.display())],
         trust: McpServerTrustPolicy {
             pin_version: true,
             pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                command_fingerprint: "sha256:stale".to_owned(),
+                transport_fingerprint: "sha256:stale".to_owned(),
                 protocol_version: "2024-11-05".to_owned(),
                 server_name: "stale".to_owned(),
                 server_version: "0".to_owned(),
@@ -3140,7 +3233,7 @@ async fn mismatched_static_pin_rejects_before_process_spawn() -> Result<()> {
     assert!(
         error
             .to_string()
-            .contains("pre-spawn command_fingerprint mismatch")
+            .contains("pre-spawn transport_fingerprint mismatch")
     );
     assert!(!marker.exists());
     Ok(())
@@ -3155,7 +3248,7 @@ async fn pinned_mcp_server_errors_when_pin_is_missing() -> Result<()> {
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "unpinned".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -3172,7 +3265,7 @@ async fn pinned_mcp_server_errors_when_pin_is_missing() -> Result<()> {
 
     let message = error.to_string();
     assert!(message.contains("pin_version = true but no pinned identity"));
-    assert!(message.contains("command_fingerprint"));
+    assert!(message.contains("transport_fingerprint"));
     assert!(message.contains("MCP server unpinned"));
     Ok(())
 }
@@ -3183,12 +3276,12 @@ async fn pinned_mcp_server_errors_when_identity_mismatches() -> Result<()> {
     let script = temp.path().join("mismatched_mcp_server.py");
     write_identity_server_script(&script, "sigil-test-server", "1.2.3")?;
     let args = vec![script.to_string_lossy().to_string()];
-    let command_fingerprint = super::mcp_command_fingerprint("python3", &args)?;
+    let transport_fingerprint = super::mcp_transport_fingerprint("python3", &args)?;
 
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "mismatched".to_owned(),
             command: "python3".to_owned(),
             args,
@@ -3196,7 +3289,7 @@ async fn pinned_mcp_server_errors_when_identity_mismatches() -> Result<()> {
             trust: McpServerTrustPolicy {
                 pin_version: true,
                 pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                    command_fingerprint,
+                    transport_fingerprint,
                     protocol_version: "2024-11-05".to_owned(),
                     server_name: "other-server".to_owned(),
                     server_version: "1.2.3".to_owned(),
@@ -3254,7 +3347,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_capabilities_roots_and_secrets(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "fake".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -3382,7 +3475,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_capabilities_roots_and_secrets(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "fake".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -3440,7 +3533,7 @@ if message and message.get("method") == "initialize":
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "slow".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -3464,7 +3557,7 @@ async fn required_lazy_mcp_server_is_deferred_until_activation() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "required-lazy".to_owned(),
             command: "/definitely/missing/sigil-mcp-server".to_owned(),
             startup: McpServerStartup::Lazy,
@@ -3477,7 +3570,7 @@ async fn required_lazy_mcp_server_is_deferred_until_activation() -> Result<()> {
 
     let error = activate_lazy_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "required-lazy".to_owned(),
             command: "/definitely/missing/sigil-mcp-server".to_owned(),
             startup: McpServerStartup::Lazy,
@@ -3500,7 +3593,7 @@ async fn lazy_mcp_servers_are_not_started_or_registered() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "lazy".to_owned(),
             command: "/definitely/missing/sigil-mcp-server".to_owned(),
             startup: McpServerStartup::Lazy,
@@ -3551,7 +3644,7 @@ while True:
 "#,
     )?;
 
-    let server = McpServerConfig {
+    let server = mcp_server_config! {
         name: "lazy".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.to_string_lossy().to_string()],
@@ -3589,7 +3682,7 @@ async fn optional_eager_mcp_server_start_failure_is_skipped() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "optional".to_owned(),
             command: "/definitely/missing/sigil-mcp-server".to_owned(),
             required: false,
@@ -3640,13 +3733,13 @@ while True:
     register_mcp_tools(
         &mut registry,
         &[
-            McpServerConfig {
+            mcp_server_config! {
                 name: "optional".to_owned(),
                 command: "/definitely/missing/sigil-mcp-server".to_owned(),
                 required: false,
                 ..McpServerConfig::default()
             },
-            McpServerConfig {
+            mcp_server_config! {
                 name: "healthy".to_owned(),
                 command: "python3".to_owned(),
                 args: vec![script.to_string_lossy().to_string()],
@@ -3700,7 +3793,7 @@ while True:
     )?;
 
     let mut registry = ToolRegistry::new();
-    let server = McpServerConfig {
+    let server = mcp_server_config! {
         name: "stderr".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.to_string_lossy().to_string()],
@@ -3755,7 +3848,7 @@ while True:
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "invalid-tools-list".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -3813,7 +3906,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "error-call".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -3881,7 +3974,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "non-text".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -3958,7 +4051,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_name_limit_and_roots(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "roots".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4018,7 +4111,7 @@ while True:
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools_with_name_limit_and_roots(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "secret_roots".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4086,7 +4179,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "elicitation".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4178,7 +4271,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "elicitation".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4240,7 +4333,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_name_limit(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "bad server!".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4319,14 +4412,14 @@ while True:
     register_mcp_tools_with_name_limit(
         &mut registry,
         &[
-            McpServerConfig {
+            mcp_server_config! {
                 name: "server-a".to_owned(),
                 command: "python3".to_owned(),
                 args: vec![script.to_string_lossy().to_string()],
                 startup_timeout_secs: 5,
                 ..McpServerConfig::default()
             },
-            McpServerConfig {
+            mcp_server_config! {
                 name: "server-b".to_owned(),
                 command: "python3".to_owned(),
                 args: vec![script.to_string_lossy().to_string()],
@@ -4377,14 +4470,14 @@ while True:
 "#,
     )?;
 
-    let eager = McpServerConfig {
+    let eager = mcp_server_config! {
         name: "wrapper-eager".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.to_string_lossy().to_string()],
         startup_timeout_secs: 5,
         ..McpServerConfig::default()
     };
-    let lazy = McpServerConfig {
+    let lazy = mcp_server_config! {
         name: "wrapper-lazy".to_owned(),
         command: "python3".to_owned(),
         args: vec![script.to_string_lossy().to_string()],
@@ -4556,7 +4649,7 @@ fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
     assert_eq!(super::summarize_egress_json(&Value::Null)["type"], "null");
 
     let observed = super::McpServerObservedIdentity {
-        command_fingerprint: "sha256:observed".to_owned(),
+        transport_fingerprint: "sha256:observed".to_owned(),
         process_authorization_fingerprint: "hmac-sha256:observed".to_owned(),
         declaration: None,
         environment_grant_names: Vec::new(),
@@ -4566,7 +4659,7 @@ fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
         server_name: "observed-server".to_owned(),
         server_version: "2.0.0".to_owned(),
     };
-    let disabled = McpServerConfig {
+    let disabled = mcp_server_config! {
         name: "unmatched".to_owned(),
         trust: McpServerTrustPolicy {
             pin_version: false,
@@ -4576,7 +4669,7 @@ fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
     };
     super::validate_mcp_pin(&disabled, &observed)?;
 
-    let matching = McpServerConfig {
+    let matching = mcp_server_config! {
         name: "matched".to_owned(),
         trust: McpServerTrustPolicy {
             pin_version: true,
@@ -4587,12 +4680,12 @@ fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
     };
     super::validate_mcp_pin(&matching, &observed)?;
 
-    let mismatched = McpServerConfig {
+    let mismatched = mcp_server_config! {
         name: "mismatched".to_owned(),
         trust: McpServerTrustPolicy {
             pin_version: true,
             pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                command_fingerprint: "sha256:expected".to_owned(),
+                transport_fingerprint: "sha256:expected".to_owned(),
                 protocol_version: "2024-11-05".to_owned(),
                 server_name: "expected-server".to_owned(),
                 server_version: "1.0.0".to_owned(),
@@ -4605,7 +4698,7 @@ fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
         .expect_err("pin mismatch should include every mismatched field");
     let message = error.to_string();
     assert!(
-        message.contains("command_fingerprint expected sha256:expected observed sha256:observed")
+        message.contains("transport_fingerprint expected sha256:expected observed sha256:observed")
     );
     assert!(message.contains("protocol_version expected 2024-11-05 observed 2025-06-18"));
     assert!(message.contains("server_name expected expected-server observed observed-server"));
@@ -4696,7 +4789,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "bare".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4750,7 +4843,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "optional-tools".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4824,7 +4917,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "missing-result".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4891,7 +4984,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "string-content".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -4959,7 +5052,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "unsupported".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -5016,7 +5109,7 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "error".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -5075,7 +5168,7 @@ while True:
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
         &mut registry,
-        &[McpServerConfig {
+        &[mcp_server_config! {
             name: "secret".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
@@ -5105,12 +5198,12 @@ while True:
 #[test]
 fn validate_mcp_pin_reports_all_supported_mismatch_fields() {
     let error = super::validate_mcp_pin(
-        &McpServerConfig {
+        &mcp_server_config! {
             name: "pin".to_owned(),
             trust: McpServerTrustPolicy {
                 pin_version: true,
                 pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                    command_fingerprint: "expected-fingerprint".to_owned(),
+                    transport_fingerprint: "expected-fingerprint".to_owned(),
                     protocol_version: "expected-protocol".to_owned(),
                     server_name: "expected-name".to_owned(),
                     server_version: "expected-version".to_owned(),
@@ -5120,7 +5213,7 @@ fn validate_mcp_pin_reports_all_supported_mismatch_fields() {
             ..McpServerConfig::default()
         },
         &super::McpServerObservedIdentity {
-            command_fingerprint: "observed-fingerprint".to_owned(),
+            transport_fingerprint: "observed-fingerprint".to_owned(),
             process_authorization_fingerprint: "observed-authorization".to_owned(),
             declaration: None,
             environment_grant_names: Vec::new(),
@@ -5135,7 +5228,7 @@ fn validate_mcp_pin_reports_all_supported_mismatch_fields() {
 
     let message = error.to_string();
     assert!(message.contains(
-        "command_fingerprint expected expected-fingerprint observed observed-fingerprint"
+        "transport_fingerprint expected expected-fingerprint observed observed-fingerprint"
     ));
     assert!(
         message.contains("protocol_version expected expected-protocol observed observed-protocol")

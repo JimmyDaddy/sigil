@@ -21,10 +21,12 @@ const EVENT_DETAIL_MAX_CHARS: usize = 240;
 
 impl AppState {
     pub(super) fn live_panel_height(&self) -> u16 {
-        self.terminal_height
+        let height = self
+            .terminal_height
             .saturating_sub(self.footer_strip_height())
             .saturating_sub(1)
-            .max(1)
+            .max(1);
+        height.saturating_sub(self.egress_disclosure_reserved_rows(height))
     }
 
     pub(super) fn timeline_viewport_rows(&self) -> usize {
@@ -1039,7 +1041,7 @@ impl AppState {
             ),
             RunPhase::Agent(profile_id) => ("agent", format!("waiting for @{profile_id} result")),
             RunPhase::Tool(name) => ("tool", format!("running {name}")),
-            RunPhase::Streaming => ("streaming", "writing the reply".to_owned()),
+            RunPhase::Streaming => ("streaming", "receiving response".to_owned()),
         };
         Some(LiveActivitySummary {
             label: label.to_owned(),

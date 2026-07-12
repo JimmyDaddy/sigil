@@ -7,16 +7,19 @@ use serde_json::json;
 use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfilePolicyEntry, AgentProfileSnapshot,
     AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
-    ApprovalMode, CompactionConfig, CompactionRecord, DurableEventType,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel,
-    ExecutionNetworkReceipt, ExecutionSandboxProfile, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, MemoryConfig, PlanApprovalExpiry, PlanApprovalPermission,
-    PluginCapability, PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry,
-    PluginHookExecutionStatus, PluginHookKind, PluginManifestSnapshot, PluginTrustDecision,
-    PluginTrustEntry, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillRunMode, SkillSource, SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
-    ToolEffect, ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
+    ApprovalMode, CitationSupport, CompactionConfig, CompactionRecord, ControlEntry,
+    DurableEventType, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel,
+    ExecutionNetworkReceipt, ExecutionSandboxProfile, ExternalEvidenceLevel,
+    ExternalProvenanceEntry, ExternalSourceRecord, ExternalTrust, JsonlSessionStore,
+    McpElicitationDecision, McpElicitationEntry, MemoryConfig, PlanApprovalExpiry,
+    PlanApprovalPermission, PluginCapability, PluginHookExecutionFinishedEntry,
+    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SessionStreamRecord,
+    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
+    SkillTrustState, SourceCacheStatus, SourceFreshness, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry,
+    ToolApprovalUserDecision, ToolEffect, ToolError, ToolErrorKind, ToolRestartPolicy,
+    ToolResultMeta, WorkspaceConfig,
 };
 
 #[test]
@@ -43,6 +46,53 @@ fn session_labels_and_identifiers_truncate_as_expected() {
         bytes: 0,
     };
     assert!(session_history_display_label(&titled).starts_with("A very long title"));
+}
+
+#[test]
+fn external_provenance_audit_line_shows_bounded_safe_sources_and_citations() -> Result<()> {
+    let final_text = "External evidence supports this answer.";
+    let source = ExternalSourceRecord::from_remote_candidate(
+        "scope-a",
+        Some("untrusted-remote-id"),
+        ExternalEvidenceLevel::SearchSnippet,
+        "https://example.com/research?token=must-not-display",
+        "exa_mcp",
+        Some("Research summary".to_owned()),
+        None,
+        "2026-07-12T00:00:00Z",
+        None,
+        Some(1),
+        SourceFreshness::Fresh,
+        SourceCacheStatus::Miss,
+        ToolRestartPolicy::InterruptOnRestart,
+    )?;
+    let citation = CitationSupport::for_final_safe_text(
+        "scope-a",
+        "assistant-a",
+        source.source_id.clone(),
+        final_text,
+        0,
+        8,
+    )
+    .expect("valid final text range");
+    let rendered =
+        render_control_entry_line(&ControlEntry::ExternalProvenance(ExternalProvenanceEntry {
+            session_scope_id: "scope-a".to_owned(),
+            message_id: "assistant-a".to_owned(),
+            trust: ExternalTrust::ExternalUntrusted,
+            sources: vec![source],
+            citations: vec![citation],
+        }));
+
+    assert!(rendered.contains("sources=1 citations=1"));
+    assert!(rendered.contains("level=search_snippet"));
+    assert!(rendered.contains("title=Research summary"));
+    assert!(rendered.contains("url=https://example.com/research?[redacted]"));
+    assert!(rendered.contains("citation source=src_"));
+    assert!(rendered.contains("range=0..8"));
+    assert!(!rendered.contains("must-not-display"));
+    assert!(!rendered.contains("untrusted-remote-id"));
+    Ok(())
 }
 
 #[test]
@@ -1858,6 +1908,8 @@ fn render_session_control_entries_cover_remaining_labels() {
             risk: sigil_kernel::PermissionRisk::High,
             subjects: Vec::new(),
             subject_zones: Vec::new(),
+            facets: vec![sigil_kernel::ToolApprovalSessionGrantFacet::Local],
+            scope: sigil_kernel::ToolApprovalSessionGrantScope::ExactSubjects,
             expires: ToolApprovalSessionGrantExpiry::Session,
             granted_at_ms: 1,
         }),

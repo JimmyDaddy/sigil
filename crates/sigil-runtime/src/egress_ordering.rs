@@ -118,7 +118,7 @@ impl EgressOrderingCoordinator {
             || disclosure.safe_transport_destination() != authorization.safe_transport_destination
             || !reservation
                 .matches_route(&authorization.root_run_id, &authorization.route_fingerprint)
-            || reservation.kind()? != WebBudgetReservationKind::LogicalCall
+            || reservation.kind()? != WebBudgetReservationKind::FetchCall
         {
             return Err(EgressOrderingError::BindingMismatch);
         }
@@ -155,7 +155,7 @@ impl EgressOrderingCoordinator {
             || disclosure.correlation_id() != Some(started.correlation_id.as_str())
             || disclosure.route_fingerprint() != started.route_fingerprint
             || reservation.root_run_id() != started.root_run_id
-            || reservation.kind()? != WebBudgetReservationKind::LogicalCall
+            || reservation.kind()? != WebBudgetReservationKind::ClientSearchCall
             || !reservation.matches(
                 &started.correlation_id,
                 &started.route_lease_id,

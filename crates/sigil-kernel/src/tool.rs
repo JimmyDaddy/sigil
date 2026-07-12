@@ -442,6 +442,10 @@ pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub timeout_secs: u64,
     pub mutation_recorder: Option<MutationEventRecorder>,
+    egress_audit_recorder: Option<crate::EgressAuditRecorder>,
+    user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
+    session_scope_id: Option<String>,
+    web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
     network_policy: NetworkPolicy,
     explicit_network_approval: bool,
     approved_subjects: Vec<ToolSubject>,
@@ -456,6 +460,16 @@ impl std::fmt::Debug for ToolContext {
             .field("workspace_root", &self.workspace_root)
             .field("timeout_secs", &self.timeout_secs)
             .field("mutation_recorder", &self.mutation_recorder.is_some())
+            .field(
+                "egress_audit_recorder",
+                &self.egress_audit_recorder.is_some(),
+            )
+            .field(
+                "user_url_capability_registrar",
+                &self.user_url_capability_registrar.is_some(),
+            )
+            .field("session_scope_id", &self.session_scope_id)
+            .field("web_task_tree_budget", &self.web_task_tree_budget.is_some())
             .field("network_policy", &self.network_policy)
             .field("explicit_network_approval", &self.explicit_network_approval)
             .field("approved_subjects", &self.approved_subjects.len())
@@ -476,6 +490,10 @@ impl ToolContext {
             workspace_root: workspace_root.into(),
             timeout_secs,
             mutation_recorder: None,
+            egress_audit_recorder: None,
+            user_url_capability_registrar: None,
+            session_scope_id: None,
+            web_task_tree_budget: None,
             network_policy: NetworkPolicy::Allow,
             explicit_network_approval: false,
             approved_subjects: Vec::new(),
@@ -485,10 +503,93 @@ impl ToolContext {
         }
     }
 
+    /// Creates the fail-closed execution context for a configured eager network startup.
+    ///
+    /// This authority is narrower than interactive tool approval: it only represents an explicit
+    /// root configuration whose effective network policy is already `allow`, and it still requires
+    /// a durable recorder plus the root-owned budget before any adapter can reach egress.
+    pub fn for_eager_network_startup(
+        workspace_root: impl Into<PathBuf>,
+        timeout_secs: u64,
+        network_policy: NetworkPolicy,
+        recorder: crate::EgressAuditRecorder,
+        budget: Arc<crate::WebTaskTreeBudget>,
+    ) -> Result<Self> {
+        if network_policy != NetworkPolicy::Allow {
+            bail!("eager network startup requires web.network_mode = allow");
+        }
+        Ok(Self::new(workspace_root, timeout_secs)
+            .with_egress_audit_recorder(recorder)
+            .with_network_authorization(NetworkPolicy::Allow, false)
+            .with_web_task_tree_budget(budget))
+    }
+
     #[must_use]
     pub fn with_mutation_recorder(mut self, recorder: MutationEventRecorder) -> Self {
         self.mutation_recorder = Some(recorder);
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_egress_audit_recorder(
+        mut self,
+        recorder: crate::EgressAuditRecorder,
+    ) -> Self {
+        self.egress_audit_recorder = Some(recorder);
+        self
+    }
+
+    /// Returns the durable recorder inherited from the active session.
+    #[must_use]
+    pub fn egress_audit_recorder(&self) -> Option<crate::EgressAuditRecorder> {
+        self.egress_audit_recorder.clone()
+    }
+
+    /// Installs the process-local URL capability attachment inherited from the active session.
+    #[must_use]
+    pub(crate) fn with_user_url_capability_registrar(
+        mut self,
+        registrar: Arc<dyn crate::UserUrlCapabilityRegistrar>,
+    ) -> Self {
+        self.user_url_capability_registrar = Some(registrar);
+        self
+    }
+
+    /// Returns the process-local URL capability attachment for exact source-id lookup.
+    #[must_use]
+    pub fn user_url_capability_registrar(
+        &self,
+    ) -> Option<Arc<dyn crate::UserUrlCapabilityRegistrar>> {
+        self.user_url_capability_registrar.clone()
+    }
+
+    /// Installs the exact logical session scope for capability lookup.
+    #[must_use]
+    pub(crate) fn with_session_scope_id(mut self, session_scope_id: impl Into<String>) -> Self {
+        self.session_scope_id = Some(session_scope_id.into());
+        self
+    }
+
+    /// Returns the active logical session scope, when execution came through the agent loop.
+    #[must_use]
+    pub fn session_scope_id(&self) -> Option<&str> {
+        self.session_scope_id.as_deref()
+    }
+
+    /// Installs the root-owned Web budget inherited from the active run.
+    #[must_use]
+    pub(crate) fn with_web_task_tree_budget(
+        mut self,
+        budget: Arc<crate::WebTaskTreeBudget>,
+    ) -> Self {
+        self.web_task_tree_budget = Some(budget);
+        self
+    }
+
+    /// Returns the shared Web budget for this run and its nested Web effects.
+    #[must_use]
+    pub fn web_task_tree_budget(&self) -> Option<Arc<crate::WebTaskTreeBudget>> {
+        self.web_task_tree_budget.clone()
     }
 
     #[must_use]
@@ -698,6 +799,10 @@ pub struct ToolResult {
     pub transient_context: Vec<ModelMessage>,
     #[serde(skip)]
     pub control_entries: Vec<ControlEntry>,
+    #[serde(skip)]
+    pub url_capability_registrations: Box<Vec<crate::UserUrlCapabilityRegistration>>,
+    #[serde(skip)]
+    pub external_sources: Box<Vec<crate::ExternalSourceRecord>>,
 }
 
 impl ToolResult {
@@ -715,6 +820,8 @@ impl ToolResult {
             metadata,
             transient_context: Vec::new(),
             control_entries: Vec::new(),
+            url_capability_registrations: Box::default(),
+            external_sources: Box::default(),
         }
     }
 
@@ -738,6 +845,8 @@ impl ToolResult {
             metadata: ToolResultMeta::default(),
             transient_context: Vec::new(),
             control_entries: Vec::new(),
+            url_capability_registrations: Box::default(),
+            external_sources: Box::default(),
         }
     }
 
@@ -756,6 +865,24 @@ impl ToolResult {
 
     pub fn with_control_entry(mut self, entry: ControlEntry) -> Self {
         self.control_entries.push(entry);
+        self
+    }
+
+    /// Carries exact URL registrations to the agent's pre-persistence tool-result boundary.
+    ///
+    /// The registrations are consumed before the result is emitted as a `RunEvent`; raw URL
+    /// material therefore remains process-local and never enters the durable tool envelope.
+    pub fn with_url_capability_registrations(
+        mut self,
+        registrations: Vec<crate::UserUrlCapabilityRegistration>,
+    ) -> Self {
+        self.url_capability_registrations = Box::new(registrations);
+        self
+    }
+
+    /// Carries normalized external sources for a durable tool-result provenance sidecar.
+    pub fn with_external_sources(mut self, sources: Vec<crate::ExternalSourceRecord>) -> Self {
+        self.external_sources = Box::new(sources);
         self
     }
 
@@ -1973,6 +2100,7 @@ pub trait Tool: Send + Sync {
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
+    run_input_preparer: Arc<RwLock<Option<Arc<dyn crate::AgentRunInputPreparer>>>>,
     scope: Option<Arc<ToolRegistryScope>>,
     deny_scope: Option<Arc<ToolRegistryScope>>,
 }
@@ -1987,6 +2115,7 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self {
             tools: Arc::new(RwLock::new(BTreeMap::new())),
+            run_input_preparer: Arc::new(RwLock::new(None)),
             scope: None,
             deny_scope: None,
         }
@@ -2009,11 +2138,29 @@ impl ToolRegistry {
         tools.insert(name, tool);
     }
 
+    /// Attaches one runtime-owned per-run input resolver shared by every scoped registry view.
+    pub fn set_run_input_preparer(&mut self, preparer: Arc<dyn crate::AgentRunInputPreparer>) {
+        let mut slot = match self.run_input_preparer.write() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(preparer);
+    }
+
+    pub(crate) fn run_input_preparer(&self) -> Option<Arc<dyn crate::AgentRunInputPreparer>> {
+        let slot = match self.run_input_preparer.read() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.clone()
+    }
+
     /// Returns a role-scoped registry sharing the same underlying tool map.
     pub fn scoped(&self, scope: ToolRegistryScope) -> ScopedToolRegistry {
         ScopedToolRegistry {
             inner: Self {
                 tools: Arc::clone(&self.tools),
+                run_input_preparer: Arc::clone(&self.run_input_preparer),
                 scope: Some(Arc::new(self.effective_scope(scope))),
                 deny_scope: self.deny_scope.clone(),
             },
@@ -2029,6 +2176,7 @@ impl ToolRegistry {
         ScopedToolRegistry {
             inner: Self {
                 tools: Arc::clone(&self.tools),
+                run_input_preparer: Arc::clone(&self.run_input_preparer),
                 scope: Some(Arc::new(self.effective_scope(scope))),
                 deny_scope: self.effective_deny_scope(deny_scope).map(Arc::new),
             },

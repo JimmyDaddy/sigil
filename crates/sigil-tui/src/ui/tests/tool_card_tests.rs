@@ -1687,6 +1687,28 @@ fn tool_card_read_file_preview_uses_document_and_file_sections() {
 }
 
 #[test]
+fn tool_card_websearch_preview_keeps_result_content_visible_when_collapsed() {
+    let summary = ToolCardRender {
+        preview_kind: ToolPreviewKind::Text,
+        preview_lines: vec![
+            "Title: Rust release notes".to_owned(),
+            "URL: https://www.rust-lang.org/".to_owned(),
+            "Text: Stable release details".to_owned(),
+        ],
+        ..base_summary("websearch")
+    };
+
+    let text = plain_text(&render_tool_collapsed_preview_body(
+        &summary,
+        accent_rose(),
+        80,
+    ));
+    assert!(text.contains("Title: Rust release notes"));
+    assert!(text.contains("URL: https://www.rust-lang.org/"));
+    assert!(text.contains("Text: Stable release details"));
+}
+
+#[test]
 fn tool_card_grep_bash_and_file_change_helpers_cover_remaining_labels() {
     let grep_summary = ToolCardRender {
         preview_value: Some(json!([])),

@@ -85,7 +85,7 @@ use roots::{canonical_root, file_uri, root_name};
 use tools::{McpTool, McpToolDescriptor};
 
 #[cfg(test)]
-use tools::mcp_command_fingerprint;
+use tools::mcp_transport_fingerprint;
 
 #[cfg(test)]
 use client::{read_message, validate_mcp_pin};
@@ -111,7 +111,7 @@ pub use lifecycle::{
     activate_lazy_mcp_tools, register_mcp_tools, register_mcp_tools_with_options,
     register_mcp_tools_with_report,
 };
-pub use name::{McpToolName, mcp_provider_tool_name_prefix};
+pub use name::{McpToolName, mcp_provider_tool_name_candidate, mcp_provider_tool_name_prefix};
 pub use process::{
     LocalMcpProcessLauncher, McpDeclarationLaunchMetadata, McpProcessClass, McpProcessCoverage,
     McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest, McpProcessLauncher,
@@ -134,7 +134,7 @@ pub use streamable_http::{
 };
 pub use tools::{
     mcp_launch_static_fingerprint, mcp_launch_static_fingerprint_at,
-    mcp_resolved_launch_static_fingerprint_at,
+    mcp_resolved_launch_static_fingerprint_at, mcp_transport_static_fingerprint,
 };
 
 #[cfg(test)]

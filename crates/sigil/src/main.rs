@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod egress_disclosure;
+
 #[cfg(not(test))]
 use std::env;
 
@@ -13,9 +15,9 @@ use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
-    Agent, EventHandler, InteractionMode, JsonlSessionStore, MutationEventRecorder, ProviderChunk,
-    RootConfig, RunEvent, Session, UsageStats, WorkspaceTrust, resolve_workspace_root,
-    workspace_trust_from_entries,
+    Agent, EventHandler, InteractionMode, JsonlSessionStore, McpServerStartup,
+    MutationEventRecorder, ProviderChunk, RootConfig, RunEvent, Session, UsageStats,
+    WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
 };
 use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
 use sigil_runtime::{
@@ -290,7 +292,7 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
         workspace_root.clone(),
         InteractionMode::Headless,
     );
-    let registry =
+    let mut registry =
         sigil_runtime::build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission(
             &root_config,
             &provider.capabilities(),
@@ -303,6 +305,46 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
             ),
         )
         .await?;
+    let elicitation_handler = sigil_runtime::unsupported_mcp_elicitation_handler();
+    let runtime_event_handler = sigil_runtime::unsupported_mcp_runtime_event_handler();
+    let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
+        std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
+    sigil_runtime::attach_remote_mcp_activation_presenter(
+        &mut registry,
+        &root_config,
+        &provider.capabilities(),
+        workspace_root.clone(),
+        std::sync::Arc::clone(&elicitation_handler),
+        runtime_event_handler,
+        std::sync::Arc::clone(&disclosure_presenter),
+    );
+    let eager_remote_servers = root_config
+        .mcp_servers
+        .iter()
+        .filter(|server| {
+            server.startup == McpServerStartup::Eager && server.streamable_http().is_some()
+        })
+        .map(|server| (server.name.clone(), server.required))
+        .collect::<Vec<_>>();
+    for (server_name, required) in eager_remote_servers {
+        let activation = sigil_runtime::activate_eager_remote_mcp_server(
+            &mut registry,
+            &root_config,
+            &server_name,
+            provider.capabilities().tool_name_max_chars,
+            workspace_root.clone(),
+            session.egress_audit_recorder()?,
+            std::sync::Arc::clone(&disclosure_presenter),
+            std::sync::Arc::clone(&elicitation_handler),
+        )
+        .await;
+        if let Err(error) = activation {
+            if required {
+                return Err(error);
+            }
+            eprintln!("optional eager MCP server {server_name} failed: {error:#}");
+        }
+    }
     let agent = Agent::new(provider, registry);
 
     let mut handler = StdoutEventHandler;

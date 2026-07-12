@@ -36,6 +36,7 @@ fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }

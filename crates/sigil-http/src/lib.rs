@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod disclosure;
 mod driver;
 mod dto;
 mod listener;
@@ -10,6 +11,11 @@ mod sse;
 
 pub use auth::{HttpAuthError, HttpAuthValidator};
 pub use config::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig, HttpServerConfigError};
+pub use disclosure::{
+    HTTP_EGRESS_DISCLOSURE_SCHEMA_VERSION, HttpEgressDisclosureEvent,
+    HttpEgressDisclosureReplayBuffer, HttpEgressDisclosureReplayError,
+    HttpReplayEgressDisclosurePresenter,
+};
 pub use driver::{
     HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
     HttpRunDriverStart,

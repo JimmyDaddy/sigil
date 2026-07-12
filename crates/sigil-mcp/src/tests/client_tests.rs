@@ -15,6 +15,61 @@ use tokio::io::{AsyncRead, ReadBuf};
 
 use super::*;
 
+macro_rules! set_mcp_server_config_field {
+    ($config:ident, command, $value:expr) => {
+        let sigil_kernel::McpServerTransportConfig::Stdio { command, .. } = &mut $config.transport
+        else {
+            panic!("test MCP config must use stdio transport");
+        };
+        *command = $value;
+    };
+    ($config:ident, args, $value:expr) => {
+        let sigil_kernel::McpServerTransportConfig::Stdio { args, .. } = &mut $config.transport
+        else {
+            panic!("test MCP config must use stdio transport");
+        };
+        *args = $value;
+    };
+    ($config:ident, inherit_env, $value:expr) => {
+        let sigil_kernel::McpServerTransportConfig::Stdio { inherit_env, .. } =
+            &mut $config.transport
+        else {
+            panic!("test MCP config must use stdio transport");
+        };
+        *inherit_env = $value;
+    };
+    ($config:ident, $field:ident, $value:expr) => {
+        $config.$field = $value;
+    };
+}
+
+macro_rules! mcp_server_config {
+    (.. $base:expr $(,)?) => {{
+        let base: McpServerConfig = $base;
+        base
+    }};
+    ($field:ident: $value:expr, $($rest:tt)*) => {{
+        let mut config = mcp_server_config!($($rest)*);
+        set_mcp_server_config_field!(config, $field, $value);
+        config
+    }};
+    ($field:ident, $($rest:tt)*) => {{
+        let mut config = mcp_server_config!($($rest)*);
+        set_mcp_server_config_field!(config, $field, $field);
+        config
+    }};
+    ($field:ident: $value:expr $(,)?) => {{
+        let mut config = McpServerConfig::default();
+        set_mcp_server_config_field!(config, $field, $value);
+        config
+    }};
+    ($field:ident $(,)?) => {{
+        let mut config = McpServerConfig::default();
+        set_mcp_server_config_field!(config, $field, $field);
+        config
+    }};
+}
+
 fn write_server(path: &std::path::Path, body: &str) -> Result<()> {
     fs::write(path, body)?;
     Ok(())
@@ -25,7 +80,7 @@ fn server_config(
     script: &std::path::Path,
     startup_timeout_secs: u64,
 ) -> McpServerConfig {
-    McpServerConfig {
+    mcp_server_config! {
         name: name.to_owned(),
         command: "python3".to_owned(),
         args: vec![script.to_string_lossy().into_owned()],
@@ -682,7 +737,7 @@ while True:
         .replace("__PID_FILE__", &pid_path),
     )?;
     let first = server_config("first", &script, 5);
-    let second = McpServerConfig {
+    let second = mcp_server_config! {
         name: "second".to_owned(),
         command: "/definitely/missing/second-mcp-server".to_owned(),
         startup_timeout_secs: 5,

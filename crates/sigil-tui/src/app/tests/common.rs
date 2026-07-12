@@ -49,6 +49,7 @@ pub(crate) fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: std::collections::BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }

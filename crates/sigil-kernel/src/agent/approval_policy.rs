@@ -6,7 +6,8 @@ use crate::{
     ToolSubjectAudit,
     permission::{
         ApprovalMode, InteractionMode, PermissionDecision, PermissionRisk,
-        tool_approval_session_grant_available,
+        ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope,
+        tool_approval_session_grant_shape,
     },
     tool::{ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope},
 };
@@ -88,7 +89,8 @@ pub(super) fn tool_session_grant_decision_override(
     tool_name: &str,
     mut decision: PermissionDecision,
 ) -> (PermissionDecision, Option<ToolApprovalSessionGrantEntry>) {
-    if decision.mode != ApprovalMode::Ask || !tool_approval_session_grant_available(&decision) {
+    if decision.mode != ApprovalMode::Ask || tool_approval_session_grant_shape(&decision).is_none()
+    {
         return (decision, None);
     }
     let matching_grant = session.entries().iter().rev().find_map(|entry| {
@@ -97,8 +99,17 @@ pub(super) fn tool_session_grant_decision_override(
         };
         session_grant_covers_decision(grant, tool_name, &decision).then(|| grant.clone())
     });
-    if matching_grant.is_some() {
-        decision.local_policy_decision = ApprovalMode::Allow;
+    if let Some(grant) = matching_grant.as_ref() {
+        for facet in &grant.facets {
+            match facet {
+                ToolApprovalSessionGrantFacet::Local => {
+                    decision.local_policy_decision = ApprovalMode::Allow;
+                }
+                ToolApprovalSessionGrantFacet::Network => {
+                    decision.network_policy_decision = ApprovalMode::Allow;
+                }
+            }
+        }
         decision.recompute_mode();
     }
     (decision, matching_grant)
@@ -109,12 +120,32 @@ pub(super) fn session_grant_covers_decision(
     tool_name: &str,
     decision: &PermissionDecision,
 ) -> bool {
+    let Some(shape) = tool_approval_session_grant_shape(decision) else {
+        return false;
+    };
     grant.expires == ToolApprovalSessionGrantExpiry::Session
         && grant.tool_name == tool_name
         && grant.access == decision.access
         && grant.network_effect == decision.network_effect
         && grant.operation == decision.operation
-        && grant_subjects_match_decision(&grant.subjects, &decision.subjects)
+        && grant.facets == shape.facets
+        && grant.scope == shape.scope
+        && match grant.scope {
+            ToolApprovalSessionGrantScope::ExactSubjects => {
+                grant_subjects_match_decision(&grant.subjects, &decision.subjects)
+            }
+            ToolApprovalSessionGrantScope::NetworkReadTool => {
+                !grant.subjects.is_empty()
+                    && grant.subjects.iter().all(|subject| {
+                        subject.kind == ToolSubjectKind::NetworkEndpoint
+                            && !subject.normalized.trim().is_empty()
+                    })
+                    && decision.subjects.iter().all(|subject| {
+                        subject.kind == ToolSubjectKind::NetworkEndpoint
+                            && !subject.normalized.trim().is_empty()
+                    })
+            }
+        }
 }
 
 fn grant_subjects_match_decision(

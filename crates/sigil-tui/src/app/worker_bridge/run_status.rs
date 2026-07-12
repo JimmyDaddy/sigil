@@ -21,6 +21,7 @@ impl AppState {
         self.approval.pending = None;
         self.modal_state = None;
         self.runtime.last_phase_marker = None;
+        self.clear_recent_egress_disclosure();
     }
 
     pub(super) fn finish_worker_streams(&mut self) {

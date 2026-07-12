@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Result, bail};
 use sigil_kernel::{
-    SecretString, Session, ToolRestartPolicy, UserUrlCapabilityRegistrar,
-    UserUrlCapabilityRegistration, WebUrlCapabilityDescriptor, WebUrlProvenanceKind,
-    canonical_web_url_persistence_projection,
+    ResolvedUserUrlCapability, SecretString, Session, ToolRestartPolicy,
+    UserUrlCapabilityLookupError, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
+    WebUrlCapabilityDescriptor, WebUrlProvenanceKind, canonical_web_url_persistence_projection,
 };
 
 /// Default lifetime of one live URL capability.
@@ -407,6 +407,30 @@ impl WebUrlCapabilityStore {
 }
 
 impl UserUrlCapabilityRegistrar for WebUrlCapabilityStore {
+    fn resolve(
+        &self,
+        session_scope_id: &str,
+        source_id: &str,
+    ) -> std::result::Result<ResolvedUserUrlCapability, UserUrlCapabilityLookupError> {
+        let capability = WebUrlCapabilityStore::resolve(self, session_scope_id, source_id)
+            .map_err(|error| match error {
+                UrlCapabilityLookupError::NotFound => UserUrlCapabilityLookupError::NotFound,
+                UrlCapabilityLookupError::Expired => UserUrlCapabilityLookupError::Expired,
+                UrlCapabilityLookupError::Evicted => UserUrlCapabilityLookupError::Evicted,
+                UrlCapabilityLookupError::InterruptedOnRestart => {
+                    UserUrlCapabilityLookupError::InterruptedOnRestart
+                }
+            })?;
+        Ok(ResolvedUserUrlCapability::new(
+            capability.session_scope_id().to_owned(),
+            capability.source_id().to_owned(),
+            capability.raw_canonical_url().clone(),
+            capability.safe_display_url().to_owned(),
+            capability.restart_policy(),
+            capability.provenance(),
+        ))
+    }
+
     fn stage(&self, registration: UserUrlCapabilityRegistration) -> Result<()> {
         self.validate_registration(&registration)?;
         let now = Instant::now();

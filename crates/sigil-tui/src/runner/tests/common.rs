@@ -54,6 +54,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
     }
 }

@@ -140,7 +140,8 @@ fn budget() -> Arc<WebTaskTreeBudget> {
     WebTaskTreeBudget::new(
         "root-run",
         WebTaskTreeBudgetLimits {
-            max_logical_calls: 2,
+            max_fetch_calls: 2,
+            max_client_search_calls: 2,
             max_hosted_requests: 2,
             max_network_attempts: 3,
             max_wire_bytes: 64,
@@ -161,7 +162,7 @@ fn query_reservation(budget: &Arc<WebTaskTreeBudget>) -> sigil_kernel::WebBudget
             attempt_id: "query-attempt".to_owned(),
             route_lease_id: "route-lease".to_owned(),
             route_fingerprint: "route-fingerprint".to_owned(),
-            kind: WebBudgetReservationKind::LogicalCall,
+            kind: WebBudgetReservationKind::ClientSearchCall,
         })
         .expect("reservation")
 }

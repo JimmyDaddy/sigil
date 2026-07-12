@@ -49,7 +49,8 @@ use crate::{
     memory::{apply_memory_report, materialize_memory},
     mutation::{ExecutionMutationProfile, MutationEventRecorder},
     permission::{
-        ApprovalMode, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation,
+        ApprovalMode, PathTrustZone, PermissionConfirmation, PermissionRisk,
+        ToolApprovalSessionGrantFacet, ToolApprovalSessionGrantScope, ToolOperation,
     },
     plan::{
         PlanApprovalProjection, PlanApprovedEntry, PlanArtifactProjection,

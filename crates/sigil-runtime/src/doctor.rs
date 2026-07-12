@@ -30,6 +30,7 @@ mod mcp; // MCP server, plugin hook, and command availability checks.
 mod providers; // provider config, auth, capability, and sandbox checks.
 mod session; // workspace, storage, and session stream checks.
 mod terminal; // terminal profile, mouse, and clipboard checks.
+mod web; // offline Web V1 capability and route diagnostics.
 
 pub use code_intel::build_code_intelligence_checks;
 use code_intel::check_code_intelligence;
@@ -37,6 +38,9 @@ use mcp::{CommandStatus, check_mcp_servers, check_plugin_hooks, command_status};
 use providers::{check_execution_backend, check_provider};
 use session::{check_session_streams, check_storage_paths, check_workspace};
 use terminal::check_terminal;
+pub use web::{
+    WebDoctorBindingState, WebDoctorHostedCapability, WebDoctorSnapshot, append_web_doctor_snapshot,
+};
 
 #[cfg(test)]
 use providers::{push_provider_auth_check, secret_source_label};
@@ -197,6 +201,10 @@ pub fn build_doctor_report_with_options(
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
     check_provider(&mut report, &root_config);
     check_mcp_servers(&mut report, &root_config, &workspace_root);
+    append_web_doctor_snapshot(
+        &mut report,
+        &WebDoctorSnapshot::from_root_config(&root_config),
+    );
     check_plugin_hooks(
         &mut report,
         canonical_workspace.as_deref().unwrap_or(&workspace_root),

@@ -303,7 +303,10 @@ pub(super) fn bounded_mcp_identity_projection(
         "environment_grant_source": "parent_environment",
     });
     for (key, value) in [
-        ("command_fingerprint", identity.command_fingerprint.as_str()),
+        (
+            "transport_fingerprint",
+            identity.transport_fingerprint.as_str(),
+        ),
         (
             "process_authorization_fingerprint",
             identity.process_authorization_fingerprint.as_str(),

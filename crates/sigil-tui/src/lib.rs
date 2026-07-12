@@ -3,6 +3,11 @@
     allow(dead_code, unused_imports)
 )]
 
+#[cfg(test)]
+#[macro_use]
+#[path = "tests/mcp_config_macros.rs"]
+mod mcp_config_macros;
+
 pub(crate) mod agent_display;
 pub mod app;
 pub mod appearance_diagnostics;

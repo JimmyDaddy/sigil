@@ -1,4 +1,4 @@
-use sigil_kernel::{PermissionMode, VerificationAutoRunPolicy};
+use sigil_kernel::{PermissionMode, VerificationAutoRunPolicy, WebSearchRoute};
 use sigil_runtime::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
 
 use super::{ConfigField, ConfigSection, ConfigState};
@@ -50,6 +50,10 @@ impl ConfigState {
                 .selected_mcp_server()
                 .map(|server| server.startup_timeout_secs.as_str()),
             ConfigField::PermissionMode
+            | ConfigField::WebEnabled
+            | ConfigField::WebNetworkMode
+            | ConfigField::WebSearchRoute
+            | ConfigField::WebBundledSearchEnabled
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
@@ -108,6 +112,10 @@ impl ConfigState {
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.startup_timeout_secs),
             ConfigField::PermissionMode
+            | ConfigField::WebEnabled
+            | ConfigField::WebNetworkMode
+            | ConfigField::WebSearchRoute
+            | ConfigField::WebBundledSearchEnabled
             | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
@@ -167,6 +175,16 @@ impl ConfigState {
             }
             ConfigField::PermissionMode => {
                 return permission_mode_label(self.draft.permission_mode).to_owned();
+            }
+            ConfigField::WebEnabled => return bool_label(self.draft.web_enabled).to_owned(),
+            ConfigField::WebNetworkMode => {
+                return self.draft.web_network_mode.as_str().to_owned();
+            }
+            ConfigField::WebSearchRoute => {
+                return web_search_route_label(self.draft.web_search_route).to_owned();
+            }
+            ConfigField::WebBundledSearchEnabled => {
+                return bool_label(self.draft.web_bundled_search_enabled).to_owned();
             }
             ConfigField::VerificationAutoRun => {
                 return verification_auto_run_label(self.draft.verification_auto_run).to_owned();
@@ -293,6 +311,10 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         ConfigField::ProviderApiKey
         | ConfigField::ProviderName
         | ConfigField::PermissionMode
+        | ConfigField::WebEnabled
+        | ConfigField::WebNetworkMode
+        | ConfigField::WebSearchRoute
+        | ConfigField::WebBundledSearchEnabled
         | ConfigField::VerificationAutoRun
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled
@@ -328,6 +350,16 @@ fn permission_mode_label(mode: PermissionMode) -> &'static str {
         PermissionMode::Manual => "manual",
         PermissionMode::AutoEdit => "auto-edit",
         PermissionMode::DangerFullAccess => "danger-full-access",
+    }
+}
+
+fn web_search_route_label(route: WebSearchRoute) -> &'static str {
+    match route {
+        WebSearchRoute::Auto => "auto",
+        WebSearchRoute::ProviderHosted => "provider-hosted",
+        WebSearchRoute::Mcp => "configured MCP",
+        WebSearchRoute::Bundled => "bundled Exa",
+        WebSearchRoute::Disabled => "disabled",
     }
 }
 

@@ -23,6 +23,7 @@ fn test_root_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }
@@ -222,6 +223,7 @@ fn compaction_context_field_uses_short_fallback_label() {
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     });
 
@@ -255,6 +257,7 @@ fn config_rows_do_not_pre_pad_labels() {
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     });
 
@@ -292,6 +295,7 @@ fn api_key_display_uses_status_without_secret_length() {
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     };
 
@@ -436,17 +440,27 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Storage.summary(), "local state paths");
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
     assert_eq!(ConfigSection::Storage.flow_index(), Some(1));
-    assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(5));
-    assert_eq!(ConfigSection::Terminal.flow_index(), Some(6));
-    assert_eq!(ConfigSection::Appearance.flow_index(), Some(7));
-    assert_eq!(ConfigSection::Agents.flow_index(), Some(8));
-    assert_eq!(ConfigSection::Skills.flow_index(), Some(9));
-    assert_eq!(ConfigSection::Plugins.flow_index(), Some(10));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(11));
+    assert_eq!(ConfigSection::Web.flow_index(), Some(3));
+    assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(6));
+    assert_eq!(ConfigSection::Terminal.flow_index(), Some(7));
+    assert_eq!(ConfigSection::Appearance.flow_index(), Some(8));
+    assert_eq!(ConfigSection::Agents.flow_index(), Some(9));
+    assert_eq!(ConfigSection::Skills.flow_index(), Some(10));
+    assert_eq!(ConfigSection::Plugins.flow_index(), Some(11));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(12));
     assert_eq!(ConfigField::fields_for_section(ConfigSection::Storage), &[]);
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Permissions),
         &[ConfigField::PermissionMode]
+    );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Web),
+        &[
+            ConfigField::WebEnabled,
+            ConfigField::WebNetworkMode,
+            ConfigField::WebSearchRoute,
+            ConfigField::WebBundledSearchEnabled,
+        ]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
@@ -663,6 +677,24 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             .help_text()
             .contains("#RRGGBB")
     );
+}
+
+#[test]
+fn web_config_draft_is_editable_and_roundtrips_without_losing_advanced_policy() {
+    let mut root = test_root_config();
+    root.web.allowed_domains = vec!["example.com".to_owned()];
+    let mut draft = ConfigDraft::from_root_config(&root);
+    draft.web_enabled = false;
+    draft.web_network_mode = sigil_kernel::NetworkPolicy::Ask;
+    draft.web_search_route = sigil_kernel::WebSearchRoute::Mcp;
+    draft.web_bundled_search_enabled = false;
+
+    let saved = draft.to_root_config().expect("web draft should save");
+    assert!(!saved.web.enabled);
+    assert_eq!(saved.web.network_mode, sigil_kernel::NetworkPolicy::Ask);
+    assert_eq!(saved.web.search_route, sigil_kernel::WebSearchRoute::Mcp);
+    assert!(!saved.web.bundled_search.enabled);
+    assert_eq!(saved.web.allowed_domains, ["example.com"]);
 }
 
 #[test]
@@ -1095,6 +1127,7 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
         args_csv: "server.js, --stdio, ".to_owned(),
         startup_timeout_secs: "15".to_owned(),
         inherit_env: Vec::new(),
+        transport: McpTransportDraft::Stdio,
         base_config: sigil_kernel::McpServerConfig::default(),
     }];
 
@@ -1117,7 +1150,13 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     assert!(provider.get("request_timeout_secs").is_none());
     assert!(provider.get("user_id_strategy").is_none());
     assert_eq!(config.mcp_servers.len(), 1);
-    assert_eq!(config.mcp_servers[0].args, vec!["server.js", "--stdio"]);
+    assert_eq!(
+        config.mcp_servers[0]
+            .stdio()
+            .expect("config-panel server should remain stdio")
+            .1,
+        ["server.js", "--stdio"]
+    );
     assert_eq!(config.mcp_servers[0].startup_timeout_secs, 15);
     Ok(())
 }
@@ -1125,7 +1164,7 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
 #[test]
 fn config_draft_preserves_complete_mcp_config_and_environment_grants() -> anyhow::Result<()> {
     let mut root = test_root_config();
-    let original = sigil_kernel::McpServerConfig {
+    let original = mcp_server_config! {
         name: "credentialed".to_owned(),
         command: "/usr/local/bin/mcp-server".to_owned(),
         args: vec![
@@ -1144,7 +1183,9 @@ fn config_draft_preserves_complete_mcp_config_and_environment_grants() -> anyhow
             allow_secrets: true,
             pin_version: true,
             pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                command_fingerprint: "sha256:pinned".to_owned(),
+                transport_fingerprint:
+                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                        .to_owned(),
                 protocol_version: "2025-06-18".to_owned(),
                 server_name: "credentialed".to_owned(),
                 server_version: "1.2.3".to_owned(),
@@ -1434,6 +1475,7 @@ fn config_draft_validates_mcp_server_values() {
                 args_csv: String::new(),
                 startup_timeout_secs: "10".to_owned(),
                 inherit_env: Vec::new(),
+                transport: McpTransportDraft::Stdio,
                 base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (draft, "mcp server 1 name cannot be empty")
@@ -1446,6 +1488,7 @@ fn config_draft_validates_mcp_server_values() {
                 args_csv: String::new(),
                 startup_timeout_secs: "10".to_owned(),
                 inherit_env: Vec::new(),
+                transport: McpTransportDraft::Stdio,
                 base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (draft, "mcp server 1 command cannot be empty")
@@ -1458,6 +1501,7 @@ fn config_draft_validates_mcp_server_values() {
                 args_csv: String::new(),
                 startup_timeout_secs: "abc".to_owned(),
                 inherit_env: Vec::new(),
+                transport: McpTransportDraft::Stdio,
                 base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (
@@ -1473,6 +1517,7 @@ fn config_draft_validates_mcp_server_values() {
                 args_csv: String::new(),
                 startup_timeout_secs: "0".to_owned(),
                 inherit_env: Vec::new(),
+                transport: McpTransportDraft::Stdio,
                 base_config: sigil_kernel::McpServerConfig::default(),
             }];
             (
@@ -1487,6 +1532,39 @@ fn config_draft_validates_mcp_server_values() {
             "{error:#} should contain {expected}"
         );
     }
+}
+
+#[test]
+fn mcp_transport_draft_requires_confirmation_and_never_infers_remote_fields() {
+    let mut draft = McpServerDraft::from_config(&mcp_server_config! {
+        name: "search".to_owned(),
+        command: "node".to_owned(),
+        args: vec!["server.js".to_owned()],
+        ..sigil_kernel::McpServerConfig::default()
+    });
+
+    let error = draft
+        .switch_transport(McpTransportDraft::StreamableHttp, false)
+        .expect_err("transport change must require an explicit confirmation");
+    assert!(
+        error
+            .to_string()
+            .contains("confirm transport change before clearing mutually exclusive MCP fields")
+    );
+    assert_eq!(draft.transport, McpTransportDraft::Stdio);
+
+    draft
+        .switch_transport(McpTransportDraft::StreamableHttp, true)
+        .expect("confirmed internal draft change");
+    assert_eq!(draft.transport, McpTransportDraft::StreamableHttp);
+    let error = draft
+        .to_config(0)
+        .expect_err("transport switching cannot infer a remote endpoint");
+    assert!(
+        error
+            .to_string()
+            .contains("select a configured streamable_http entry before saving")
+    );
 }
 
 #[test]

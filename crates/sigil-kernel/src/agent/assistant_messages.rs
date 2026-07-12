@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use crate::{
     TransientMessageOverlay,
@@ -44,6 +44,7 @@ pub(super) fn append_final_answer_message<H>(
     handler: &mut H,
     assistant_text: &str,
     pending_states: Vec<ProviderContinuationState>,
+    mut url_capability_registrations: Vec<crate::UserUrlCapabilityRegistration>,
 ) -> Result<String>
 where
     H: EventHandler,
@@ -55,8 +56,56 @@ where
     );
     let (assistant_message, _) = crate::project_message_for_persistence(exact_assistant_message)?;
     let final_message_id = assistant_message.id.clone();
-    session.append_assistant_message(assistant_message.clone())?;
+    for registration in &mut url_capability_registrations {
+        registration.durable_entry_id.clone_from(&final_message_id);
+    }
+    let registrar = session.user_url_capability_registrar();
+    if !url_capability_registrations.is_empty() {
+        let registrar = registrar.as_ref().ok_or_else(|| {
+            anyhow!("hosted final answer produced URL capabilities without a session registrar")
+        })?;
+        for registration in &url_capability_registrations {
+            if let Err(error) = registrar.stage(registration.clone()) {
+                let _ = registrar.rollback_message(&final_message_id);
+                return Err(error);
+            }
+        }
+    }
+    if let Err(error) = session.append_assistant_message(assistant_message.clone()) {
+        if !url_capability_registrations.is_empty()
+            && let Some(registrar) = registrar.as_ref()
+        {
+            let _ = registrar.rollback_message(&final_message_id);
+        }
+        return Err(error);
+    }
     handler.handle(RunEvent::AssistantMessage(assistant_message))?;
+    for registration in &url_capability_registrations {
+        let descriptor = registration.durable_descriptor(session.session_scope_id());
+        descriptor.validate()?;
+        let control = ControlEntry::WebUrlCapabilityDescriptor(descriptor);
+        if let Err(error) = session.append_control(control.clone()) {
+            if !url_capability_registrations.is_empty()
+                && let Some(registrar) = registrar.as_ref()
+            {
+                let _ = registrar.rollback_message(&final_message_id);
+            }
+            return Err(error);
+        }
+        handler.handle(RunEvent::Control(control))?;
+    }
+    if !url_capability_registrations.is_empty()
+        && let Some(registrar) = registrar.as_ref()
+        && let Err(error) = registrar.commit_message(&final_message_id)
+    {
+        let rollback_error = registrar.rollback_message(&final_message_id).err();
+        return Err(error.context(match rollback_error {
+            Some(rollback_error) => format!(
+                "failed to commit hosted URL capabilities; rollback also failed: {rollback_error:#}"
+            ),
+            None => "failed to commit hosted URL capabilities".to_owned(),
+        }));
+    }
     save_continuation_states(session, handler, pending_states, &final_message_id)?;
     Ok(final_message_id)
 }

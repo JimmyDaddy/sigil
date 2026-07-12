@@ -85,13 +85,13 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
 #[test]
 fn from_root_config_initializes_mcp_statuses_from_startup_mode() {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "eager".to_owned(),
         command: "mcp-eager".to_owned(),
         startup: McpServerStartup::Eager,
         ..Default::default()
     });
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "lazy".to_owned(),
         command: "mcp-lazy".to_owned(),
         startup: McpServerStartup::Lazy,
@@ -1418,7 +1418,7 @@ fn task_sidebar_lines_label_failed_verification_as_check_failed() -> Result<()> 
 #[test]
 fn mcp_sidebar_lines_summarize_failure_without_repeating_server_name() -> Result<()> {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         startup: sigil_kernel::McpServerStartup::Eager,
         ..sigil_kernel::McpServerConfig::default()

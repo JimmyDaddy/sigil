@@ -16,6 +16,7 @@ fn valid_records_become_search_snippets_without_claim_citations() {
     );
 
     assert_eq!(response.sources.len(), 2);
+    assert_eq!(response.source_capabilities.len(), 2);
     assert!(
         response
             .sources
@@ -38,6 +39,7 @@ fn malformed_and_duplicate_records_do_not_create_sources() {
     );
 
     assert_eq!(response.sources.len(), 1);
+    assert_eq!(response.source_capabilities.len(), 1);
     assert_eq!(response.sources[0].title.as_deref(), Some("Good"));
 }
 
@@ -45,6 +47,7 @@ fn malformed_and_duplicate_records_do_not_create_sources() {
 fn format_drift_and_invalid_records_degrade_without_sources() {
     let drift = decode("unstructured answer with known-secret\u{1b}[31m");
     assert!(drift.sources.is_empty());
+    assert!(drift.source_capabilities.is_empty());
     assert_eq!(
         drift.source_projection,
         SourceProjection::Unavailable {
@@ -58,6 +61,7 @@ fn format_drift_and_invalid_records_degrade_without_sources() {
         "Title: Bad\nURL: https://user:pass@example.test/\nPublished: \nAuthor: X\nText: nope",
     );
     assert!(invalid.sources.is_empty());
+    assert!(invalid.source_capabilities.is_empty());
     assert_eq!(
         invalid.source_projection,
         SourceProjection::Unavailable {
@@ -77,4 +81,12 @@ fn query_and_fragment_are_safely_projected_but_raw_material_is_not_retained() {
         "https://example.test/path?[redacted]"
     );
     assert!(!response.safe_model_content.contains("q=secret"));
+    assert_eq!(response.source_capabilities.len(), 1);
+    assert_eq!(
+        response.source_capabilities[0]
+            .raw_canonical_url
+            .expose_secret(),
+        "https://example.test/path?q=secret"
+    );
+    assert!(!format!("{:?}", response.source_capabilities).contains("q=secret"));
 }

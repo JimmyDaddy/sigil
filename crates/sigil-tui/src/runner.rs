@@ -1,5 +1,6 @@
 mod approval_bridge;
 mod diagnostics;
+pub mod egress_disclosure_bridge;
 mod elicitation_bridge;
 mod event_bridge;
 mod mcp_event_bridge;
@@ -11,7 +12,10 @@ mod worker_loop;
 pub use protocol::{
     CompactionTrigger, McpActivationStatus, QueueMoveDirection, WorkerCommand, WorkerMessage,
 };
-pub(crate) use protocol::{McpElicitationResponseTx, WorkerApprovalCommand, WorkerCommandEnvelope};
+pub(crate) use protocol::{
+    EgressDisclosureReceiptTx, McpElicitationResponseTx, WorkerApprovalCommand,
+    WorkerCommandEnvelope,
+};
 pub use spawn::spawn_agent_worker;
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

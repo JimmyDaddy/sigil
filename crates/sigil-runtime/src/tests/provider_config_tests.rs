@@ -34,6 +34,7 @@ fn test_root_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }

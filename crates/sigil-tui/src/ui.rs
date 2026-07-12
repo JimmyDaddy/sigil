@@ -2,6 +2,7 @@ mod approval;
 mod command_text;
 mod composer;
 mod diff;
+mod egress_disclosure;
 mod geometry;
 mod info_rail;
 mod layout_snapshot;

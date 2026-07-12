@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct McpServerObservedIdentity {
     /// Stable command/executable pin material used only for version pin validation.
-    pub(super) command_fingerprint: String,
+    pub(super) transport_fingerprint: String,
     /// Exact runtime-keyed process binding used for permission subjects and approval continuity.
     pub(super) process_authorization_fingerprint: String,
     pub(super) declaration: Option<McpDeclarationLaunchMetadata>,
@@ -17,7 +17,7 @@ pub(super) struct McpServerObservedIdentity {
 impl McpServerObservedIdentity {
     pub(super) fn as_pinned_identity(&self) -> McpServerPinnedIdentity {
         McpServerPinnedIdentity {
-            command_fingerprint: self.command_fingerprint.clone(),
+            transport_fingerprint: self.transport_fingerprint.clone(),
             protocol_version: self.protocol_version.clone(),
             server_name: self.server_name.clone(),
             server_version: self.server_version.clone(),
@@ -368,7 +368,7 @@ impl McpClient {
             .unwrap_or_else(|| self._process_receipt.launch_static_fingerprint.clone());
         Ok(McpInitializeOutcome {
             identity: McpServerObservedIdentity {
-                command_fingerprint: self._process_receipt.launch_static_fingerprint.clone(),
+                transport_fingerprint: self._process_receipt.launch_static_fingerprint.clone(),
                 process_authorization_fingerprint,
                 declaration,
                 environment_grant_names: self._process_receipt.environment_grant_names.clone(),
@@ -1269,18 +1269,18 @@ pub(super) fn validate_mcp_static_pin(config: &McpServerConfig, observed: &str) 
         return Err(ExtensionProcessLaunchError::configuration_invalid(
             &config.name,
             format!(
-                "MCP server {} has pin_version = true but no pinned identity; pre-spawn command_fingerprint={observed}",
+                "MCP server {} has pin_version = true but no pinned identity; pre-spawn transport_fingerprint={observed}",
                 config.name
             ),
         )
         .into());
     };
-    if expected.command_fingerprint != observed {
+    if expected.transport_fingerprint != observed {
         return Err(ExtensionProcessLaunchError::configuration_invalid(
             &config.name,
             format!(
-                "MCP server {} pre-spawn command_fingerprint mismatch: expected {} observed {}",
-                config.name, expected.command_fingerprint, observed
+                "MCP server {} pre-spawn transport_fingerprint mismatch: expected {} observed {}",
+                config.name, expected.transport_fingerprint, observed
             ),
         )
         .into());
@@ -1305,10 +1305,10 @@ pub(super) fn validate_mcp_pin(
     };
 
     let mut mismatches = Vec::new();
-    if expected.command_fingerprint != observed_pin.command_fingerprint {
+    if expected.transport_fingerprint != observed_pin.transport_fingerprint {
         mismatches.push(format!(
-            "command_fingerprint expected {} observed {}",
-            expected.command_fingerprint, observed_pin.command_fingerprint
+            "transport_fingerprint expected {} observed {}",
+            expected.transport_fingerprint, observed_pin.transport_fingerprint
         ));
     }
     if expected.protocol_version != observed_pin.protocol_version {

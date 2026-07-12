@@ -425,6 +425,9 @@ pub struct ToolApprovalSessionGrantEntry {
     pub subjects: Vec<ToolSubjectAudit>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subject_zones: Vec<PathTrustZone>,
+    pub facets: Vec<ToolApprovalSessionGrantFacet>,
+    #[serde(default)]
+    pub scope: ToolApprovalSessionGrantScope,
     pub expires: ToolApprovalSessionGrantExpiry,
     pub granted_at_ms: u64,
 }
@@ -442,6 +445,10 @@ struct ToolApprovalSessionGrantEntryWire {
     subjects: Vec<ToolSubjectAudit>,
     #[serde(default)]
     subject_zones: Vec<PathTrustZone>,
+    #[serde(default = "default_tool_approval_session_grant_facets")]
+    facets: Vec<ToolApprovalSessionGrantFacet>,
+    #[serde(default)]
+    scope: ToolApprovalSessionGrantScope,
     expires: ToolApprovalSessionGrantExpiry,
     granted_at_ms: u64,
 }
@@ -462,10 +469,16 @@ impl<'de> Deserialize<'de> for ToolApprovalSessionGrantEntry {
             risk: wire.risk,
             subjects: wire.subjects,
             subject_zones: wire.subject_zones,
+            facets: wire.facets,
+            scope: wire.scope,
             expires: wire.expires,
             granted_at_ms: wire.granted_at_ms,
         })
     }
+}
+
+fn default_tool_approval_session_grant_facets() -> Vec<ToolApprovalSessionGrantFacet> {
+    vec![ToolApprovalSessionGrantFacet::Local]
 }
 
 /// Expiration policy for a session-local tool approval grant.

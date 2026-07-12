@@ -174,7 +174,8 @@ fn fixture(
     let budget = WebTaskTreeBudget::new(
         "root-run",
         WebTaskTreeBudgetLimits {
-            max_logical_calls: 4,
+            max_fetch_calls: 4,
+            max_client_search_calls: 4,
             max_hosted_requests: 1,
             max_network_attempts: 4,
             max_wire_bytes: 1024 * 1024,
@@ -192,7 +193,7 @@ fn fixture(
             attempt_id: "query-attempt".to_owned(),
             route_lease_id: "query-lease".to_owned(),
             route_fingerprint: "query-route".to_owned(),
-            kind: WebBudgetReservationKind::LogicalCall,
+            kind: WebBudgetReservationKind::ClientSearchCall,
         })
         .expect("reservation");
     let disclosure = PreEgressDisclosure::new(

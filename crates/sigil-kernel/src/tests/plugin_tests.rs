@@ -47,8 +47,11 @@ fn sample_manifest() -> PluginManifest {
         }],
         mcp_servers: vec![McpServerConfig {
             name: "repo-tools".to_owned(),
-            command: "node".to_owned(),
-            args: vec!["server.js".to_owned()],
+            transport: crate::McpServerTransportConfig::Stdio {
+                command: "node".to_owned(),
+                args: vec!["server.js".to_owned()],
+                inherit_env: Vec::new(),
+            },
             startup: McpServerStartup::Lazy,
             required: false,
             ..McpServerConfig::default()
@@ -474,11 +477,19 @@ fn plugin_manifest_validation_rejects_unsafe_edges() {
     assert!(invalid_mcp_name.validate().is_err());
 
     let mut empty_mcp_command = sample_manifest();
-    empty_mcp_command.mcp_servers[0].command.clear();
+    if let crate::McpServerTransportConfig::Stdio { command, .. } =
+        &mut empty_mcp_command.mcp_servers[0].transport
+    {
+        command.clear();
+    }
     assert!(empty_mcp_command.validate().is_err());
 
     let mut plugin_environment_grant = sample_manifest();
-    plugin_environment_grant.mcp_servers[0].inherit_env = vec!["PLUGIN_TOKEN".to_owned()];
+    if let crate::McpServerTransportConfig::Stdio { inherit_env, .. } =
+        &mut plugin_environment_grant.mcp_servers[0].transport
+    {
+        *inherit_env = vec!["PLUGIN_TOKEN".to_owned()];
+    }
     let error = plugin_environment_grant
         .validate()
         .expect_err("plugin environment grants must be rejected");

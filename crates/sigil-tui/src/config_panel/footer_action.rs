@@ -42,6 +42,7 @@ impl ConfigFooterAction {
             ConfigSection::Skills => &Self::SKILLS_ORDER,
             ConfigSection::Plugins => &Self::PLUGINS_ORDER,
             ConfigSection::Provider
+            | ConfigSection::Web
             | ConfigSection::Memory
             | ConfigSection::Compaction
             | ConfigSection::CodeIntelligence

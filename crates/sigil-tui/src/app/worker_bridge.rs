@@ -563,6 +563,12 @@ impl AppState {
             } => {
                 self.open_mcp_elicitation(request, response_tx);
             }
+            WorkerMessage::EgressDisclosureRequested {
+                disclosure,
+                receipt_tx,
+            } => {
+                self.open_egress_disclosure(disclosure, receipt_tx);
+            }
             WorkerMessage::RunFailed(error) => {
                 self.clear_worker_run_state();
                 self.discard_worker_streaming_assistant_and_finish_reasoning();

@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -10,6 +11,7 @@ mod command_dispatch;
 mod config_flow;
 mod conversation_queue_flow;
 mod diagnostics_flow;
+mod egress_disclosure_flow;
 mod file_type;
 mod formatting;
 mod input_flow;
@@ -62,6 +64,7 @@ pub use crate::approval::{ApprovalDiffMode, PendingApproval};
 use crate::commands::{UiCommand, command_for_key_event};
 pub(crate) use crate::config_panel::ConfigState;
 pub use crate::input::PaneFocus;
+use crate::runner::EgressDisclosureReceiptTx;
 use crate::runner::QueueMoveDirection;
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
@@ -73,6 +76,8 @@ pub(crate) use crate::timeline::{
 };
 pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
+pub(crate) use self::egress_disclosure_flow::EGRESS_DISCLOSURE_HEIGHT;
+use self::egress_disclosure_flow::{EgressDisclosureCard, PendingEgressDisclosure};
 use self::formatting::*;
 use self::modal_flow::{ModalState, ModelPickerRefresh};
 use self::runtime_status::McpProgressState;
@@ -312,6 +317,9 @@ pub struct AppState {
     sidebar_agent_selected: usize,
     active_agent_view: AgentView,
     active_agent_child_transcript: Option<ActiveAgentChildTranscript>,
+    pending_egress_disclosures: VecDeque<PendingEgressDisclosure>,
+    recent_egress_disclosure: Option<EgressDisclosureCard>,
+    egress_disclosure_rendered: Cell<bool>,
     terminal_width: u16,
     terminal_height: u16,
     slash_selector_index: usize,
@@ -557,6 +565,9 @@ impl AppState {
             sidebar_agent_selected: 0,
             active_agent_view: AgentView::Main,
             active_agent_child_transcript: None,
+            pending_egress_disclosures: VecDeque::new(),
+            recent_egress_disclosure: None,
+            egress_disclosure_rendered: Cell::new(false),
             terminal_width: 120,
             terminal_height: 32,
             slash_selector_index: 0,
@@ -672,6 +683,9 @@ impl AppState {
             sidebar_agent_selected: 0,
             active_agent_view: AgentView::Main,
             active_agent_child_transcript: None,
+            pending_egress_disclosures: VecDeque::new(),
+            recent_egress_disclosure: None,
+            egress_disclosure_rendered: Cell::new(false),
             terminal_width: 120,
             terminal_height: 32,
             slash_selector_index: 0,

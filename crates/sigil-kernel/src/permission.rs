@@ -40,6 +40,48 @@ pub enum ApprovalMode {
     Deny,
 }
 
+/// Permission facets that one durable session-local tool grant may relax.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalSessionGrantFacet {
+    Local,
+    Network,
+}
+
+impl ToolApprovalSessionGrantFacet {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Network => "network",
+        }
+    }
+}
+
+/// Subject matching scope for one durable session-local tool grant.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalSessionGrantScope {
+    #[default]
+    ExactSubjects,
+    /// Same tool and read-only network operation; destination controls still run per call.
+    NetworkReadTool,
+}
+
+impl ToolApprovalSessionGrantScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactSubjects => "exact_subjects",
+            Self::NetworkReadTool => "network_read_tool",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolApprovalSessionGrantShape {
+    pub(crate) facets: Vec<ToolApprovalSessionGrantFacet>,
+    pub(crate) scope: ToolApprovalSessionGrantScope,
+}
+
 impl ApprovalMode {
     /// Returns the stable config-friendly label.
     pub fn as_str(self) -> &'static str {
@@ -810,12 +852,12 @@ impl<'a> PermissionPolicy<'a> {
         let subject_risk_overlays = collect_path_risk_overlays(&subject_analyses);
         let external_directory_required = subjects
             .iter()
-            .any(|subject| subject.scope == ToolSubjectScope::External)
+            .any(subject_requires_external_directory_gate)
             && !self.config.external_directory.enabled;
         let external_directory_policy_decision = {
             let external_modes = subjects
                 .iter()
-                .filter(|subject| subject.scope == ToolSubjectScope::External)
+                .filter(|subject| subject_requires_external_directory_gate(subject))
                 .map(|subject| self.decide_external_subject(subject))
                 .collect::<Result<Vec<_>>>()?;
             if external_modes.is_empty() {
@@ -1067,16 +1109,16 @@ pub fn classify_path_trust_zone(subject: &ToolSubject) -> PathTrustZone {
 
 /// Classifies a path subject into a trust zone and independent risk overlays.
 pub fn classify_path_trust_analysis(subject: &ToolSubject) -> PathTrustAnalysis {
-    if subject.scope == ToolSubjectScope::External {
-        return PathTrustAnalysis {
-            zone: PathTrustZone::External,
-            overlays: path_risk_overlays(subject),
-        };
-    }
     if subject.kind != ToolSubjectKind::Path {
         return PathTrustAnalysis {
             zone: PathTrustZone::Unknown,
             overlays: Vec::new(),
+        };
+    }
+    if subject.scope == ToolSubjectScope::External {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::External,
+            overlays: path_risk_overlays(subject),
         };
     }
 
@@ -1143,16 +1185,16 @@ pub fn classify_path_trust_analysis_with_context(
     subject: &ToolSubject,
     context: &PermissionEvaluationContext,
 ) -> PathTrustAnalysis {
-    if subject.scope == ToolSubjectScope::External {
-        return PathTrustAnalysis {
-            zone: PathTrustZone::External,
-            overlays: path_risk_overlays(subject),
-        };
-    }
     if subject.kind != ToolSubjectKind::Path {
         return PathTrustAnalysis {
             zone: PathTrustZone::Unknown,
             overlays: Vec::new(),
+        };
+    }
+    if subject.scope == ToolSubjectScope::External {
+        return PathTrustAnalysis {
+            zone: PathTrustZone::External,
+            overlays: path_risk_overlays(subject),
         };
     }
 
@@ -1216,6 +1258,10 @@ pub fn classify_path_trust_analysis_with_context(
         zone: built_in.zone,
         overlays,
     }
+}
+
+fn subject_requires_external_directory_gate(subject: &ToolSubject) -> bool {
+    subject.kind == ToolSubjectKind::Path && subject.scope == ToolSubjectScope::External
 }
 
 fn subject_path_for_context(
@@ -1348,7 +1394,7 @@ pub fn apply_risk_overlay(mode: ApprovalMode, risk: PermissionRisk) -> ApprovalM
 
 /// Returns true when an interactive approval can safely be widened to a session-local grant.
 pub fn tool_approval_session_grant_available(decision: &PermissionDecision) -> bool {
-    tool_approval_session_grant_available_for_facets(
+    tool_approval_session_grant_shape_for_facets(
         decision.access,
         decision.network_effect,
         decision.operation,
@@ -1361,9 +1407,10 @@ pub fn tool_approval_session_grant_available(decision: &PermissionDecision) -> b
         decision.network_policy_decision,
         decision.source_policy_decision,
     )
+    .is_some()
 }
 
-/// Returns true when an approval is local-only and can safely become a session grant.
+/// Returns true when an approval can safely become a bounded session-local grant.
 #[allow(clippy::too_many_arguments)]
 pub fn tool_approval_session_grant_available_for_facets(
     access: ToolAccess,
@@ -1378,11 +1425,92 @@ pub fn tool_approval_session_grant_available_for_facets(
     network_policy_decision: ApprovalMode,
     source_policy_decision: ApprovalMode,
 ) -> bool {
+    tool_approval_session_grant_shape_for_facets(
+        access,
+        network_effect,
+        operation,
+        risk,
+        subjects,
+        zones,
+        confirmation,
+        snapshot_required,
+        local_policy_decision,
+        network_policy_decision,
+        source_policy_decision,
+    )
+    .is_some()
+}
+
+pub(crate) fn tool_approval_session_grant_shape(
+    decision: &PermissionDecision,
+) -> Option<ToolApprovalSessionGrantShape> {
+    tool_approval_session_grant_shape_for_facets(
+        decision.access,
+        decision.network_effect,
+        decision.operation,
+        decision.risk,
+        &decision.subjects,
+        &decision.subject_zones,
+        decision.confirmation.as_ref(),
+        decision.snapshot_required,
+        decision.local_policy_decision,
+        decision.network_policy_decision,
+        decision.source_policy_decision,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tool_approval_session_grant_shape_for_facets(
+    access: ToolAccess,
+    network_effect: Option<NetworkEffect>,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    subjects: &[ToolSubject],
+    zones: &[PathTrustZone],
+    confirmation: Option<&PermissionConfirmation>,
+    snapshot_required: bool,
+    local_policy_decision: ApprovalMode,
+    network_policy_decision: ApprovalMode,
+    source_policy_decision: ApprovalMode,
+) -> Option<ToolApprovalSessionGrantShape> {
+    if source_policy_decision != ApprovalMode::Allow
+        || matches!(local_policy_decision, ApprovalMode::Deny)
+        || matches!(network_policy_decision, ApprovalMode::Deny)
+    {
+        return None;
+    }
+
+    let mut facets = Vec::new();
+    if local_policy_decision == ApprovalMode::Ask {
+        facets.push(ToolApprovalSessionGrantFacet::Local);
+    }
+    if network_policy_decision == ApprovalMode::Ask {
+        facets.push(ToolApprovalSessionGrantFacet::Network);
+    }
+    if facets.is_empty() {
+        return None;
+    }
+
+    let network_read_scope = network_read_session_grant_scope(
+        access,
+        network_effect,
+        operation,
+        risk,
+        subjects,
+        confirmation,
+        snapshot_required,
+    );
+    if network_policy_decision == ApprovalMode::Ask {
+        let scope = network_read_scope?;
+        return Some(ToolApprovalSessionGrantShape { facets, scope });
+    }
+    if let Some(scope) = network_read_scope {
+        return Some(ToolApprovalSessionGrantShape { facets, scope });
+    }
+
     let network_risk_is_consistent = network_effect.is_none() || risk >= PermissionRisk::High;
-    network_risk_is_consistent
-        && local_policy_decision == ApprovalMode::Ask
-        && network_policy_decision == ApprovalMode::Allow
-        && source_policy_decision == ApprovalMode::Allow
+    (network_policy_decision == ApprovalMode::Allow
+        && network_risk_is_consistent
         && tool_approval_session_grant_available_for_parts(
             access,
             operation,
@@ -1391,7 +1519,49 @@ pub fn tool_approval_session_grant_available_for_facets(
             zones,
             confirmation,
             snapshot_required,
-        )
+        ))
+    .then_some(ToolApprovalSessionGrantShape {
+        facets,
+        scope: ToolApprovalSessionGrantScope::ExactSubjects,
+    })
+}
+
+fn network_read_session_grant_scope(
+    access: ToolAccess,
+    network_effect: Option<NetworkEffect>,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    subjects: &[ToolSubject],
+    confirmation: Option<&PermissionConfirmation>,
+    snapshot_required: bool,
+) -> Option<ToolApprovalSessionGrantScope> {
+    if access != ToolAccess::Read
+        || network_effect != Some(NetworkEffect::Read)
+        || operation != ToolOperation::NetworkRequest
+        || risk != PermissionRisk::High
+        || confirmation.is_some()
+        || snapshot_required
+        || subjects.is_empty()
+    {
+        return None;
+    }
+    if subjects.iter().all(|subject| {
+        subject.kind == ToolSubjectKind::NetworkEndpoint && !subject.normalized.trim().is_empty()
+    }) {
+        return Some(ToolApprovalSessionGrantScope::NetworkReadTool);
+    }
+    subjects
+        .iter()
+        .all(stable_network_read_subject)
+        .then_some(ToolApprovalSessionGrantScope::ExactSubjects)
+}
+
+fn stable_network_read_subject(subject: &ToolSubject) -> bool {
+    match subject.kind {
+        ToolSubjectKind::McpTool => !subject.normalized.trim().is_empty(),
+        ToolSubjectKind::McpTrustClass => !subject.original.trim().is_empty(),
+        _ => false,
+    }
 }
 
 pub fn evaluate_network_policy(
@@ -1512,6 +1682,7 @@ fn subject_has_stable_session_grant_scope(
             ) || exact_command_grant_available)
                 && !subject.normalized.trim().is_empty()
         }
+        ToolSubjectKind::McpTrustClass => !subject.original.trim().is_empty(),
         _ => false,
     }
 }

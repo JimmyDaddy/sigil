@@ -123,6 +123,26 @@ fn command_subject_audit(command: &str) -> ToolSubjectAudit {
     }
 }
 
+fn network_endpoint(url: &str) -> ToolSubject {
+    ToolSubject {
+        kind: ToolSubjectKind::NetworkEndpoint,
+        original: url.to_owned(),
+        normalized: url.to_owned(),
+        canonical_path: None,
+        scope: ToolSubjectScope::External,
+    }
+}
+
+fn network_endpoint_audit(url: &str) -> ToolSubjectAudit {
+    ToolSubjectAudit {
+        kind: ToolSubjectKind::NetworkEndpoint,
+        original: url.to_owned(),
+        normalized: url.to_owned(),
+        canonical_path: None,
+        scope: ToolSubjectScope::External,
+    }
+}
+
 #[test]
 fn session_grant_requires_exact_network_effect_match() -> Result<()> {
     let command = "cargo check";
@@ -154,6 +174,8 @@ fn session_grant_requires_exact_network_effect_match() -> Result<()> {
             risk: crate::PermissionRisk::High,
             subjects: vec![command_subject_audit(command)],
             subject_zones: vec![crate::PathTrustZone::Unknown],
+            facets: vec![crate::ToolApprovalSessionGrantFacet::Local],
+            scope: crate::ToolApprovalSessionGrantScope::ExactSubjects,
             expires: ToolApprovalSessionGrantExpiry::Session,
             granted_at_ms: 42,
         },
@@ -161,6 +183,71 @@ fn session_grant_requires_exact_network_effect_match() -> Result<()> {
 
     let (decision, grant) = tool_session_grant_decision_override(&session, "bash", decision);
     assert_eq!(decision.mode, ApprovalMode::Ask);
+    assert!(grant.is_none());
+    Ok(())
+}
+
+#[test]
+fn network_read_tool_session_grant_reuses_across_public_endpoints() -> Result<()> {
+    let tool_spec = spec(
+        "webfetch",
+        ToolCategory::Search,
+        ToolAccess::Read,
+        Some(NetworkEffect::Read),
+        ToolPreviewCapability::None,
+    );
+    let first_url = "https://example.com/first";
+    let second_url = "https://docs.example.org/second";
+    let decision = policy_decision(
+        crate::PermissionMode::Manual,
+        NetworkPolicy::Ask,
+        &tool_spec,
+        ToolOperation::NetworkRequest,
+        vec![network_endpoint(second_url)],
+    )?;
+    assert_eq!(decision.local_policy_decision, ApprovalMode::Allow);
+    assert_eq!(decision.network_policy_decision, ApprovalMode::Ask);
+    assert!(crate::tool_approval_session_grant_available(&decision));
+
+    let mut session = Session::new("test", "test");
+    session.append_control(ControlEntry::ToolApprovalSessionGrant(
+        ToolApprovalSessionGrantEntry {
+            call_id: "first-fetch".to_owned(),
+            tool_name: "webfetch".to_owned(),
+            access: ToolAccess::Read,
+            network_effect: Some(NetworkEffect::Read),
+            operation: ToolOperation::NetworkRequest,
+            risk: crate::PermissionRisk::High,
+            subjects: vec![network_endpoint_audit(first_url)],
+            subject_zones: vec![crate::PathTrustZone::Unknown],
+            facets: vec![crate::ToolApprovalSessionGrantFacet::Network],
+            scope: crate::ToolApprovalSessionGrantScope::NetworkReadTool,
+            expires: ToolApprovalSessionGrantExpiry::Session,
+            granted_at_ms: 42,
+        },
+    ))?;
+
+    let (decision, grant) = tool_session_grant_decision_override(&session, "webfetch", decision);
+    assert_eq!(decision.network_policy_decision, ApprovalMode::Allow);
+    assert_eq!(decision.mode, ApprovalMode::Allow);
+    assert!(grant.is_some());
+
+    let other_tool_decision = policy_decision(
+        crate::PermissionMode::Manual,
+        NetworkPolicy::Ask,
+        &spec(
+            "remote_read",
+            ToolCategory::Custom,
+            ToolAccess::Read,
+            Some(NetworkEffect::Read),
+            ToolPreviewCapability::None,
+        ),
+        ToolOperation::NetworkRequest,
+        vec![network_endpoint(second_url)],
+    )?;
+    let (other_tool_decision, grant) =
+        tool_session_grant_decision_override(&session, "remote_read", other_tool_decision);
+    assert_eq!(other_tool_decision.mode, ApprovalMode::Ask);
     assert!(grant.is_none());
     Ok(())
 }

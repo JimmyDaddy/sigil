@@ -3,6 +3,7 @@ pub(crate) enum ConfigSection {
     Provider,
     Storage,
     Permissions,
+    Web,
     Memory,
     Compaction,
     CodeIntelligence,
@@ -15,19 +16,21 @@ pub(crate) enum ConfigSection {
 }
 
 impl ConfigSection {
-    pub(crate) const DEFAULT_FLOW: [Self; 6] = [
+    pub(crate) const DEFAULT_FLOW: [Self; 7] = [
         Self::Provider,
         Self::Permissions,
+        Self::Web,
         Self::Memory,
         Self::Compaction,
         Self::Mcp,
         Self::Appearance,
     ];
 
-    pub(crate) const FLOW: [Self; 12] = [
+    pub(crate) const FLOW: [Self; 13] = [
         Self::Provider,
         Self::Storage,
         Self::Permissions,
+        Self::Web,
         Self::Memory,
         Self::Compaction,
         Self::CodeIntelligence,
@@ -56,6 +59,7 @@ impl ConfigSection {
             Self::Provider => "Provider",
             Self::Storage => "Storage",
             Self::Permissions => "Permissions",
+            Self::Web => "Web",
             Self::Memory => "Memory",
             Self::Compaction => "Compaction",
             Self::CodeIntelligence => "Code Intel",
@@ -73,6 +77,7 @@ impl ConfigSection {
             Self::Provider => "provider",
             Self::Storage => "storage",
             Self::Permissions => "permissions",
+            Self::Web => "web",
             Self::Memory => "memory",
             Self::Compaction => "compaction",
             Self::CodeIntelligence => "code intel",
@@ -97,6 +102,7 @@ impl ConfigSection {
             Self::Provider => "provider settings",
             Self::Storage => "local state paths",
             Self::Permissions => "safety settings",
+            Self::Web => "network data tools",
             Self::Memory => "memory status",
             Self::Compaction => "context and thresholds",
             Self::CodeIntelligence => "LSP readiness",

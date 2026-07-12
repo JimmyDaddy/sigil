@@ -11,6 +11,7 @@ use crate::{
 
 use super::{
     composer::composer_input_area,
+    egress_disclosure::egress_disclosure_layout,
     geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
     live_panel::{LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app},
     setup_config::{
@@ -32,6 +33,7 @@ pub struct LayoutSnapshot {
     pub screen: Rect,
     pub mode: LayoutMode,
     pub live_panel: Rect,
+    pub egress_disclosure: Option<Rect>,
     pub composer: Rect,
     pub agent_panel: Rect,
     pub composer_input: Rect,
@@ -175,20 +177,22 @@ impl LayoutSnapshot {
         }
 
         let shell = shell_layout(screen, app.footer_strip_height(), app.composer_height());
+        let (egress_disclosure, live_content) = egress_disclosure_layout(shell.live_panel, app);
         Self {
             screen,
             mode: LayoutMode::Main,
             live_panel: shell.live_panel,
+            egress_disclosure,
             composer: shell.composer,
             agent_panel: shell.agent_panel,
             composer_input: composer_input_area(shell.composer, app.composer_input_rows()),
             footer: shell.footer,
             info_rail: shell.info_rail,
-            live_text_rows: live_text_row_hit_areas(shell.live_panel, app),
-            tool_cards: tool_card_hit_areas(shell.live_panel, app),
-            thinking_blocks: thinking_block_hit_areas(shell.live_panel, app),
+            live_text_rows: live_text_row_hit_areas(live_content, app),
+            tool_cards: tool_card_hit_areas(live_content, app),
+            thinking_blocks: thinking_block_hit_areas(live_content, app),
             info_rail_agent_rows: info_rail_agent_row_hit_areas(shell.info_rail, app),
-            slash_overlay: slash_overlay_hit_areas(shell.live_panel, shell.composer, app),
+            slash_overlay: slash_overlay_hit_areas(live_content, shell.composer, app),
             approval_modal: app
                 .approval_modal_view()
                 .map(|view| approval_modal_area(screen, &view)),
@@ -205,6 +209,7 @@ impl LayoutSnapshot {
             screen,
             mode,
             live_panel: Rect::default(),
+            egress_disclosure: None,
             composer: Rect::default(),
             agent_panel: Rect::default(),
             composer_input: Rect::default(),

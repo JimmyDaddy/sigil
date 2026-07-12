@@ -863,9 +863,17 @@ pub fn merge_mcp_server_declarations(
                 safe_projection: None,
             });
         }
-        if !registration.server.inherit_env.is_empty() {
+        let inherit_env = registration
+            .server
+            .stdio()
+            .map(|(_, _, inherit_env)| inherit_env);
+        if inherit_env.is_none() || inherit_env.is_some_and(|values| !values.is_empty()) {
             return Err(McpRegistrationError {
-                code: McpRegistrationErrorCode::PluginMcpEnvironmentGrantNotSupported,
+                code: if inherit_env.is_none() {
+                    McpRegistrationErrorCode::PluginRemoteMcpNotSupported
+                } else {
+                    McpRegistrationErrorCode::PluginMcpEnvironmentGrantNotSupported
+                },
                 declared_name: registration.original_name.clone(),
                 reason: format!(
                     "plugin MCP registration at index {index} cannot carry environment grants"

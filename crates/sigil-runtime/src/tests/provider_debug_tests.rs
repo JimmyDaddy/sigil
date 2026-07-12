@@ -133,6 +133,7 @@ fn test_root_config(base_url: &str) -> RootConfig {
                 "strict_tools_mode": "auto"
             }),
         )]),
+        web: Default::default(),
         mcp_servers: Vec::<McpServerConfig>::new(),
     }
 }

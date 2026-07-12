@@ -16,7 +16,8 @@ const BUDGET_HOST_MAX_BYTES: usize = 253;
 /// Hard caps shared by a complete top-level run tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebTaskTreeBudgetLimits {
-    pub max_logical_calls: u64,
+    pub max_fetch_calls: u64,
+    pub max_client_search_calls: u64,
     pub max_hosted_requests: u64,
     pub max_network_attempts: u64,
     pub max_wire_bytes: u64,
@@ -28,7 +29,8 @@ pub struct WebTaskTreeBudgetLimits {
 
 impl WebTaskTreeBudgetLimits {
     fn validate(self) -> Result<Self, WebBudgetError> {
-        if self.max_logical_calls == 0
+        if self.max_fetch_calls == 0
+            || self.max_client_search_calls == 0
             || self.max_hosted_requests == 0
             || self.max_network_attempts == 0
             || self.max_wire_bytes == 0
@@ -48,7 +50,8 @@ impl WebTaskTreeBudgetLimits {
 /// Logical capacity consumed when request-body egress begins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebBudgetReservationKind {
-    LogicalCall,
+    FetchCall,
+    ClientSearchCall,
     HostedProviderRequest,
     TransportLifecycle,
 }
@@ -77,6 +80,8 @@ pub struct WebTaskTreeBudgetSnapshot {
     pub root_run_id: String,
     pub provisional_reservations: u64,
     pub logical_calls: u64,
+    pub fetch_calls: u64,
+    pub client_search_calls: u64,
     pub hosted_requests: u64,
     pub network_attempts: u64,
     pub wire_bytes: u64,
@@ -113,6 +118,8 @@ struct ReservationState {
 struct BudgetState {
     reservations: HashMap<String, ReservationState>,
     logical_calls: u64,
+    fetch_calls: u64,
+    client_search_calls: u64,
     hosted_requests: u64,
     network_attempts: u64,
     wire_bytes: u64,
@@ -199,10 +206,15 @@ impl WebTaskTreeBudget {
             .filter(|entry| entry.request.kind == request.kind && !entry.call_committed)
             .count() as u64;
         let limited_dimension = match request.kind {
-            WebBudgetReservationKind::LogicalCall => (
-                state.logical_calls,
-                self.limits.max_logical_calls,
-                "logical_calls",
+            WebBudgetReservationKind::FetchCall => (
+                state.fetch_calls,
+                self.limits.max_fetch_calls,
+                "fetch_calls",
+            ),
+            WebBudgetReservationKind::ClientSearchCall => (
+                state.client_search_calls,
+                self.limits.max_client_search_calls,
+                "client_search_calls",
             ),
             WebBudgetReservationKind::HostedProviderRequest => (
                 state.hosted_requests,
@@ -265,6 +277,8 @@ impl WebTaskTreeBudget {
                 .filter(|entry| !entry.call_committed && entry.committed_attempt_ids.is_empty())
                 .count() as u64,
             logical_calls: state.logical_calls,
+            fetch_calls: state.fetch_calls,
+            client_search_calls: state.client_search_calls,
             hosted_requests: state.hosted_requests,
             network_attempts: state.network_attempts,
             wire_bytes: state.wire_bytes,
@@ -303,7 +317,14 @@ impl WebTaskTreeBudget {
             .expect("reservation existence checked")
             .call_committed = true;
         match kind {
-            WebBudgetReservationKind::LogicalCall => state.logical_calls += 1,
+            WebBudgetReservationKind::FetchCall => {
+                state.logical_calls += 1;
+                state.fetch_calls += 1;
+            }
+            WebBudgetReservationKind::ClientSearchCall => {
+                state.logical_calls += 1;
+                state.client_search_calls += 1;
+            }
             WebBudgetReservationKind::HostedProviderRequest => state.hosted_requests += 1,
             WebBudgetReservationKind::TransportLifecycle => unreachable!("checked above"),
         }

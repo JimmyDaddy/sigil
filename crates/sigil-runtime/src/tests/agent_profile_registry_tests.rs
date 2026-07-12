@@ -58,6 +58,7 @@ fn root_config() -> RootConfig {
                 "base_url": "https://example.com",
             }),
         )]),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }

@@ -1,6 +1,7 @@
 use super::super::timeline_flow::{selected_timeline_line_columns, text_by_display_columns};
 use super::*;
 use crate::{
+    app::EGRESS_DISCLOSURE_HEIGHT,
     mouse::{AppMouseOutcome, MouseInput, MouseInputKind},
     timeline::TimelineEntry,
     ui::LayoutSnapshot,
@@ -11,6 +12,36 @@ use ratatui::{
     text::{Line, Span},
 };
 use std::path::PathBuf;
+
+#[test]
+fn active_disclosure_reduces_the_timeline_viewport_by_reserved_rows() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(100, 30);
+    let before = app.timeline_viewport_rows();
+    let (receipt_tx, _receipt_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::EgressDisclosureRequested {
+        disclosure: sigil_kernel::PreEgressDisclosure::new(
+            sigil_kernel::EgressDisclosureKind::Query,
+            Some("query-viewport".to_owned()),
+            "builtin-search",
+            "tui",
+            "Web search",
+            "route-fingerprint",
+            "profile-fingerprint",
+            "https://example.com/",
+            "https://example.com/",
+            sigil_kernel::EgressNetworkRoute::Direct,
+            vec![sigil_kernel::EgressDataCategory::SearchQuery],
+        )?,
+        receipt_tx,
+    })?;
+
+    assert_eq!(
+        app.timeline_viewport_rows(),
+        before.saturating_sub(usize::from(EGRESS_DISCLOSURE_HEIGHT))
+    );
+    Ok(())
+}
 
 fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
@@ -1432,7 +1463,7 @@ fn timeline_scroll_and_live_summary_edges_cover_pending_and_busy_states() -> Res
     assert_eq!(
         app.live_activity_summary()
             .map(|summary| (summary.label, summary.detail)),
-        Some(("streaming".to_owned(), "writing the reply".to_owned()))
+        Some(("streaming".to_owned(), "receiving response".to_owned()))
     );
     Ok(())
 }
@@ -2483,7 +2514,7 @@ fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
         .live_activity_summary()
         .expect("parent activity should still be visible");
     assert_eq!(summary.label, "streaming");
-    assert_eq!(summary.detail, "writing the reply");
+    assert_eq!(summary.detail, "receiving response");
     Ok(())
 }
 

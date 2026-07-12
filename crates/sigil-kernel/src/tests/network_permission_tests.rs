@@ -160,7 +160,7 @@ fn explicit_tool_policy_can_override_delegated_source_default() -> Result<()> {
 }
 
 #[test]
-fn session_grants_are_available_only_for_local_ask_facets() -> Result<()> {
+fn session_grants_cover_local_ask_and_read_only_network_ask_facets() -> Result<()> {
     let subjects = vec![ToolSubject::path("src/lib.rs", "src/lib.rs")];
     assert!(tool_approval_session_grant_available_for_facets(
         ToolAccess::Write,
@@ -188,23 +188,36 @@ fn session_grants_are_available_only_for_local_ask_facets() -> Result<()> {
         ApprovalMode::Allow,
         ApprovalMode::Allow,
     ));
-    for (network, source) in [
-        (ApprovalMode::Ask, ApprovalMode::Allow),
-        (ApprovalMode::Deny, ApprovalMode::Allow),
-        (ApprovalMode::Allow, ApprovalMode::Ask),
-        (ApprovalMode::Allow, ApprovalMode::Deny),
+    assert!(tool_approval_session_grant_available_for_facets(
+        ToolAccess::Read,
+        Some(NetworkEffect::Read),
+        ToolOperation::NetworkRequest,
+        PermissionRisk::High,
+        &[ToolSubject::mcp_tool("builtin:websearch")],
+        &[PathTrustZone::Unknown],
+        None,
+        false,
+        ApprovalMode::Allow,
+        ApprovalMode::Ask,
+        ApprovalMode::Allow,
+    ));
+    for (effect, source) in [
+        (NetworkEffect::Mutate, ApprovalMode::Allow),
+        (NetworkEffect::Unknown, ApprovalMode::Allow),
+        (NetworkEffect::Read, ApprovalMode::Ask),
+        (NetworkEffect::Read, ApprovalMode::Deny),
     ] {
         assert!(!tool_approval_session_grant_available_for_facets(
-            ToolAccess::Write,
-            Some(NetworkEffect::Read),
-            ToolOperation::EditFile,
+            ToolAccess::Read,
+            Some(effect),
+            ToolOperation::NetworkRequest,
             PermissionRisk::High,
-            &subjects,
-            &[PathTrustZone::WorkspaceSource],
+            &[ToolSubject::mcp_tool("network_tool")],
+            &[PathTrustZone::Unknown],
             None,
             false,
+            ApprovalMode::Allow,
             ApprovalMode::Ask,
-            network,
             source,
         ));
     }

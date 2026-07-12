@@ -157,6 +157,9 @@ pub struct AgentRunInput {
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     hosted_tools: Vec<crate::HostedToolRequest>,
     hosted_evidence_processor: Option<Arc<dyn crate::HostedEvidenceProcessor>>,
+    hosted_turn_preparer: Option<Arc<dyn AgentHostedTurnPreparer>>,
+    suppressed_tool_names: Vec<String>,
+    web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
 }
 
 impl fmt::Debug for AgentRunInput {
@@ -181,6 +184,15 @@ impl fmt::Debug for AgentRunInput {
                     .map(|_| "configured"),
             )
             .field("hosted_tools", &self.hosted_tools)
+            .field(
+                "hosted_turn_preparer",
+                &self.hosted_turn_preparer.as_ref().map(|_| "configured"),
+            )
+            .field("suppressed_tool_names", &self.suppressed_tool_names)
+            .field(
+                "web_task_tree_budget",
+                &self.web_task_tree_budget.as_ref().map(|_| "configured"),
+            )
             .field(
                 "hosted_evidence_processor",
                 &self
@@ -209,6 +221,9 @@ impl AgentRunInput {
             user_url_capability_registrar: None,
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
+            hosted_turn_preparer: None,
+            suppressed_tool_names: Vec::new(),
+            web_task_tree_budget: None,
         }
     }
 
@@ -228,6 +243,9 @@ impl AgentRunInput {
             user_url_capability_registrar: None,
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
+            hosted_turn_preparer: None,
+            suppressed_tool_names: Vec::new(),
+            web_task_tree_budget: None,
         }
     }
 
@@ -246,6 +264,9 @@ impl AgentRunInput {
             user_url_capability_registrar: None,
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
+            hosted_turn_preparer: None,
+            suppressed_tool_names: Vec::new(),
+            web_task_tree_budget: None,
         }
     }
 
@@ -284,6 +305,36 @@ impl AgentRunInput {
     ) -> Self {
         self.hosted_evidence_processor = Some(processor);
         self
+    }
+
+    /// Suppresses one otherwise registered client tool for this exact provider run.
+    #[must_use]
+    pub fn suppress_tool(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        if !self.suppressed_tool_names.contains(&name) {
+            self.suppressed_tool_names.push(name);
+        }
+        self
+    }
+
+    /// Installs a runtime-owned per-provider-turn hosted authorization factory.
+    #[must_use]
+    pub fn with_hosted_turn_preparer(mut self, preparer: Arc<dyn AgentHostedTurnPreparer>) -> Self {
+        self.hosted_turn_preparer = Some(preparer);
+        self
+    }
+
+    /// Binds every Web effect in this run to the root-owned task-tree budget handle.
+    #[must_use]
+    pub fn with_web_task_tree_budget(mut self, budget: Arc<crate::WebTaskTreeBudget>) -> Self {
+        self.web_task_tree_budget = Some(budget);
+        self
+    }
+
+    /// Returns the already-bound root Web budget, when a parent/task runner supplied one.
+    #[must_use]
+    pub fn web_task_tree_budget(&self) -> Option<Arc<crate::WebTaskTreeBudget>> {
+        self.web_task_tree_budget.clone()
     }
 
     pub fn with_runtime_context(mut self, context: RuntimeContextCandidates) -> Self {
@@ -421,6 +472,9 @@ pub trait AgentToolDelegate: Send {
     /// Binds the current root run cancellation scope before delegated child work is admitted.
     fn set_run_cancellation(&mut self, _cancellation: Option<RunCancellationHandle>) {}
 
+    /// Binds the root-owned Web budget so delegated children cannot create a fresh owner.
+    fn set_web_task_tree_budget(&mut self, _budget: Option<Arc<crate::WebTaskTreeBudget>>) {}
+
     /// Handles one agent tool call after normal permission approval has resolved.
     ///
     /// Return `Ok(None)` when the call is not an agent-thread tool and should continue through the
@@ -465,6 +519,29 @@ pub trait AgentToolDelegate: Send {
     ) -> Result<Option<FinalAnswerContext>> {
         Ok(None)
     }
+}
+
+/// Runtime-owned resolver for per-run capabilities that require the live provider and session.
+#[async_trait]
+pub trait AgentRunInputPreparer: Send + Sync {
+    async fn prepare(
+        &self,
+        provider: &dyn Provider,
+        session: &Session,
+        input: AgentRunInput,
+    ) -> Result<AgentRunInput>;
+}
+
+/// One independently authorized provider-hosted turn.
+pub struct AgentHostedTurn {
+    pub hosted_tools: Vec<crate::HostedToolRequest>,
+    pub evidence_processor: Arc<dyn crate::HostedEvidenceProcessor>,
+}
+
+/// Runtime hook invoked immediately before every provider request in a multi-turn run.
+#[async_trait]
+pub trait AgentHostedTurnPreparer: Send + Sync {
+    async fn prepare_turn(&self) -> Result<AgentHostedTurn>;
 }
 
 /// Provider-backed agent loop with a registered tool surface.
@@ -703,6 +780,10 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let input = match tools.run_input_preparer() {
+            Some(preparer) => preparer.prepare(&self.provider, session, input).await?,
+            None => input,
+        };
         let AgentRunInput {
             persisted_user_message,
             persisted_user_message_id,
@@ -717,6 +798,9 @@ where
             user_url_capability_registrar,
             hosted_tools,
             hosted_evidence_processor,
+            hosted_turn_preparer,
+            suppressed_tool_names,
+            web_task_tree_budget,
         } = input;
         // An explicit per-run registrar is useful for constrained callers and tests; production
         // sessions fall back to their non-serializable session-scoped runtime attachment so live
@@ -870,7 +954,11 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
-            let mut tool_specs = tools.specs();
+            let mut tool_specs = tools
+                .specs()
+                .into_iter()
+                .filter(|spec| !suppressed_tool_names.contains(&spec.name))
+                .collect::<Vec<_>>();
             if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
             }
@@ -885,7 +973,18 @@ where
                 runtime_context.clone(),
                 &current_run_overlays,
             )?;
-            request.hosted_tools.clone_from(&hosted_tools);
+            let prepared_hosted_turn = match hosted_turn_preparer.as_ref() {
+                Some(preparer) => Some(preparer.prepare_turn().await?),
+                None => None,
+            };
+            let current_hosted_tools = prepared_hosted_turn
+                .as_ref()
+                .map_or(hosted_tools.as_slice(), |turn| turn.hosted_tools.as_slice());
+            request.hosted_tools = current_hosted_tools.to_vec();
+            let current_hosted_processor = prepared_hosted_turn
+                .as_ref()
+                .map(|turn| &turn.evidence_processor)
+                .or(hosted_evidence_processor.as_ref());
 
             let provider_effect =
                 begin_run_effect(cancellation.as_ref(), RunEffectKind::ProviderRequest)?;
@@ -897,7 +996,7 @@ where
                 total_tool_calls,
                 handler,
                 cancellation.as_ref(),
-                hosted_evidence_processor.as_ref(),
+                current_hosted_processor,
             )
             .await;
             drop(provider_effect);
@@ -947,6 +1046,17 @@ where
                 }
                 if let Some(recorder) = session.mutation_event_recorder() {
                     tool_ctx = tool_ctx.with_mutation_recorder(recorder);
+                }
+                if let Ok(recorder) = session.egress_audit_recorder() {
+                    tool_ctx = tool_ctx.with_egress_audit_recorder(recorder);
+                }
+                if let Some(registrar) = user_url_capability_registrar.as_ref() {
+                    tool_ctx = tool_ctx
+                        .with_user_url_capability_registrar(Arc::clone(registrar))
+                        .with_session_scope_id(session.session_scope_id().to_owned());
+                }
+                if let Some(budget) = web_task_tree_budget.as_ref() {
+                    tool_ctx = tool_ctx.with_web_task_tree_budget(Arc::clone(budget));
                 }
                 let accepted_task_plan_in_batch = completed_calls.iter().any(|call| {
                     task_plan_update
@@ -1791,6 +1901,7 @@ where
                         {
                             Some(delegate) => {
                                 delegate.set_run_cancellation(cancellation.clone());
+                                delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
                                 match delegate
                                     .handle_agent_tool_call(
                                         session,
@@ -1970,8 +2081,18 @@ where
             }
 
             claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
-            let final_message_id =
-                append_final_answer_message(session, handler, &assistant_text, pending_states)?;
+            let mut hosted_finalized = hosted_finalized;
+            let url_capability_registrations = hosted_finalized
+                .as_mut()
+                .map(|finalized| std::mem::take(&mut finalized.url_capability_registrations))
+                .unwrap_or_default();
+            let final_message_id = append_final_answer_message(
+                session,
+                handler,
+                &assistant_text,
+                pending_states,
+                url_capability_registrations,
+            )?;
             if let Some(finalized) = hosted_finalized {
                 let final_safe_text = session
                     .entries()

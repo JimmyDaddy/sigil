@@ -2854,7 +2854,7 @@ fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
 #[test]
 fn mcp_activate_server_tool_result_marks_lazy_server_ready() -> Result<()> {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         startup: sigil_kernel::McpServerStartup::Lazy,
         ..sigil_kernel::McpServerConfig::default()
@@ -2939,7 +2939,7 @@ fn mcp_runtime_progress_updates_live_activity_without_timeline_notice() -> Resul
 #[test]
 fn mcp_list_changed_marks_server_stale_until_refresh_status_arrives() -> Result<()> {
     let mut config = test_config();
-    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         startup: sigil_kernel::McpServerStartup::Eager,
         ..sigil_kernel::McpServerConfig::default()

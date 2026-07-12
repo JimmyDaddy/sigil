@@ -240,6 +240,18 @@ impl PreEgressDisclosure {
         &self.disclosure_id
     }
 
+    /// Returns the product surface that will present this disclosure.
+    #[must_use]
+    pub fn surface(&self) -> &str {
+        &self.surface
+    }
+
+    /// Returns the safe, user-facing destination label for this disclosure.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
     #[must_use]
     pub fn route_fingerprint(&self) -> &str {
         &self.route_fingerprint
@@ -383,6 +395,32 @@ pub struct DisclosurePresentationReceipt {
     route: EgressNetworkRoute,
     disclosure_content_sha256: String,
     sink_fingerprint: String,
+}
+
+impl DisclosurePresentationReceipt {
+    /// Returns the disclosure kind bound to this one-shot receipt.
+    #[must_use]
+    pub fn kind(&self) -> EgressDisclosureKind {
+        self.kind
+    }
+
+    /// Returns the optional query correlation bound to this receipt.
+    #[must_use]
+    pub fn correlation_id(&self) -> Option<&str> {
+        self.correlation_id.as_deref()
+    }
+
+    /// Returns the disclosure identity bound to this receipt.
+    #[must_use]
+    pub fn disclosure_id(&self) -> &str {
+        &self.disclosure_id
+    }
+
+    /// Returns the product sink identity that completed presentation.
+    #[must_use]
+    pub fn sink_fingerprint(&self) -> &str {
+        &self.sink_fingerprint
+    }
 }
 
 /// Durable proof that the selected sink completed the disclosure action.

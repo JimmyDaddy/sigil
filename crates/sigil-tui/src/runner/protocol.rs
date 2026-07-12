@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use sigil_kernel::{
     AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionRecord,
     ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
-    ConversationQueueItemProjection, MutationArtifactCleanupTarget, PlanApprovalPermission,
-    PlanApprovedEntry, PlanDecisionRecordedEntry, PlanTaskStartMode, ReasoningEffort, RunEvent,
+    ConversationQueueItemProjection, DisclosurePresentationError, DisclosurePresentationReceipt,
+    MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
+    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort, RunEvent,
     SessionLogEntry, TaskCreatedFromPlanEntry, TaskRunStatus, TerminalTaskEntry,
 };
 use sigil_runtime::{
@@ -14,6 +15,8 @@ use sigil_runtime::{
 use tokio::sync::oneshot;
 
 pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationResponse>;
+pub(crate) type EgressDisclosureReceiptTx =
+    oneshot::Sender<Result<DisclosurePresentationReceipt, DisclosurePresentationError>>;
 
 pub(crate) const WORKER_COMMAND_PROTOCOL_VERSION: u16 = 1;
 
@@ -344,6 +347,10 @@ pub enum WorkerMessage {
     McpElicitationRequest {
         request: McpElicitationRequest,
         response_tx: McpElicitationResponseTx,
+    },
+    EgressDisclosureRequested {
+        disclosure: PreEgressDisclosure,
+        receipt_tx: EgressDisclosureReceiptTx,
     },
     RunFailed(String),
 }

@@ -54,6 +54,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
                 "strict_tools_mode": "auto"
             }),
         )]),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }
@@ -188,7 +189,7 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
         .path()
         .join(".sigil/sessions/session-spawn-registry.jsonl");
     let mut root_config = deepseek_root_config(&workspace_root);
-    root_config.mcp_servers.push(McpServerConfig {
+    root_config.mcp_servers.push(mcp_server_config! {
         name: "required-eager".to_owned(),
         command: "/definitely/missing/sigil-mcp-server".to_owned(),
         startup: McpServerStartup::Eager,
@@ -258,7 +259,7 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
         .path()
         .join(".sigil/sessions/session-spawn-eager-ready.jsonl");
     let mut root_config = deepseek_root_config(&workspace_root);
-    root_config.mcp_servers.push(McpServerConfig {
+    root_config.mcp_servers.push(mcp_server_config! {
         name: "ready-eager".to_owned(),
         command: "python3".to_owned(),
         args: vec![script_path.to_string_lossy().to_string()],

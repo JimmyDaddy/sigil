@@ -30,6 +30,7 @@ pub enum McpRegistrationErrorCode {
     ReservedMcpNamespace,
     DuplicateMcpServerName,
     PluginMcpEnvironmentGrantNotSupported,
+    PluginRemoteMcpNotSupported,
     PluginOriginAttestationMismatch,
     PluginAttestationReviewRequired,
     McpExecutionBaseUnavailable,
@@ -47,6 +48,7 @@ impl McpRegistrationErrorCode {
             Self::PluginMcpEnvironmentGrantNotSupported => {
                 "plugin_mcp_environment_grant_not_supported"
             }
+            Self::PluginRemoteMcpNotSupported => "plugin_remote_mcp_not_supported",
             Self::PluginOriginAttestationMismatch => "plugin_origin_attestation_mismatch",
             Self::PluginAttestationReviewRequired => "plugin_mcp_attestation_review_required",
             Self::McpExecutionBaseUnavailable => "mcp_execution_base_unavailable",
@@ -326,12 +328,22 @@ impl ResolvedMcpServerDeclaration {
         attestation: PluginManifestAttestation,
     ) -> Result<Self, McpRegistrationError> {
         reject_reserved_namespace(&declared_name)?;
-        if !config.inherit_env.is_empty() {
-            return Err(McpRegistrationError::new(
-                McpRegistrationErrorCode::PluginMcpEnvironmentGrantNotSupported,
-                &declared_name,
-                "plugin MCP declarations cannot inherit parent environment values",
-            ));
+        match config.stdio() {
+            Some((_, _, inherit_env)) if !inherit_env.is_empty() => {
+                return Err(McpRegistrationError::new(
+                    McpRegistrationErrorCode::PluginMcpEnvironmentGrantNotSupported,
+                    &declared_name,
+                    "plugin MCP declarations cannot inherit parent environment values",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                return Err(McpRegistrationError::new(
+                    McpRegistrationErrorCode::PluginRemoteMcpNotSupported,
+                    &declared_name,
+                    "plugin MCP declarations cannot use remote transport",
+                ));
+            }
         }
         let execution_base = canonicalize_optional_execution_base(&declared_name, execution_base)?;
         Self::new(
@@ -893,21 +905,25 @@ fn resolve_stdio_executable(
     config: &McpServerConfig,
     cwd: &Path,
 ) -> Result<PathBuf, McpRegistrationError> {
-    if config.command.is_empty() {
+    let (command, _, inherit_env) = config.stdio().ok_or_else(|| {
+        McpRegistrationError::new(
+            McpRegistrationErrorCode::PluginRemoteMcpNotSupported,
+            declared_name,
+            "remote MCP transport has no stdio executable",
+        )
+    })?;
+    if command.is_empty() {
         return Err(McpRegistrationError::new(
             McpRegistrationErrorCode::McpCommandResolutionFailed,
             declared_name,
             "stdio command cannot be empty",
         ));
     }
-    let command_path = Path::new(&config.command);
+    let command_path = Path::new(command);
     if command_path.is_absolute() {
         return canonical_command(declared_name, command_path.to_path_buf());
     }
-    if config.command.contains('/')
-        || config.command.contains('\\')
-        || command_path.components().count() > 1
-    {
+    if command.contains('/') || command.contains('\\') || command_path.components().count() > 1 {
         let executable = canonical_command(declared_name, cwd.join(command_path))?;
         if !executable.starts_with(cwd) {
             return Err(McpRegistrationError::new(
@@ -919,7 +935,7 @@ fn resolve_stdio_executable(
         return Ok(executable);
     }
 
-    let environment = resolve_extension_process_environment(&config.inherit_env).map_err(|_| {
+    let environment = resolve_extension_process_environment(inherit_env).map_err(|_| {
         McpRegistrationError::new(
             McpRegistrationErrorCode::McpCommandResolutionFailed,
             declared_name,
@@ -935,7 +951,7 @@ fn resolve_stdio_executable(
     })?;
     resolve_bare_stdio_executable(
         declared_name,
-        &config.command,
+        command,
         cwd,
         OsStr::new(path.expose_secret()),
         environment
@@ -1256,13 +1272,14 @@ fn keyed_launch_authorization_fingerprint(
             "release_digest": release_digest,
         }),
     };
+    let (command, args, _) = declaration.config.stdio().unwrap_or(("", &[], &[]));
     let material = serde_json::to_vec(&json!({
         "declared_name": declaration.declared_name,
         "effective_name": declaration.config.name,
         "origin": exact_origin,
         "execution_base_path": execution_base_path,
-        "command": declaration.config.command,
-        "args": declaration.config.args,
+        "command": command,
+        "args": args,
         "resolved_executable": launch.executable.to_string_lossy(),
         "resolved_cwd": launch.cwd.to_string_lossy(),
         "transport_static_fingerprint": transport_static_fingerprint,

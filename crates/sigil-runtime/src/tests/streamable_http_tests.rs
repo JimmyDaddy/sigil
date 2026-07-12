@@ -26,9 +26,73 @@ use url::Url;
 use crate::{
     EgressOrderingCoordinator, IpCidr, ProxyEnvironment,
     QueuedRuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpAttempt,
-    RuntimeMcpStreamableHttpDestinationAuthorizer, WebDestinationError, WebDestinationGuard,
+    RuntimeMcpStreamableHttpAttemptFactory, RuntimeMcpStreamableHttpDestinationAuthorizer,
+    RuntimeMcpTransportAttemptFactory, WebDestinationError, WebDestinationGuard,
     WebDestinationGuardPolicy, WebDestinationResolver,
 };
+
+#[tokio::test]
+async fn production_attempt_factory_issues_unique_disclosures_and_shared_budget_reservations() {
+    let budget = WebTaskTreeBudget::new(
+        "remote-root",
+        WebTaskTreeBudgetLimits {
+            max_fetch_calls: 2,
+            max_client_search_calls: 2,
+            max_hosted_requests: 1,
+            max_network_attempts: 4,
+            max_wire_bytes: 1024,
+            max_decoded_bytes: 1024,
+            max_model_bytes: 1024,
+            max_concurrent_requests: 2,
+            max_attempts_per_host: 4,
+        },
+        None,
+    )
+    .expect("budget");
+    let factory = RuntimeMcpTransportAttemptFactory::new(
+        budget,
+        "remote-root",
+        sigil_kernel::EgressBindingOrigin::UserConfigured,
+        "remote-disclosure",
+        "tui",
+        "Remote MCP",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "https://example.test/",
+        "https://example.test/",
+        sigil_kernel::EgressNetworkRoute::Direct,
+        vec![sigil_kernel::EgressDataCategory::ConnectionMetadata],
+    );
+    let first = factory.next_attempt().await.expect("first attempt");
+    let second = factory.next_attempt().await.expect("second attempt");
+    assert_ne!(
+        first.authorization.disclosure_id,
+        second.authorization.disclosure_id
+    );
+    assert_ne!(first.attempt_id, second.attempt_id);
+
+    let next_budget = WebTaskTreeBudget::new(
+        "next-remote-root",
+        WebTaskTreeBudgetLimits {
+            max_fetch_calls: 2,
+            max_client_search_calls: 2,
+            max_hosted_requests: 1,
+            max_network_attempts: 4,
+            max_wire_bytes: 1024,
+            max_decoded_bytes: 1024,
+            max_model_bytes: 1024,
+            max_concurrent_requests: 2,
+            max_attempts_per_host: 4,
+        },
+        None,
+    )
+    .expect("next budget");
+    factory
+        .rebind_budget(next_budget)
+        .expect("rebind current run budget");
+    let rebound = factory.next_attempt().await.expect("rebound attempt");
+    assert_eq!(rebound.authorization.root_run_id, "next-remote-root");
+}
 
 #[derive(Clone)]
 struct SequenceResolver {
@@ -92,7 +156,8 @@ fn fixture(
     let budget = WebTaskTreeBudget::new(
         "root-run",
         WebTaskTreeBudgetLimits {
-            max_logical_calls: 8,
+            max_fetch_calls: 8,
+            max_client_search_calls: 8,
             max_hosted_requests: 8,
             max_network_attempts: 16,
             max_wire_bytes: 1024 * 1024,

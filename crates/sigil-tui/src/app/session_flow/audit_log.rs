@@ -4,8 +4,9 @@ use std::{
 };
 
 use sigil_kernel::{
-    CompactionPreview, ControlEntry, ModelMessage, SessionLogEntry, ToolCall, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
+    CompactionPreview, ControlEntry, ExternalEvidenceLevel, ExternalProvenanceEntry, ModelMessage,
+    SessionLogEntry, ToolCall, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreviewSnapshot,
 };
 
 use super::super::formatting::truncate_session_view_text;
@@ -91,13 +92,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             skipped.item_ids.len(),
             truncate_session_view_text(&skipped.reason, 96)
         ),
-        ControlEntry::ExternalProvenance(entry) => format!(
-            "[ctl] external provenance message={} sources={} citations={} trust={:?}",
-            truncate_session_view_text(&entry.message_id, 48),
-            entry.sources.len(),
-            entry.citations.len(),
-            entry.trust
-        ),
+        ControlEntry::ExternalProvenance(entry) => render_external_provenance_line(entry),
         ControlEntry::WebUrlCapabilityDescriptor(entry) => format!(
             "[ctl] url capability source={} message={} restart={:?}",
             truncate_session_view_text(&entry.source_id, 48),
@@ -125,9 +120,16 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             approval.policy_decision.as_str()
         ),
         ControlEntry::ToolApprovalSessionGrant(grant) => format!(
-            "[ctl] approval grant {} {} scope=session access={} effect={} subjects={}",
+            "[ctl] approval grant {} {} expires=session scope={} facets={} access={} effect={} subjects={}",
             grant.call_id,
             grant.tool_name,
+            grant.scope.as_str(),
+            grant
+                .facets
+                .iter()
+                .map(|facet| facet.as_str())
+                .collect::<Vec<_>>()
+                .join("+"),
             grant.access.as_str(),
             grant
                 .network_effect
@@ -563,6 +565,61 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.status
         ),
         ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
+    }
+}
+
+fn render_external_provenance_line(entry: &ExternalProvenanceEntry) -> String {
+    const MAX_VISIBLE_SOURCES: usize = 3;
+    const MAX_VISIBLE_CITATIONS: usize = 3;
+
+    let mut lines = vec![format!(
+        "[ctl] external provenance message={} sources={} citations={} trust={:?}",
+        truncate_session_view_text(&entry.message_id, 48),
+        entry.sources.len(),
+        entry.citations.len(),
+        entry.trust
+    )];
+
+    for source in entry.sources.iter().take(MAX_VISIBLE_SOURCES) {
+        let title = source.title.as_deref().unwrap_or("untitled");
+        lines.push(format!(
+            "  source id={} level={} title={} url={}",
+            truncate_session_view_text(&source.source_id, 24),
+            external_evidence_level_label(source.evidence_level),
+            truncate_session_view_text(title, 72),
+            truncate_session_view_text(&source.safe_display_url, 96)
+        ));
+    }
+    if entry.sources.len() > MAX_VISIBLE_SOURCES {
+        lines.push(format!(
+            "  sources: {} additional source(s) hidden",
+            entry.sources.len() - MAX_VISIBLE_SOURCES
+        ));
+    }
+
+    for citation in entry.citations.iter().take(MAX_VISIBLE_CITATIONS) {
+        lines.push(format!(
+            "  citation source={} range={}..{}",
+            truncate_session_view_text(&citation.source_id, 24),
+            citation.start_byte,
+            citation.end_byte
+        ));
+    }
+    if entry.citations.len() > MAX_VISIBLE_CITATIONS {
+        lines.push(format!(
+            "  citations: {} additional citation(s) hidden",
+            entry.citations.len() - MAX_VISIBLE_CITATIONS
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn external_evidence_level_label(level: ExternalEvidenceLevel) -> &'static str {
+    match level {
+        ExternalEvidenceLevel::SearchSnippet => "search_snippet",
+        ExternalEvidenceLevel::ProviderGroundingSource => "provider_grounding_source",
+        ExternalEvidenceLevel::FetchedPage => "fetched_page",
     }
 }
 

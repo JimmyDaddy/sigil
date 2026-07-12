@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
     fs,
@@ -10,11 +10,12 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use url::Url;
 
 use crate::{
     execution_backend::ExecutionConfig,
     mutation::MutationArtifactRetentionPolicy,
-    permission::{ApprovalMode, PermissionConfig},
+    permission::{ApprovalMode, NetworkPolicy, PermissionConfig},
     process_environment::normalize_environment_variable_names,
     provider::ReasoningEffort,
     task::AgentRole,
@@ -59,9 +60,436 @@ pub struct RootConfig {
     #[serde(default)]
     pub task: TaskConfig,
     #[serde(default)]
+    pub web: WebConfig,
+    #[serde(default)]
     pub providers: BTreeMap<String, Value>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// Root Web V1 policy shared by every entrypoint and task role.
+///
+/// A missing `[web]` block intentionally resolves to the alpha defaults. Runtime callers may
+/// only further restrict this policy with a non-persistent policy cap; they must not use it to
+/// enable a route that this root policy disables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct WebConfig {
+    #[serde(default = "default_web_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub network_mode: NetworkPolicy,
+    #[serde(default = "default_web_allow_http")]
+    pub allow_http: bool,
+    #[serde(default)]
+    pub proxy_mode: WebProxyMode,
+    #[serde(default)]
+    pub redirect_policy: WebRedirectPolicy,
+    #[serde(default)]
+    pub search_route: WebSearchRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_mcp: Option<WebSearchMcpConfig>,
+    #[serde(default = "default_web_max_same_origin_redirects")]
+    pub max_same_origin_redirects: u32,
+    #[serde(default = "default_web_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_web_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_web_max_url_bytes")]
+    pub max_url_bytes: usize,
+    #[serde(default = "default_web_max_query_chars")]
+    pub max_query_chars: usize,
+    #[serde(default = "default_web_max_query_bytes")]
+    pub max_query_bytes: usize,
+    #[serde(default = "default_web_max_domains")]
+    pub max_domains: usize,
+    #[serde(default = "default_web_max_results")]
+    pub max_results: u32,
+    #[serde(default = "default_web_url_capabilities")]
+    pub max_url_capabilities_per_session: usize,
+    #[serde(default = "default_web_url_capability_ttl_secs")]
+    pub url_capability_ttl_secs: u64,
+    #[serde(default = "default_web_max_wire_response_bytes")]
+    pub max_wire_response_bytes: u64,
+    #[serde(default = "default_web_max_decoded_response_bytes")]
+    pub max_decoded_response_bytes: u64,
+    #[serde(default = "default_web_max_model_content_bytes")]
+    pub max_model_content_bytes: u64,
+    #[serde(default = "default_web_max_hosted_turn_buffer_bytes")]
+    pub max_hosted_turn_buffer_bytes: u64,
+    #[serde(default = "default_web_max_fetches_per_run")]
+    pub max_fetches_per_run: u32,
+    #[serde(default = "default_web_max_client_searches_per_run")]
+    pub max_client_searches_per_run: u32,
+    #[serde(default = "default_web_max_hosted_requests_per_run")]
+    pub max_hosted_enabled_provider_requests_per_run: u32,
+    #[serde(default = "default_web_provider_hosted_max_uses")]
+    pub provider_hosted_max_uses_per_request: u32,
+    #[serde(default = "default_web_max_network_attempts_per_run")]
+    pub max_network_attempts_per_run: u32,
+    #[serde(default = "default_web_max_total_wire_bytes_per_run")]
+    pub max_total_wire_bytes_per_run: u64,
+    #[serde(default = "default_web_max_total_decoded_bytes_per_run")]
+    pub max_total_decoded_bytes_per_run: u64,
+    #[serde(default = "default_web_max_total_model_bytes_per_run")]
+    pub max_total_model_bytes_per_run: u64,
+    #[serde(default = "default_web_max_concurrent_requests")]
+    pub max_concurrent_requests: u32,
+    #[serde(default = "default_web_per_host_rate_limit")]
+    pub per_host_rate_limit_per_minute: u32,
+    #[serde(default = "default_web_allowed_ports")]
+    pub allowed_ports: Vec<u16>,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+    #[serde(default)]
+    pub allowed_private_hosts: Vec<String>,
+    #[serde(default)]
+    pub allowed_private_cidrs: Vec<String>,
+    #[serde(default)]
+    pub bundled_search: WebBundledSearchConfig,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_web_enabled(),
+            network_mode: NetworkPolicy::Allow,
+            allow_http: default_web_allow_http(),
+            proxy_mode: WebProxyMode::default(),
+            redirect_policy: WebRedirectPolicy::default(),
+            search_route: WebSearchRoute::default(),
+            search_mcp: None,
+            max_same_origin_redirects: default_web_max_same_origin_redirects(),
+            timeout_secs: default_web_timeout_secs(),
+            connect_timeout_secs: default_web_connect_timeout_secs(),
+            max_url_bytes: default_web_max_url_bytes(),
+            max_query_chars: default_web_max_query_chars(),
+            max_query_bytes: default_web_max_query_bytes(),
+            max_domains: default_web_max_domains(),
+            max_results: default_web_max_results(),
+            max_url_capabilities_per_session: default_web_url_capabilities(),
+            url_capability_ttl_secs: default_web_url_capability_ttl_secs(),
+            max_wire_response_bytes: default_web_max_wire_response_bytes(),
+            max_decoded_response_bytes: default_web_max_decoded_response_bytes(),
+            max_model_content_bytes: default_web_max_model_content_bytes(),
+            max_hosted_turn_buffer_bytes: default_web_max_hosted_turn_buffer_bytes(),
+            max_fetches_per_run: default_web_max_fetches_per_run(),
+            max_client_searches_per_run: default_web_max_client_searches_per_run(),
+            max_hosted_enabled_provider_requests_per_run: default_web_max_hosted_requests_per_run(),
+            provider_hosted_max_uses_per_request: default_web_provider_hosted_max_uses(),
+            max_network_attempts_per_run: default_web_max_network_attempts_per_run(),
+            max_total_wire_bytes_per_run: default_web_max_total_wire_bytes_per_run(),
+            max_total_decoded_bytes_per_run: default_web_max_total_decoded_bytes_per_run(),
+            max_total_model_bytes_per_run: default_web_max_total_model_bytes_per_run(),
+            max_concurrent_requests: default_web_max_concurrent_requests(),
+            per_host_rate_limit_per_minute: default_web_per_host_rate_limit(),
+            allowed_ports: default_web_allowed_ports(),
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
+            allowed_private_hosts: Vec::new(),
+            allowed_private_cidrs: Vec::new(),
+            bundled_search: WebBundledSearchConfig::default(),
+        }
+    }
+}
+
+/// Proxy policy used by native Web V1 transports.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum WebProxyMode {
+    #[default]
+    Environment,
+    Direct,
+}
+
+/// Redirect policy used by native Web V1 transports.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRedirectPolicy {
+    #[default]
+    SameOrigin,
+    Deny,
+}
+
+/// Ordered Web search route preference selected once per run.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchRoute {
+    #[default]
+    Auto,
+    ProviderHosted,
+    Mcp,
+    Bundled,
+    Disabled,
+}
+
+/// Exact user-configured MCP binding eligible for the stable `websearch` product surface.
+///
+/// Request templates, result paths, and field aliases are intentionally not configurable in V1.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct WebSearchMcpConfig {
+    pub server: String,
+    pub tool: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct WebSearchMcpConfigWire {
+    server: String,
+    tool: String,
+}
+
+impl<'de> Deserialize<'de> for WebSearchMcpConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = WebSearchMcpConfigWire::deserialize(deserializer)?;
+        if wire.server.trim().is_empty() || wire.server.trim() != wire.server {
+            return Err(serde::de::Error::custom(
+                "web.search_mcp.server must be exact and non-empty",
+            ));
+        }
+        if wire.tool.trim().is_empty() || wire.tool.trim() != wire.tool {
+            return Err(serde::de::Error::custom(
+                "web.search_mcp.tool must be exact and non-empty",
+            ));
+        }
+        Ok(Self {
+            server: wire.server,
+            tool: wire.tool,
+        })
+    }
+}
+
+/// Non-persistent restrictions that a parent run may impose on `WebConfig`.
+///
+/// Every field is a cap, never an override: callers use [`WebConfig::meet_policy_cap`] to
+/// calculate the effective policy, so child or runtime state cannot reopen a disabled route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebPolicyCap {
+    pub enabled: Option<bool>,
+    pub bundled_search_enabled: Option<bool>,
+    pub network_mode: Option<NetworkPolicy>,
+    pub allowed_routes: Option<BTreeSet<WebSearchRoute>>,
+    pub allowed_domains: Option<BTreeSet<String>>,
+    pub blocked_domains: BTreeSet<String>,
+    pub max_query_chars: Option<usize>,
+    pub max_query_bytes: Option<usize>,
+    pub max_client_searches_per_run: Option<u32>,
+    pub max_hosted_enabled_provider_requests_per_run: Option<u32>,
+    pub max_network_attempts_per_run: Option<u32>,
+    pub max_concurrent_requests: Option<u32>,
+}
+
+/// Resolved Web policy after applying a non-persistent [`WebPolicyCap`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveWebPolicy {
+    pub enabled: bool,
+    pub bundled_search_enabled: bool,
+    pub network_mode: NetworkPolicy,
+    pub allowed_routes: BTreeSet<WebSearchRoute>,
+    pub allowed_domains: BTreeSet<String>,
+    pub blocked_domains: BTreeSet<String>,
+    pub max_query_chars: usize,
+    pub max_query_bytes: usize,
+    pub max_client_searches_per_run: u32,
+    pub max_hosted_enabled_provider_requests_per_run: u32,
+    pub max_network_attempts_per_run: u32,
+    pub max_concurrent_requests: u32,
+}
+
+impl WebConfig {
+    /// Applies only tightening restrictions and returns the effective per-run policy.
+    #[must_use]
+    pub fn meet_policy_cap(&self, cap: &WebPolicyCap) -> EffectiveWebPolicy {
+        let base_routes = web_search_route_candidates(self.search_route);
+        let allowed_routes = cap
+            .allowed_routes
+            .as_ref()
+            .map_or(base_routes.clone(), |routes| {
+                base_routes.intersection(routes).copied().collect()
+            });
+        let base_domains = self
+            .allowed_domains
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let allowed_domains =
+            cap.allowed_domains
+                .as_ref()
+                .map_or(base_domains.clone(), |domains| {
+                    if base_domains.is_empty() {
+                        domains.clone()
+                    } else {
+                        base_domains.intersection(domains).cloned().collect()
+                    }
+                });
+        let mut blocked_domains = self
+            .blocked_domains
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        blocked_domains.extend(cap.blocked_domains.iter().cloned());
+        EffectiveWebPolicy {
+            enabled: self.enabled && cap.enabled.unwrap_or(true),
+            bundled_search_enabled: self.bundled_search.enabled
+                && cap.bundled_search_enabled.unwrap_or(true),
+            network_mode: stricter_network_policy(self.network_mode, cap.network_mode),
+            allowed_routes,
+            allowed_domains,
+            blocked_domains,
+            max_query_chars: min_cap(self.max_query_chars, cap.max_query_chars),
+            max_query_bytes: min_cap(self.max_query_bytes, cap.max_query_bytes),
+            max_client_searches_per_run: min_cap(
+                self.max_client_searches_per_run,
+                cap.max_client_searches_per_run,
+            ),
+            max_hosted_enabled_provider_requests_per_run: min_cap(
+                self.max_hosted_enabled_provider_requests_per_run,
+                cap.max_hosted_enabled_provider_requests_per_run,
+            ),
+            max_network_attempts_per_run: min_cap(
+                self.max_network_attempts_per_run,
+                cap.max_network_attempts_per_run,
+            ),
+            max_concurrent_requests: min_cap(
+                self.max_concurrent_requests,
+                cap.max_concurrent_requests,
+            ),
+        }
+    }
+}
+
+fn web_search_route_candidates(route: WebSearchRoute) -> BTreeSet<WebSearchRoute> {
+    match route {
+        WebSearchRoute::Auto => [
+            WebSearchRoute::ProviderHosted,
+            WebSearchRoute::Mcp,
+            WebSearchRoute::Bundled,
+        ]
+        .into_iter()
+        .collect(),
+        WebSearchRoute::Disabled => BTreeSet::new(),
+        route => [route].into_iter().collect(),
+    }
+}
+
+fn stricter_network_policy(base: NetworkPolicy, cap: Option<NetworkPolicy>) -> NetworkPolicy {
+    match cap {
+        Some(NetworkPolicy::Deny) | None if base == NetworkPolicy::Deny => NetworkPolicy::Deny,
+        Some(NetworkPolicy::Deny) => NetworkPolicy::Deny,
+        Some(NetworkPolicy::Ask) if base == NetworkPolicy::Allow => NetworkPolicy::Ask,
+        _ => base,
+    }
+}
+
+fn min_cap<T: Ord + Copy>(base: T, cap: Option<T>) -> T {
+    cap.map_or(base, |value| base.min(value))
+}
+
+/// Controls the runtime-private bundled stable search profile.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct WebBundledSearchConfig {
+    #[serde(default = "default_web_bundled_search_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for WebBundledSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_web_bundled_search_enabled(),
+        }
+    }
+}
+
+const fn default_web_enabled() -> bool {
+    true
+}
+const fn default_web_allow_http() -> bool {
+    true
+}
+const fn default_web_max_same_origin_redirects() -> u32 {
+    5
+}
+const fn default_web_timeout_secs() -> u64 {
+    15
+}
+const fn default_web_connect_timeout_secs() -> u64 {
+    5
+}
+const fn default_web_max_url_bytes() -> usize {
+    2_048
+}
+const fn default_web_max_query_chars() -> usize {
+    512
+}
+const fn default_web_max_query_bytes() -> usize {
+    2_048
+}
+const fn default_web_max_domains() -> usize {
+    10
+}
+const fn default_web_max_results() -> u32 {
+    8
+}
+const fn default_web_url_capabilities() -> usize {
+    256
+}
+const fn default_web_url_capability_ttl_secs() -> u64 {
+    3_600
+}
+const fn default_web_max_wire_response_bytes() -> u64 {
+    2_097_152
+}
+const fn default_web_max_decoded_response_bytes() -> u64 {
+    1_048_576
+}
+const fn default_web_max_model_content_bytes() -> u64 {
+    24_000
+}
+const fn default_web_max_hosted_turn_buffer_bytes() -> u64 {
+    262_144
+}
+const fn default_web_max_fetches_per_run() -> u32 {
+    5
+}
+const fn default_web_max_client_searches_per_run() -> u32 {
+    3
+}
+const fn default_web_max_hosted_requests_per_run() -> u32 {
+    4
+}
+const fn default_web_provider_hosted_max_uses() -> u32 {
+    3
+}
+const fn default_web_max_network_attempts_per_run() -> u32 {
+    12
+}
+const fn default_web_max_total_wire_bytes_per_run() -> u64 {
+    8_388_608
+}
+const fn default_web_max_total_decoded_bytes_per_run() -> u64 {
+    4_194_304
+}
+const fn default_web_max_total_model_bytes_per_run() -> u64 {
+    98_304
+}
+const fn default_web_max_concurrent_requests() -> u32 {
+    2
+}
+const fn default_web_per_host_rate_limit() -> u32 {
+    10
+}
+fn default_web_allowed_ports() -> Vec<u16> {
+    vec![80, 443]
+}
+const fn default_web_bundled_search_enabled() -> bool {
+    true
 }
 
 /// Provider-neutral timeout settings for model requests.
@@ -1102,28 +1530,14 @@ impl CompactionThresholdStatus {
     }
 }
 
-/// External MCP server process configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+/// Validated root MCP server configuration with an explicit transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerConfig {
     pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "deserialize_inherit_env",
-        serialize_with = "serialize_inherit_env"
-    )]
-    pub inherit_env: Vec<String>,
-    #[serde(default = "default_startup_timeout_secs")]
+    pub transport: McpServerTransportConfig,
     pub startup_timeout_secs: u64,
-    #[serde(default = "default_mcp_server_required")]
     pub required: bool,
-    #[serde(default)]
     pub startup: McpServerStartup,
-    #[serde(default)]
     pub trust: McpServerTrustPolicy,
 }
 
@@ -1131,15 +1545,462 @@ impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
-            command: String::new(),
-            args: Vec::new(),
-            inherit_env: Vec::new(),
+            transport: McpServerTransportConfig::Stdio {
+                command: String::new(),
+                args: Vec::new(),
+                inherit_env: Vec::new(),
+            },
             startup_timeout_secs: default_startup_timeout_secs(),
             required: default_mcp_server_required(),
             startup: McpServerStartup::default(),
             trust: McpServerTrustPolicy::default(),
         }
     }
+}
+
+impl McpServerConfig {
+    #[must_use]
+    pub fn stdio(&self) -> Option<(&str, &[String], &[String])> {
+        match &self.transport {
+            McpServerTransportConfig::Stdio {
+                command,
+                args,
+                inherit_env,
+            } => Some((command, args, inherit_env)),
+            McpServerTransportConfig::StreamableHttp(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn streamable_http(&self) -> Option<&McpStreamableHttpConfig> {
+        match &self.transport {
+            McpServerTransportConfig::StreamableHttp(config) => Some(config),
+            McpServerTransportConfig::Stdio { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn transport_name(&self) -> &'static str {
+        match self.transport {
+            McpServerTransportConfig::Stdio { .. } => "stdio",
+            McpServerTransportConfig::StreamableHttp(_) => "streamable_http",
+        }
+    }
+}
+
+/// Transport-specific MCP configuration kept separate from shared lifecycle and trust fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerTransportConfig {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        inherit_env: Vec<String>,
+    },
+    StreamableHttp(McpStreamableHttpConfig),
+}
+
+/// User-root Streamable HTTP transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpStreamableHttpConfig {
+    pub url: String,
+    pub http_headers: BTreeMap<String, String>,
+    pub env_http_headers: BTreeMap<String, String>,
+    pub bearer_token_env_var: Option<String>,
+    pub client_capabilities: BTreeSet<McpRemoteClientCapability>,
+}
+
+/// Public, bounded MCP client capabilities supported for remote root servers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRemoteClientCapability {
+    Roots,
+    #[serde(rename = "elicitation")]
+    ElicitationForm,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
+enum McpServerConfigWire {
+    Stdio {
+        name: String,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "deserialize_inherit_env",
+            serialize_with = "serialize_inherit_env"
+        )]
+        inherit_env: Vec<String>,
+        #[serde(default = "default_startup_timeout_secs")]
+        startup_timeout_secs: u64,
+        #[serde(default = "default_mcp_server_required")]
+        required: bool,
+        #[serde(default)]
+        startup: McpServerStartup,
+        #[serde(default)]
+        trust: McpServerTrustPolicy,
+    },
+    StreamableHttp {
+        name: String,
+        url: String,
+        #[serde(default)]
+        http_headers: BTreeMap<String, String>,
+        #[serde(default)]
+        env_http_headers: BTreeMap<String, String>,
+        #[serde(default)]
+        bearer_token_env_var: Option<String>,
+        #[serde(default)]
+        client_capabilities: Vec<McpRemoteClientCapability>,
+        #[serde(default = "default_startup_timeout_secs")]
+        startup_timeout_secs: u64,
+        #[serde(default = "default_mcp_server_required")]
+        required: bool,
+        #[serde(default)]
+        startup: McpServerStartup,
+        #[serde(default)]
+        trust: McpServerTrustPolicy,
+    },
+}
+
+impl Serialize for McpServerConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        validate_mcp_server_config(self).map_err(serde::ser::Error::custom)?;
+        let wire = match &self.transport {
+            McpServerTransportConfig::Stdio {
+                command,
+                args,
+                inherit_env,
+            } => McpServerConfigWire::Stdio {
+                name: self.name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                inherit_env: inherit_env.clone(),
+                startup_timeout_secs: self.startup_timeout_secs,
+                required: self.required,
+                startup: self.startup,
+                trust: self.trust.clone(),
+            },
+            McpServerTransportConfig::StreamableHttp(config) => {
+                McpServerConfigWire::StreamableHttp {
+                    name: self.name.clone(),
+                    url: config.url.clone(),
+                    http_headers: config.http_headers.clone(),
+                    env_http_headers: config.env_http_headers.clone(),
+                    bearer_token_env_var: config.bearer_token_env_var.clone(),
+                    client_capabilities: config.client_capabilities.iter().copied().collect(),
+                    startup_timeout_secs: self.startup_timeout_secs,
+                    required: self.required,
+                    startup: self.startup,
+                    trust: self.trust.clone(),
+                }
+            }
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match McpServerConfigWire::deserialize(deserializer)? {
+            McpServerConfigWire::Stdio {
+                name,
+                command,
+                args,
+                inherit_env,
+                startup_timeout_secs,
+                required,
+                startup,
+                trust,
+            } => {
+                let config = Self {
+                    name,
+                    transport: McpServerTransportConfig::Stdio {
+                        command,
+                        args,
+                        inherit_env,
+                    },
+                    startup_timeout_secs,
+                    required,
+                    startup,
+                    trust,
+                };
+                validate_mcp_server_config(&config).map_err(serde::de::Error::custom)?;
+                Ok(config)
+            }
+            McpServerConfigWire::StreamableHttp {
+                name,
+                url,
+                http_headers,
+                env_http_headers,
+                bearer_token_env_var,
+                client_capabilities,
+                startup_timeout_secs,
+                required,
+                startup,
+                trust,
+            } => {
+                let capabilities = client_capabilities.iter().copied().collect::<BTreeSet<_>>();
+                if capabilities.len() != client_capabilities.len() {
+                    return Err(serde::de::Error::custom(
+                        "duplicate streamable_http client_capabilities value",
+                    ));
+                }
+                let config = Self {
+                    name,
+                    transport: McpServerTransportConfig::StreamableHttp(McpStreamableHttpConfig {
+                        url,
+                        http_headers,
+                        env_http_headers,
+                        bearer_token_env_var,
+                        client_capabilities: capabilities,
+                    }),
+                    startup_timeout_secs,
+                    required,
+                    startup,
+                    trust,
+                };
+                validate_mcp_server_config(&config).map_err(serde::de::Error::custom)?;
+                Ok(config)
+            }
+        }
+    }
+}
+
+fn validate_mcp_server_config(config: &McpServerConfig) -> Result<()> {
+    let name = config.name.trim();
+    anyhow::ensure!(!name.is_empty(), "MCP server name cannot be empty");
+    anyhow::ensure!(
+        name == config.name,
+        "MCP server name cannot contain leading or trailing whitespace"
+    );
+    anyhow::ensure!(
+        !name.starts_with("builtin:"),
+        "MCP server name uses reserved builtin: namespace"
+    );
+    anyhow::ensure!(
+        config.startup_timeout_secs > 0,
+        "MCP startup_timeout_secs must be greater than 0"
+    );
+    validate_mcp_pin_config(&config.trust)?;
+    match &config.transport {
+        McpServerTransportConfig::Stdio {
+            command,
+            inherit_env,
+            ..
+        } => {
+            anyhow::ensure!(
+                !command.trim().is_empty(),
+                "stdio MCP command cannot be empty"
+            );
+            let normalized = normalize_environment_variable_names(inherit_env)?;
+            anyhow::ensure!(
+                &normalized == inherit_env,
+                "stdio MCP inherit_env must be sorted and deduplicated"
+            );
+        }
+        McpServerTransportConfig::StreamableHttp(remote) => {
+            validate_remote_mcp_config(remote)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_mcp_pin_config(trust: &McpServerTrustPolicy) -> Result<()> {
+    match (trust.pin_version, trust.pinned.as_ref()) {
+        (false, None) => Ok(()),
+        (false, Some(_)) => anyhow::bail!("MCP pinned identity requires pin_version = true"),
+        (true, None) => anyhow::bail!("MCP pin_version = true requires a pinned identity"),
+        (true, Some(pin)) => {
+            anyhow::ensure!(
+                is_sha256_fingerprint(&pin.transport_fingerprint),
+                "MCP pinned transport_fingerprint must be sha256: followed by 64 hex characters"
+            );
+            anyhow::ensure!(
+                !pin.protocol_version.trim().is_empty(),
+                "MCP pinned protocol_version cannot be empty"
+            );
+            anyhow::ensure!(
+                !pin.server_name.trim().is_empty(),
+                "MCP pinned server_name cannot be empty"
+            );
+            anyhow::ensure!(
+                !pin.server_version.trim().is_empty(),
+                "MCP pinned server_version cannot be empty"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn validate_remote_mcp_config(config: &McpStreamableHttpConfig) -> Result<()> {
+    let endpoint = Url::parse(&config.url).context("streamable_http MCP url is invalid")?;
+    anyhow::ensure!(
+        matches!(endpoint.scheme(), "https" | "http"),
+        "streamable_http MCP url must use https or http"
+    );
+    anyhow::ensure!(
+        endpoint.host_str().is_some(),
+        "streamable_http MCP url must include a host"
+    );
+    anyhow::ensure!(
+        endpoint.username().is_empty() && endpoint.password().is_none(),
+        "streamable_http MCP url cannot contain userinfo"
+    );
+    anyhow::ensure!(
+        endpoint.fragment().is_none(),
+        "streamable_http MCP url cannot contain a fragment"
+    );
+
+    let header_count = config.http_headers.len()
+        + config.env_http_headers.len()
+        + usize::from(config.bearer_token_env_var.is_some());
+    anyhow::ensure!(
+        header_count <= 32,
+        "streamable_http MCP custom headers exceed the limit of 32"
+    );
+    let mut names = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    for (name, value) in &config.http_headers {
+        validate_remote_header_name(name)?;
+        anyhow::ensure!(
+            !is_sensitive_header_name(name),
+            "streamable_http MCP sensitive header {name} must reference an environment variable"
+        );
+        validate_remote_literal_header_value(value)?;
+        register_remote_header_name(&mut names, name)?;
+        total_bytes = total_bytes
+            .saturating_add(name.len())
+            .saturating_add(value.len());
+    }
+    for (name, environment_name) in &config.env_http_headers {
+        validate_remote_header_name(name)?;
+        validate_environment_variable_name(environment_name)?;
+        register_remote_header_name(&mut names, name)?;
+        total_bytes = total_bytes
+            .saturating_add(name.len())
+            .saturating_add(environment_name.len());
+    }
+    if let Some(environment_name) = &config.bearer_token_env_var {
+        validate_environment_variable_name(environment_name)?;
+        register_remote_header_name(&mut names, "authorization")?;
+        total_bytes = total_bytes
+            .saturating_add("authorization".len())
+            .saturating_add(environment_name.len());
+    }
+    anyhow::ensure!(
+        total_bytes <= 32 * 1024,
+        "streamable_http MCP custom header metadata exceeds 32 KiB"
+    );
+    if endpoint.scheme() == "http" {
+        anyhow::ensure!(
+            config.env_http_headers.is_empty() && config.bearer_token_env_var.is_none(),
+            "streamable_http MCP credentials require https"
+        );
+    }
+    Ok(())
+}
+
+fn validate_remote_header_name(name: &str) -> Result<()> {
+    anyhow::ensure!(
+        !name.is_empty() && name.len() <= 128,
+        "streamable_http MCP header name must contain 1..=128 bytes"
+    );
+    anyhow::ensure!(
+        name.bytes().all(is_http_token_byte),
+        "streamable_http MCP header name is invalid"
+    );
+    anyhow::ensure!(
+        !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "accept"
+                | "connection"
+                | "content-length"
+                | "content-type"
+                | "host"
+                | "mcp-protocol-version"
+                | "mcp-session-id"
+        ),
+        "streamable_http MCP header {name} is transport-owned"
+    );
+    Ok(())
+}
+
+fn validate_remote_literal_header_value(value: &str) -> Result<()> {
+    anyhow::ensure!(
+        value.len() <= 8 * 1024,
+        "streamable_http MCP literal header value exceeds 8 KiB"
+    );
+    anyhow::ensure!(
+        !value
+            .bytes()
+            .any(|byte| byte == b'\r' || byte == b'\n' || byte == 0),
+        "streamable_http MCP literal header value contains a control character"
+    );
+    Ok(())
+}
+
+fn register_remote_header_name(names: &mut BTreeSet<String>, name: &str) -> Result<()> {
+    anyhow::ensure!(
+        names.insert(name.to_ascii_lowercase()),
+        "streamable_http MCP header {name} is configured more than once"
+    );
+    Ok(())
+}
+
+fn validate_environment_variable_name(name: &str) -> Result<()> {
+    let normalized = normalize_environment_variable_names(&[name.to_owned()])?;
+    anyhow::ensure!(
+        normalized.first().is_some_and(|value| value == name),
+        "environment variable name must match [A-Za-z_][A-Za-z0-9_]*"
+    );
+    Ok(())
+}
+
+fn is_sensitive_header_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "authorization"
+        || name == "proxy-authorization"
+        || name == "cookie"
+        || name == "set-cookie"
+        || name.contains("api-key")
+        || name.contains("apikey")
+        || name.contains("token")
+        || name.contains("secret")
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn is_sha256_fingerprint(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn deserialize_inherit_env<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -1231,7 +2092,7 @@ impl Default for McpServerTrustPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct McpServerPinnedIdentity {
-    pub command_fingerprint: String,
+    pub transport_fingerprint: String,
     pub protocol_version: String,
     pub server_name: String,
     pub server_version: String,

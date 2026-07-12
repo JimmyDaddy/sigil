@@ -16,13 +16,23 @@ pub fn build_run_options(
         reasoning_effort: default_reasoning_effort(root_config),
         interaction_mode,
         permission_config: root_config.permission.clone(),
-        permission_context: permission_evaluation_context(&paths),
+        permission_context: permission_evaluation_context(
+            &paths,
+            if root_config.web.enabled {
+                root_config.web.network_mode
+            } else {
+                NetworkPolicy::Deny
+            },
+        ),
         memory_config: root_config.memory.clone(),
         compaction_config: root_config.compaction.clone(),
     }
 }
 
-fn permission_evaluation_context(paths: &SigilPaths) -> PermissionEvaluationContext {
+fn permission_evaluation_context(
+    paths: &SigilPaths,
+    network_policy: NetworkPolicy,
+) -> PermissionEvaluationContext {
     PermissionEvaluationContext {
         workspace_root: paths.workspace_root.clone(),
         project_asset_roots: vec![
@@ -43,7 +53,7 @@ fn permission_evaluation_context(paths: &SigilPaths) -> PermissionEvaluationCont
         user_state_roots: vec![paths.state_root.clone()],
         user_cache_roots: vec![paths.cache_root.clone(), paths.workspace_cache_root.clone()],
         effective_policy_cap: None,
-        network_policy: NetworkPolicy::Allow,
+        network_policy,
     }
 }
 

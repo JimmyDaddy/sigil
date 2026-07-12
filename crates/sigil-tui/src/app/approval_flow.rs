@@ -836,6 +836,9 @@ fn approval_permission_lines(pending: &PendingApproval) -> Vec<String> {
     if pending.snapshot_required {
         lines.push("recovery=pre-change snapshot required".to_owned());
     }
+    if pending.session_grant_available && pending.operation == ToolOperation::NetworkRequest {
+        lines.push("session_grant=read-only network access for this tool".to_owned());
+    }
     lines
 }
 

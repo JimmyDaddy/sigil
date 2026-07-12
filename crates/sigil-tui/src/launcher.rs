@@ -363,6 +363,7 @@ fn run_app(
                 latest_frame_area = frame.area();
                 ui::render(frame, app);
             })?;
+            let _ = app.acknowledge_active_egress_disclosure_frame();
             last_spinner_tick = spinner_tick;
             needs_render = false;
         }

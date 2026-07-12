@@ -3,7 +3,8 @@ use std::{collections::BTreeMap, path::Path};
 use ratatui::layout::Rect;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, ControlEntry, EventHandler, MemoryConfig, PermissionConfig,
+    AgentConfig, CompactionConfig, ControlEntry, EgressDataCategory, EgressDisclosureKind,
+    EgressNetworkRoute, EventHandler, MemoryConfig, PermissionConfig, PreEgressDisclosure,
     RootConfig, RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability,
     ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
@@ -48,6 +49,7 @@ fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }
@@ -63,6 +65,42 @@ fn sample_tool_result(call_id: &str, path: &str) -> ToolResult {
             ..ToolResultMeta::default()
         },
     )
+}
+
+#[test]
+fn layout_snapshot_reserves_disclosure_rows_before_timeline_hit_areas() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::TextDelta("assistant line".to_owned()))?;
+    let (receipt_tx, _receipt_rx) = tokio::sync::oneshot::channel();
+    app.handle_worker_message(WorkerMessage::EgressDisclosureRequested {
+        disclosure: PreEgressDisclosure::new(
+            EgressDisclosureKind::Query,
+            Some("query-layout".to_owned()),
+            "builtin-search",
+            "tui",
+            "Web search",
+            "route-fingerprint",
+            "profile-fingerprint",
+            "https://example.com/",
+            "https://example.com/",
+            EgressNetworkRoute::Direct,
+            vec![EgressDataCategory::SearchQuery],
+        )?,
+        receipt_tx,
+    })?;
+
+    let snapshot = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 30), &app);
+    let disclosure = snapshot
+        .egress_disclosure
+        .expect("active disclosure should reserve a strip");
+    assert_eq!(disclosure.y, snapshot.live_panel.y);
+    assert!(
+        snapshot
+            .live_text_rows
+            .iter()
+            .all(|row| row.area.y >= disclosure.y.saturating_add(disclosure.height))
+    );
+    Ok(())
 }
 
 #[test]

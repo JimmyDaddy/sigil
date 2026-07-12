@@ -12,11 +12,50 @@ use anyhow::Result;
 use sigil_kernel::{
     DurableEventType, EventClass, ExecutionBackendKind, ExecutionConfig, ExecutionSandboxFallback,
     ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, JsonlSessionStore,
-    PluginTrustDecision, PluginTrustEntry,
+    PluginTrustDecision, PluginTrustEntry, WebSearchFailureClass,
 };
 use tempfile::tempdir;
 
 use super::*;
+
+#[test]
+fn internal_web_snapshot_is_offline_unprobed_and_does_not_claim_public_activation() {
+    let mut report = DoctorReport::default();
+    append_web_doctor_snapshot(&mut report, &WebDoctorSnapshot::internal_only());
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "web:route"
+            && check.message.contains("public_route=internal_only")
+            && check.message.contains("binding=absent")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "web:bundled"
+            && check.message.contains("state=unprobed")
+            && check.message.contains("network=offline")
+    }));
+}
+
+#[test]
+fn unavailable_configured_binding_remains_visible_without_a_bundled_fallback_claim() {
+    let mut report = DoctorReport::default();
+    let snapshot = WebDoctorSnapshot {
+        binding: WebDoctorBindingState::Unavailable(WebSearchFailureClass::SchemaDrift),
+        bundled_enabled: true,
+        public_route_enabled: true,
+        ..WebDoctorSnapshot::internal_only()
+    };
+
+    append_web_doctor_snapshot(&mut report, &snapshot);
+
+    let binding = report
+        .checks
+        .iter()
+        .find(|check| check.name == "web:binding")
+        .expect("unavailable binding check");
+    assert_eq!(binding.status, DoctorStatus::Warn);
+    assert!(binding.message.contains("unavailable:schemadrift"));
+    assert!(binding.message.contains("raw MCP tool remains separate"));
+}
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -225,6 +264,7 @@ api_key = "test-secret-key"
 
 [[mcp_servers]]
 name = "local"
+transport = "stdio"
 command = {mcp_command:?}
 startup = "lazy"
 required = false
@@ -513,7 +553,7 @@ api_key = "test-secret-key"
 }
 
 #[test]
-fn doctor_reports_missing_session_parent_and_empty_mcp_command() -> Result<()> {
+fn doctor_reports_empty_mcp_command_as_config_error() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
     let config_path = workspace.join("sigil.toml");
@@ -534,6 +574,7 @@ api_key = "test-secret-key"
 
 [[mcp_servers]]
 name = "empty-command"
+transport = "stdio"
 command = "   "
 startup = "lazy"
 required = false
@@ -549,24 +590,9 @@ pin_version = true
 
     let report = build_doctor_report(&config_path, &workspace);
 
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "session:log_dir"
-                && check.status == DoctorStatus::Warn
-                && check.message.contains("parent does not exist"))
-    );
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|check| check.name == "mcp:empty-command"
-                && check.status == DoctorStatus::Error
-                && check.message.contains("command=empty")
-                && check.message.contains("secrets=allowed")
-                && check.message.contains("pin=required"))
-    );
+    assert!(report.checks.iter().any(|check| check.name == "config:load"
+        && check.status == DoctorStatus::Error
+        && check.message.contains("failed to parse")));
     Ok(())
 }
 
@@ -788,12 +814,14 @@ api_key = "test-secret-key"
 
 [[mcp_servers]]
 name = "required"
+transport = "stdio"
 command = "./missing-required-command"
 startup = "eager"
 required = true
 
 [[mcp_servers]]
 name = "lazy"
+transport = "stdio"
 command = "./missing-lazy-command"
 startup = "lazy"
 required = true
@@ -841,6 +869,7 @@ api_key = "test-secret-key"
 
 [[mcp_servers]]
 name = "ready-env"
+transport = "stdio"
 command = {mcp_command:?}
 startup = "lazy"
 required = false
@@ -848,6 +877,7 @@ inherit_env = ["HOME"]
 
 [[mcp_servers]]
 name = "missing-env"
+transport = "stdio"
 command = {mcp_command:?}
 startup = "lazy"
 required = false

@@ -3,8 +3,9 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ExternalSourceRecord, RunCancellationHandle, SecretRedactor, SecretString, WebQueryEgressClass,
-    WebSearchFailureClass, is_unsafe_external_control, strip_terminal_control_sequences,
+    ExternalSourceRecord, RunCancellationHandle, SecretRedactor, SecretString, ToolRestartPolicy,
+    WebQueryEgressClass, WebSearchFailureClass, is_unsafe_external_control,
+    strip_terminal_control_sequences,
 };
 use sigil_mcp::McpSearchAdapterKind;
 use thiserror::Error;
@@ -56,7 +57,29 @@ impl std::fmt::Debug for WebSearchRequest {
 pub struct WebSearchResponse {
     pub safe_model_content: String,
     pub sources: Vec<ExternalSourceRecord>,
+    pub source_capabilities: Vec<WebSearchSourceCapability>,
     pub source_projection: SourceProjection,
+}
+
+/// Non-serializable exact URL material paired with one normalized search source.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WebSearchSourceCapability {
+    pub source_id: String,
+    pub raw_canonical_url: SecretString,
+    pub safe_display_url: String,
+    pub restart_policy: ToolRestartPolicy,
+}
+
+impl std::fmt::Debug for WebSearchSourceCapability {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebSearchSourceCapability")
+            .field("source_id", &self.source_id)
+            .field("raw_canonical_url", &"[redacted]")
+            .field("safe_display_url", &self.safe_display_url)
+            .field("restart_policy", &self.restart_policy)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

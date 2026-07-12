@@ -229,7 +229,8 @@ impl PlanAuthorizer {
             budget: WebTaskTreeBudget::new(
                 "fixture-root",
                 WebTaskTreeBudgetLimits {
-                    max_logical_calls: 64,
+                    max_fetch_calls: 64,
+                    max_client_search_calls: 64,
                     max_hosted_requests: 64,
                     max_network_attempts: 64,
                     max_wire_bytes: 64 * 1024 * 1024,

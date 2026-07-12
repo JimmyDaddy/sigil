@@ -63,6 +63,7 @@ fn test_config() -> RootConfig {
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
+        web: Default::default(),
         mcp_servers: Vec::new(),
     }
 }
@@ -112,6 +113,7 @@ approval = "allow"
 
 [[mcp_servers]]
 name = "tools-1"
+transport = "stdio"
 command = "node"
 args = ["server-1.js"]
 startup = "lazy"
@@ -119,6 +121,7 @@ required = false
 
 [[mcp_servers]]
 name = "tools-2"
+transport = "stdio"
 command = "node"
 args = ["server-2.js"]
 startup = "lazy"
@@ -126,6 +129,7 @@ required = false
 
 [[mcp_servers]]
 name = "tools-3"
+transport = "stdio"
 command = "node"
 args = ["server-3.js"]
 startup = "eager"
@@ -133,6 +137,7 @@ required = true
 
 [[mcp_servers]]
 name = "tools-4"
+transport = "stdio"
 command = "node"
 args = ["server-4.js"]
 startup = "eager"
@@ -312,7 +317,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Provider 1/12"));
+    assert!(rendered.contains("Provider 1/13"));
     assert!(rendered.contains("▸ Model"));
     assert!(rendered.contains("key model"));
     assert!(rendered.contains("keys Tab section"));
@@ -329,7 +334,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 fn render_config_mcp_selector_keeps_lifecycle_visible_at_120x32() -> anyhow::Result<()> {
     let mut config = test_config();
     for index in 0..8 {
-        config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        config.mcp_servers.push(mcp_server_config! {
             name: format!("mcp-{index}"),
             command: "mcp-probe".to_owned(),
             startup: sigil_kernel::McpServerStartup::Lazy,
@@ -506,7 +511,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
         .bg;
     assert_eq!(actual, expected);
     assert_eq!(
-        cell_fg_at_text(&terminal, "Appearance 8/12", "Appearance"),
+        cell_fg_at_text(&terminal, "Appearance 9/13", "Appearance"),
         expected_theme.palette.text_primary
     );
     assert_eq!(
@@ -514,7 +519,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
         expected_theme.palette.text_secondary
     );
     assert_ne!(
-        cell_fg_at_text(&terminal, "Appearance 8/12", "Appearance"),
+        cell_fg_at_text(&terminal, "Appearance 9/13", "Appearance"),
         Theme::builtin(sigil_kernel::ThemeId::SigilDark)
             .palette
             .text_primary
@@ -552,7 +557,7 @@ fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
         expected.palette.config_bg
     );
     assert_eq!(
-        cell_fg_at_text(&terminal, "Provider 1/12", "Provider"),
+        cell_fg_at_text(&terminal, "Provider 1/13", "Provider"),
         expected.palette.text_primary
     );
     assert_eq!(
@@ -601,9 +606,9 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/12", "▸ Model"),
-            (2, "Memory 4/12", "▸ Memory"),
-            (3, "Compaction 5/12", "▸ Auto compact"),
+            (0, "Provider 1/13", "▸ Model"),
+            (3, "Memory 5/13", "▸ Memory"),
+            (4, "Compaction 6/13", "▸ Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.composer.input = "/config".to_owned();
@@ -1387,7 +1392,7 @@ fn render_config_plugins_keeps_hook_summary_and_mcp_details_visible_on_narrow_sc
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Plugins 11/12"));
+    assert!(rendered.contains("Plugins 12/13"));
     assert!(rendered.contains("Hook count"));
     assert!(rendered.contains(": 4"));
     assert!(rendered.contains("Hook kinds"));
@@ -1500,7 +1505,7 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Memory 4/12"));
+    assert!(rendered.contains("Memory 5/13"));
     assert!(rendered.contains("◇ Documents"));
     assert!(rendered.contains("Last scan"));
     assert!(rendered.contains("Root files"));

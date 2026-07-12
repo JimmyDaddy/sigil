@@ -10,6 +10,7 @@ pub struct AgentToolRuntime {
     pub(super) background_runs: AgentToolBackgroundRuns,
     pub(super) pending_waits: BTreeMap<AgentThreadId, Instant>,
     pub(super) run_cancellation: Option<sigil_kernel::RunCancellationHandle>,
+    pub(super) web_task_tree_budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>,
 }
 
 /// Result of a user-directed foreground agent invocation.
@@ -34,6 +35,7 @@ impl AgentToolRuntime {
             background_runs: AgentToolBackgroundRuns::default(),
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
+            web_task_tree_budget: None,
         }
     }
 
@@ -52,6 +54,7 @@ impl AgentToolRuntime {
             background_runs: AgentToolBackgroundRuns::default(),
             pending_waits: BTreeMap::new(),
             run_cancellation: None,
+            web_task_tree_budget: None,
         }
     }
 
@@ -102,6 +105,17 @@ impl AgentToolRuntime {
             ));
         }
         Ok(resolved.clone())
+    }
+
+    pub(super) fn inherit_web_task_tree_budget(
+        &self,
+        input: sigil_kernel::AgentRunInput,
+    ) -> sigil_kernel::AgentRunInput {
+        self.web_task_tree_budget
+            .as_ref()
+            .map_or(input.clone(), |budget| {
+                input.with_web_task_tree_budget(Arc::clone(budget))
+            })
     }
 
     fn resolve_manual_profile(&self, profile_id: &AgentProfileId) -> Result<ResolvedAgentProfile> {
@@ -279,6 +293,10 @@ impl AgentToolProviderFactory for DefaultAgentToolProviderFactory {
 impl AgentToolDelegate for AgentToolRuntime {
     fn set_run_cancellation(&mut self, cancellation: Option<sigil_kernel::RunCancellationHandle>) {
         self.run_cancellation = cancellation;
+    }
+
+    fn set_web_task_tree_budget(&mut self, budget: Option<Arc<sigil_kernel::WebTaskTreeBudget>>) {
+        self.web_task_tree_budget = budget;
     }
 
     async fn handle_agent_tool_call(

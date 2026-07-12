@@ -177,6 +177,7 @@ command = "scripts/check-tool-policy.sh"
 approval = "ask"
 
 [[mcp_servers]]
+transport = "stdio"
 name = "repo-tools"
 command = "node"
 args = ["server.js"]
@@ -296,6 +297,7 @@ egress_logging = false
 allow_secrets = true
 
 [[mcp_servers]]
+transport = "stdio"
 name = "repo-tools"
 command = "node"
 args = ["server.js"]
@@ -472,6 +474,7 @@ name = "Repository Review"
 version = "0.1.0"
 
 [[mcp_servers]]
+transport = "stdio"
 name = "credentialed"
 command = "node"
 inherit_env = ["PLUGIN_TOKEN"]
@@ -544,6 +547,7 @@ command = "scripts/check-tool-policy.sh"
 approval = "ask"
 
 [[mcp_servers]]
+transport = "stdio"
 name = "repo-tools"
 command = "node"
 args = ["server.js"]
@@ -1765,6 +1769,7 @@ name = "Repository Review"
 version = "0.1.0"
 
 [[mcp_servers]]
+transport = "stdio"
 name = "repo-tools"
 command = "/definitely/missing/plugin-mcp-server"
 startup = "lazy"
@@ -1792,12 +1797,17 @@ required = false
     ));
     assert!(merged_mcp[0].plugin_attestation().is_some());
     let mut invalid_registration = report.registrations.mcp_servers[0].clone();
-    invalid_registration.server.inherit_env = vec!["PLUGIN_TOKEN".to_owned()];
+    let sigil_kernel::McpServerTransportConfig::Stdio { inherit_env, .. } =
+        &mut invalid_registration.server.transport
+    else {
+        panic!("plugin fixture should remain stdio");
+    };
+    *inherit_env = vec!["PLUGIN_TOKEN".to_owned()];
     let error = merge_mcp_server_declarations(&[], &[invalid_registration])
         .expect_err("programmatic plugin environment grant should fail merge");
     assert_eq!(error.code(), "plugin_mcp_environment_grant_not_supported");
     let conflicting_base = resolve_user_root_mcp_declarations(
-        &[sigil_kernel::McpServerConfig {
+        &[mcp_server_config! {
             name: "repo-review.repo-tools".to_owned(),
             command: "existing".to_owned(),
             ..sigil_kernel::McpServerConfig::default()
@@ -1808,12 +1818,12 @@ required = false
     let hash = format!("{:x}", Sha256::digest(identity.as_bytes()));
     let deeply_conflicting_base = resolve_user_root_mcp_declarations(
         &[
-            sigil_kernel::McpServerConfig {
+            mcp_server_config! {
                 name: "repo-review.repo-tools".to_owned(),
                 command: "existing".to_owned(),
                 ..sigil_kernel::McpServerConfig::default()
             },
-            sigil_kernel::McpServerConfig {
+            mcp_server_config! {
                 name: format!("repo-review.repo-tools.{}", &hash[..8]),
                 command: "existing-hash".to_owned(),
                 ..sigil_kernel::McpServerConfig::default()

@@ -474,7 +474,7 @@ fn render_phase_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Ve
         "streaming" => (
             "streaming",
             palette.status_streaming,
-            "writing the reply".to_owned(),
+            "receiving response".to_owned(),
         ),
         _ => ("phase", palette.text_secondary, entry.text.clone()),
     };

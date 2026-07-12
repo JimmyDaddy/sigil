@@ -97,6 +97,11 @@ fn legacy_session_grant_upcasts_unknown_and_never_reserializes_network_access() 
     let grant: ToolApprovalSessionGrantEntry = serde_json::from_value(legacy_grant(None))?;
     assert_eq!(grant.access, ToolAccess::Read);
     assert_eq!(grant.network_effect, Some(NetworkEffect::Unknown));
+    assert_eq!(grant.facets, [crate::ToolApprovalSessionGrantFacet::Local]);
+    assert_eq!(
+        grant.scope,
+        crate::ToolApprovalSessionGrantScope::ExactSubjects
+    );
     let serialized = serde_json::to_value(grant)?;
     assert_eq!(serialized["access"], "read");
     assert_eq!(serialized["network_effect"], "unknown");

@@ -90,7 +90,10 @@ impl McpProcessLaunchRequest {
     /// Declaration-aware launchers may call this only after validating their origin/attestation
     /// and execution base, then replace the command with the already resolved executable.
     pub fn from_config(config: &McpServerConfig, working_dir: Option<PathBuf>) -> Result<Self> {
-        let environment = resolve_extension_process_environment(&config.inherit_env)?;
+        let (_, args, inherit_env) = config
+            .stdio()
+            .ok_or_else(|| anyhow!("remote MCP config cannot be launched as a stdio process"))?;
+        let environment = resolve_extension_process_environment(inherit_env)?;
         let fingerprint_working_dir = working_dir
             .clone()
             .map(Ok)
@@ -104,7 +107,7 @@ impl McpProcessLaunchRequest {
         Ok(Self {
             server_name: config.name.clone(),
             command: static_binding.executable.to_string_lossy().into_owned(),
-            args: config.args.clone(),
+            args: args.to_vec(),
             working_dir: static_binding.working_dir.or(working_dir),
             environment,
             launch_static_fingerprint: static_binding.fingerprint,

@@ -12,6 +12,93 @@ pub(super) fn check_mcp_servers(
     }
 
     for server in servers {
+        let Some((command, _, inherit_env)) = server.stdio() else {
+            let remote = server
+                .streamable_http()
+                .expect("non-stdio MCP transport is streamable HTTP");
+            let safe_destination = url::Url::parse(&remote.url)
+                .ok()
+                .and_then(|url| {
+                    let host = url.host_str()?;
+                    let port = url.port();
+                    Some(match port {
+                        Some(port) => format!("{}://{host}:{port}/", url.scheme()),
+                        None => format!("{}://{host}/", url.scheme()),
+                    })
+                })
+                .unwrap_or_else(|| "invalid".to_owned());
+            let header_sources = remote
+                .http_headers
+                .keys()
+                .map(|name| format!("{name}:literal"))
+                .chain(
+                    remote
+                        .env_http_headers
+                        .iter()
+                        .map(|(name, environment)| format!("{name}:env({environment})")),
+                )
+                .chain(
+                    remote
+                        .bearer_token_env_var
+                        .iter()
+                        .map(|environment| format!("Authorization:bearer_env({environment})")),
+                )
+                .collect::<Vec<_>>();
+            let missing_environment = remote
+                .env_http_headers
+                .values()
+                .chain(remote.bearer_token_env_var.iter())
+                .filter(|name| std::env::var_os(name).is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            let static_fingerprint = sigil_mcp::mcp_transport_static_fingerprint(server)
+                .unwrap_or_else(|_| "invalid".to_owned());
+            report.push_with_remediation(
+                if missing_environment.is_empty() {
+                    DoctorStatus::Ok
+                } else {
+                    DoctorStatus::Error
+                },
+                format!("mcp:{}", server.name),
+                format!(
+                    "{} required={} origin=user_root transport=streamable_http destination={} state=offline_unprobed capabilities={} headers={} missing={} static_fingerprint={} live_fingerprint=activation_only",
+                    server.startup.as_str(),
+                    server.required,
+                    safe_destination,
+                    if remote.client_capabilities.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        remote
+                            .client_capabilities
+                            .iter()
+                            .map(|capability| match capability {
+                                sigil_kernel::McpRemoteClientCapability::Roots => "roots",
+                                sigil_kernel::McpRemoteClientCapability::ElicitationForm => {
+                                    "elicitation"
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    },
+                    if header_sources.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        header_sources.join(",")
+                    },
+                    if missing_environment.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        missing_environment.join(",")
+                    },
+                    static_fingerprint,
+                ),
+                (!missing_environment.is_empty()).then(|| {
+                    "set every referenced remote MCP environment variable before activation"
+                        .to_owned()
+                }),
+            );
+            continue;
+        };
         let declaration =
             crate::ResolvedMcpServerDeclaration::user_root(server.clone(), workspace_root);
         let projection = declaration
@@ -28,10 +115,10 @@ pub(super) fn check_mcp_servers(
                         .map_err(|error| error.to_string())
                 }) {
                 Ok(_) => CommandStatus::Available,
-                Err(_) if server.command.trim().is_empty() => CommandStatus::Empty,
+                Err(_) if command.trim().is_empty() => CommandStatus::Empty,
                 Err(_) => CommandStatus::Missing,
             };
-        let environment = sigil_kernel::resolve_extension_process_environment(&server.inherit_env);
+        let environment = sigil_kernel::resolve_extension_process_environment(inherit_env);
         let status = if environment.is_err() {
             DoctorStatus::Error
         } else {
@@ -54,7 +141,7 @@ pub(super) fn check_mcp_servers(
             ),
             Err(error) => format!(
                 "isolated grants={} missing error={}",
-                environment_grant_names_summary(&server.inherit_env),
+                environment_grant_names_summary(inherit_env),
                 error.code.as_str()
             ),
         };

@@ -29,6 +29,12 @@ pub struct ValidatedMcpFormRequest {
 }
 
 impl ValidatedMcpFormRequest {
+    /// Returns the already bounded and validated form schema for product-surface rendering.
+    #[must_use]
+    pub fn requested_schema(&self) -> &Value {
+        &self.schema
+    }
+
     pub fn parse(params: &Value) -> Result<Self, McpStreamableHttpError> {
         Self::parse_for_version(params, McpRemoteProtocolVersion::V2025_11_25)
     }

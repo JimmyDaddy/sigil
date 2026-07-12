@@ -106,19 +106,32 @@ impl PluginManifest {
         }
         for server in &self.mcp_servers {
             validate_plugin_id(&server.name)?;
-            if !server.inherit_env.is_empty() {
-                bail!(
-                    "plugin {} MCP server {} cannot declare inherit_env; move credentialed MCP servers to the user root config",
+            match &server.transport {
+                crate::McpServerTransportConfig::Stdio {
+                    command,
+                    inherit_env,
+                    ..
+                } => {
+                    if !inherit_env.is_empty() {
+                        bail!(
+                            "plugin {} MCP server {} cannot declare inherit_env; move credentialed MCP servers to the user root config",
+                            self.id,
+                            server.name
+                        );
+                    }
+                    if command.trim().is_empty() {
+                        bail!(
+                            "plugin {} MCP server {} has empty command",
+                            self.id,
+                            server.name
+                        );
+                    }
+                }
+                crate::McpServerTransportConfig::StreamableHttp(_) => bail!(
+                    "plugin {} MCP server {} cannot declare remote transport; move it to the user root config",
                     self.id,
                     server.name
-                );
-            }
-            if server.command.trim().is_empty() {
-                bail!(
-                    "plugin {} MCP server {} has empty command",
-                    self.id,
-                    server.name
-                );
+                ),
             }
         }
         Ok(())
@@ -146,19 +159,24 @@ impl PluginManifest {
             egress_logging: hook.egress_logging,
             allow_secrets: hook.allow_secrets,
         });
-        let mcp_capabilities = self
-            .mcp_servers
-            .iter()
-            .map(|server| PluginCapability::McpServer {
-                name: server.name.clone(),
-                command: server.command.clone(),
-                args: server.args.clone(),
-                startup: server.startup,
-                required: server.required,
-                approval: server.trust.approval_default,
-                egress_logging: server.trust.egress_logging,
-                allow_secrets: server.trust.allow_secrets,
-            });
+        let mcp_capabilities =
+            self.mcp_servers
+                .iter()
+                .filter_map(|server| match &server.transport {
+                    crate::McpServerTransportConfig::Stdio { command, args, .. } => {
+                        Some(PluginCapability::McpServer {
+                            name: server.name.clone(),
+                            command: command.clone(),
+                            args: args.clone(),
+                            startup: server.startup,
+                            required: server.required,
+                            approval: server.trust.approval_default,
+                            egress_logging: server.trust.egress_logging,
+                            allow_secrets: server.trust.allow_secrets,
+                        })
+                    }
+                    crate::McpServerTransportConfig::StreamableHttp(_) => None,
+                });
         agent_capabilities
             .chain(skill_capabilities)
             .chain(hook_capabilities)

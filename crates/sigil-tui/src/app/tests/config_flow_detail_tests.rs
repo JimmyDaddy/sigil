@@ -797,7 +797,7 @@ fn detail_helpers_cover_permission_rule_and_mcp_summaries() {
             mode: ApprovalMode::Ask,
         },
     ];
-    root_config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    root_config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         command: "mcp-filesystem".to_owned(),
         inherit_env: vec!["SIGIL_E21_TUI_MISSING_8A51".to_owned()],
@@ -806,7 +806,9 @@ fn detail_helpers_cover_permission_rule_and_mcp_summaries() {
             allow_secrets: true,
             pin_version: true,
             pinned: Some(sigil_kernel::McpServerPinnedIdentity {
-                command_fingerprint: "sha256:abc".to_owned(),
+                transport_fingerprint:
+                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                        .to_owned(),
                 protocol_version: "2024-11-05".to_owned(),
                 server_name: "filesystem".to_owned(),
                 server_version: "1.0.0".to_owned(),
@@ -918,7 +920,7 @@ fn config_private_helpers_cover_missing_snapshot_and_save_guards() -> anyhow::Re
 fn activate_selected_mcp_server_guard_paths_cover_busy_section_snapshot_and_selection()
 -> anyhow::Result<()> {
     let mut root_config = test_config();
-    root_config.mcp_servers.push(sigil_kernel::McpServerConfig {
+    root_config.mcp_servers.push(mcp_server_config! {
         name: "filesystem".to_owned(),
         command: "mcp-filesystem".to_owned(),
         startup: sigil_kernel::McpServerStartup::Lazy,

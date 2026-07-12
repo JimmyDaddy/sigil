@@ -72,8 +72,15 @@ impl AppState {
         server_name: Option<String>,
         status: McpActivationStatus,
     ) {
+        let finishes_disclosure_operation = matches!(
+            &status,
+            McpActivationStatus::Ready { .. } | McpActivationStatus::Failed { .. }
+        );
         let Some(server_name) = server_name else {
             self.push_event("mcp", mcp_activation_event_detail(None, &status));
+            if finishes_disclosure_operation {
+                self.clear_recent_egress_disclosure();
+            }
             return;
         };
         let runtime_status = match &status {
@@ -101,6 +108,9 @@ impl AppState {
             "mcp",
             mcp_activation_event_detail(Some(&server_name), &status),
         );
+        if finishes_disclosure_operation {
+            self.clear_recent_egress_disclosure();
+        }
     }
 
     pub(in crate::app) fn apply_mcp_progress(&mut self, notification: McpProgressNotification) {
