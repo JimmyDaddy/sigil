@@ -67,11 +67,11 @@ Workspace trust is handled by the startup workspace trust gate, not a slash comm
 | `sigil doctor` | Run local diagnostics |
 | `sigil run "<task>"` | Run a non-interactive automation task |
 | `sigil resume [session-id]` | Open the TUI and restore the latest or requested session; TUI exit prints a copyable resume command |
-| `sigil serve` | Validate HTTP/SSE adapter local bind/token defaults; HTTP routing is not implemented yet |
+| `sigil serve` | Check local server settings; starting a service is not implemented yet |
 | `sigil --version` | Print the installed version |
 | `sigil --config <path> doctor` | Run diagnostics with an explicit config file |
 
-Subcommands are for automation, diagnostics, scripts, and adapter preflight checks. The full product surface is the TUI.
+Subcommands are for automation, diagnostics, scripts, and setup checks. The full product surface is the TUI.
 
 ## Config Resolution
 
@@ -102,14 +102,14 @@ Do not commit real secrets in `sigil.toml` or local memory files. A workspace-ro
 
 ## Provider Setup
 
-Use the [Provider guide](providers.md) for the supported provider values, model selection, and authentication priority. Each linked provider page owns its copyable config block and complete environment-variable list. Shared model-request timeout overrides remain in [Configuration](configuration.md#model-request-environment-overrides).
+Use the [Provider guide](providers.md) for the supported provider values, model selection, and authentication priority. Each linked provider page owns its copyable config block and complete environment-variable list. Shared model-request timeout overrides are documented in [Advanced configuration](advanced-configuration.md#terminal-and-model-request-overrides).
 
 ## Common Config Sections
 
 | Section | Purpose |
 | --- | --- |
 | `[workspace]` | Workspace root |
-| `[agent]` | Shared agent runtime settings |
+| `[agent]` | Shared agent settings |
 | `[permission]` | Default approval policy |
 | `[web]` | Stable search route, network policy, destination rules, and budgets |
 | `[memory]` | Workspace memory loading |

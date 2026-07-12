@@ -54,7 +54,7 @@ These overrides are useful for CI and local experiments where you do not want to
 
 ## Behavior Notes
 
-This provider maps kernel-neutral Sigil messages, tool specs, streamed tool calls, usage, and optional `system_fingerprint` through a Chat Completions-compatible API.
+This provider uses a Chat Completions-compatible API and supports Sigil conversations, tool calls, streaming replies, and usage reporting. Optional provider diagnostics may be shown when the service supplies them.
 
 It does not expose DeepSeek-only prefix/FIM, reasoning replay, strict tools mode, or beta endpoint settings. If you need those, use [DeepSeek provider](provider-deepseek.md).
 

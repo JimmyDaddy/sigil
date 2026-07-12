@@ -50,7 +50,7 @@ Sigil 按这个顺序解析 Gemini 认证：
 
 ## 行为说明
 
-Sigil 会在 provider crate 内把 provider-neutral messages、tool specs、function calls、function responses、usage 和 block reasons 映射到 Gemini 协议细节。Gemini 专属的 `systemInstruction`、`functionDeclarations` 和 `functionResponse` 细节不进入 `sigil-kernel`。
+Sigil 会为你处理 Gemini 的请求格式、function calling、response、usage 与安全阻断。Gemini 专属选项留在本文；正常的 tool approval、隐私与 session 工作流保持一致。
 
 Gemini model 名称和 endpoint 可用性可能随账号和区域变化。自动化使用时，请显式配置 `[agent].model`。
 

@@ -7,11 +7,11 @@ Use these prompts as starting points. Adjust file paths, scope, and verification
 ## Explore A Repository
 
 ```text
-Explain this repository structure for a new contributor. Identify the main binary, important crates or packages, test layout, configuration files, docs, and likely entrypoints.
+Explain this repository structure for a new contributor. Identify the important components, test layout, configuration files, user docs, and likely starting points.
 ```
 
 ```text
-Trace the path for <feature or command>. List the files you read, the state transitions, and where errors are surfaced to the user.
+Investigate how <feature or command> behaves. List the files you read, what you found, and where a user would see errors.
 ```
 
 ## Make A Small Docs Change

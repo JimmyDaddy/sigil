@@ -63,12 +63,12 @@ sigil doctor
 
 ## 行为边界
 
-Provider 专项行为留在 provider 配置和 provider crate 内。共享 Sigil 工作流保持 provider-neutral：
+Provider 专项选项由对应 provider 页面维护。共享的 Sigil 工作流保持一致：
 
 - 工具调用仍然走同一套 approval 和 preview 流程。
 - Session 和 control records 仍然 append-only。
 - MCP trust 和 secret-egress policy 不随 provider 改变。
-- `sigil-kernel` 不应出现 DeepSeek、OpenAI、Anthropic 或 Gemini 专属公共 API 术语。
+- Provider 专属选项不应改变正常的 approval、隐私或 session 工作流。
 
 ## 排障路径
 

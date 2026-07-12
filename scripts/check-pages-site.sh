@@ -11,6 +11,8 @@ stage_dir="${stage_root}/public"
 scripts/check-docs.sh >/dev/null
 scripts/build-pages-site.sh "${stage_dir}" >/dev/null
 ruby scripts/check-site-structure.rb "${stage_dir}" >/dev/null
+scripts/check-site-metadata.rb "${stage_dir}" >/dev/null
+scripts/check-site-accessibility.rb "${stage_dir}" >/dev/null
 scripts/test-docs-table-render.rb >/dev/null
 scripts/check-site-viewport.rb "${stage_dir}" >/dev/null
 scripts/check-site-artifact-links.rb "${stage_dir}" >/dev/null
@@ -21,6 +23,10 @@ required_files=(
   "docs/index.html"
   "docs/quickstart/index.html"
   "docs/safety/index.html"
+  "docs/permissions-and-sandbox/index.html"
+  "docs/appearance/index.html"
+  "docs/advanced-configuration/index.html"
+  "docs/configuration-reference/index.html"
   "docs/providers/index.html"
   "docs/provider-deepseek/index.html"
   "docs/provider-openai-compatible/index.html"
@@ -32,6 +38,10 @@ required_files=(
   "zh-CN/docs/index.html"
   "zh-CN/docs/quickstart/index.html"
   "zh-CN/docs/safety/index.html"
+  "zh-CN/docs/permissions-and-sandbox/index.html"
+  "zh-CN/docs/appearance/index.html"
+  "zh-CN/docs/advanced-configuration/index.html"
+  "zh-CN/docs/configuration-reference/index.html"
   "zh-CN/docs/providers/index.html"
   "zh-CN/docs/provider-deepseek/index.html"
   "zh-CN/docs/provider-openai-compatible/index.html"
@@ -79,6 +89,10 @@ source_docs=(
   "docs/en/user-guide.md"
   "docs/en/safety.md"
   "docs/en/configuration.md"
+  "docs/en/permissions-and-sandbox.md"
+  "docs/en/appearance.md"
+  "docs/en/advanced-configuration.md"
+  "docs/en/configuration-reference.md"
   "docs/en/providers.md"
   "docs/en/provider-deepseek.md"
   "docs/en/provider-openai-compatible.md"
@@ -100,6 +114,10 @@ source_docs=(
   "docs/zh-CN/user-guide.md"
   "docs/zh-CN/safety.md"
   "docs/zh-CN/configuration.md"
+  "docs/zh-CN/permissions-and-sandbox.md"
+  "docs/zh-CN/appearance.md"
+  "docs/zh-CN/advanced-configuration.md"
+  "docs/zh-CN/configuration-reference.md"
   "docs/zh-CN/providers.md"
   "docs/zh-CN/provider-deepseek.md"
   "docs/zh-CN/provider-openai-compatible.md"

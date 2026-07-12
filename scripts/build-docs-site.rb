@@ -5,11 +5,12 @@ require "cgi"
 require "date"
 require "fileutils"
 require "json"
+require "open3"
 
 REPO_ROOT = File.expand_path("..", __dir__)
 OUT_DIR = File.expand_path(ARGV.fetch(0), REPO_ROOT) if $PROGRAM_NAME == __FILE__
 SITE_URL = "https://jimmydaddy.github.io/sigil"
-LASTMOD = Date.today.iso8601
+SOURCE_LAST_MODIFIED_CACHE = {}
 
 PAGES = [
   ["overview", "README.md", "User docs"],
@@ -21,6 +22,10 @@ PAGES = [
   ["user-guide", "user-guide.md", "TUI user guide"],
   ["safety", "safety.md", "Safety and permissions"],
   ["configuration", "configuration.md", "Configuration"],
+  ["permissions-and-sandbox", "permissions-and-sandbox.md", "Permissions and sandbox"],
+  ["appearance", "appearance.md", "Appearance"],
+  ["advanced-configuration", "advanced-configuration.md", "Advanced configuration"],
+  ["configuration-reference", "configuration-reference.md", "Configuration reference"],
   ["providers", "providers.md", "Provider guide"],
   ["provider-deepseek", "provider-deepseek.md", "DeepSeek provider"],
   ["provider-openai-compatible", "provider-openai-compatible.md", "OpenAI-compatible provider"],
@@ -35,6 +40,34 @@ PAGES = [
   ["changelog", "changelog.md", "User changelog"]
 ].freeze
 
+NAV_GROUPS = [
+  ["get-started", %w[overview quickstart installation visual-tour]],
+  ["use-sigil", %w[workflows cookbook user-guide reference]],
+  ["configure-sigil", %w[configuration permissions-and-sandbox appearance advanced-configuration configuration-reference]],
+  ["providers-and-integrations", %w[providers provider-deepseek provider-openai-compatible provider-anthropic provider-gemini mcp terminal-compatibility]],
+  ["safety-and-troubleshooting", %w[safety privacy troubleshooting]],
+  ["project-status", %w[status changelog]]
+].freeze
+
+NAV_GROUP_TITLES = {
+  "en" => {
+    "get-started" => "Get started",
+    "use-sigil" => "Use Sigil",
+    "configure-sigil" => "Configure Sigil",
+    "providers-and-integrations" => "Providers and integrations",
+    "safety-and-troubleshooting" => "Safety and troubleshooting",
+    "project-status" => "Project status"
+  },
+  "zh-CN" => {
+    "get-started" => "开始使用",
+    "use-sigil" => "使用 Sigil",
+    "configure-sigil" => "配置 Sigil",
+    "providers-and-integrations" => "Provider 与集成",
+    "safety-and-troubleshooting" => "安全与排障",
+    "project-status" => "项目状态"
+  }
+}.freeze
+
 ZH_PAGE_TITLES = {
   "overview" => "用户文档",
   "quickstart" => "快速开始",
@@ -45,6 +78,10 @@ ZH_PAGE_TITLES = {
   "user-guide" => "TUI 用户指南",
   "safety" => "安全与权限",
   "configuration" => "配置",
+  "permissions-and-sandbox" => "权限与沙箱",
+  "appearance" => "外观",
+  "advanced-configuration" => "高级配置",
+  "configuration-reference" => "配置字段参考",
   "providers" => "Provider 指南",
   "provider-deepseek" => "DeepSeek provider",
   "provider-openai-compatible" => "OpenAI-compatible provider",
@@ -194,6 +231,28 @@ end
 def page_url(locale, slug)
   locale_config = LOCALES.fetch(locale)
   "#{locale_config.fetch(:site_prefix)}/#{slug}/"
+end
+
+def source_last_modified(source_path)
+  absolute_path = File.expand_path(source_path)
+  return SOURCE_LAST_MODIFIED_CACHE.fetch(absolute_path) if SOURCE_LAST_MODIFIED_CACHE.key?(absolute_path)
+
+  relative_path = absolute_path.delete_prefix("#{REPO_ROOT}/")
+  git_date = nil
+  if File.exist?(File.join(REPO_ROOT, ".git"))
+    output, status = Open3.capture2e(
+      "git",
+      "log",
+      "-1",
+      "--format=%cI",
+      "--",
+      relative_path,
+      chdir: REPO_ROOT
+    )
+    git_date = Date.parse(output.strip).iso8601 if status.success? && !output.strip.empty?
+  end
+
+  SOURCE_LAST_MODIFIED_CACHE[absolute_path] = git_date || File.mtime(absolute_path).utc.to_date.iso8601
 end
 
 def html_escape(value)
@@ -457,12 +516,26 @@ def render_markdown(markdown, locale)
 end
 
 def nav_html(locale, active_slug)
-  PAGES.map do |slug, _file, title|
-    href = slug == active_slug ? "./" : "../#{slug}/"
-    klass = slug == active_slug ? " class=\"active\"" : ""
-    current = slug == active_slug ? ' aria-current="page"' : ""
-    label = locale == "zh-CN" ? ZH_PAGE_TITLES.fetch(slug, title) : title
-    %(<a#{klass}#{current} href="#{href}">#{html_escape(label)}</a>)
+  pages_by_slug = PAGES.to_h { |slug, file, title| [slug, [file, title]] }
+  NAV_GROUPS.map do |group_key, slugs|
+    group_id = "doc-nav-group-#{group_key}"
+    links = slugs.map do |slug|
+      _file, title = pages_by_slug.fetch(slug)
+      href = slug == active_slug ? "./" : "../#{slug}/"
+      klass = slug == active_slug ? " class=\"active\"" : ""
+      current = slug == active_slug ? ' aria-current="page"' : ""
+      label = locale == "zh-CN" ? ZH_PAGE_TITLES.fetch(slug, title) : title
+      %(<a#{klass}#{current} href="#{href}">#{html_escape(label)}</a>)
+    end.join("\n")
+    title = NAV_GROUP_TITLES.fetch(locale).fetch(group_key)
+    <<~HTML
+      <section class="doc-nav-group">
+        <h2 class="doc-nav-group-title" id="#{group_id}">#{html_escape(title)}</h2>
+        <nav class="doc-nav-group-links" aria-labelledby="#{group_id}">
+          #{links}
+        </nav>
+      </section>
+    HTML
   end.join("\n")
 end
 
@@ -565,6 +638,7 @@ def rendered_page(locale, slug, source_file, fallback_title)
   locale_config = LOCALES.fetch(locale)
   source_path = File.join(REPO_ROOT, locale_config.fetch(:source_dir), source_file)
   markdown = File.read(source_path)
+  last_modified = source_last_modified(source_path)
   body, toc = render_markdown(markdown, locale)
   title = markdown[/^#\s+(.+)$/, 1] || fallback_title
   description = page_description(markdown, title)
@@ -584,7 +658,7 @@ def rendered_page(locale, slug, source_file, fallback_title)
     "headline" => title,
     "description" => description,
     "url" => canonical,
-    "dateModified" => LASTMOD,
+    "dateModified" => last_modified,
     "publisher" => {
       "@type" => "Organization",
       "name" => "Sigil"
@@ -627,7 +701,7 @@ def rendered_page(locale, slug, source_file, fallback_title)
         <header class="site-header">
           #{brand_html(asset_prefix, home_href, locale)}
           <div class="header-actions">
-            <details class="nav-menu" open>
+            <details class="nav-menu">
               <summary>#{html_escape(locale_config.fetch(:menu_label))}</summary>
               <nav aria-label="#{html_escape(locale_config.fetch(:primary_nav_label))}">
                 <a href="#{home_href}#workflow">#{html_escape(locale_config.fetch(:workflow_label))}</a>
@@ -642,7 +716,7 @@ def rendered_page(locale, slug, source_file, fallback_title)
         </header>
         <main class="doc-shell" id="main-content">
           <aside class="doc-sidebar" aria-label="#{html_escape(locale_config.fetch(:docs_nav_label))}">
-            <details class="doc-navigation" open>
+            <details class="doc-navigation">
               <summary>#{html_escape(locale_config.fetch(:docs_menu_label))}</summary>
               <div class="doc-navigation-panel">
                 #{search_form_html(locale, asset_prefix, slug)}
@@ -709,21 +783,21 @@ end
 
 def write_sitemap
   urls = [
-    ["", 1.0],
-    ["zh-CN/", 0.9],
-    ["docs/", 0.9],
-    ["zh-CN/docs/", 0.9]
+    ["", 1.0, File.join(REPO_ROOT, "site", "index.html")],
+    ["zh-CN/", 0.9, File.join(REPO_ROOT, "site", "zh-CN", "index.html")],
+    ["docs/", 0.9, File.join(REPO_ROOT, "site", "docs", "index.html")],
+    ["zh-CN/docs/", 0.9, File.join(REPO_ROOT, "site", "zh-CN", "docs", "index.html")]
   ]
-  PAGES.each do |slug, _file, _title|
-    urls << [page_url("en", slug), 0.75]
-    urls << [page_url("zh-CN", slug), 0.75]
+  PAGES.each do |slug, file, _title|
+    urls << [page_url("en", slug), 0.75, File.join(REPO_ROOT, "docs", "en", file)]
+    urls << [page_url("zh-CN", slug), 0.75, File.join(REPO_ROOT, "docs", "zh-CN", file)]
   end
-  body = urls.map do |path, priority|
+  body = urls.map do |path, priority, source_path|
     loc = path.empty? ? "#{SITE_URL}/" : "#{SITE_URL}/#{path}"
     <<~XML
       <url>
         <loc>#{loc}</loc>
-        <lastmod>#{LASTMOD}</lastmod>
+        <lastmod>#{source_last_modified(source_path)}</lastmod>
         <changefreq>weekly</changefreq>
         <priority>#{priority}</priority>
       </url>
@@ -762,7 +836,7 @@ def write_examples_index
         <header class="site-header">
           #{brand_html("../..", "../../", "en")}
           <div class="header-actions">
-            <details class="nav-menu" open>
+            <details class="nav-menu">
               <summary>Menu</summary>
               <nav aria-label="Primary navigation">
                 <a href="../../docs/" aria-current="page">Docs</a>

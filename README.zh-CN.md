@@ -108,7 +108,7 @@ Sigil 把工具执行视为可审计状态，而不是隐藏副作用。
 - 文件写入、编辑、删除、命令执行、MCP 调用和外部数据访问都经过 permission model。
 - 写工具围绕 preview 和 diff 审批体验设计。
 - 中断的工具执行在恢复时会投影为 interrupted result，不会静默重放。
-- Provider 专项行为留在 provider crate；`sigil-kernel` 保持通用的 agent、tool、session、approval 和 event 契约。
+- Provider 专项选项由各 provider 页面维护；tool approval、session recovery 与安全规则在支持的服务之间保持一致。
 
 ## Provider 与集成
 
@@ -118,7 +118,7 @@ Sigil 把工具执行视为可审计状态，而不是隐藏副作用。
 | OpenAI-compatible | `[providers.openai_compat]` | 兼容 Chat Completions 的 `/v1` endpoint。 | [OpenAI-compatible 指南](docs/zh-CN/provider-openai-compatible.md) |
 | Anthropic | `[providers.anthropic]` | 通过 Anthropic Messages streaming 使用 Claude 模型。 | [Anthropic 指南](docs/zh-CN/provider-anthropic.md) |
 | Gemini | `[providers.gemini]` | 通过 `streamGenerateContent` 使用 Gemini 模型。 | [Gemini 指南](docs/zh-CN/provider-gemini.md) |
-| Web data tools | `[web]` | Provider-hosted/configured/bundled search 与精确 capability-backed fetch。 | [配置](docs/zh-CN/configuration.md#web-搜索与网络) |
+| Web data tools | `[web]` | Provider-hosted、configured 或 bundled search，以及读取已选择的来源。 | [权限与沙箱](docs/zh-CN/permissions-and-sandbox.md#网络与-web-工具) |
 | MCP server | `[[mcp_servers]]` | 带显式 trust 与 egress policy 的外部 stdio 或用户根 Streamable HTTP 工具。 | [MCP 指南](docs/zh-CN/mcp.md) |
 | Code intelligence | `[code_intelligence]` | LSP-backed 符号、引用、诊断、action 和 rename preview。 | [配置指南](docs/zh-CN/configuration.md) |
 

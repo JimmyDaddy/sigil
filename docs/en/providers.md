@@ -63,12 +63,12 @@ Use them as starting points, then review model names, base URLs, key sources, an
 
 ## Behavior Boundaries
 
-Provider-specific behavior stays inside provider configuration and provider crates. The shared Sigil workflow remains provider-neutral:
+Provider-specific options stay on the matching provider page. The shared Sigil workflow remains consistent:
 
 - Tool calls still go through the same approval and preview flow.
 - Session and control records remain append-only.
 - MCP trust and secret-egress policy do not change by provider.
-- `sigil-kernel` should not gain DeepSeek, OpenAI, Anthropic, or Gemini-only public API terms.
+- Provider-only options should not change your normal approval, privacy, or session workflow.
 
 ## Troubleshooting Path
 

@@ -4,6 +4,8 @@
 require "cgi"
 require "fileutils"
 require "open3"
+require "tmpdir"
+require "timeout"
 
 VIEWPORTS = [
   { width: 390, height: 844, label: "mobile" },
@@ -27,6 +29,8 @@ PAGES = [
   { path: "zh-CN/docs/quickstart/index.html", kind: "quickstart" },
   { path: "docs/reference/index.html", kind: "generated-doc" },
   { path: "zh-CN/docs/reference/index.html", kind: "generated-doc" },
+  { path: "docs/configuration-reference/index.html", kind: "generated-doc" },
+  { path: "zh-CN/docs/configuration-reference/index.html", kind: "generated-doc" },
   { path: "docs/changelog/index.html", kind: "generated-doc" },
   { path: "zh-CN/docs/changelog/index.html", kind: "generated-doc" },
   { path: "docs/providers/index.html", kind: "generated-doc" },
@@ -243,6 +247,38 @@ def result_attribute(tag, name)
   raw && CGI.unescapeHTML(raw)
 end
 
+def capture_browser(command, timeout_secs)
+  stdin, stdout, stderr, wait_thread = Open3.popen3(*command)
+  stdin.close
+  output = ""
+  errors = ""
+  status = nil
+
+  begin
+    Timeout.timeout(timeout_secs) do
+      output = stdout.read
+      errors = stderr.read
+      status = wait_thread.value
+    end
+  rescue Timeout::Error
+    Process.kill("TERM", wait_thread.pid)
+    begin
+      Timeout.timeout(3) { wait_thread.value }
+    rescue Timeout::Error
+      Process.kill("KILL", wait_thread.pid)
+      wait_thread.value
+    end
+    errors = "browser timed out after #{timeout_secs} seconds"
+  ensure
+    stdout.close unless stdout.closed?
+    stderr.close unless stderr.closed?
+  end
+
+  [output, errors, status]
+rescue Errno::ESRCH
+  [output, errors, status]
+end
+
 def numeric_attribute(tag, name)
   value = result_attribute(tag, name)
   Float(value) unless value.nil? || value.empty?
@@ -266,6 +302,8 @@ unless browser
 end
 
 failures = []
+browser_profile_dir = Dir.mktmpdir("sigil-site-browser-")
+at_exit { FileUtils.rm_rf(browser_profile_dir) }
 PAGES.each do |page|
   next if File.file?(File.join(site_root, page.fetch(:path)))
 
@@ -276,25 +314,37 @@ unless failures.empty?
   exit 1
 end
 
+browser_timed_out = false
 VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
+  break if browser_timed_out
+
   probe_path = File.join(
     site_root,
     ".sigil-viewport-#{Process.pid}-#{viewport.fetch(:width)}-#{variant.fetch(:label)}.html"
   )
   File.write(probe_path, probe_html(viewport, variant))
   begin
-    stdout, stderr, status = Open3.capture3(
+    stdout, stderr, status = capture_browser([
       browser,
       *variant.fetch(:flags),
       "--headless",
       "--disable-gpu",
+      "--disable-extensions",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--user-data-dir=#{browser_profile_dir}",
       "--force-device-scale-factor=1",
       "--hide-scrollbars",
       "--allow-file-access-from-files",
       "--window-size=#{viewport.fetch(:width) + 120},#{viewport.fetch(:height)}",
       "--dump-dom",
       "file://#{probe_path}"
-    )
+    ], 20)
+    if status.nil?
+      failures << "#{viewport.fetch(:label)} #{variant.fetch(:label)}: #{stderr}"
+      browser_timed_out = true
+      next
+    end
     unless status.success?
       failures << "#{viewport.fetch(:label)} #{variant.fetch(:label)}: browser exited #{status.exitstatus}: #{stderr.lines.last(5).join.strip}"
       next

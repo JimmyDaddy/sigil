@@ -31,15 +31,15 @@ This page separates what users can rely on today from what is experimental, limi
 | Release archives | Available on tagged GitHub releases for manual installs; package-manager installs are preferred. |
 | Package-manager channels | Packaging names and availability may evolve during alpha; use [Installation](installation.md) as the current source of truth. |
 | OpenAI-compatible differences | The provider intentionally omits DeepSeek-only prefix/FIM/beta behaviors. |
-| Provider-specific semantics | Anthropic and Gemini request/event details stay in provider crates; `sigil-kernel` only exposes provider-neutral capabilities and chunks. |
+| Provider-specific options | Each provider page explains its available setup and options; normal tool approvals, privacy, and session behavior stay consistent. |
 | Code intelligence | Depends on installed language servers and local environment; normal chat does not require it. |
 | MCP lazy startup | Lazy servers are configured but do not register fake tools until activated. |
 | External directories | Disabled by default and should stay narrow and approval-backed. |
 | Headless automation | `sigil run` is useful for scripts but cannot show interactive approval modals. |
-| HTTP/SSE adapter | `sigil serve` validates local bind/token defaults and prints a preflight plan; HTTP routing and listener startup remain future work. |
+| Local server | `sigil serve` currently checks local server settings but does not start a service. |
 | Execution sandbox | macOS, Linux, Docker, PTY, MCP stdio, and trusted plugin-hook paths have core coverage and receipts where supported, but coverage is not equivalent across all platforms and remote/container daemon scenarios. |
-| Context retrieval | Context V0 supports session/task memory and bounded repo-file candidates. Full semantic repo graph, impact graph, and vector retrieval remain evidence-gated future work. |
-| Model evals | Deterministic eval infrastructure exists. Real-model eval runner, repeat policy, and release/nightly trend reports are not part of the supported user path yet. |
+| Context help | Sigil can use relevant session/task information and a small set of workspace files. Comprehensive automatic codebase analysis remains future work. |
+| Model quality reports | Internal automated checks exist, but repeatable end-user model comparisons and release trends are not a supported product feature yet. |
 
 ## Future Work
 
@@ -55,7 +55,7 @@ These are not the current supported path unless a later release says otherwise:
 - parallel write-agent worktree isolation as a default workflow;
 - stable plugin API compatibility;
 - all-platform equivalent OS sandbox behavior;
-- built-in real-model eval runner for end users;
+- built-in end-user model quality benchmarking;
 - fully automated terminal screenshot generation for release docs.
 
 ## How To Read The Docs

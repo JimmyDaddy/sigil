@@ -118,11 +118,11 @@ TUI 会展示生命周期状态：
 
 ## Stdio 兼容性与 deadline
 
-Sigil 使用 MCP `2025-06-18` 定义的 newline-delimited JSON stdio transport。仍使用 LSP 风格 `Content-Length` header 的 MCP server 与之不兼容，需要升级或通过符合标准的 adapter 包装；Sigil 不会在已建立的 stream 上猜测或切换 framing。
+Sigil 使用 MCP `2025-06-18` 定义的 newline-delimited JSON stdio transport。仍使用 LSP 风格 `Content-Length` header 的 MCP server 与之不兼容，需要升级到当前 transport；Sigil 不会在已建立的连接上猜测或切换格式。
 
 启动过程使用一个覆盖 `initialize`、`initialized` 和首次 `tools/list` 的 absolute budget。每次 tool、resource 或 prompt 调用使用当前 tool timeout。timeout 为零时使用有限的 30 秒项目默认值，过大的配置值会被限制到 24 小时硬上限。timeout、非法 frame 或超限 frame 会永久关闭当前 client generation，尝试终止对应的 process group/tree，并回收直接 child；清理不完整时会明确报告，不能伪装成成功。Windows 上会在执行有界 `taskkill /T /F` 期间保持 stdio connection 打开，避免 server 因 stdin EOF 提前退出而抢在 process-tree cleanup 之前；若 teardown 开始前 leader 已消失，则明确报告 tree cleanup 无法确认。各类超限错误会以 resource-limit 类型返回适用 limit 和 observed lower bound 等结构化字段。
 
-单个 NDJSON frame 上限为 4 MiB；一次 operation 最多消费 256 条 inbound message 和累计 8 MiB frame，MCP stderr hard limit 为 8 MiB。tool、resource 与 prompt content 会在 JSON escaping 前脱敏，并在进入 kernel model-content cap 前限制为 32 KiB 或 2,000 行。截断只通过结构化 metadata 报告，不生成可能重新引入已配置 secret carrier 的文本 marker。
+单个 NDJSON frame 上限为 4 MiB；一次 operation 最多消费 256 条 inbound message 和累计 8 MiB frame，MCP stderr hard limit 为 8 MiB。tool、resource 与 prompt content 会在 JSON escaping 前脱敏，并在进入模型输入限制前限制为 32 KiB 或 2,000 行。截断不会生成可能重新引入已配置 secret 的文本。
 
 可在 `/config` → MCP 中选择 `activate` 刷新 server。Registry ownership 使用未清洗的 exact server identity 加唯一 process-generation id，绝不以 provider-visible name prefix 作为所有权依据，因此 sanitize/hash collision 不会误回收其他 server。即使 server 为 optional，显式 activation/refresh 也必须得到可调用 replacement。只有 replacement 注册成功且所有不同的旧 generation 都已显式 shutdown 后 refresh 才会返回成功；replacement 启动失败时恢复旧 generation，旧 generation 清理失败时则移除并 shutdown replacement，保持 fail-closed。多 server registration 采用事务语义，同一操作中后续 server 失败时会回滚此前已启动的 generation；重复的 exact server name 会在 launch 前被拒绝。旧 generation 不会复用，因此延迟到达的 response 不会被下一次调用误收。
 

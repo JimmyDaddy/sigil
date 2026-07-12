@@ -55,7 +55,7 @@ Prefer environment variables for local and CI use. Do not commit configs that co
 
 ## Behavior Notes
 
-Sigil maps provider-neutral messages, tool specs, tool results, usage, and incremental tool arguments into Anthropic request and SSE events inside the provider crate. Anthropic-specific headers, versioning, and tool result shaping stay out of `sigil-kernel`.
+Sigil handles Anthropic's request format, streaming replies, tool results, usage, and incremental tool input for you. Anthropic-specific options remain on this page, while the normal tool-approval, privacy, and session workflow stays the same.
 
 Use `beta_headers` only when you know the Anthropic feature or endpoint requires them.
 

@@ -108,7 +108,7 @@ Sigil treats tool execution as auditable state, not hidden side effects.
 - File writes, edits, deletes, command execution, MCP calls, and external data access go through the permission model.
 - Write tools are designed around previews and diff approval.
 - Interrupted tool executions are restored as interrupted results instead of being replayed silently.
-- Provider-specific behavior stays in provider crates; `sigil-kernel` keeps generic agent, tool, session, approval, and event contracts.
+- Provider-specific options stay on their provider pages; tool approvals, session recovery, and safety rules remain consistent across supported services.
 
 ## Providers And Integrations
 
@@ -118,7 +118,7 @@ Sigil treats tool execution as auditable state, not hidden side effects.
 | OpenAI-compatible | `[providers.openai_compat]` | Chat Completions-compatible `/v1` endpoints. | [OpenAI-compatible guide](docs/en/provider-openai-compatible.md) |
 | Anthropic | `[providers.anthropic]` | Claude models through Anthropic Messages streaming. | [Anthropic guide](docs/en/provider-anthropic.md) |
 | Gemini | `[providers.gemini]` | Gemini models through `streamGenerateContent`. | [Gemini guide](docs/en/provider-gemini.md) |
-| Web data tools | `[web]` | Provider-hosted/configured/bundled search and exact capability-backed fetch. | [Configuration](docs/en/configuration.md#web-search-and-network) |
+| Web data tools | `[web]` | Provider-hosted, configured, or bundled search and fetching a selected source. | [Permissions and sandbox](docs/en/permissions-and-sandbox.md#network-and-web-tools) |
 | MCP servers | `[[mcp_servers]]` | External stdio or user-root Streamable HTTP tools with explicit trust and egress policy. | [MCP guide](docs/en/mcp.md) |
 | Code intelligence | `[code_intelligence]` | LSP-backed symbols, references, diagnostics, actions, and rename previews. | [Configuration](docs/en/configuration.md) |
 

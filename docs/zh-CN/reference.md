@@ -67,11 +67,11 @@ Workspace trust 由启动时的 workspace trust gate 处理，不是 slash comma
 | `sigil doctor` | 运行本地诊断 |
 | `sigil run "<task>"` | 运行非交互自动化任务 |
 | `sigil resume [session-id]` | 打开 TUI 并恢复 latest 或指定 session；TUI 退出时会打印可复制的恢复命令 |
-| `sigil serve` | 校验 HTTP/SSE adapter 的 local bind/token 默认值；HTTP routing 尚未实现 |
+| `sigil serve` | 检查本地服务设置；尚不能启动服务 |
 | `sigil --version` | 打印安装版本 |
 | `sigil --config <path> doctor` | 使用显式 config 文件运行诊断 |
 
-子命令用于自动化、诊断、脚本和 adapter preflight check。完整产品表面是 TUI。
+子命令用于自动化、诊断、脚本和设置检查。完整产品表面是 TUI。
 
 ## Config 解析顺序
 
@@ -102,14 +102,14 @@ Sigil 按以下顺序解析 config：
 
 ## Provider 设置
 
-支持的 provider value、model 选择和认证优先级见 [Provider 指南](providers.md)。其中链接的各 provider 专页分别维护可复制的配置 block 和完整环境变量清单。共享的模型请求 timeout 覆盖仍由[配置](configuration.md#模型请求环境变量覆盖)维护。
+支持的 provider value、model 选择和认证优先级见 [Provider 指南](providers.md)。其中链接的各 provider 专页分别维护可复制的配置 block 和完整环境变量清单。共享的模型请求 timeout 覆盖见[高级配置](advanced-configuration.md#终端与模型请求环境变量覆盖)。
 
 ## 常见 Config Sections
 
 | Section | 作用 |
 | --- | --- |
 | `[workspace]` | Workspace root |
-| `[agent]` | 共享 agent runtime 设置 |
+| `[agent]` | 共享 agent 设置 |
 | `[permission]` | 默认审批策略 |
 | `[web]` | Stable search route、网络策略、destination rule 与预算 |
 | `[memory]` | Workspace memory loading |

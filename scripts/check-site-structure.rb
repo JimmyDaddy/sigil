@@ -177,6 +177,24 @@ html_paths.each do |path|
     next
   end
 
+  doc_navigation_tags = tags(sidebar, "details").select do |tag|
+    class_token?(attributes(tag), "doc-navigation")
+  end
+  if doc_navigation_tags.length != 1
+    failures << "#{page}: expected one details.doc-navigation, found #{doc_navigation_tags.length}"
+  elsif attributes(doc_navigation_tags.first).key?("open")
+    failures << "#{page}: documentation navigation must be closed in source HTML for mobile-first disclosure"
+  end
+
+  group_titles = tags(sidebar, "h2").select { |tag| class_token?(attributes(tag), "doc-nav-group-title") }
+  group_navs = tags(sidebar, "nav").select { |tag| class_token?(attributes(tag), "doc-nav-group-links") }
+  if group_titles.length < 2 || group_titles.length != group_navs.length
+    failures << "#{page}: grouped documentation navigation must expose matching group titles and labelled nav sections"
+  end
+  group_navs.each do |tag|
+    failures << "#{page}: grouped documentation nav is missing aria-labelledby" if attributes(tag)["aria-labelledby"].to_s.empty?
+  end
+
   current_links = tags(sidebar, "a").select { |tag| attributes(tag)["aria-current"] == "page" }
   if current_links.length == 1
     current_href = attributes(current_links.first)["href"]
@@ -208,6 +226,17 @@ html_paths.each do |path|
     end
   else
     failures << "#{page}: missing primary navigation"
+  end
+end
+
+html_paths.each do |path|
+  page = relative_path(path, site_root)
+  html = File.read(path)
+  nav_menu_tags = tags(html, "details").select { |tag| class_token?(attributes(tag), "nav-menu") }
+  next if nav_menu_tags.empty?
+
+  if nav_menu_tags.any? { |tag| attributes(tag).key?("open") }
+    failures << "#{page}: primary navigation must be closed in source HTML for mobile-first disclosure"
   end
 end
 

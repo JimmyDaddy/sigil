@@ -68,7 +68,7 @@ This reports config loading, workspace, sessions, provider/auth, MCP, code intel
 Then ask a read-only repository question:
 
 ```text
-Explain this repository structure. Point out the main binary, TUI crate, runtime crate, provider crates, and where user docs live.
+Explain this repository structure. Point out the important directories, test locations, configuration files, and user documentation.
 ```
 
 Read-only file and search tools usually run without approval. This is a good first test because it lets you watch how Sigil reads context before making changes.

@@ -20,14 +20,14 @@ sigil
 继续问一个聚焦问题：
 
 ```text
-追踪一个用户 prompt 如何从 TUI composer 进入 agent runtime。列出主要文件和状态转换。
+解释 Sigil 如何处理这个请求。指出用户可见阶段、可能需要查看的文件，以及它会在哪里显示错误或批准。
 ```
 
 好的信号：
 
 - Sigil 会说明它读取了哪些具体文件。
 - Tool activity 保持只读。
-- 你可以要求它继续缩小到某个 crate、模块或路径。
+- 你可以要求它继续缩小到某个组件、目录或路径。
 
 ## 安全地做小改动
 
@@ -72,7 +72,7 @@ git diff
 贴出失败命令和相关输出：
 
 ```text
-cargo test 在 crates/sigil-tui 失败。断言显示 help text 缺少 Alt-D。
+cargo test 失败。断言显示 help text 缺少 Alt-D。
 找出 help text 来源，解释可能原因，并在编辑前给出最小修复方案。
 ```
 

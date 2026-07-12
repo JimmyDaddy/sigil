@@ -31,15 +31,15 @@
 | Release archives | 已在 tagged GitHub releases 提供，用于手动安装；日常优先使用包管理器安装。 |
 | 包管理器渠道 | Alpha 阶段的 package name 和可用性仍可能调整；当前事实以[安装](installation.md)为准。 |
 | OpenAI-compatible 差异 | 该 provider 有意不暴露 DeepSeek-only prefix/FIM/beta 行为。 |
-| Provider-specific 语义 | Anthropic 和 Gemini 的 request/event 细节留在 provider crate；`sigil-kernel` 只暴露 provider-neutral capabilities 和 chunks。 |
+| Provider 专项选项 | 每个 provider 页面说明可用的 setup 与选项；正常的 tool approval、隐私和 session 行为保持一致。 |
 | Code intelligence | 依赖本地 language servers 和环境；普通 chat 不依赖它。 |
 | MCP lazy startup | Lazy server 会记录配置，但激活前不会注册假工具。 |
 | External directories | 默认关闭，应保持窄范围和 approval-backed。 |
 | Headless automation | `sigil run` 可用于脚本，但不能展示交互 approval modal。 |
-| HTTP/SSE adapter | `sigil serve` 会校验 local bind/token 默认值并输出 preflight plan；HTTP routing 和 listener startup 仍是后续工作。 |
+| 本地服务 | `sigil serve` 当前只检查本地服务设置，不会启动服务。 |
 | Execution sandbox | macOS、Linux、Docker、PTY、MCP stdio 和受信任 plugin hook 路径在支持的平台上已有 core coverage 与 receipt，但不同平台、远端工具和容器/daemon 场景的覆盖并不等价。 |
-| Context retrieval | Context V0 支持 session/task memory 和有边界的 repo-file candidates。完整 semantic repo graph、impact graph 和向量检索仍是证据触发的未来工作。 |
-| Model evals | 已有 deterministic eval 基础设施。真实模型 eval runner、重复运行策略和 release/nightly 趋势报告还不是当前用户支持路径。 |
+| 上下文帮助 | Sigil 可以使用相关的 session/task 信息和少量 workspace 文件；全面自动代码库分析仍是后续工作。 |
+| 模型质量报告 | 已有内部自动化检查，但可重复的最终用户模型对比与 release 趋势还不是支持的产品功能。 |
 
 ## 未来工作
 
@@ -55,7 +55,7 @@
 - 把并行写 agent worktree isolation 作为默认工作流；
 - 稳定 plugin API 兼容性；
 - 全平台等价 OS sandbox 行为；
-- 面向最终用户的内置真实模型 eval runner；
+- 面向最终用户的内置模型质量对比；
 - 用于 release docs 的全自动真实终端截图生成。
 
 ## 如何理解文档

@@ -1445,7 +1445,7 @@ h3 {
 
 .doc-navigation-panel {
   display: grid;
-  gap: 8px;
+  gap: 16px;
 }
 
 .doc-navigation:not([open]) > .doc-navigation-panel {
@@ -1468,6 +1468,33 @@ h3 {
 .doc-sidebar a {
   padding: 7px 9px;
   border-radius: 7px;
+}
+
+.doc-nav-group {
+  display: grid;
+  gap: 5px;
+}
+
+.doc-nav-group + .doc-nav-group {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.doc-nav-group-title {
+  margin: 0;
+  padding: 0 9px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.doc-nav-group-links {
+  display: grid;
+  gap: 1px;
+  justify-content: stretch;
 }
 
 .doc-sidebar a.active,
@@ -2189,6 +2216,10 @@ footer a {
     border: 1px solid var(--line);
     border-radius: 8px;
     overflow: auto;
+  }
+
+  .doc-nav-group + .doc-nav-group {
+    padding-top: 12px;
   }
 
   .doc-toc-mobile {

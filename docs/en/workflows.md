@@ -20,14 +20,14 @@ Explain the repository structure. Identify the main entrypoints, test layout, co
 Follow up with a focused question:
 
 ```text
-Trace how a user prompt moves from the TUI composer into the agent runtime. Include the main files and state transitions.
+Explain how Sigil handles this request. Identify the user-visible stages, likely files it needs to inspect, and where it will show errors or approvals.
 ```
 
 Good signs:
 
 - Sigil cites concrete files it read.
 - Tool activity stays read-only.
-- You can ask it to narrow the answer to a crate, module, or path.
+- You can ask it to narrow the answer to a component, directory, or path.
 
 ## Make A Small Change Safely
 
@@ -74,7 +74,7 @@ when the latest task should continue without extra guidance.
 Paste the failing command and the relevant output:
 
 ```text
-cargo test failed in crates/sigil-tui. The failing assertion says the help text is missing Alt-D.
+cargo test failed. The failing assertion says the help text is missing Alt-D.
 Find the source of that help text, explain the likely cause, and propose the smallest fix before editing.
 ```
 

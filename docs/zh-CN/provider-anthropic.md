@@ -55,7 +55,7 @@ Sigil 按这个顺序解析 Anthropic 认证：
 
 ## 行为说明
 
-Sigil 会在 provider crate 内把 provider-neutral messages、tool specs、tool results、usage 和 incremental tool arguments 映射到 Anthropic request 与 SSE events。Anthropic 专属 header、version 和 tool result shaping 不进入 `sigil-kernel`。
+Sigil 会为你处理 Anthropic 的请求格式、流式回复、tool result、usage 和增量工具输入。Anthropic 专属选项留在本文；正常的 tool approval、隐私与 session 工作流保持一致。
 
 只有在你明确知道 Anthropic feature 或 endpoint 需要时，才使用 `beta_headers`。
 

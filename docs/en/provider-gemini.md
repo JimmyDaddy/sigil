@@ -50,7 +50,7 @@ Prefer `SIGIL_GEMINI_API_KEY` when you want Sigil-specific credentials without a
 
 ## Behavior Notes
 
-Sigil maps provider-neutral messages, tool specs, function calls, function responses, usage, and block reasons into Gemini protocol details inside the provider crate. Gemini-specific `systemInstruction`, `functionDeclarations`, and `functionResponse` details stay out of `sigil-kernel`.
+Sigil handles Gemini's request format, function calling, responses, usage, and safety blocks for you. Gemini-specific options remain on this page, while the normal tool-approval, privacy, and session workflow stays the same.
 
 Gemini model names and endpoint availability can vary by account and region. Keep `[agent].model` explicit when using this provider in automation.
 
