@@ -85,3 +85,11 @@ fn linux_process_group_scan_is_live_for_members_and_indeterminate_reads() {
     assert_eq!(indeterminate, LinuxProcessGroupScan::Indeterminate);
     assert!(linux_process_group_scan_has_live_effect(indeterminate));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_group_probe_reports_current_group_as_live() -> anyhow::Result<()> {
+    let process_group_id = u32::try_from(nix::unistd::getpgrp().as_raw())?;
+    assert!(super::process_group_has_live_members(process_group_id).await?);
+    Ok(())
+}

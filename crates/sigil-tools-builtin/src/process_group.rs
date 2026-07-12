@@ -48,11 +48,9 @@ pub(crate) async fn process_group_has_live_members(process_id: u32) -> Result<bo
     #[cfg(target_os = "linux")]
     {
         let process_group_id = process_id;
-        return tokio::task::spawn_blocking(move || {
-            linux_process_group_has_live_members(process_group_id)
-        })
-        .await
-        .context("Linux process-group inspection task failed");
+        tokio::task::spawn_blocking(move || linux_process_group_has_live_members(process_group_id))
+            .await
+            .context("Linux process-group inspection task failed")
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -73,7 +71,7 @@ pub(crate) fn process_is_live(process_id: u32) -> Result<bool> {
 
     #[cfg(target_os = "linux")]
     {
-        return linux_process_is_live(process_id.as_raw() as u32);
+        linux_process_is_live(process_id.as_raw() as u32)
     }
 
     #[cfg(not(target_os = "linux"))]

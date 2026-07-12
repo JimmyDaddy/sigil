@@ -87,6 +87,14 @@ async fn process_group_probe_reports_missing_group_as_quiescent() -> Result<()> 
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn process_group_probe_reports_current_group_as_live() -> Result<()> {
+    let process_group_id = u32::try_from(nix::unistd::getpgrp().as_raw())?;
+    assert!(process_group_has_live_members(process_group_id).await?);
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn write_proc_stat(
     proc_root: &std::path::Path,

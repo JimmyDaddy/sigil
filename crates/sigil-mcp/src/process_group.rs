@@ -39,7 +39,7 @@ pub(crate) async fn process_group_has_live_members(process_id: u32) -> Result<bo
         let scan = tokio::task::spawn_blocking(move || scan_linux_process_group(process_id))
             .await
             .context("Linux process-group liveness scan task failed")?;
-        return Ok(linux_process_group_scan_has_live_effect(scan));
+        Ok(linux_process_group_scan_has_live_effect(scan))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -62,13 +62,13 @@ pub(crate) fn process_has_live_effect(process_id: u32) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
         let stat_path = format!("/proc/{process_id}/stat");
-        return match std::fs::read_to_string(&stat_path) {
+        match std::fs::read_to_string(&stat_path) {
             Ok(stat) => parse_linux_proc_stat(&stat)
                 .map(|stat| linux_process_state_is_live(stat.state))
                 .with_context(|| format!("failed to parse {stat_path}")),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error).with_context(|| format!("failed to read {stat_path}")),
-        };
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
