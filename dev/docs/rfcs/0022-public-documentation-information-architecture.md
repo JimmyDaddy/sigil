@@ -6,10 +6,10 @@
 
 基线：
 
-- Related: [RFC-0017 Architecture and TUI Productization execution plan](../../../.repo-local-dev/rfcs/0017-architecture-tui-productization-execution-plan.md)
-- Related: [RFC-0021 Web Data Tools](../../../.repo-local-dev/rfcs/0021-web-data-tools-execution-plan.md)
-- Execution plan: [RFC-0022 Documentation Information Architecture Execution Plan](../../../.repo-local-dev/rfcs/0022-documentation-information-architecture-execution-plan.md)
-- Review basis: [Sigil Comprehensive Project Review](../../../.repo-local-dev/review/sigil-comprehensive-project-review-2026-07-10.md)
+- Related: RFC-0017 Architecture and TUI Productization execution tracking
+- Related: RFC-0021 Web Data Tools execution tracking
+- Execution plan: repository-local RFC-0022 execution plan (not published)
+- Review basis: repository-local comprehensive project review (not published)
 
 ## 1. Summary
 
