@@ -10,6 +10,7 @@ use sigil_kernel::{
 use crate::ui::{StatusKind, status_symbol};
 
 use super::formatting::truncate_session_view_text;
+use super::verification_recommendation::{latest_check_run_for_check, verification_recommendation};
 
 const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
 const TASK_STRIP_STEP_LIMIT: usize = 4;
@@ -135,6 +136,15 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
         ));
         if let Some(summary) = readiness_reason_summary(&readiness.evaluation.reasons, 48) {
             lines.push(format!("verification reason: {summary}"));
+        }
+        if let Some(recommendation) =
+            verification_recommendation(entries, task, &scope, readiness, &verification_projection)
+        {
+            lines.push(format!("recommended: {}", recommendation.action_label()));
+            lines.push(format!(
+                "recommended why: {}",
+                recommendation.reason_label()
+            ));
         }
         if let Some(summary) = child_merge_recheck_summary(entries, task, readiness, 48) {
             lines.push(format!("merge: {summary}"));
@@ -1091,13 +1101,7 @@ fn latest_check_run_for_action<'a>(
     action: &RequiredAction,
 ) -> Option<&'a VerificationCheckRunEntry> {
     let check_spec_id = required_action_check_spec_id(action)?;
-    entries.iter().rev().find_map(|entry| {
-        let SessionLogEntry::Control(sigil_kernel::ControlEntry::VerificationCheckRun(run)) = entry
-        else {
-            return None;
-        };
-        (run.scope == *scope && run.check_spec_id == check_spec_id).then_some(run)
-    })
+    latest_check_run_for_check(entries, scope, check_spec_id)
 }
 
 fn required_action_check_spec_id(action: &RequiredAction) -> Option<&str> {

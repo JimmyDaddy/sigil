@@ -1,6 +1,6 @@
 # RFC-0023 Verification UX V1
 
-状态：proposed / implementation queued
+状态：accepted / implementation in progress
 
 创建日期：2026-07-13
 

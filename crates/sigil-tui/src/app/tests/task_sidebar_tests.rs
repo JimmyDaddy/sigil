@@ -1,12 +1,13 @@
 use sigil_kernel::{
-    AgentRole, ChangeSetId, ControlEntry, EvidenceScope, MergeDecision, MergeReviewId,
+    AgentRole, ChangeSetId, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
+    CheckSpecRecordedEntry, ControlEntry, EvidenceScope, MergeDecision, MergeReviewId,
     MergeReviewRequested, MergeReviewResolved, ModelMessage, ReadinessEvaluatedEntry,
     ReadinessEvaluation, ReadinessReason, RequiredAction, RunStatus, SessionLogEntry, SessionRef,
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
     TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, VerificationCheckRunEntry,
-    VerificationCheckRunStatus, VerificationStaleCause, VerificationStaleReason,
-    VerificationVerdict, VisibleCompletionState,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolEffect, TrustedCheckSpec,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationStaleCause,
+    VerificationStaleReason, VerificationVerdict, VisibleCompletionState,
 };
 
 use super::{
@@ -605,6 +606,7 @@ fn task_sidebar_shows_latest_check_runner_state_for_required_action() {
             .iter()
             .any(|line| line == "action: run check docs-check")
     );
+    assert!(!lines.iter().any(|line| line.starts_with("recommended:")));
 
     let strip = task_strip_view(&entries).expect("task strip should project");
     assert!(strip.detail.contains("check running timeout=5000 ms"));
@@ -673,6 +675,213 @@ fn task_sidebar_keeps_retry_action_after_terminal_check_failure() {
     );
 }
 
+#[test]
+fn task_sidebar_recommends_current_trusted_required_check() {
+    let entries = task_entries_with_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+    );
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "recommended: run check docs-check")
+    );
+    assert!(lines.iter().any(|line| {
+        line == "recommended why: this trusted check is required by the current task"
+    }));
+}
+
+#[test]
+fn task_sidebar_does_not_recommend_an_untrusted_run_check() {
+    let entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::RunCheck {
+            check_spec_id: "repo-discovered-check".to_owned(),
+        }],
+    );
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line == "recommended: run check repo-discovered-check")
+    );
+}
+
+#[test]
+fn task_sidebar_recommends_non_writing_rerun_before_other_actions() {
+    let entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+        VisibleCompletionState::NeedsUser,
+        vec![
+            RequiredAction::RunCheck {
+                check_spec_id: "docs-check".to_owned(),
+            },
+            RequiredAction::ApproveCheckExecution {
+                check_spec_id: "repo-make-check".to_owned(),
+            },
+            RequiredAction::ReRunNonWritingCheck {
+                check_spec_id: "docs-check".to_owned(),
+            },
+        ],
+    );
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "recommended: rerun non-writing check docs-check")
+    );
+    assert!(lines.iter().any(|line| {
+        line == "recommended why: a writing check needs fresh non-writing evidence"
+    }));
+}
+
+#[test]
+fn task_sidebar_recommends_retry_for_trusted_failed_check_without_run_action() {
+    for (status, expected_reason) in [
+        (
+            VerificationCheckRunStatus::Failed,
+            "recommended why: the latest result failed for the current task scope",
+        ),
+        (
+            VerificationCheckRunStatus::Inconclusive,
+            "recommended why: the latest result is inconclusive for the current task scope",
+        ),
+    ] {
+        let mut entries = task_entries_with_custom_readiness(
+            TaskRunStatus::Paused,
+            TaskStepStatus::Blocked,
+            VerificationVerdict::Failed,
+            VisibleCompletionState::NeedsUser,
+            vec![RequiredAction::ReviewVerificationFailure {
+                receipt_id: "receipt-1".to_owned(),
+            }],
+        );
+        entries.push(SessionLogEntry::Control(
+            ControlEntry::VerificationCheckRun(verification_check_run(
+                "run-1",
+                status,
+                Some("tests failed"),
+            )),
+        ));
+
+        let lines = task_sidebar_lines(&entries);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "recommended: retry check docs-check")
+        );
+        assert!(lines.iter().any(|line| line == expected_reason));
+    }
+}
+
+#[test]
+fn task_sidebar_does_not_retry_a_superseded_failed_run() {
+    let mut entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Failed,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::ReviewVerificationFailure {
+            receipt_id: "receipt-1".to_owned(),
+        }],
+    );
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(verification_check_run(
+            "run-1",
+            VerificationCheckRunStatus::Failed,
+            Some("tests failed"),
+        )),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(verification_check_run(
+            "run-1",
+            VerificationCheckRunStatus::Succeeded,
+            None,
+        )),
+    ));
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line == "recommended: retry check docs-check")
+    );
+}
+
+#[test]
+fn task_sidebar_does_not_retry_a_run_for_a_stale_check_spec_hash() {
+    let mut entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Failed,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::ReviewVerificationFailure {
+            receipt_id: "receipt-1".to_owned(),
+        }],
+    );
+    let mut stale_run = verification_check_run(
+        "run-1",
+        VerificationCheckRunStatus::Failed,
+        Some("tests failed"),
+    );
+    stale_run.check_spec_hash = "stale-check-spec-hash".to_owned();
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(stale_run),
+    ));
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line == "recommended: retry check docs-check")
+    );
+}
+
+#[test]
+fn task_sidebar_recommends_check_approval_without_treating_it_as_execution() {
+    let entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::ApproveCheckExecution {
+            check_spec_id: "repo-make-check".to_owned(),
+        }],
+    );
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "recommended: review check approval repo-make-check")
+    );
+    assert!(lines.iter().any(|line| {
+        line == "recommended why: this check needs one-time approval before it can run"
+    }));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line == "recommended: run check repo-make-check")
+    );
+}
+
 fn task_entries_with_readiness(
     run_status: TaskRunStatus,
     step_status: TaskStepStatus,
@@ -716,7 +925,7 @@ fn task_entries_with_custom_readiness_and_reasons(
 ) -> Vec<SessionLogEntry> {
     let task_id = TaskId::new("task_1").expect("task id");
     let step_id = TaskStepId::new("fix_typo").expect("step id");
-    vec![
+    let mut entries = vec![
         SessionLogEntry::User(ModelMessage::user("/task fix typo")),
         SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
             task_id: task_id.clone(),
@@ -763,7 +972,11 @@ fn task_entries_with_custom_readiness_and_reasons(
             policy_hash: None,
             workspace_snapshot_id: Some("snapshot-1".to_owned()),
         })),
-    ]
+    ];
+    entries.push(SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(
+        trusted_check_spec_entry("docs-check"),
+    )));
+    entries
 }
 
 fn task_entries_without_readiness(
@@ -815,11 +1028,42 @@ fn verification_check_run(
         run_id: run_id.to_owned(),
         scope: EvidenceScope::Step("task_1:fix_typo".to_owned()),
         check_spec_id: "docs-check".to_owned(),
-        check_spec_hash: "docs-check-hash".to_owned(),
+        check_spec_hash: trusted_check_spec_entry("docs-check")
+            .trusted_check
+            .check_spec
+            .check_spec_hash,
         status,
         receipt_id: None,
         source_event_id: None,
         timeout_ms: Some(5_000),
         reason: reason.map(str::to_owned),
     }
+}
+
+fn trusted_check_spec_entry(check_spec_id: &str) -> CheckSpecRecordedEntry {
+    let check_spec = CheckSpec::new(
+        check_spec_id,
+        CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        ToolEffect::ReadOnly,
+        "task-verification-scope",
+    );
+    let trusted_check = TrustedCheckSpec {
+        check_spec,
+        source: CheckDiscoverySource::UserExplicitConfig,
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+        promoted_by: CheckPromotion::ExplicitUserConfig {
+            config_event_id: "config-verification".to_owned(),
+        },
+        approval_event_id: None,
+        sandbox_decision_id: None,
+    };
+    CheckSpecRecordedEntry::new(
+        EvidenceScope::Task("task_1".to_owned()),
+        trusted_check,
+        "config-verification",
+    )
 }
