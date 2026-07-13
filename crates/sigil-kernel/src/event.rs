@@ -203,6 +203,8 @@ durable_event_types! {
     WriteCommitted => ("write_committed", RecoveryCritical, Critical, DirectJson, "write_committed"),
     WorkspaceMutationDetected => ("workspace_mutation_detected", RecoveryCritical, Critical, DirectJson, "workspace_mutation_detected"),
     CheckpointRestored => ("checkpoint_restored", RecoveryCritical, Critical, DirectJson, "checkpoint_restored"),
+    CheckpointRestoreConflict => ("checkpoint_restore_conflict", RecoveryCritical, Critical, DirectJson, "checkpoint_restore_conflict"),
+    ConversationForked => ("conversation_forked", RecoveryCritical, Critical, DirectJson, "conversation_forked"),
     MutationArtifactCleanupRequested => ("mutation_artifact_cleanup_requested", RecoveryCritical, Critical, DirectJson, "mutation_artifact_cleanup_requested"),
     MutationArtifactLifecycleRecorded => ("mutation_artifact_lifecycle_recorded", RecoveryCritical, Critical, DirectJson, "mutation_artifact_lifecycle_recorded"),
     CommandFinished => ("command_finished", RecoveryCritical, Critical, DirectJson, "command_finished"),
@@ -451,6 +453,7 @@ pub enum TypedStoredEventDecode {
 pub enum TypedDomainEvent {
     MutationPrepared(MutationPrepared),
     MutationCommitted(MutationCommitted),
+    CheckpointRestoreConflict(crate::CheckpointRestoreConflict),
     WorkspaceMutationDetected(WorkspaceMutationDetected),
     VerificationRecorded(VerificationRecordedEntry),
     VerificationCheckRun(VerificationCheckRunEntry),
@@ -508,6 +511,9 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         }
         DurableEventType::MutationCommitted => {
             TypedDomainEvent::MutationCommitted(decode_event_payload(&event)?)
+        }
+        DurableEventType::CheckpointRestoreConflict => {
+            TypedDomainEvent::CheckpointRestoreConflict(decode_event_payload(&event)?)
         }
         DurableEventType::WorkspaceMutationDetected => {
             TypedDomainEvent::WorkspaceMutationDetected(decode_event_payload(&event)?)

@@ -6,6 +6,7 @@ pub mod changeset;
 pub mod checkpoint;
 pub mod config;
 pub mod context_engine;
+pub mod conversation_fork;
 pub mod conversation_queue;
 pub mod egress;
 pub mod eval;
@@ -78,6 +79,8 @@ pub use changeset::{
 pub use checkpoint::{
     ControlledCheckpoint, ControlledCheckpointFile, ControlledCheckpointFileAvailability,
     ControlledCheckpointProjection, ControlledCheckpointRestoreKind,
+    ControlledCheckpointRestoreOutput, ControlledCheckpointRestorePreview,
+    ControlledCheckpointRestorePreviewFile, ControlledCheckpointRestoreRequest,
 };
 pub use config::{
     AgentConfig, AppearanceConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
@@ -111,6 +114,10 @@ pub use context_engine::{
     SessionArchiveEntryId, SessionArchiveSearchHit, UNKNOWN_CONTEXT_REPO_REVISION,
     build_context_quality_evidence_pack, context_provenance_row_v1, estimate_context_token_cost,
     pack_context_items, validate_context_render_snippet, write_context_quality_evidence_artifacts,
+};
+pub use conversation_fork::{
+    ConversationForkOutput, ConversationForkRequest, ConversationForked,
+    fork_conversation_at_checkpoint,
 };
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
@@ -179,9 +186,10 @@ pub use hosted::{
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
-    CheckpointRestored, CommittedDirectoryMutation, CommittedFileMutation,
-    ExecutionMutationProfile, MutationArtifactCleanupRequested, MutationArtifactCleanupTarget,
-    MutationArtifactId, MutationArtifactInventoryItem, MutationArtifactLifecycleRecorded,
+    CheckpointRestoreConflict, CheckpointRestoreConflictReason, CheckpointRestored,
+    CommittedDirectoryMutation, CommittedFileMutation, ExecutionMutationProfile,
+    MutationArtifactCleanupRequested, MutationArtifactCleanupTarget, MutationArtifactId,
+    MutationArtifactInventoryItem, MutationArtifactLifecycleRecorded,
     MutationArtifactLifecycleStatus, MutationArtifactRetentionPolicy,
     MutationArtifactRetentionReport, MutationBatchFinished, MutationBatchId, MutationBatchStarted,
     MutationBatchStatus, MutationCommitted, MutationCoordinator, MutationEventRecorder,
@@ -190,9 +198,9 @@ pub use mutation::{
     PreparedFileMutation, RestoredFileMutation, SnapshotCoverage, WorkspaceMutationDetected,
     WorkspaceMutationDetectionReason, WorkspaceMutationScan, bytes_hash,
     create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
-    delete_file_with_mutation_in_batch, file_content_hash,
-    restore_file_from_snapshot_with_mutation, write_file_with_mutation,
-    write_file_with_mutation_in_batch,
+    delete_file_with_mutation_in_batch, execute_controlled_checkpoint_restore, file_content_hash,
+    preview_controlled_checkpoint_restore, restore_file_from_snapshot_with_mutation,
+    write_file_with_mutation, write_file_with_mutation_in_batch,
 };
 pub use permission::{
     ApprovalMode, CommandPermissionConfig, CommandPermissionGroup, CommandPermissionMatch,

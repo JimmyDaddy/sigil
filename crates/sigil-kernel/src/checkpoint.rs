@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -27,6 +27,47 @@ pub enum ControlledCheckpointFileAvailability {
 pub enum ControlledCheckpointRestoreKind {
     RestoreContent,
     RemoveCreatedFile,
+}
+
+/// Exact UI-to-runtime binding for one controlled checkpoint operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ControlledCheckpointRestoreRequest {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+}
+
+/// Read-only preflight state for one file in a checkpoint restore preview.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ControlledCheckpointRestorePreviewFile {
+    pub path: PathBuf,
+    pub restore_kind: ControlledCheckpointRestoreKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_current_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_current_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_reason: Option<crate::CheckpointRestoreConflictReason>,
+}
+
+/// Read-only exact restore preview. `ready` is true only when every controlled file can restore.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ControlledCheckpointRestorePreview {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+    pub files: Vec<ControlledCheckpointRestorePreviewFile>,
+    pub unknown_mutation_count: usize,
+    pub ready: bool,
+}
+
+/// Durable result of one exact controlled checkpoint batch restore.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlledCheckpointRestoreOutput {
+    pub preview: ControlledCheckpointRestorePreview,
+    pub batch_id: String,
+    pub restored: Vec<crate::RestoredFileMutation>,
 }
 
 /// Exact durable binding for one ordinary file in a controlled checkpoint.
@@ -98,6 +139,7 @@ impl ControlledCheckpointProjection {
     /// checkpoint digest cannot be serialized deterministically.
     pub fn from_records(records: &[SessionStreamRecord]) -> Result<Self> {
         let unavailable_artifacts = unavailable_artifacts(records)?;
+        let restored_operation_ids = restored_operation_ids(records)?;
         let mut checkpoints = Vec::new();
         let mut current = None::<CheckpointBuilder>;
         let mut turn_index = 0usize;
@@ -125,6 +167,9 @@ impl ControlledCheckpointProjection {
                 DomainEvent::MutationPrepared(payload) => {
                     let prepared = serde_json::from_value::<MutationPrepared>(payload.payload)
                         .context("failed to decode checkpoint mutation prepared payload")?;
+                    if restored_operation_ids.contains(&prepared.operation_id) {
+                        continue;
+                    }
                     builder.prepared.insert(
                         prepared.operation_id.clone(),
                         PreparedBinding {
@@ -137,6 +182,9 @@ impl ControlledCheckpointProjection {
                 DomainEvent::MutationCommitted(payload) => {
                     let committed = serde_json::from_value::<MutationCommitted>(payload.payload)
                         .context("failed to decode checkpoint mutation committed payload")?;
+                    if restored_operation_ids.contains(&committed.operation_id) {
+                        continue;
+                    }
                     builder.apply_committed(committed, record.event_id());
                 }
                 DomainEvent::WorkspaceMutationDetected(payload) => {
@@ -378,6 +426,22 @@ fn unavailable_artifacts(
         }
     }
     Ok(unavailable)
+}
+
+fn restored_operation_ids(records: &[SessionStreamRecord]) -> Result<BTreeSet<String>> {
+    let mut restored = BTreeSet::new();
+    for record in records {
+        let Some(domain_record) = record.domain_event_record()? else {
+            continue;
+        };
+        let DomainEvent::CheckpointRestored(payload) = domain_record.event else {
+            continue;
+        };
+        let checkpoint = serde_json::from_value::<crate::CheckpointRestored>(payload.payload)
+            .context("failed to decode checkpoint restored payload")?;
+        restored.insert(checkpoint.operation_id);
+    }
+    Ok(restored)
 }
 
 fn session_entry(record: &SessionStreamRecord) -> Result<Option<SessionLogEntry>> {

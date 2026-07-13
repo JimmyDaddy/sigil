@@ -24,11 +24,11 @@ use crate::{
 };
 
 use super::{
-    CheckpointRestored, CommittedFileMutation, MutationArtifactCleanupRequested,
-    MutationArtifactLifecycleRecorded, MutationBatchFinished, MutationBatchId,
-    MutationBatchStarted, MutationBatchStatus, MutationCommitted, MutationCoordinator,
-    MutationPrepared, MutationReconciled, MutationSubject, OperationId, ToolCallId,
-    WorkspaceMutationDetected, default_mutation_artifact_root, harden_artifact_dir,
+    CheckpointRestoreConflict, CheckpointRestored, CommittedFileMutation,
+    MutationArtifactCleanupRequested, MutationArtifactLifecycleRecorded, MutationBatchFinished,
+    MutationBatchId, MutationBatchStarted, MutationBatchStatus, MutationCommitted,
+    MutationCoordinator, MutationPrepared, MutationReconciled, MutationSubject, OperationId,
+    ToolCallId, WorkspaceMutationDetected, default_mutation_artifact_root, harden_artifact_dir,
     harden_artifact_file, latest_workspace_revision,
 };
 
@@ -340,6 +340,18 @@ impl MutationEventRecorder {
             EventClass::Critical,
             serde_json::to_value(payload)
                 .context("failed to encode checkpoint restored payload")?,
+        )
+    }
+
+    pub fn append_checkpoint_restore_conflict(
+        &self,
+        payload: &CheckpointRestoreConflict,
+    ) -> Result<StoredEvent> {
+        self.store.append_event(
+            DurableEventType::CheckpointRestoreConflict,
+            EventClass::Critical,
+            serde_json::to_value(payload)
+                .context("failed to encode checkpoint restore conflict payload")?,
         )
     }
 

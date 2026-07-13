@@ -208,13 +208,10 @@ fn agent_run_workspace_mutation_evidence(
                 Some(DurableEventType::CheckpointRestored) => {
                     let payload =
                         serde_json::from_value::<CheckpointRestored>(event.payload.clone()).ok()?;
-                    if !payload
-                        .tool_call_id
-                        .as_ref()
-                        .is_some_and(|call_id| outcome.tool_call_ids.contains(call_id))
-                    {
-                        return None;
-                    }
+                    // A user-initiated checkpoint restore happens outside the agent run that
+                    // follows it. Keep the durable restore in the evidence set so any earlier
+                    // successful receipt becomes stale even though the restore call id is not an
+                    // agent tool call in `outcome`.
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id.clone(),
                         source_event_type: DurableEventType::CheckpointRestored.as_str().to_owned(),

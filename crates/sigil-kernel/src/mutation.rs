@@ -5,6 +5,7 @@
 //! persistent terminal lifecycle coverage remains staged by RFC-0002.
 
 mod artifacts;
+mod checkpoint_restore;
 mod coordinator;
 mod events;
 mod hash;
@@ -35,15 +36,18 @@ use scan::{latest_workspace_revision, single_subject_snapshot_id};
 use hash::atomic_replace_error_message;
 
 pub use artifacts::{MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus};
+pub use checkpoint_restore::{
+    execute_controlled_checkpoint_restore, preview_controlled_checkpoint_restore,
+};
 pub use coordinator::MutationCoordinator;
 pub use events::{
-    CheckpointRestored, CommittedDirectoryMutation, CommittedFileMutation,
-    ExecutionMutationProfile, MutationArtifactId, MutationBatchFinished, MutationBatchId,
-    MutationBatchStarted, MutationBatchStatus, MutationCommitted, MutationObservedState,
-    MutationPrepared, MutationReconciled, MutationResolution, MutationSubject, MutationSyncClass,
-    OperationId, PreparedDirectoryMutation, PreparedFileMutation, RestoredFileMutation,
-    SnapshotCoverage, ToolCallId, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
-    WorkspaceMutationScan,
+    CheckpointRestoreConflict, CheckpointRestoreConflictReason, CheckpointRestored,
+    CommittedDirectoryMutation, CommittedFileMutation, ExecutionMutationProfile,
+    MutationArtifactId, MutationBatchFinished, MutationBatchId, MutationBatchStarted,
+    MutationBatchStatus, MutationCommitted, MutationObservedState, MutationPrepared,
+    MutationReconciled, MutationResolution, MutationSubject, MutationSyncClass, OperationId,
+    PreparedDirectoryMutation, PreparedFileMutation, RestoredFileMutation, SnapshotCoverage,
+    ToolCallId, WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceMutationScan,
 };
 pub use hash::{bytes_hash, file_content_hash};
 pub use ops::{

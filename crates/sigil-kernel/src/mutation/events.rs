@@ -298,6 +298,33 @@ pub struct CheckpointRestored {
     pub workspace_snapshot_id: WorkspaceSnapshotId,
 }
 
+/// Why an exact checkpoint restore was rejected before its first workspace write.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointRestoreConflictReason {
+    WorkspaceMismatch,
+    CurrentHashMismatch,
+    ArtifactUnavailable,
+    SensitiveSnapshot,
+    UnsupportedSnapshot,
+    InvalidBinding,
+}
+
+/// Durable evidence that one explicit restore could not pass its exact preflight.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CheckpointRestoreConflict {
+    pub checkpoint_id: String,
+    pub checkpoint_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    pub reason: CheckpointRestoreConflictReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_current_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_current_hash: Option<String>,
+}
+
 /// Result of one checkpoint restore mutation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RestoredFileMutation {

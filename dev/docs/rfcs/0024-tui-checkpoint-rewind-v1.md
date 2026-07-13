@@ -106,3 +106,14 @@ Restore preview 必须显示文件列表、create/update/delete 方向、unknown
 3. `C24.3`：worker-bound exact batch restore and verification invalidation。
 4. `C24.5`：TUI Review actions, confirmation, mouse/help/docs。
 5. `C24.6`：recovery, worker E2E and completion audit。
+
+## 10. Implementation Progress
+
+- `C24.1` complete：mixed-stream checkpoint projection、same-path folding、stable id/digest 和
+  artifact lifecycle availability 已落地。
+- `C24.2` complete：exact restore preview、workspace lease 下的 full preflight、batch restore、
+  `CheckpointRestoreConflict` 与 restore verification-stale evidence 已落地。
+- `C24.4` complete：complete-turn conversation fork、`ConversationForked` provenance、safe
+  message prefix 与 external provenance session-scope rebinding 已落地。
+- `C24.3`、`C24.5`、`C24.6` pending：worker command、TUI interaction 与 completion audit 尚待
+  后续切片完成。
