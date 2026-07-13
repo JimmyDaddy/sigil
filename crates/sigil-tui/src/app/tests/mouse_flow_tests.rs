@@ -1686,6 +1686,7 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(80, 20);
     let layout = LayoutSnapshot {
+        verification_card: None,
         screen: Rect::new(0, 0, 80, 20),
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),
@@ -1719,6 +1720,7 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(80, 20);
     let layout = LayoutSnapshot {
+        verification_card: None,
         screen: Rect::new(0, 0, 80, 20),
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),

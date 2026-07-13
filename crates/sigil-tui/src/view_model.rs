@@ -341,14 +341,41 @@ impl ComposerViewModel {
 pub(crate) struct TaskStripViewModel {
     pub title: String,
     pub detail: String,
+    pub verification: Option<VerificationCardViewModel>,
     pub rows: Vec<TaskStripRowViewModel>,
 }
 
 impl TaskStripViewModel {
+    #[cfg(test)]
     pub(crate) fn from_task_strip_view(view: crate::app::task_sidebar::TaskStripView) -> Self {
+        Self::from_task_strip_view_with_state(view, false, false)
+    }
+
+    pub(crate) fn from_task_strip_view_with_state(
+        view: crate::app::task_sidebar::TaskStripView,
+        focused: bool,
+        inspect_open: bool,
+    ) -> Self {
         Self {
             title: view.title,
             detail: view.detail,
+            verification: view.verification.map(|verification| {
+                let action_label = verification.action.as_ref().map(|action| match action {
+                    crate::app::task_sidebar::VerificationCardAction::Rerun(_) => "run check",
+                    crate::app::task_sidebar::VerificationCardAction::ReviewApproval { .. } => {
+                        "review approval"
+                    }
+                });
+                VerificationCardViewModel {
+                    status: verification.status,
+                    recommended: verification.recommended,
+                    why: verification.why,
+                    action_label,
+                    inspect_lines: verification.inspect_lines,
+                    focused,
+                    inspect_open,
+                }
+            }),
             rows: view
                 .rows
                 .into_iter()
@@ -360,6 +387,17 @@ impl TaskStripViewModel {
                 .collect(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VerificationCardViewModel {
+    pub status: String,
+    pub recommended: Option<String>,
+    pub why: Option<String>,
+    pub action_label: Option<&'static str>,
+    pub inspect_lines: Vec<String>,
+    pub focused: bool,
+    pub inspect_open: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -931,6 +969,14 @@ fn footer_hints(app: &AppState) -> String {
         };
         return format!("{agent} · {shortcut_hint} · V details");
     }
+    if app.verification_card_focused() {
+        let action = if app.verification_card_has_action() {
+            "Enter action · "
+        } else {
+            ""
+        };
+        return format!("{agent} · Verification {action}I inspect · Esc input");
+    }
     if app.is_composer_queue_panel_focused() {
         return format!(
             "{agent} · Follow-ups ↑↓ item · ←/→ action · Enter selected · Tab/Esc input"
@@ -1011,9 +1057,13 @@ impl LivePanelViewModel {
             plan_approval: app
                 .pending_plan_approval()
                 .map(PlanApprovalViewModel::from_pending),
-            task_strip: app
-                .task_strip_view()
-                .map(TaskStripViewModel::from_task_strip_view),
+            task_strip: app.task_strip_view().map(|view| {
+                TaskStripViewModel::from_task_strip_view_with_state(
+                    view,
+                    app.verification_card_focused(),
+                    app.verification_inspect_open(),
+                )
+            }),
             transcript_lines: app.transcript_lines(transcript_rows),
         }
     }

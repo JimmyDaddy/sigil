@@ -1908,6 +1908,61 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::RerunTaskVerification { request }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before running verification".to_owned(),
+                    ));
+                    continue;
+                }
+                let Some(session) = current_session.as_mut() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "verification rerun requires an active session".to_owned(),
+                    ));
+                    continue;
+                };
+                let execution_backend =
+                    match sigil_runtime::build_configured_execution_backend(&root_config) {
+                        Ok(backend) => backend,
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                "failed to build verification execution backend: {error:#}"
+                            )));
+                            continue;
+                        }
+                    };
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                match runtime.block_on(rerun_task_verification_check(
+                    session,
+                    &mut handler,
+                    execution_backend.as_ref(),
+                    &options.workspace_root,
+                    &request,
+                )) {
+                    Ok(output) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "verification check {} {}",
+                            output.check_run.check_spec_id,
+                            match output.check_run.status {
+                                sigil_kernel::VerificationCheckRunStatus::Succeeded => "passed",
+                                sigil_kernel::VerificationCheckRunStatus::Failed => "failed",
+                                sigil_kernel::VerificationCheckRunStatus::Skipped => "skipped",
+                                sigil_kernel::VerificationCheckRunStatus::Inconclusive => {
+                                    "inconclusive"
+                                }
+                                sigil_kernel::VerificationCheckRunStatus::Errored => "errored",
+                                sigil_kernel::VerificationCheckRunStatus::Queued
+                                | sigil_kernel::VerificationCheckRunStatus::Running => "finished",
+                            }
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "verification rerun failed: {error:#}"
+                        )));
+                    }
+                }
+            }
             Ok(WorkerCommand::RefreshProviderBalance {
                 request_id,
                 provider_config,

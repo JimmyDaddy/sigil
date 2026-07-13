@@ -46,6 +46,7 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 | Leave overlay or clear activity focus | `Esc` |
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
+| Focus task verification | `Alt-V`; then `Enter` runs the exact action, `I` inspects evidence |
 | Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A` / `Shift-Alt-A` |
 | Focus follow-up panel | `Tab` from the composer when a follow-up is pending |
 | Run selected follow-up next | `Enter` on a selected follow-up uses the safe `next` action by default |
@@ -110,7 +111,7 @@ Planned tasks use role-specific agents:
 
 Task runs, plans, step status, child-session links, and subagent approval route summaries are stored as append-only control entries. The info rail shows the latest task status, plan version, and current step from that durable state. When child agents exist, the composer shows a compact agent panel under the input with each agent's status. Press `Down` from the last composer input row to focus that panel, use `Up/Down` to choose an agent, and press `Enter` to switch the main chat area. `Alt-A` / `Shift-Alt-A` still cycle the visible transcript between `main` and concrete child agents, and `/agent` picks a specific target. Child agent display names come from explicit plan metadata, then persisted `/agent rename` overrides, and otherwise fall back to generic role labels such as `read 1` or `write 1`.
 
-When a planned task needs verification, the Info rail may show one recommended next step and a short reason. It only summarizes trusted task checks or an approval that must happen before a check can run; it never starts a check by itself. A queued or running check is shown as in progress instead of being recommended again.
+When a planned task needs verification, the task status band shows a compact Verification card with one recommended check and a short reason. It only offers a trusted task check or an approval that must happen before a check can run; it never starts a check by itself. Click the card or press `Alt-V` to focus it, then press `Enter` to run the exact rendered action. Press `I` to inspect the terminal reason, receipt, workspace snapshot, and any proven changeset/command/artifact link. Missing evidence is shown as `not linked`, not inferred. A queued or running check is shown as in progress instead of being recommended again.
 
 Session restore only rebuilds the visible task state. It does not automatically continue unfinished work. Type the next instruction in the composer to continue the latest task with guidance, or use `/task continue` to continue without extra guidance.
 

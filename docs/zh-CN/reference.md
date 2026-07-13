@@ -24,6 +24,7 @@
 | 离开 overlay 或清除 activity focus | `Esc` |
 | 聚焦最新 activity | `Ctrl-G` |
 | 在 activities 间移动 | `Alt-J` / `Alt-K` |
+| 聚焦 task verification | `Alt-V`；随后用 `Enter` 执行精确 action，`I` 查看证据 |
 | 切换可见 agent transcript | composer agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A` |
 | 展开或折叠 thinking / activity | `Ctrl-T` |
 | 对 changed source files 运行 code diagnostics | `Alt-D` |

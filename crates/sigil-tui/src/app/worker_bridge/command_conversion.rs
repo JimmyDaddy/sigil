@@ -150,6 +150,9 @@ impl AppState {
             AppAction::SandboxVerificationCheck { check_spec_id } => {
                 WorkerCommand::SandboxVerificationCheck { check_spec_id }
             }
+            AppAction::RerunTaskVerification { request } => {
+                WorkerCommand::RerunTaskVerification { request }
+            }
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
             }

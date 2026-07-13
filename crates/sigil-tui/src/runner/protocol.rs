@@ -6,7 +6,8 @@ use sigil_kernel::{
     ConversationQueueItemProjection, DisclosurePresentationError, DisclosurePresentationReceipt,
     MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
     PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort, RunEvent,
-    SessionLogEntry, TaskCreatedFromPlanEntry, TaskRunStatus, TerminalTaskEntry,
+    SessionLogEntry, TaskCreatedFromPlanEntry, TaskRunStatus, TaskVerificationRerunRequest,
+    TerminalTaskEntry,
 };
 use sigil_runtime::{
     BalanceSnapshot, McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
@@ -179,6 +180,9 @@ pub enum WorkerCommand {
     },
     SandboxVerificationCheck {
         check_spec_id: String,
+    },
+    RerunTaskVerification {
+        request: TaskVerificationRerunRequest,
     },
     RefreshProviderBalance {
         request_id: u64,

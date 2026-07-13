@@ -34,8 +34,8 @@ use sigil_kernel::{
     UserUrlCapabilityRegistrar, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrust,
     WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, build_workspace_snapshot,
     default_user_config_dir, discover_candidate_checks_with_user_config, plan_draft_created_entry,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, saturating_elapsed,
-    stable_event_uuid, stable_workspace_id,
+    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
+    rerun_task_verification_check, saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
 
 use sigil_runtime::{

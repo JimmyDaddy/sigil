@@ -10,6 +10,22 @@ pub(super) struct VerificationRecommendation {
 }
 
 impl VerificationRecommendation {
+    pub(super) fn check_spec_id(&self) -> &str {
+        match &self.action {
+            VerificationRecommendationAction::Run { check_spec_id }
+            | VerificationRecommendationAction::ReRunNonWriting { check_spec_id }
+            | VerificationRecommendationAction::Retry { check_spec_id }
+            | VerificationRecommendationAction::Approve { check_spec_id } => check_spec_id,
+        }
+    }
+
+    pub(super) fn requires_approval(&self) -> bool {
+        matches!(
+            self.action,
+            VerificationRecommendationAction::Approve { .. }
+        )
+    }
+
     pub(super) fn action_label(&self) -> String {
         match &self.action {
             VerificationRecommendationAction::Run { check_spec_id } => {
@@ -78,8 +94,14 @@ pub(super) fn verification_recommendation(
         let RequiredAction::ReRunNonWritingCheck { check_spec_id } = action else {
             continue;
         };
-        if trusted_check_is_actionable(entries, task, scope, verification_projection, check_spec_id)
-        {
+        if trusted_check_is_actionable(
+            entries,
+            task,
+            scope,
+            readiness,
+            verification_projection,
+            check_spec_id,
+        ) {
             return Some(VerificationRecommendation {
                 action: VerificationRecommendationAction::ReRunNonWriting {
                     check_spec_id: check_spec_id.clone(),
@@ -93,8 +115,14 @@ pub(super) fn verification_recommendation(
         let RequiredAction::RunCheck { check_spec_id } = action else {
             continue;
         };
-        if trusted_check_is_actionable(entries, task, scope, verification_projection, check_spec_id)
-        {
+        if trusted_check_is_actionable(
+            entries,
+            task,
+            scope,
+            readiness,
+            verification_projection,
+            check_spec_id,
+        ) {
             return Some(VerificationRecommendation {
                 action: VerificationRecommendationAction::Run {
                     check_spec_id: check_spec_id.clone(),
@@ -139,6 +167,7 @@ fn trusted_check_is_actionable(
     entries: &[SessionLogEntry],
     task: &TaskRunProjection,
     scope: &EvidenceScope,
+    readiness: &ReadinessEvaluatedEntry,
     verification_projection: &VerificationStateProjection,
     check_spec_id: &str,
 ) -> bool {
@@ -148,8 +177,27 @@ fn trusted_check_is_actionable(
         return false;
     };
     latest_check_run_for_check(entries, scope, check_spec_id).is_none_or(|run| {
-        run.check_spec_hash != trusted_check.trusted_check.check_spec.check_spec_hash
-            || !check_run_status_blocks_action(run.status)
+        if run.check_spec_hash != trusted_check.trusted_check.check_spec.check_spec_hash {
+            return true;
+        }
+        match run.status {
+            VerificationCheckRunStatus::Queued | VerificationCheckRunStatus::Running => false,
+            VerificationCheckRunStatus::Succeeded => {
+                !run.receipt_id.as_deref().is_some_and(|receipt_id| {
+                    verification_projection
+                        .receipt_link(receipt_id)
+                        .is_some_and(|link| {
+                            link.scope == *scope
+                                && readiness.workspace_snapshot_id.as_deref()
+                                    == Some(link.workspace_snapshot_id.as_str())
+                        })
+                })
+            }
+            VerificationCheckRunStatus::Failed
+            | VerificationCheckRunStatus::Skipped
+            | VerificationCheckRunStatus::Inconclusive
+            | VerificationCheckRunStatus::Errored => true,
+        }
     })
 }
 
@@ -178,7 +226,7 @@ fn latest_retryable_check_run<'a>(
     })
 }
 
-fn trusted_check_for_task<'a>(
+pub(super) fn trusted_check_for_task<'a>(
     verification_projection: &'a VerificationStateProjection,
     task: &TaskRunProjection,
     scope: &EvidenceScope,
@@ -206,11 +254,4 @@ pub(super) fn latest_check_run_for_check<'a>(
         };
         (run.scope == *scope && run.check_spec_id == check_spec_id).then_some(run)
     })
-}
-
-fn check_run_status_blocks_action(status: VerificationCheckRunStatus) -> bool {
-    matches!(
-        status,
-        VerificationCheckRunStatus::Queued | VerificationCheckRunStatus::Running
-    )
 }

@@ -13,7 +13,9 @@ use super::{
     composer::composer_input_area,
     egress_disclosure::egress_disclosure_layout,
     geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
-    live_panel::{LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app},
+    live_panel::{
+        LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app, verification_card_area_for_app,
+    },
     setup_config::{
         CONFIG_DETAIL_PANEL_WIDTH, CONFIG_DETAIL_SPLIT_MIN_WIDTH, CONFIG_FOOTER_COMPACT_WIDTH,
         centered_config_area, config_panel_height, config_scroll_offset, footer_action_width,
@@ -39,6 +41,7 @@ pub struct LayoutSnapshot {
     pub composer_input: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
+    pub verification_card: Option<Rect>,
     pub live_text_rows: Vec<LiveTextRowHitArea>,
     pub tool_cards: Vec<ToolCardHitArea>,
     pub thinking_blocks: Vec<ThinkingBlockHitArea>,
@@ -188,6 +191,7 @@ impl LayoutSnapshot {
             composer_input: composer_input_area(shell.composer, app.composer_input_rows()),
             footer: shell.footer,
             info_rail: shell.info_rail,
+            verification_card: verification_card_area_for_app(live_content, app),
             live_text_rows: live_text_row_hit_areas(live_content, app),
             tool_cards: tool_card_hit_areas(live_content, app),
             thinking_blocks: thinking_block_hit_areas(live_content, app),
@@ -215,6 +219,7 @@ impl LayoutSnapshot {
             composer_input: Rect::default(),
             footer: Rect::default(),
             info_rail: Rect::default(),
+            verification_card: None,
             live_text_rows: Vec::new(),
             tool_cards: Vec::new(),
             thinking_blocks: Vec::new(),
@@ -315,6 +320,11 @@ impl LayoutSnapshot {
 
         if self.mode != LayoutMode::Main {
             return HitTarget::Background;
+        }
+        if let Some(area) = self.verification_card
+            && contains(area, column, row)
+        {
+            return HitTarget::VerificationCard;
         }
         if contains(self.composer, column, row) || contains(self.agent_panel, column, row) {
             return HitTarget::Composer;

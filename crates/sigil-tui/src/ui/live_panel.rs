@@ -126,7 +126,12 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
         .unwrap_or(0);
     let task_rows = app
         .task_strip_view()
-        .map(|view| live_task_strip_rows(view.rows.len()))
+        .map(|view| {
+            live_task_strip_rows(
+                view.rows.len(),
+                verification_card_rows(view.verification.as_ref(), app.verification_inspect_open()),
+            )
+        })
         .unwrap_or(0);
     live_status_rows_with_separator(
         app.queue_strip_rows()
@@ -151,7 +156,12 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
     let task_rows = view_model
         .task_strip
         .as_ref()
-        .map(|view| live_task_strip_rows(view.rows.len()))
+        .map(|view| {
+            live_task_strip_rows(
+                view.rows.len(),
+                verification_card_view_rows(view.verification.as_ref()),
+            )
+        })
         .unwrap_or(0);
     live_status_rows_with_separator(
         queue_rows
@@ -161,6 +171,43 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
     )
 }
 
+pub(crate) fn verification_card_area_for_app(live_area: Rect, app: &AppState) -> Option<Rect> {
+    let task_strip = app.task_strip_view()?;
+    let verification = task_strip.verification.as_ref()?;
+    let verification_rows =
+        verification_card_rows(Some(verification), app.verification_inspect_open());
+    if verification_rows == 0 {
+        return None;
+    }
+    let inner = inset_rect(live_area, 1, 0);
+    let content_frame = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner
+            .height
+            .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
+            .max(1),
+    );
+    let task_rows = live_task_strip_rows(task_strip.rows.len(), verification_rows);
+    let status_rows = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
+    let status_top = content_frame
+        .y
+        .saturating_add(content_frame.height.saturating_sub(status_rows));
+    let card_top = content_frame
+        .y
+        .saturating_add(content_frame.height.saturating_sub(task_rows))
+        .saturating_add(1)
+        .max(status_top.saturating_add(1));
+    let available = content_frame.bottom().saturating_sub(card_top);
+    Some(Rect::new(
+        inner.x,
+        card_top,
+        inner.width,
+        verification_rows.min(available),
+    ))
+}
+
 fn live_status_rows_with_separator(content_rows: u16) -> u16 {
     if content_rows == 0 {
         return 0;
@@ -168,11 +215,38 @@ fn live_status_rows_with_separator(content_rows: u16) -> u16 {
     content_rows.saturating_add(1)
 }
 
-fn live_task_strip_rows(row_count: usize) -> u16 {
+fn live_task_strip_rows(row_count: usize, verification_rows: u16) -> u16 {
     if row_count == 0 {
         return 0;
     }
-    1 + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
+    1 + verification_rows + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
+}
+
+fn verification_card_rows(
+    card: Option<&crate::app::task_sidebar::VerificationCardView>,
+    inspect_open: bool,
+) -> u16 {
+    let Some(card) = card else {
+        return 0;
+    };
+    3 + u16::from(card.why.is_some())
+        + if inspect_open {
+            card.inspect_lines.len() as u16
+        } else {
+            0
+        }
+}
+
+fn verification_card_view_rows(card: Option<&crate::view_model::VerificationCardViewModel>) -> u16 {
+    let Some(card) = card else {
+        return 0;
+    };
+    3 + u16::from(card.why.is_some())
+        + if card.inspect_open {
+            card.inspect_lines.len() as u16
+        } else {
+            0
+        }
 }
 
 fn live_queue_strip_rows(row_count: usize) -> u16 {
@@ -615,6 +689,9 @@ fn render_task_strip_lines(
     }
     let mut lines = Vec::with_capacity(1 + task_strip.rows.len().min(LIVE_TASK_ROW_LIMIT));
     lines.push(render_task_strip_header(task_strip, width, theme));
+    if let Some(verification) = &task_strip.verification {
+        lines.extend(render_verification_card_lines(verification, width, theme));
+    }
     lines.extend(
         task_strip
             .rows
@@ -622,6 +699,81 @@ fn render_task_strip_lines(
             .take(LIVE_TASK_ROW_LIMIT)
             .map(|row| render_task_strip_row(row, width, theme)),
     );
+    lines
+}
+
+fn render_verification_card_lines(
+    card: &crate::view_model::VerificationCardViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let palette = &theme.palette;
+    let bg = if card.focused {
+        palette.surface_input
+    } else {
+        palette.surface_panel_alt
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "Verification",
+            Style::default()
+                .fg(palette.accent_warning)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ·  ", Style::default().fg(palette.text_muted).bg(bg)),
+        Span::styled(
+            truncate_display_width(&card.status, width.saturating_sub(16)),
+            Style::default().fg(palette.text_primary).bg(bg),
+        ),
+    ])];
+    lines.push(Line::from(Span::styled(
+        truncate_display_width(
+            &format!(
+                "  Recommended  {}",
+                card.recommended.as_deref().unwrap_or("none")
+            ),
+            width,
+        ),
+        Style::default().fg(palette.text_primary).bg(bg),
+    )));
+    if let Some(why) = &card.why {
+        lines.push(Line::from(Span::styled(
+            truncate_display_width(&format!("  Why         {why}"), width),
+            Style::default().fg(palette.text_secondary).bg(bg),
+        )));
+    }
+    if let Some(action) = card.action_label {
+        lines.push(Line::from(Span::styled(
+            truncate_display_width(&format!("  Enter {action}  ·  I inspect"), width),
+            Style::default()
+                .fg(if card.focused {
+                    palette.accent_primary
+                } else {
+                    palette.text_muted
+                })
+                .bg(bg),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  I inspect",
+            Style::default()
+                .fg(if card.focused {
+                    palette.accent_primary
+                } else {
+                    palette.text_muted
+                })
+                .bg(bg),
+        )));
+    }
+    if card.inspect_open {
+        lines.extend(card.inspect_lines.iter().map(|line| {
+            Line::from(Span::styled(
+                truncate_display_width(&format!("  {line}"), width),
+                Style::default().fg(palette.text_secondary).bg(bg),
+            ))
+        }));
+    }
     lines
 }
 

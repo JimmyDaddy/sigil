@@ -232,6 +232,16 @@ impl AppState {
             {
                 Ok(self.click_thinking_block(entry_index, target))
             }
+            crate::mouse::HitTarget::VerificationCard if self.approval.pending.is_none() => {
+                self.cancel_tool_card_body_click();
+                self.set_mouse_hover_target(Some(target));
+                self.clear_timeline_text_selection();
+                if self.focus_verification_card() {
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
+            }
             crate::mouse::HitTarget::Composer if self.approval.pending.is_none() => {
                 Ok(self.click_composer(input, layout))
             }
@@ -271,6 +281,16 @@ impl AppState {
                 Ok(self.click_info_rail_agent_row(index, target))
             }
             crate::mouse::HitTarget::InfoRail => Ok(self.click_info_rail(target)),
+            crate::mouse::HitTarget::VerificationCard => {
+                self.cancel_tool_card_body_click();
+                self.set_mouse_hover_target(Some(target));
+                self.clear_timeline_text_selection();
+                if self.focus_verification_card() {
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
+            }
             _ => {
                 self.cancel_tool_card_body_click();
                 Ok(crate::mouse::AppMouseOutcome::Noop)
@@ -298,6 +318,7 @@ impl AppState {
         target: crate::mouse::HitTarget,
     ) -> Result<crate::mouse::AppMouseOutcome> {
         let anchor = self.tool_card_mouse_anchor(entry_index, input.column, input.row, layout);
+        self.blur_verification_card();
         self.cancel_tool_card_body_click();
         self.set_mouse_hover_target(Some(target));
         self.clear_timeline_text_selection();
@@ -317,6 +338,7 @@ impl AppState {
         self.cancel_tool_card_body_click();
         self.set_mouse_hover_target(Some(crate::mouse::HitTarget::Composer));
         self.clear_timeline_text_selection();
+        self.blur_verification_card();
         self.active_pane = PaneFocus::Composer;
         self.blur_composer_aux_panels();
         self.position_input_cursor_from_mouse(input.column, input.row, layout);
@@ -346,6 +368,7 @@ impl AppState {
         self.cancel_tool_card_body_click();
         self.set_mouse_hover_target(Some(target));
         self.clear_timeline_text_selection();
+        self.blur_verification_card();
         self.active_pane = PaneFocus::Activity;
         self.blur_composer_aux_panels();
         if self.activate_agent_view_at_index(index) {
@@ -362,6 +385,7 @@ impl AppState {
         self.cancel_tool_card_body_click();
         self.set_mouse_hover_target(Some(target));
         self.clear_timeline_text_selection();
+        self.blur_verification_card();
         self.active_pane = PaneFocus::Activity;
         self.blur_composer_aux_panels();
         crate::mouse::AppMouseOutcome::Redraw
@@ -450,6 +474,7 @@ impl AppState {
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::ThinkingBlock { .. }
+            | crate::mouse::HitTarget::VerificationCard
             | crate::mouse::HitTarget::LivePanel
             | crate::mouse::HitTarget::Background => {
                 self.handle_mouse_scroll(upward);

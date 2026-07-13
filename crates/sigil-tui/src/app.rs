@@ -36,6 +36,7 @@ mod timeline_flow;
 mod timeline_render_store;
 mod tool_card_interaction;
 mod usage_sidebar_flow;
+mod verification_flow;
 mod verification_recommendation;
 mod worker_bridge;
 mod workspace_trust_flow;
@@ -298,6 +299,8 @@ pub struct AppState {
     collapsed_tool_activity_keys: BTreeSet<String>,
     tool_activity_visible_rows: BTreeMap<String, usize>,
     pending_terminal_cancel_confirmation: Option<String>,
+    verification_card_focused: bool,
+    verification_inspect_open: bool,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
     pending_mouse_left_down: bool,
@@ -435,6 +438,9 @@ pub enum AppAction {
     SandboxVerificationCheck {
         check_spec_id: String,
     },
+    RerunTaskVerification {
+        request: sigil_kernel::TaskVerificationRerunRequest,
+    },
     ActivateLazyMcp {
         server_name: Option<String>,
     },
@@ -546,6 +552,8 @@ impl AppState {
             collapsed_tool_activity_keys: BTreeSet::new(),
             tool_activity_visible_rows: BTreeMap::new(),
             pending_terminal_cancel_confirmation: None,
+            verification_card_focused: false,
+            verification_inspect_open: false,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
@@ -664,6 +672,8 @@ impl AppState {
             collapsed_tool_activity_keys: BTreeSet::new(),
             tool_activity_visible_rows: BTreeMap::new(),
             pending_terminal_cancel_confirmation: None,
+            verification_card_focused: false,
+            verification_inspect_open: false,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
@@ -943,6 +953,10 @@ impl AppState {
         }
 
         if let Some(outcome) = self.handle_pending_approval_key_event(key) {
+            return Ok(outcome);
+        }
+
+        if let Some(outcome) = self.handle_verification_card_key_event(key) {
             return Ok(outcome);
         }
 

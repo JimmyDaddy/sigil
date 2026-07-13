@@ -89,6 +89,9 @@ impl AppState {
             self.toggle_info_rail_detail();
             return true;
         }
+        if command == UiCommand::FocusVerificationCard {
+            return self.focus_verification_card();
+        }
         if command == UiCommand::CycleAgentView {
             if self.approval.pending.is_some() {
                 self.last_notice =
@@ -131,6 +134,7 @@ impl AppState {
             | UiCommand::CycleAgentView
             | UiCommand::CycleAgentViewPrevious
             | UiCommand::CheckChangedFilesDiagnostics => false,
+            UiCommand::FocusVerificationCard => false,
         }
     }
 }

@@ -6,14 +6,16 @@ use sigil_kernel::{
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
     TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
     TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolEffect, TrustedCheckSpec,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationStaleCause,
-    VerificationStaleReason, VerificationVerdict, VisibleCompletionState,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
+    VerificationReceiptLinkRecorded, VerificationStaleCause, VerificationStaleReason,
+    VerificationVerdict, VisibleCompletionState,
 };
 
 use super::{
     readiness_reason_summary, required_action_label, task_sidebar_lines, task_step_status_label,
     task_strip_view, verification_stale_reason_compact_label, verification_verdict_label,
 };
+use crate::app::task_sidebar::VerificationCardAction;
 
 #[test]
 fn verification_labels_cover_all_sidebar_variants() {
@@ -693,6 +695,139 @@ fn task_sidebar_recommends_current_trusted_required_check() {
     assert!(lines.iter().any(|line| {
         line == "recommended why: this trusted check is required by the current task"
     }));
+}
+
+#[test]
+fn task_verification_card_binds_exact_rerun_request_and_failure_evidence() {
+    let mut entries = task_entries_with_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Failed,
+    );
+    for entry in &mut entries {
+        if let SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness)) = entry {
+            readiness.policy_hash = Some("policy-hash".to_owned());
+        }
+    }
+    let mut run = verification_check_run(
+        "run-1",
+        VerificationCheckRunStatus::Failed,
+        Some("tests failed"),
+    );
+    run.receipt_id = Some("receipt-1".to_owned());
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(run),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationReceiptLinkRecorded(VerificationReceiptLinkRecorded {
+            receipt_id: "receipt-1".to_owned(),
+            receipt_event_id: "event-receipt".to_owned(),
+            scope: EvidenceScope::Step("task_1:fix_typo".to_owned()),
+            workspace_snapshot_id: "snapshot-1".to_owned(),
+            changeset_id: None,
+            changeset_apply_event_id: None,
+        }),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationFailureLocatorRecorded(VerificationFailureLocatorRecorded {
+            check_run_id: "run-1".to_owned(),
+            receipt_id: Some("receipt-1".to_owned()),
+            command_event_id: Some("event-command".to_owned()),
+            output_artifact_id: None,
+            summary: "tests failed".to_owned(),
+        }),
+    ));
+
+    let card = task_strip_view(&entries)
+        .expect("task strip")
+        .verification
+        .expect("verification card");
+
+    assert_eq!(card.status, "check failed");
+    assert_eq!(card.recommended.as_deref(), Some("docs-check"));
+    let VerificationCardAction::Rerun(request) = card.action.expect("exact rerun action") else {
+        panic!("expected exact rerun action");
+    };
+    assert_eq!(request.task_id.as_str(), "task_1");
+    assert_eq!(request.step_id.as_str(), "fix_typo");
+    assert_eq!(request.policy_hash, "policy-hash");
+    assert_eq!(request.workspace_snapshot_id, "snapshot-1");
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Failure: tests failed")
+    );
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Command evidence: event-command")
+    );
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Changeset: not linked")
+    );
+}
+
+#[test]
+fn task_verification_card_suppresses_satisfied_action_and_shows_exact_passed_receipt() {
+    let mut entries = task_entries_with_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+    );
+    let mut run = verification_check_run("run-1", VerificationCheckRunStatus::Succeeded, None);
+    run.receipt_id = Some("receipt-1".to_owned());
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(run),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationReceiptLinkRecorded(VerificationReceiptLinkRecorded {
+            receipt_id: "receipt-1".to_owned(),
+            receipt_event_id: "event-receipt".to_owned(),
+            scope: EvidenceScope::Step("task_1:fix_typo".to_owned()),
+            workspace_snapshot_id: "snapshot-1".to_owned(),
+            changeset_id: None,
+            changeset_apply_event_id: None,
+        }),
+    ));
+
+    let card = task_strip_view(&entries)
+        .expect("task strip")
+        .verification
+        .expect("verification card");
+
+    assert_eq!(card.status, "passed");
+    assert!(card.recommended.is_none());
+    assert!(card.action.is_none());
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Receipt: receipt-1")
+    );
+    assert!(
+        card.inspect_lines
+            .iter()
+            .any(|line| line == "Snapshot: snapshot-1")
+    );
+}
+
+#[test]
+fn task_verification_card_stays_hidden_when_verification_is_not_applicable() {
+    let entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Completed,
+        TaskStepStatus::Completed,
+        VerificationVerdict::NotApplicable,
+        VisibleCompletionState::Verified,
+        Vec::new(),
+    );
+
+    assert!(
+        task_strip_view(&entries)
+            .expect("task strip")
+            .verification
+            .is_none()
+    );
 }
 
 #[test]

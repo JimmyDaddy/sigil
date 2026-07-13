@@ -14,6 +14,7 @@ use crate::{
     view_model::{
         LivePanelViewModel, LiveProgressViewModel, PlanApprovalViewModel,
         QueueActionButtonViewModel, TaskStripRowViewModel, TaskStripViewModel,
+        VerificationCardViewModel,
     },
 };
 
@@ -174,6 +175,7 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
         }),
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {
+            verification: None,
             title: "Task task_1".to_owned(),
             detail: "running · v1 · 1/2 done".to_owned(),
             rows: vec![
@@ -211,6 +213,59 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
     assert!(rendered.contains("◇ 2. update status band"));
     assert!(rendered.contains("▌"));
     assert!(!rendered.contains("status:"));
+    Ok(())
+}
+
+#[test]
+fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::Result<()> {
+    let view_model = LivePanelViewModel {
+        phase: crate::timeline::RunPhase::Idle,
+        queue_rows: Vec::new(),
+        queue_paused: false,
+        queue_panel_focused: false,
+        queue_action_buttons: Vec::new(),
+        progress: None,
+        plan_approval: None,
+        task_strip: Some(TaskStripViewModel {
+            title: "Task task_1".to_owned(),
+            detail: "paused · check failed".to_owned(),
+            verification: Some(VerificationCardViewModel {
+                status: "check failed".to_owned(),
+                recommended: Some("cargo-test".to_owned()),
+                why: Some("the latest result failed".to_owned()),
+                action_label: Some("run check"),
+                inspect_lines: vec![
+                    "Snapshot: snapshot-1".to_owned(),
+                    "Changeset: not linked".to_owned(),
+                ],
+                focused: true,
+                inspect_open: true,
+            }),
+            rows: vec![TaskStripRowViewModel {
+                kind: crate::ui::StatusKind::Error,
+                label: "1. check failed · implement".to_owned(),
+                active: true,
+            }],
+        }),
+        transcript_lines: vec![Line::from("visible tail")],
+    };
+    let backend = TestBackend::new(100, 12);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Verification  ·  check failed"));
+    assert!(rendered.contains("Recommended  cargo-test"));
+    assert!(rendered.contains("Enter run check  ·  I inspect"));
+    assert!(rendered.contains("Snapshot: snapshot-1"));
+    assert!(rendered.contains("Changeset: not linked"));
     Ok(())
 }
 
@@ -394,6 +449,7 @@ fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
         progress: None,
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {
+            verification: None,
             title: "Task task_3".to_owned(),
             detail: "started".to_owned(),
             rows: vec![TaskStripRowViewModel {

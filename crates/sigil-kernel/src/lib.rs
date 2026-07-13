@@ -314,7 +314,8 @@ pub use task_orchestrator::{
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskVerificationRerunOutput,
     TaskVerificationRerunRequest, changeset_only_child_contract_prompt,
     changeset_only_child_tool_registry, changeset_only_child_tool_scope,
-    decode_changeset_only_child_output, validate_changeset_only_parent_snapshot_unchanged_for_task,
+    decode_changeset_only_child_output, rerun_task_verification_check,
+    validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,

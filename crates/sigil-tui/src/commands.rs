@@ -17,6 +17,7 @@ pub(crate) enum UiCommand {
     CycleAgentView,
     CycleAgentViewPrevious,
     CheckChangedFilesDiagnostics,
+    FocusVerificationCard,
     FocusLatestToolCard,
     SelectNextToolCard,
     SelectPreviousToolCard,
@@ -171,6 +172,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
+        command: UiCommand::FocusVerificationCard,
+        keys: &[KeyBinding { label: "Alt-V" }],
+        slash: None,
+        label: "Verification",
+        help: "Focus the current task verification card; Enter runs its action and I inspects evidence.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
         command: UiCommand::FocusLatestToolCard,
         keys: &[KeyBinding { label: "Ctrl-G" }],
         slash: None,
@@ -239,6 +248,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::CheckChangedFilesDiagnostics)
         }
+        KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::FocusVerificationCard)
+        }
         KeyCode::Char('i') | KeyCode::Char('I') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::ToggleInfoRailDetail)
         }
@@ -273,6 +285,7 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
         control_hint(UiCommand::CycleAgentViewPrevious).expect("previous agent metadata exists"),
         control_hint(UiCommand::CheckChangedFilesDiagnostics)
             .expect("check changes metadata exists"),
+        control_hint(UiCommand::FocusVerificationCard).expect("verification metadata exists"),
     ];
     hints.retain(|hint| !hint.is_empty());
     hints
@@ -312,6 +325,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     ]);
     lines.extend(command_help_lines([
         UiCommand::CheckChangedFilesDiagnostics,
+        UiCommand::FocusVerificationCard,
     ]));
     if include_tool_cards {
         lines.extend(command_help_lines([
