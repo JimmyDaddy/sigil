@@ -3,6 +3,7 @@ pub mod agent_thread;
 pub mod approval;
 pub mod cancellation;
 pub mod changeset;
+pub mod checkpoint;
 pub mod config;
 pub mod context_engine;
 pub mod conversation_queue;
@@ -73,6 +74,10 @@ pub use changeset::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetProjection, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk,
     ChangeSetState, ChangeSetValidation, ChangeSetValidationKind, ChangeSetValidationStatus,
+};
+pub use checkpoint::{
+    ControlledCheckpoint, ControlledCheckpointFile, ControlledCheckpointFileAvailability,
+    ControlledCheckpointProjection, ControlledCheckpointRestoreKind,
 };
 pub use config::{
     AgentConfig, AppearanceConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
