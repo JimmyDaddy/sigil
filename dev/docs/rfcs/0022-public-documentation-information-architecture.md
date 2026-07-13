@@ -1,6 +1,6 @@
 # RFC-0022 Public Documentation Information Architecture
 
-状态：active
+状态：implemented
 
 创建日期：2026-07-13
 
