@@ -2,9 +2,11 @@ use std::{fs, thread, time::Duration};
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    Agent, ControlEntry, DurableEventType, JsonlSessionStore, ModelMessage, ReasoningEffort,
-    SessionLogEntry, SessionStreamRecord, ToolRegistry, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, stable_workspace_id,
+    Agent, AssistantMessageKind, ControlEntry, ControlledCheckpointProjection,
+    ControlledCheckpointRestoreRequest, DurableEventType, EventClass, JsonlSessionStore,
+    ModelMessage, MutationEventRecorder, ReasoningEffort, SessionLogEntry, SessionStreamRecord,
+    ToolRegistry, WorkspaceTrust, WorkspaceTrustDecisionEntry, stable_workspace_id,
+    write_file_with_mutation,
 };
 use tempfile::tempdir;
 
@@ -14,6 +16,224 @@ use super::{
         PlannedProvider, StreamPlan, spawn_test_worker, test_root_config, wait_for_session_entry,
     },
 };
+
+#[test]
+fn worker_previews_and_executes_exact_checkpoint_restore() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    fs::create_dir(&workspace_root)?;
+    let note = workspace_root.join("note.txt");
+    fs::write(&note, "before\n")?;
+    let session_log_path = temp.path().join(".sigil/sessions/session-restore.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "default-provider".to_owned(),
+        model_name: "default-model".to_owned(),
+    }))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    write_file_with_mutation(
+        Some(&recorder),
+        &workspace_root,
+        "call-edit",
+        "note.txt",
+        &note,
+        b"after\n",
+    )?;
+    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    let checkpoint = ControlledCheckpointProjection::from_records(&records)?
+        .latest()
+        .cloned()
+        .expect("checkpoint");
+    let request = ControlledCheckpointRestoreRequest {
+        checkpoint_id: checkpoint.checkpoint_id,
+        checkpoint_digest: checkpoint.checkpoint_digest,
+    };
+    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let agent = Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::PreviewCheckpointRestore {
+        request: request.clone(),
+    })?;
+    let preview = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::CheckpointRestorePreviewed { .. })
+    })?;
+    assert!(matches!(
+        preview,
+        WorkerMessage::CheckpointRestorePreviewed { ref preview }
+            if preview.ready && preview.files.len() == 1
+    ));
+    worker.send(WorkerCommand::ExecuteCheckpointRestore { request })?;
+    let completed = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::CheckpointRestoreCompleted { .. })
+    })?;
+    assert!(matches!(
+        completed,
+        WorkerMessage::CheckpointRestoreCompleted { ref preview, ref entries, .. }
+            if preview.ready && !entries.is_empty()
+    ));
+    assert_eq!(fs::read_to_string(&note)?, "before\n");
+    assert!(
+        JsonlSessionStore::read_event_records(&session_log_path)?
+            .iter()
+            .any(|record| matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_kind() == Some(DurableEventType::CheckpointRestored)
+            ))
+    );
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn worker_forks_complete_conversation_and_switches_to_destination() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    fs::create_dir(&workspace_root)?;
+    let note = workspace_root.join("note.txt");
+    fs::write(&note, "before\n")?;
+    let session_log_path = temp.path().join(".sigil/sessions/session-source.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "default-provider".to_owned(),
+        model_name: "default-model".to_owned(),
+    }))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    write_file_with_mutation(
+        Some(&recorder),
+        &workspace_root,
+        "call-edit",
+        "note.txt",
+        &note,
+        b"after\n",
+    )?;
+    let assistant = ModelMessage::assistant_with_kind(
+        Some("done".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    );
+    store.append(&SessionLogEntry::Assistant(assistant.clone()))?;
+    store.append_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        serde_json::json!({
+            "run_status": "completed",
+            "terminal_reason": "final_answer",
+            "final_message_id": assistant.id,
+            "tool_calls": 1,
+            "error": null
+        }),
+    )?;
+    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    let checkpoint = ControlledCheckpointProjection::from_records(&records)?
+        .latest()
+        .cloned()
+        .expect("checkpoint");
+    let request = ControlledCheckpointRestoreRequest {
+        checkpoint_id: checkpoint.checkpoint_id,
+        checkpoint_digest: checkpoint.checkpoint_digest,
+    };
+    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let agent = Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+    let parent_before = fs::read(&session_log_path)?;
+
+    worker.send(WorkerCommand::ForkConversationAtCheckpoint { request })?;
+    let forked =
+        worker.recv_until(|message| matches!(message, WorkerMessage::ConversationForked { .. }))?;
+    let WorkerMessage::ConversationForked {
+        session_log_path: destination_path,
+        copied_message_count,
+        entries,
+        ..
+    } = forked
+    else {
+        unreachable!();
+    };
+    assert_eq!(copied_message_count, 2);
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Assistant(message) if message.content.as_deref() == Some("done")
+    )));
+    assert_ne!(destination_path, session_log_path);
+    assert_eq!(fs::read(&session_log_path)?, parent_before);
+    let destination_records = JsonlSessionStore::read_event_records(destination_path)?;
+    assert!(destination_records.iter().any(|record| matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_kind() == Some(DurableEventType::ConversationForked)
+    )));
+    assert!(!destination_records.iter().any(|record| matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_kind() == Some(DurableEventType::MutationCommitted)
+    )));
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn worker_checkpoint_restore_fails_closed_when_file_drifts_after_preview() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    fs::create_dir(&workspace_root)?;
+    let note = workspace_root.join("note.txt");
+    fs::write(&note, "before\n")?;
+    let session_log_path = temp.path().join(".sigil/sessions/session-conflict.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    write_file_with_mutation(
+        Some(&recorder),
+        &workspace_root,
+        "call-edit",
+        "note.txt",
+        &note,
+        b"after\n",
+    )?;
+    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    let checkpoint = ControlledCheckpointProjection::from_records(&records)?
+        .latest()
+        .cloned()
+        .expect("checkpoint");
+    let request = ControlledCheckpointRestoreRequest {
+        checkpoint_id: checkpoint.checkpoint_id,
+        checkpoint_digest: checkpoint.checkpoint_digest,
+    };
+    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let agent = Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+    worker.send(WorkerCommand::PreviewCheckpointRestore {
+        request: request.clone(),
+    })?;
+    let _ = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::CheckpointRestorePreviewed { .. })
+    })?;
+    fs::write(&note, "external drift\n")?;
+
+    worker.send(WorkerCommand::ExecuteCheckpointRestore { request })?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error) if error.contains("preflight found conflicts")
+    ));
+    assert_eq!(fs::read_to_string(note)?, "external drift\n");
+    assert!(
+        JsonlSessionStore::read_event_records(&session_log_path)?
+            .iter()
+            .any(|record| matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_kind() == Some(DurableEventType::CheckpointRestoreConflict)
+            ))
+    );
+    worker.shutdown()?;
+    Ok(())
+}
 
 #[test]
 fn switch_session_restores_identity_and_entries() -> Result<()> {

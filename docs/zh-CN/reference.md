@@ -25,6 +25,7 @@
 | 聚焦最新 activity | `Ctrl-G` |
 | 在 activities 间移动 | `Alt-J` / `Alt-K` |
 | 聚焦 task verification | `Alt-V`；随后用 `Enter` 执行精确 action，`I` 查看证据 |
+| 聚焦最新 checkpoint review | `Alt-R`；随后用 `Enter` 预览/确认受控文件恢复，`F` fork 会话，`I` 查看证据 |
 | 切换可见 agent transcript | composer agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A` |
 | 展开或折叠 thinking / activity | `Ctrl-T` |
 | 对 changed source files 运行 code diagnostics | `Alt-D` |

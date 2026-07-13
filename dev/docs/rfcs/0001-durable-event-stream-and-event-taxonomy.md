@@ -66,6 +66,8 @@ enum DurableDomainEvent {
     WriteCommitted(WriteCommitted),
     WorkspaceMutationDetected(WorkspaceMutationDetected),
     CheckpointRestored(CheckpointRestored),
+    CheckpointRestoreConflict(CheckpointRestoreConflict),
+    ConversationForked(ConversationForked),
     MutationArtifactLifecycleRecorded(MutationArtifactLifecycleRecorded),
     CommandFinished(CommandFinished),
     CheckFinished(CheckFinished),
@@ -326,7 +328,7 @@ Initial event-to-sync mapping:
 | `ApprovalResolved` | `RecoveryCritical` |
 | `MutationPrepared` / `MutationCommitted` / `MutationReconciled` | `RecoveryCritical` |
 | `MutationBatchStarted` / `MutationBatchFinished` | `RecoveryCritical` |
-| `WriteCommitted` / `WorkspaceMutationDetected` / `CheckpointRestored` / `MutationArtifactLifecycleRecorded` | `RecoveryCritical` |
+| `WriteCommitted` / `WorkspaceMutationDetected` / `CheckpointRestored` / `CheckpointRestoreConflict` / `ConversationForked` / `MutationArtifactLifecycleRecorded` | `RecoveryCritical` |
 | `CommandFinished` / `CheckFinished` / `CheckSpecRecorded` | `RecoveryCritical` |
 | `DiagnosticRecorded` / `TodoChanged` | `RecoveryCritical` |
 | `VerificationRecorded` / `VerificationPolicyChanged` / `VerificationCheckRun` / `EnvironmentFingerprintRecorded` / `ReadinessEvaluated` | `RecoveryCritical` |
@@ -500,6 +502,9 @@ Required deterministic tests:
 - 已新增 plan approval、skill 和 plugin projection 的 durable replay API：`Session` 可从 mixed-format event stream 重建 `PlanApprovalProjection`、`SkillStateProjection` 与 `PluginStateProjection`，支撑 workspace trust / extension context 审计。
 - 已新增 agent profile trust/policy、agent result continuation 和 conversation queue projection 的 durable replay API：`Session` 可从 mixed-format event stream 重建 profile trust/policy、child result continuation 与 queued user input 状态，进一步减少 resume 后对运行时 entries-only projection 的依赖。
 - 已新增 `MutationArtifactLifecycleRecorded` durable event，用于审计 RFC-0002 artifact 删除、过期和内容不可用状态。
+- 已新增 `CheckpointRestoreConflict` 与 `ConversationForked` recovery-critical durable event：
+  前者记录 exact restore 在首个写入前的 fail-closed 原因，后者记录新 session 的 parent/turn
+  provenance；两者都不保存原始文件内容或 prompt。
 - 已将 `/task` readiness 的 durable replay bridge 接到 store-backed session snapshot，避免非阻塞 readiness 只从 in-memory legacy entries 判断 RFC-0002 mutation evidence。
 - 已将 foreground chat 和 `/task` synthetic readiness evidence 的 `source_stream_sequence` 切到 mixed-format durable stream 的 next sequence；durable-only events 不进入 `Session::entries()` 时，也不会低估后续 readiness / run-check ordering。
 - 已将 `/task` durable mutation replay failure 处理为 fail-closed unknown-dirty evidence，避免 corrupt/unreadable stream 被当作空 mutation evidence。

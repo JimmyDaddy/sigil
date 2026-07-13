@@ -153,6 +153,15 @@ impl AppState {
             AppAction::RerunTaskVerification { request } => {
                 WorkerCommand::RerunTaskVerification { request }
             }
+            AppAction::PreviewCheckpointRestore { request } => {
+                WorkerCommand::PreviewCheckpointRestore { request }
+            }
+            AppAction::ExecuteCheckpointRestore { request } => {
+                WorkerCommand::ExecuteCheckpointRestore { request }
+            }
+            AppAction::ForkConversationAtCheckpoint { request } => {
+                WorkerCommand::ForkConversationAtCheckpoint { request }
+            }
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
             }

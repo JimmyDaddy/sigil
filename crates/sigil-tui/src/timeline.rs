@@ -58,6 +58,7 @@ pub(crate) enum SessionHistoryRow {
 pub(crate) enum SidebarCard {
     Permission,
     Agents,
+    Review,
     Usage,
 }
 
@@ -66,6 +67,7 @@ impl SidebarCard {
         match self {
             Self::Permission => "permission",
             Self::Agents => "agents",
+            Self::Review => "review",
             Self::Usage => "usage",
         }
     }
@@ -73,7 +75,8 @@ impl SidebarCard {
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Permission => Self::Agents,
-            Self::Agents => Self::Usage,
+            Self::Agents => Self::Review,
+            Self::Review => Self::Usage,
             Self::Usage => Self::Permission,
         }
     }
@@ -82,7 +85,8 @@ impl SidebarCard {
         match self {
             Self::Permission => Self::Usage,
             Self::Agents => Self::Permission,
-            Self::Usage => Self::Agents,
+            Self::Review => Self::Agents,
+            Self::Usage => Self::Review,
         }
     }
 }

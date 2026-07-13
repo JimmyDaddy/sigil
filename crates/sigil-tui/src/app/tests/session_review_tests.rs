@@ -172,3 +172,83 @@ fn session_review_warns_for_unknown_mutation_without_precise_rewind() -> Result<
     assert!(review.contains("rewind: unknown write need git/manual restore"));
     Ok(())
 }
+
+#[test]
+fn checkpoint_review_requires_preview_before_restore_and_supports_fork() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let note = workspace.join("note.txt");
+    std::fs::write(&note, "before\n")?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: workspace.display().to_string(),
+        },
+        ..test_config()
+    };
+    let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
+    let session_path = temp.path().join("session-checkpoint-actions.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
+    let recorder = sigil_kernel::MutationEventRecorder::new(store.clone());
+    sigil_kernel::write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "call-edit",
+        "note.txt",
+        &note,
+        b"after\n",
+    )?;
+    app.session_log_path = session_path.clone();
+    app.sync_current_session_state(JsonlSessionStore::read_entries(&session_path)?);
+
+    let focus = app.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('r'),
+        crossterm::event::KeyModifiers::ALT,
+    ))?;
+    assert!(focus.is_none());
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert_eq!(app.sidebar_selected_card, SidebarCard::Review);
+
+    let first_enter = app
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))?
+        .expect("preview action");
+    let AppAction::PreviewCheckpointRestore { request } = first_enter else {
+        panic!("first Enter must preview");
+    };
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let preview = sigil_kernel::preview_controlled_checkpoint_restore(
+        &recorder, &records, &workspace, &request,
+    )?;
+    app.apply_checkpoint_restore_preview(preview);
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("press Enter again"))
+    );
+
+    let second_enter = app
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))?
+        .expect("execute action");
+    assert!(matches!(
+        second_enter,
+        AppAction::ExecuteCheckpointRestore { .. }
+    ));
+
+    let fork = app
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('f'),
+            crossterm::event::KeyModifiers::NONE,
+        ))?
+        .expect("fork action");
+    assert!(matches!(
+        fork,
+        AppAction::ForkConversationAtCheckpoint { .. }
+    ));
+    Ok(())
+}

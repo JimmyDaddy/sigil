@@ -63,7 +63,7 @@ Sigil 已经是一个真正的 TUI-first coding agent，而不是普通 tool-cal
 | --- | --- | --- | --- |
 | P0 | Durable Event Foundation + Minimal Eval | JSONL 是 append-only，但缺少统一 envelope、stream sequence、schema version、尾部损坏恢复和基础 conformance eval | 事件地基、兼容读取、reducer 接口、deterministic fake provider/tool 和最小状态机 eval |
 | P0 | Verification Contract + Evidence Projection | Agent / task 可以返回 final answer；`/task` 中非 blocking tool error 可能被记录为 recovered 后完成 | 拆开 `RunStatus` 与 `VerificationVerdict`，用事件派生 evidence projection |
-| P0/P1 | Checkpoint / Rewind | 写工具有 preview、diff、changeset 和 append-only 审计，但没有通用会话级 rewind | 先做受控文件写 restore MVP；conversation fork、unrevert 和 Bash snapshot 后置 |
+| P0/P1 | Checkpoint / Rewind | RFC-0024 V1 已实现：受控普通文件 exact batch restore、冲突审计、verification stale、完整 turn conversation fork 与 TUI Review 流程；不覆盖 shell/remote 副作用 | 后续只扩展可证明的 backend snapshot/unrevert 能力，不扩大 V1 承诺边界 |
 | P0/P1 | Execution Sandbox | Permission、preview、workspace confinement 较强；`bash` / terminal 仍是本地进程 | 抽象执行后端、capability model、profile presets、fail-closed policy 和一个非交互 shell sandbox |
 | P1 | Context Engine | Memory 主要是项目指令文件；LSP/code-intel 是模型主动调用工具 | Trust-labeled context archive、BM25、LSP inputs、secret/egress policy 和 token-budget packing |
 | P1 | Task DAG + Reviewer/Verifier | `/task` 仍是 sequential orchestrator；普通子 agent 可并发但不等同于 task DAG | 只读并发、写任务隔离、显式依赖 schema、review、verify 和 bounded replanning |
@@ -423,13 +423,22 @@ cargo check
 
 ## 6. Phase 2：Checkpoint / Rewind
 
-目标：先为受控文件写入提供可审计、可冲突检测的 restore 能力；更复杂的 session fork / unrevert / Bash snapshot 后置。
+目标：为受控文件写入提供可审计、可冲突检测的 restore 能力，并通过 append-only
+conversation fork 分离会话分支；unrevert / Bash snapshot 仅在 backend 能证明时后置扩展。
+
+当前实现（RFC-0024 V1）：
+
+- 已从现有 mutation evidence 派生 user-turn checkpoint，不新增重复 snapshot store。
+- 已实现 exact id/digest、全量 preflight、batch restore、conflict evidence 和 verification stale。
+- 已在 TUI Session Review 提供 preview/confirm、evidence inspect 与 complete-turn conversation
+  fork；父 session 不改写，external provenance 会重绑到新 session scope。
+- shell、MCP、network、database、remote、directory、rename 与 symlink 副作用仍明确不在
+  restore 承诺内。
 
 当前问题：
 
-- Sigil 已有 diff、preview、changeset 和工具执行审计，但没有统一的 checkpoint / rewind 用户能力。
-- 当前写入安全主要发生在执行前审批和执行后审计；用户如果想回退一轮修改，仍主要依赖 Git 或手工恢复。
-- 当前还没有面向用户的“撤销本轮受控写工具修改”的一体化体验。
+- 受控普通文件已有统一 checkpoint / rewind 用户能力；未受控副作用仍需 Git、backend
+  snapshot 或手工恢复。
 - Bash、formatter、migration script 这类命令的副作用不能仅靠编辑工具 preview 推断。
 - Restore 本身也是新的 workspace mutation，不能复用 restore 前的 verification verdict。
 

@@ -27,6 +27,7 @@ pub(crate) struct TaskStripView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationCardView {
+    pub(crate) scope: EvidenceScope,
     pub(crate) status: String,
     pub(crate) recommended: Option<String>,
     pub(crate) why: Option<String>,
@@ -373,6 +374,7 @@ fn verification_card_view(
     }
     let inspect_lines = verification_inspect_lines(run, projection);
     Some(VerificationCardView {
+        scope: scope.clone(),
         status: verification_card_status(task, &scope, readiness, run, projection),
         recommended,
         why,

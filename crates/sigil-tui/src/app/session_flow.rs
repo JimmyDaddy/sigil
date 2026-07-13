@@ -290,6 +290,10 @@ impl AppState {
     }
 
     pub(super) fn sync_current_session_state(&mut self, entries: Vec<SessionLogEntry>) {
+        (
+            self.latest_checkpoint_restore_sequence,
+            self.readiness_sequences_by_scope,
+        ) = super::session_review::checkpoint_verification_order(&self.session_log_path);
         let entries =
             preserve_local_ui_control_entries(&self.session_browser.current_entries, entries);
         self.runtime.stats = session_stats_from_entries(&entries);
@@ -307,6 +311,10 @@ impl AppState {
         self.session_browser
             .current_entries
             .push(SessionLogEntry::Control(control));
+        (
+            self.latest_checkpoint_restore_sequence,
+            self.readiness_sequences_by_scope,
+        ) = super::session_review::checkpoint_verification_order(&self.session_log_path);
         self.runtime.stats = session_stats_from_entries(&self.session_browser.current_entries);
         self.latest_compaction_record =
             latest_compaction_record(&self.session_browser.current_entries);
@@ -477,6 +485,7 @@ impl AppState {
         entries: Vec<SessionLogEntry>,
         notice: &str,
     ) {
+        self.checkpoint_restore_preview = None;
         self.session_log_path = session_log_path;
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = model_name;

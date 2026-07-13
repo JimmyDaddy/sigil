@@ -2076,8 +2076,12 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.sidebar_selected_card, SidebarCard::Review);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Agents);
     assert_eq!(app.sidebar_agent_selected, 0);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.sidebar_selected_card, SidebarCard::Review);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
 

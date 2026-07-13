@@ -1797,6 +1797,125 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::PreviewCheckpointRestore { request }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot preview checkpoint restore while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                match preview_current_checkpoint_restore(
+                    &current_session_log_path,
+                    current_session.as_ref(),
+                    &workspace_root,
+                    &request,
+                ) {
+                    Ok(preview) => {
+                        let _ =
+                            message_tx.send(WorkerMessage::CheckpointRestorePreviewed { preview });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::ExecuteCheckpointRestore { request }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot restore checkpoint while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                let output = match execute_current_checkpoint_restore(
+                    &current_session_log_path,
+                    current_session.as_ref(),
+                    &workspace_root,
+                    &request,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                match load_session_with_url_capability_attachment(
+                    &root_config.agent.provider,
+                    &root_config.agent.model,
+                    &current_session_log_path,
+                    current_session.as_ref(),
+                ) {
+                    Ok(session) => {
+                        let entries = session.entries().to_vec();
+                        current_session = Some(session);
+                        let _ = message_tx.send(WorkerMessage::CheckpointRestoreCompleted {
+                            preview: output.preview,
+                            batch_id: output.batch_id,
+                            entries,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "checkpoint restored but session reload failed: {error:#}"
+                        )));
+                    }
+                }
+            }
+            Ok(WorkerCommand::ForkConversationAtCheckpoint { request }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot fork conversation while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                let output = match fork_current_conversation(
+                    &current_session_log_path,
+                    current_session.as_ref(),
+                    &request,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                match load_session_with_url_capability_attachment(
+                    &root_config.agent.provider,
+                    &root_config.agent.model,
+                    &output.destination_path,
+                    current_session.as_ref(),
+                ) {
+                    Ok(mut session) => {
+                        if current_session.as_ref().is_some_and(|session| {
+                            session_workspace_is_trusted(session, &workspace_root)
+                        }) && let Err(error) = ensure_session_workspace_trust(
+                            &mut session,
+                            &workspace_root,
+                            "trusted workspace carried into conversation fork",
+                        ) {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            continue;
+                        }
+                        exact_conversation_prompts.clear();
+                        let entries = session.entries().to_vec();
+                        let provider_name = session.provider_name().to_owned();
+                        let model_name = session.model_name().to_owned();
+                        current_session_log_path = output.destination_path.clone();
+                        current_session = Some(session);
+                        let _ = message_tx.send(WorkerMessage::ConversationForked {
+                            session_log_path: output.destination_path,
+                            provider_name,
+                            model_name,
+                            copied_message_count: output.copied_message_count,
+                            entries,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "conversation fork created but session switch failed: {error:#}"
+                        )));
+                    }
+                }
+            }
             Ok(WorkerCommand::CleanMutationArtifacts { target }) => {
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(

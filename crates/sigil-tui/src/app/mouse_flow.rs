@@ -387,6 +387,9 @@ impl AppState {
         self.clear_timeline_text_selection();
         self.blur_verification_card();
         self.active_pane = PaneFocus::Activity;
+        if self.info_rail_detail_enabled() && !self.session_review_sidebar_lines().is_empty() {
+            self.sidebar_selected_card = super::SidebarCard::Review;
+        }
         self.blur_composer_aux_panels();
         crate::mouse::AppMouseOutcome::Redraw
     }

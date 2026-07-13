@@ -7,6 +7,7 @@ use std::{
 
 mod agent_flow;
 mod approval_flow;
+mod checkpoint_flow;
 mod command_dispatch;
 mod config_flow;
 mod conversation_queue_flow;
@@ -46,7 +47,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, AgentThreadStateProjection, CompactionConfig, CompactionRecord,
-    CompactionThresholdStatus, ConversationInputKind, ConversationInputQueueId,
+    CompactionThresholdStatus, ControlledCheckpointRestorePreview,
+    ControlledCheckpointRestoreRequest, ConversationInputKind, ConversationInputQueueId,
     ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
     MutationArtifactInventoryItem, MutationArtifactRetentionReport, PermissionMode,
     PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig, SecretRedactor,
@@ -280,6 +282,9 @@ pub struct AppState {
     pub timeline_scroll_back: usize,
     pub activity_scroll_back: usize,
     info_rail_detail: bool,
+    checkpoint_restore_preview: Option<ControlledCheckpointRestorePreview>,
+    latest_checkpoint_restore_sequence: Option<u64>,
+    readiness_sequences_by_scope: BTreeMap<sigil_kernel::EvidenceScope, u64>,
     config_snapshot: Option<RootConfig>,
     terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
@@ -441,6 +446,15 @@ pub enum AppAction {
     RerunTaskVerification {
         request: sigil_kernel::TaskVerificationRerunRequest,
     },
+    PreviewCheckpointRestore {
+        request: ControlledCheckpointRestoreRequest,
+    },
+    ExecuteCheckpointRestore {
+        request: ControlledCheckpointRestoreRequest,
+    },
+    ForkConversationAtCheckpoint {
+        request: ControlledCheckpointRestoreRequest,
+    },
     ActivateLazyMcp {
         server_name: Option<String>,
     },
@@ -533,6 +547,9 @@ impl AppState {
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_detail: false,
+            checkpoint_restore_preview: None,
+            latest_checkpoint_restore_sequence: None,
+            readiness_sequences_by_scope: BTreeMap::new(),
             config_snapshot: Some(root_config.clone()),
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
@@ -653,6 +670,9 @@ impl AppState {
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_detail: false,
+            checkpoint_restore_preview: None,
+            latest_checkpoint_restore_sequence: None,
+            readiness_sequences_by_scope: BTreeMap::new(),
             config_snapshot: None,
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: SecretRedactor::default(),
@@ -957,6 +977,10 @@ impl AppState {
         }
 
         if let Some(outcome) = self.handle_verification_card_key_event(key) {
+            return Ok(outcome);
+        }
+
+        if let Some(outcome) = self.handle_checkpoint_review_key_event(key) {
             return Ok(outcome);
         }
 

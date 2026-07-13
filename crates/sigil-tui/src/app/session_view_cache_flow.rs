@@ -113,7 +113,27 @@ impl AppState {
     }
 
     pub(crate) fn task_strip_view(&self) -> Option<super::task_sidebar::TaskStripView> {
-        self.session_view_cache().task_strip_view.clone()
+        let mut view = self.session_view_cache().task_strip_view.clone()?;
+        if let Some(verification) = view.verification.as_mut()
+            && self
+                .latest_checkpoint_restore_sequence
+                .is_some_and(|restore| {
+                    restore
+                        > self
+                            .readiness_sequences_by_scope
+                            .get(&verification.scope)
+                            .copied()
+                            .unwrap_or(0)
+                })
+        {
+            verification.status = "stale after checkpoint restore".to_owned();
+            verification.why = Some("workspace changed; refresh verification evidence".to_owned());
+            verification.action = None;
+            verification.inspect_lines.push(
+                "checkpoint restore is newer than the latest readiness evaluation".to_owned(),
+            );
+        }
+        Some(view)
     }
 
     pub(in crate::app) fn session_view_cache(&self) -> Ref<'_, SessionViewCache> {

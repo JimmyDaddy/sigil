@@ -47,6 +47,7 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
 | Focus task verification | `Alt-V`; then `Enter` runs the exact action, `I` inspects evidence |
+| Focus checkpoint review | `Alt-R`; then `Enter` previews/confirms file restore, `F` forks the conversation, `I` inspects evidence |
 | Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A` / `Shift-Alt-A` |
 | Focus follow-up panel | `Tab` from the composer when a follow-up is pending |
 | Run selected follow-up next | `Enter` on a selected follow-up uses the safe `next` action by default |
@@ -149,6 +150,25 @@ Sigil stores session and control state as append-only JSONL. For users, this mea
 - Saving new provider/model defaults in `/config` does not rewrite the identity of the current session.
 - Before prompts, queued follow-ups, tool arguments, task controls, or external URLs are kept in session records, Sigil stores a redacted, size-limited description. Sensitive exact values remain only for active use and are not reconstructed after restart; if exact information is required again, Sigil asks you to retry the action.
 - External material remains explicitly untrusted through compaction and recovery. Source records and claim citations are stored separately, and citations bind only to the final safe assistant text they support.
+
+### Controlled checkpoints and conversation forks
+
+When the latest completed turn contains controlled ordinary-file edits, press `Alt-R` to focus its
+checkpoint review. `Enter` first asks the worker to rebuild an exact preview from the durable log.
+The timeline lists every file, the restore direction, conflicts, and any unknown side effects that
+are excluded. Only a ready preview can be confirmed by pressing `Enter` again.
+
+Restore checks the current file hashes and stored snapshots before its first write. A changed file,
+missing or sensitive snapshot, different workspace, or stale preview blocks the whole operation.
+After a successful restore, prior verification is stale and should be rerun. This operation restores
+only controlled ordinary-file mutations: it does not undo shell commands, MCP/plugin effects,
+network requests, databases, remote services, directories, renames, or symlinks.
+
+Press `F` while checkpoint review is focused to fork the conversation through that completed turn.
+The fork becomes the active session and keeps only safe user/assistant/tool history plus rebound
+source provenance; active approvals, tasks, queues, continuation handles, and mutation state are not
+copied. The parent session stays append-only. Conversation fork does not isolate or restore the
+workspace—both sessions still refer to the same files.
 
 ## Long Context and Compaction
 

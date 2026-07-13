@@ -11,6 +11,8 @@ use sigil_kernel::{
     AgentResultContinuationStatus, AgentRole, AgentRunInput, AgentRunOptions, AgentRunResult,
     AgentThreadId, AgentThreadStatus, AgentThreadStatusChangedEntry, CheckDiscoverySource,
     CheckPromotion, CheckSpec, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
+    ControlledCheckpointRestoreOutput, ControlledCheckpointRestorePreview,
+    ControlledCheckpointRestoreRequest, ConversationForkOutput, ConversationForkRequest,
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
@@ -61,6 +63,7 @@ use super::{
 
 mod active_run;
 mod agent_runtime;
+mod checkpoint_runtime;
 mod mcp_refresh;
 mod provider_status;
 mod queue_driver;
@@ -76,6 +79,10 @@ pub(in crate::runner) use agent_runtime::{
     close_agent_thread, collect_finished_background_agent_runs, extend_agent_thread_ids_unique,
     manual_agent_invocation_result, manual_agent_parent_summary, message_agent_thread,
     start_agent_result_continuation_run, start_queued_conversation_run,
+};
+pub(in crate::runner) use checkpoint_runtime::{
+    execute_current_checkpoint_restore, fork_current_conversation,
+    preview_current_checkpoint_restore,
 };
 pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;
 pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;

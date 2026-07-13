@@ -520,6 +520,45 @@ impl AppState {
                     }
                 }
             }
+            WorkerMessage::CheckpointRestorePreviewed { preview } => {
+                self.apply_checkpoint_restore_preview(preview);
+            }
+            WorkerMessage::CheckpointRestoreCompleted {
+                preview,
+                batch_id,
+                entries,
+            } => {
+                self.sync_current_session_state(entries);
+                self.apply_checkpoint_restore_completed(&preview);
+                self.push_event("checkpoint", format!("restore batch {batch_id} applied"));
+            }
+            WorkerMessage::ConversationForked {
+                session_log_path,
+                provider_name,
+                model_name,
+                copied_message_count,
+                entries,
+            } => {
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
+                self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
+                self.clear_checkpoint_interaction();
+                self.restore_session_view(
+                    session_log_path,
+                    provider_name,
+                    model_name,
+                    entries,
+                    "conversation fork created",
+                );
+                self.last_notice = Some(format!(
+                    "conversation fork created with {copied_message_count} safe message(s); workspace files are shared"
+                ));
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    "Conversation fork created. Active approvals/tasks were not copied; workspace files remain shared.",
+                );
+                self.schedule_balance_refresh();
+            }
             WorkerMessage::Notice(message) => {
                 self.last_notice = Some(message.clone());
                 if message.starts_with("mutation artifact cleanup:")

@@ -478,7 +478,11 @@ Required deterministic tests:
 - 已补充 cleanup intent durable audit：显式 `clean` 会先追加 `MutationArtifactCleanupRequested`，再逐 artifact 追加 `MutationArtifactLifecycleRecorded`；preview / inventory 仍然只读，不修改 artifact store。
 - 已接入受控 `write_file`、`edit_file`、`delete_file` 与 `apply_changeset` 路径；legacy no-recorder 路径保留兼容。
 - 已实现多文件 changeset batch id、per-file prepare/commit、batch started/finished 和 apply-stage failure 的 failed batch evidence。
-- 已实现最小 checkpoint restore helper：`SnapshotCoverage::Captured` 会读取并校验 mutation artifact，将 restore 作为新的 prepare/commit/write mutation 记录，并追加 `CheckpointRestored`；`SkippedSensitive` / `Unsupported` / `Unavailable` 会 fail closed，不会静默恢复。
+- 已实现 exact checkpoint batch restore：worker 只接受 checkpoint id/digest，kernel 在 workspace
+  lease 内重新投影并 full-preflight 全部普通文件的 workspace/path/current hash/snapshot artifact；
+  任一 stale、drift、sensitive、unsupported 或 unavailable binding 都会在首个写入前 fail closed
+  并追加 `CheckpointRestoreConflict`。成功路径复用 batch + per-file prepare/commit/write/
+  `CheckpointRestored` evidence；中途 I/O failure 明确记录 failed/partially-applied，不声明原子回滚。
 - 已实现 load/reconcile helper：prepared without terminal event 可按当前文件 hash 归类为 not applied、committed、conflict 或 unknown dirty。
 - 已实现受控 directory mutation evidence：目录创建/删除使用同一 prepare/commit/reconcile 协议；受控写入创建缺失父目录前会先记录 directory mutation，避免 crash 后出现“目录已创建但无 evidence”的状态。
 - 已将 committed/reconciled mutation evidence 接入 RFC-0003 readiness，受控写入会使旧 verification stale 或 missing。

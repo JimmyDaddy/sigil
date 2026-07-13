@@ -1,6 +1,6 @@
 # RFC-0024 TUI Checkpoint / Rewind V1
 
-状态：accepted / implementation in progress
+状态：implemented
 
 创建日期：2026-07-13
 
@@ -115,5 +115,10 @@ Restore preview 必须显示文件列表、create/update/delete 方向、unknown
   `CheckpointRestoreConflict` 与 restore verification-stale evidence 已落地。
 - `C24.4` complete：complete-turn conversation fork、`ConversationForked` provenance、safe
   message prefix 与 external provenance session-scope rebinding 已落地。
-- `C24.3`、`C24.5`、`C24.6` pending：worker command、TUI interaction 与 completion audit 尚待
-  后续切片完成。
+- `C24.3` complete：worker-bound preview/execute/fork command、session reload/switch 与
+  scope-aware verification stale projection 已落地。
+- `C24.5` complete：`Alt-R` Review focus、双 `Enter` preview/confirm、`F` conversation fork、
+  `I` evidence inspect、mouse info-rail focus、narrow timeline fallback 和 EN/ZH 帮助已落地。
+- `C24.6` complete：kernel 全量测试、TUI 全量测试/all-target Clippy、worker-loop
+  success/conflict/fork E2E、docs gate 与本地 full-audit 均通过；Pages 非 viewport 检查通过，
+  viewport gate 因本机 Chrome `--dump-dom` 对最小空白页同样超时而保留为环境限制。

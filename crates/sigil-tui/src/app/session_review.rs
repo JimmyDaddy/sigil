@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use sigil_kernel::{
     CheckpointRestored, ControlEntry, DomainEvent, JsonlSessionStore, MutationCommitted,
@@ -65,6 +68,47 @@ pub(super) fn session_review_sidebar_lines(
     session_review_sidebar_lines_from_records(&records, entries)
 }
 
+pub(super) fn checkpoint_verification_order(
+    session_log_path: &Path,
+) -> (Option<u64>, BTreeMap<sigil_kernel::EvidenceScope, u64>) {
+    let Ok(records) = JsonlSessionStore::read_event_records(session_log_path) else {
+        return (None, BTreeMap::new());
+    };
+    checkpoint_verification_order_from_records(&records)
+}
+
+fn verification_stale_after_checkpoint_from_records(records: &[SessionStreamRecord]) -> bool {
+    let (latest_restore, readiness_by_scope) = checkpoint_verification_order_from_records(records);
+    let latest_readiness = readiness_by_scope.values().max().copied();
+    latest_restore.is_some_and(|restore| restore > latest_readiness.unwrap_or(0))
+}
+
+fn checkpoint_verification_order_from_records(
+    records: &[SessionStreamRecord],
+) -> (Option<u64>, BTreeMap<sigil_kernel::EvidenceScope, u64>) {
+    let mut latest_restore = None;
+    let mut readiness_by_scope = BTreeMap::new();
+    for record in records {
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
+        match event.event_kind() {
+            Some(sigil_kernel::DurableEventType::CheckpointRestored) => {
+                latest_restore = Some(event.stream_sequence);
+            }
+            Some(sigil_kernel::DurableEventType::ReadinessEvaluated) => {
+                if let Some(SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))) =
+                    session_entry_from_stream_record(record)
+                {
+                    readiness_by_scope.insert(readiness.scope, event.stream_sequence);
+                }
+            }
+            _ => {}
+        }
+    }
+    (latest_restore, readiness_by_scope)
+}
+
 pub(super) fn session_review_sidebar_lines_from_records(
     records: &[SessionStreamRecord],
     fallback_entries: &[SessionLogEntry],
@@ -97,7 +141,11 @@ pub(super) fn session_review_sidebar_lines_from_records(
         return Vec::new();
     }
 
-    render_review_lines(turns_seen, &latest_completed)
+    render_review_lines(
+        turns_seen,
+        &latest_completed,
+        verification_stale_after_checkpoint_from_records(records),
+    )
 }
 
 fn apply_session_entry(
@@ -229,7 +277,11 @@ fn record_subject_path(subject: &MutationSubject, changed_files: &mut BTreeSet<S
     }
 }
 
-fn render_review_lines(turns_seen: usize, latest: &ReviewTurnSummary) -> Vec<String> {
+fn render_review_lines(
+    turns_seen: usize,
+    latest: &ReviewTurnSummary,
+    verification_stale_after_checkpoint: bool,
+) -> Vec<String> {
     let mut lines = Vec::new();
     let turn_index = if latest.index > 0 {
         latest.index
@@ -247,7 +299,9 @@ fn render_review_lines(turns_seen: usize, latest: &ReviewTurnSummary) -> Vec<Str
         latest.tool_calls,
         latest.controlled_writes
     ));
-    if let Some((run_status, verdict)) = latest.latest_readiness {
+    if verification_stale_after_checkpoint {
+        lines.push("verification: stale after checkpoint restore".to_owned());
+    } else if let Some((run_status, verdict)) = latest.latest_readiness {
         lines.push(format!(
             "verification: run {} · {}",
             run_status_label(run_status),
@@ -257,6 +311,12 @@ fn render_review_lines(turns_seen: usize, latest: &ReviewTurnSummary) -> Vec<Str
         lines.push("verification: not evaluated".to_owned());
     }
     lines.push(checkpoint_label(latest));
+    if latest.precise_restore_available
+        || latest.limited_restore_evidence
+        || latest.unknown_mutations > 0
+    {
+        lines.push("actions: Alt-R focus · Enter preview · F fork · I inspect".to_owned());
+    }
     lines
 }
 

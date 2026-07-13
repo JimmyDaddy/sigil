@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use sigil_kernel::{
     AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionRecord,
-    ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
-    ConversationQueueItemProjection, DisclosurePresentationError, DisclosurePresentationReceipt,
-    MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
-    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort, RunEvent,
-    SessionLogEntry, TaskCreatedFromPlanEntry, TaskRunStatus, TaskVerificationRerunRequest,
-    TerminalTaskEntry,
+    ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
+    ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
+    DisclosurePresentationError, DisclosurePresentationReceipt, MutationArtifactCleanupTarget,
+    PlanApprovalPermission, PlanApprovedEntry, PlanDecisionRecordedEntry, PlanTaskStartMode,
+    PreEgressDisclosure, ReasoningEffort, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
+    TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry,
 };
 use sigil_runtime::{
     BalanceSnapshot, McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
@@ -184,6 +184,15 @@ pub enum WorkerCommand {
     RerunTaskVerification {
         request: TaskVerificationRerunRequest,
     },
+    PreviewCheckpointRestore {
+        request: ControlledCheckpointRestoreRequest,
+    },
+    ExecuteCheckpointRestore {
+        request: ControlledCheckpointRestoreRequest,
+    },
+    ForkConversationAtCheckpoint {
+        request: ControlledCheckpointRestoreRequest,
+    },
     RefreshProviderBalance {
         request_id: u64,
         provider_config: ProviderStatusConfig,
@@ -327,6 +336,21 @@ pub enum WorkerMessage {
         model_name: String,
         record: Box<CompactionRecord>,
         trigger: CompactionTrigger,
+        entries: Vec<SessionLogEntry>,
+    },
+    CheckpointRestorePreviewed {
+        preview: ControlledCheckpointRestorePreview,
+    },
+    CheckpointRestoreCompleted {
+        preview: ControlledCheckpointRestorePreview,
+        batch_id: String,
+        entries: Vec<SessionLogEntry>,
+    },
+    ConversationForked {
+        session_log_path: PathBuf,
+        provider_name: String,
+        model_name: String,
+        copied_message_count: usize,
         entries: Vec<SessionLogEntry>,
     },
     McpActivationStatus {

@@ -25,6 +25,7 @@ This page collects user-facing commands, keys, paths, shared config sections, ap
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
 | Focus task verification | `Alt-V`; then `Enter` runs the exact action, `I` inspects evidence |
+| Focus latest checkpoint review | `Alt-R`; then `Enter` previews/confirms controlled file restore, `F` forks conversation, `I` inspects evidence |
 | Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A` |
 | Expand or collapse thinking / activity | `Ctrl-T` |
 | Run code diagnostics for changed source files | `Alt-D` |

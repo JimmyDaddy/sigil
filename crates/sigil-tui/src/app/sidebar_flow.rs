@@ -21,7 +21,7 @@ impl AppState {
                     if self.sidebar_agent_selected < last_index {
                         self.sidebar_agent_selected += 1;
                     } else {
-                        self.sidebar_selected_card = SidebarCard::Usage;
+                        self.sidebar_selected_card = SidebarCard::Review;
                     }
                 } else if self.sidebar_agent_selected > 0 {
                     self.sidebar_agent_selected -= 1;
@@ -29,7 +29,7 @@ impl AppState {
                     self.sidebar_selected_card = SidebarCard::Permission;
                 }
             }
-            SidebarCard::Usage => {
+            SidebarCard::Review | SidebarCard::Usage => {
                 self.sidebar_selected_card = if next {
                     self.sidebar_selected_card.next()
                 } else {

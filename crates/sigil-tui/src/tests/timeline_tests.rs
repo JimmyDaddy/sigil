@@ -120,15 +120,18 @@ fn sidebar_agent_rows_compact_common_status_labels() {
 fn sidebar_card_navigation_covers_all_variants() {
     assert_eq!(SidebarCard::Permission.label(), "permission");
     assert_eq!(SidebarCard::Agents.label(), "agents");
+    assert_eq!(SidebarCard::Review.label(), "review");
     assert_eq!(SidebarCard::Usage.label(), "usage");
 
     assert_eq!(SidebarCard::Permission.next(), SidebarCard::Agents);
-    assert_eq!(SidebarCard::Agents.next(), SidebarCard::Usage);
+    assert_eq!(SidebarCard::Agents.next(), SidebarCard::Review);
+    assert_eq!(SidebarCard::Review.next(), SidebarCard::Usage);
     assert_eq!(SidebarCard::Usage.next(), SidebarCard::Permission);
 
     assert_eq!(SidebarCard::Permission.previous(), SidebarCard::Usage);
     assert_eq!(SidebarCard::Agents.previous(), SidebarCard::Permission);
-    assert_eq!(SidebarCard::Usage.previous(), SidebarCard::Agents);
+    assert_eq!(SidebarCard::Review.previous(), SidebarCard::Agents);
+    assert_eq!(SidebarCard::Usage.previous(), SidebarCard::Review);
 }
 
 #[test]

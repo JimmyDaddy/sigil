@@ -18,6 +18,7 @@ pub(crate) enum UiCommand {
     CycleAgentViewPrevious,
     CheckChangedFilesDiagnostics,
     FocusVerificationCard,
+    FocusCheckpointReview,
     FocusLatestToolCard,
     SelectNextToolCard,
     SelectPreviousToolCard,
@@ -95,6 +96,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: None,
         label: "Info rail",
         help: "Toggle the right rail between compact and detailed information.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
+        command: UiCommand::FocusCheckpointReview,
+        keys: &[KeyBinding { label: "Alt-R" }],
+        slash: None,
+        label: "Checkpoint review",
+        help: "Focus the latest controlled checkpoint for restore preview or conversation fork.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -251,6 +260,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::FocusVerificationCard)
         }
+        KeyCode::Char('r') | KeyCode::Char('R') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::FocusCheckpointReview)
+        }
         KeyCode::Char('i') | KeyCode::Char('I') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::ToggleInfoRailDetail)
         }
@@ -286,6 +298,7 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
         control_hint(UiCommand::CheckChangedFilesDiagnostics)
             .expect("check changes metadata exists"),
         control_hint(UiCommand::FocusVerificationCard).expect("verification metadata exists"),
+        control_hint(UiCommand::FocusCheckpointReview).expect("checkpoint metadata exists"),
     ];
     hints.retain(|hint| !hint.is_empty());
     hints
@@ -326,7 +339,12 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     lines.extend(command_help_lines([
         UiCommand::CheckChangedFilesDiagnostics,
         UiCommand::FocusVerificationCard,
+        UiCommand::FocusCheckpointReview,
     ]));
+    lines.push(
+        "Checkpoint focus: Enter previews/confirms controlled file restore; F forks conversation; I inspects evidence. Shell and remote effects are never undone."
+            .to_owned(),
+    );
     if include_tool_cards {
         lines.extend(command_help_lines([
             UiCommand::FocusLatestToolCard,
