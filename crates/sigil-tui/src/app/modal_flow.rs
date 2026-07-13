@@ -186,6 +186,7 @@ pub(super) enum ModalState {
     SecretInput(SecretInputState),
     TextInput(TextInputState),
     McpElicitation(McpElicitationModalState),
+    CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
     KeyboardHelp,
 }
 
@@ -214,6 +215,7 @@ impl AppState {
             ModalState::SecretInput(state) => Some(state.target.title()),
             ModalState::TextInput(state) => Some(state.target.title()),
             ModalState::McpElicitation(_) => Some("MCP Elicitation"),
+            ModalState::CheckpointRestore(_) => Some("Restore Checkpoint"),
             ModalState::KeyboardHelp => Some("Keyboard Help"),
         }
     }
@@ -281,6 +283,7 @@ impl AppState {
                 }
                 lines
             }
+            Some(ModalState::CheckpointRestore(_)) => Vec::new(),
             Some(ModalState::KeyboardHelp) => {
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());
@@ -336,6 +339,7 @@ impl AppState {
                 ))
             }
             ModalState::ModelPicker(_) => None,
+            ModalState::CheckpointRestore(_) => None,
             ModalState::KeyboardHelp => None,
         }
     }
@@ -659,6 +663,7 @@ impl AppState {
                 _ => ModalOutcome::None,
             },
             ModalState::McpElicitation(_) => ModalOutcome::None,
+            ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::KeyboardHelp => match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
                     self.modal_state = None;
@@ -705,6 +710,7 @@ impl AppState {
             }
             ModalState::ModelPicker(_)
             | ModalState::McpElicitation(_)
+            | ModalState::CheckpointRestore(_)
             | ModalState::KeyboardHelp => ModalOutcome::None,
         }
     }
@@ -739,6 +745,7 @@ impl AppState {
                 ModalOutcome::TextSubmitted { target, value }
             }
             ModalState::McpElicitation(_) => self.accept_mcp_elicitation(),
+            ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::KeyboardHelp => {
                 self.modal_state = None;
                 ModalOutcome::Dismissed("closed keyboard help".to_owned())

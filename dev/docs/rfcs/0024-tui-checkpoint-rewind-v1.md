@@ -76,15 +76,15 @@ File restore 与 conversation fork 是两个独立事实。组合操作必须明
 Session Review 是主入口。V1 提供粗粒度动作：
 
 ```text
-Review · turn 3/5
-Files       2 controlled · restorable
-Other       shell changes not included
-Enter       preview file restore
-F           fork conversation here
-I           inspect evidence
+Ctrl-R      open restore dialog and load exact preview
+Dialog      source turn, files, conflicts and reverse diff
+Enter       restore controlled files when ready
+F           fork conversation here (files unchanged)
+Ctrl-R      refresh exact preview
+Esc         close without changing files
 ```
 
-Restore preview 必须显示文件列表、create/update/delete 方向、unknown-side-effect warning 和不可恢复原因。用户再次显式确认后才发送 worker command。Conflict、sensitive、unsupported、unavailable 和 stale digest 都不能降级为静默部分恢复。
+`Ctrl-R` 必须打开独占焦点的 restore modal，并立即请求 exact preview，不再依赖 Activity/Review 的伪焦点或第一次 `Enter`。弹窗必须显示 source turn/prompt、文件列表、create/update/delete 方向、unknown-side-effect warning 和不可恢复原因，并使用该 turn 已持久化的 bounded tool preview 直接展示反向 diff；没有记录 diff 时显示 current/target hash 证据。弹窗必须接管 `Enter/F/Esc`，保留 composer draft，支持键盘与鼠标滚轮浏览，且不能让点击或按键穿透到 composer。异步请求必须关联 request id，关闭或刷新后迟到的回包不得覆盖新弹窗。用户在 ready 状态显式按 `Enter` 后才发送 restore command；成功后关闭弹窗并留下 restored 结果。`F` 必须明确 conversation fork 不改变共享 workspace 文件。Conflict、sensitive、unsupported、unavailable 和 stale digest 都不能降级为静默部分恢复。
 
 键位 metadata、focus routing、mouse hit testing、narrow layout、session switch、新 session message 和 EN/ZH 文档必须同步更新。
 
@@ -117,8 +117,9 @@ Restore preview 必须显示文件列表、create/update/delete 方向、unknown
   message prefix 与 external provenance session-scope rebinding 已落地。
 - `C24.3` complete：worker-bound preview/execute/fork command、session reload/switch 与
   scope-aware verification stale projection 已落地。
-- `C24.5` complete：`Alt-R` Review focus、双 `Enter` preview/confirm、`F` conversation fork、
-  `I` evidence inspect、mouse info-rail focus、narrow timeline fallback 和 EN/ZH 帮助已落地。
+- `C24.5` complete：`Ctrl-R` 独占 restore modal、自动 exact preview、request-id 回包隔离、
+  直接 durable reverse diff、`Enter` restore、`F` conversation fork、`Esc` close、滚动与
+  composer 防穿透、narrow fallback 和 EN/ZH 帮助已落地。
 - `C24.6` complete：kernel 全量测试、TUI 全量测试/all-target Clippy、worker-loop
   success/conflict/fork E2E、docs gate 与本地 full-audit 均通过；Pages 非 viewport 检查通过，
   viewport gate 因本机 Chrome `--dump-dom` 对最小空白页同样超时而保留为环境限制。

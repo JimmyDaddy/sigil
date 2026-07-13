@@ -14,11 +14,16 @@ pub(super) fn build_tool_activity_view(summary: &ToolCardRender, source: &str) -
         key: tool_activity_key(summary, source),
         title: display.title.plain(),
         is_inspection: tool_activity_is_inspection_summary(summary),
-        defaults_expanded: summary.diff.is_some() || terminal_task_is_active(summary),
+        defaults_expanded: summary.diff.is_some()
+            || terminal_task_is_active(summary)
+            || checkpoint_restore_tool(summary),
     }
 }
 
 pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
+    if checkpoint_restore_tool(summary) {
+        return checkpoint_restore_display_status(summary);
+    }
     if terminal_task_tool(summary) {
         return terminal_task_display_status(summary);
     }
@@ -121,6 +126,12 @@ pub(super) fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
 }
 
 pub(super) fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
+    if checkpoint_restore_tool(summary) {
+        return match summary.metadata.action.as_deref() {
+            Some("restored") => ToolCardTitle::new("Restored", "checkpoint files", None),
+            _ => ToolCardTitle::new("Review", "checkpoint restore", None),
+        };
+    }
     if terminal_task_tool(summary) {
         return ToolCardTitle::new(
             "Terminal",
@@ -347,6 +358,9 @@ pub(super) fn shell_command_title(action: &'static str, command: &str) -> ToolCa
 }
 
 pub(super) fn tool_activity_is_inspection_summary(summary: &ToolCardRender) -> bool {
+    if checkpoint_restore_tool(summary) {
+        return true;
+    }
     if tool_name_matches(&summary.tool_name, "read_file")
         || tool_name_matches(&summary.tool_name, "grep")
         || tool_name_matches(&summary.tool_name, "glob")
@@ -360,6 +374,33 @@ pub(super) fn tool_activity_is_inspection_summary(summary: &ToolCardRender) -> b
             .or_else(|| summary.metadata.call_summary.clone())
             .and_then(|command| classify_simple_shell_search(&command))
             .is_some()
+}
+
+fn checkpoint_restore_tool(summary: &ToolCardRender) -> bool {
+    tool_name_matches(&summary.tool_name, "checkpoint_restore")
+}
+
+fn checkpoint_restore_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
+    match summary.metadata.action.as_deref() {
+        Some("restored") => ToolCardDisplayStatus {
+            label: "RESTORED",
+            detail: Some("verification stale".to_owned()),
+            kind: StatusKind::Success,
+            is_error: false,
+        },
+        Some("blocked") => ToolCardDisplayStatus {
+            label: "BLOCKED",
+            detail: Some("preflight conflict".to_owned()),
+            kind: StatusKind::Error,
+            is_error: true,
+        },
+        _ => ToolCardDisplayStatus {
+            label: "PREVIEW",
+            detail: Some("Enter to restore".to_owned()),
+            kind: StatusKind::Pending,
+            is_error: false,
+        },
+    }
 }
 
 pub(super) fn tool_activity_key(summary: &ToolCardRender, source: &str) -> String {

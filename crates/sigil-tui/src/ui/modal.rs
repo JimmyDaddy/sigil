@@ -14,7 +14,7 @@ use super::{
 };
 
 pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
-    if !app.has_modal() {
+    if !app.has_modal() || app.checkpoint_restore_modal_open() {
         return;
     }
 

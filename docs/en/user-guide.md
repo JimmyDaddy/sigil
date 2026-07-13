@@ -30,6 +30,9 @@ The TUI is organized around these areas:
 - Activity: tool results such as file reads, searches, shell commands, file edits, and code diagnostics.
 - Approval modal: a review card for tool calls that need confirmation, including summary, files, diff, and actions.
 
+Text streamed before a tool call is treated as a collapsible thinking/progress preamble, not as a
+completed assistant reply. The transcript therefore keeps one assistant reply for the final answer.
+
 The main workflow is typing tasks directly in the composer. Slash commands are reserved for a small set of high-frequency control actions.
 
 ## Common Controls
@@ -47,7 +50,7 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
 | Focus task verification | `Alt-V`; then `Enter` runs the exact action, `I` inspects evidence |
-| Focus checkpoint review | `Alt-R`; then `Enter` previews/confirms file restore, `F` forks the conversation, `I` inspects evidence |
+| Open checkpoint restore | `Ctrl-R` opens and loads the reverse-diff dialog; `Enter` restores controlled files, `F` forks the conversation without changing files, `Esc` closes |
 | Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A` / `Shift-Alt-A` |
 | Focus follow-up panel | `Tab` from the composer when a follow-up is pending |
 | Run selected follow-up next | `Enter` on a selected follow-up uses the safe `next` action by default |
@@ -153,10 +156,18 @@ Sigil stores session and control state as append-only JSONL. For users, this mea
 
 ### Controlled checkpoints and conversation forks
 
-When the latest completed turn contains controlled ordinary-file edits, press `Alt-R` to focus its
-checkpoint review. `Enter` first asks the worker to rebuild an exact preview from the durable log.
-The timeline lists every file, the restore direction, conflicts, and any unknown side effects that
-are excluded. Only a ready preview can be confirmed by pressing `Enter` again.
+When the latest completed turn contains controlled ordinary-file edits, press `Ctrl-R` to open its
+restore dialog. Sigil immediately asks the worker to rebuild an exact preview from the durable log;
+there is no separate first `Enter` step. The modal owns keyboard focus and directly shows the
+reverse diff, file restore directions, conflicts, and excluded unknown side effects. If no durable
+line diff was recorded, it shows current and restore-target hash evidence instead. Use
+`Up/Down` or `PageUp/PageDown` (or the mouse wheel) to scroll, `Ctrl-R` to refresh, and `Esc` to
+close without changing files. The composer draft is preserved and action keys are not inserted into
+it while the dialog is open.
+
+After the modal reaches `READY`, press `Enter` to restore the controlled files. While preview or
+restore is in flight, duplicate actions are ignored. A completed restore closes the dialog and adds
+a `RESTORED` result to the timeline; late responses from an older dialog request are ignored.
 
 Restore checks the current file hashes and stored snapshots before its first write. A changed file,
 missing or sensitive snapshot, different workspace, or stale preview blocks the whole operation.
@@ -164,7 +175,7 @@ After a successful restore, prior verification is stale and should be rerun. Thi
 only controlled ordinary-file mutations: it does not undo shell commands, MCP/plugin effects,
 network requests, databases, remote services, directories, renames, or symlinks.
 
-Press `F` while checkpoint review is focused to fork the conversation through that completed turn.
+Press `F` in a ready or blocked restore dialog to fork the conversation through that completed turn.
 The fork becomes the active session and keeps only safe user/assistant/tool history plus rebound
 source provenance; active approvals, tasks, queues, continuation handles, and mutation state are not
 copied. The parent session stays append-only. Conversation fork does not isolate or restore the

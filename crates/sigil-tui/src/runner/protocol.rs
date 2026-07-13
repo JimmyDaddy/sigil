@@ -185,12 +185,15 @@ pub enum WorkerCommand {
         request: TaskVerificationRerunRequest,
     },
     PreviewCheckpointRestore {
+        request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
     ExecuteCheckpointRestore {
+        request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
     ForkConversationAtCheckpoint {
+        request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
     RefreshProviderBalance {
@@ -339,19 +342,26 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     CheckpointRestorePreviewed {
+        request_id: u64,
         preview: ControlledCheckpointRestorePreview,
     },
     CheckpointRestoreCompleted {
+        request_id: u64,
         preview: ControlledCheckpointRestorePreview,
         batch_id: String,
         entries: Vec<SessionLogEntry>,
     },
     ConversationForked {
+        request_id: u64,
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
         copied_message_count: usize,
         entries: Vec<SessionLogEntry>,
+    },
+    CheckpointOperationFailed {
+        request_id: u64,
+        error: String,
     },
     McpActivationStatus {
         server_name: Option<String>,

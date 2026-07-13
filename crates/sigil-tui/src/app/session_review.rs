@@ -315,7 +315,7 @@ fn render_review_lines(
         || latest.limited_restore_evidence
         || latest.unknown_mutations > 0
     {
-        lines.push("actions: Alt-R focus · Enter preview · F fork · I inspect".to_owned());
+        lines.push("actions: Ctrl-R open restore dialog".to_owned());
     }
     lines
 }

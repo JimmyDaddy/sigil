@@ -486,6 +486,12 @@ impl AppState {
         notice: &str,
     ) {
         self.checkpoint_restore_preview = None;
+        self.checkpoint_expected_request = None;
+        self.checkpoint_request_id = None;
+        self.checkpoint_action_pending = false;
+        if self.checkpoint_restore_modal_open() {
+            self.modal_state = None;
+        }
         self.session_log_path = session_log_path;
         self.runtime.provider_name = provider_name;
         self.runtime.model_name = model_name;

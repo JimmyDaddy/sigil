@@ -36,9 +36,7 @@ impl EventHandler for AppState {
             }
             RunEvent::ToolCallStarted(call) => {
                 self.runtime.run_phase = RunPhase::Tool(call.name.clone());
-                if agent_tool_name(&call.name) {
-                    self.downgrade_streaming_assistant_entry_to_thinking();
-                }
+                self.downgrade_streaming_assistant_entry_to_thinking();
                 self.finish_streaming_assistant_entry();
                 if suppress_reasoning_before_tool_call(&call.name) {
                     self.discard_streaming_reasoning_entry();
@@ -54,9 +52,7 @@ impl EventHandler for AppState {
                 }
             }
             RunEvent::ToolCallCompleted(call) => {
-                if agent_tool_name(&call.name) {
-                    self.downgrade_streaming_assistant_entry_to_thinking();
-                }
+                self.downgrade_streaming_assistant_entry_to_thinking();
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 if let Some(profile_id) = spawn_agent_profile_id(&call) {
@@ -84,6 +80,7 @@ impl EventHandler for AppState {
                 preview,
             } => {
                 self.runtime.run_phase = RunPhase::Tool(call.name.clone());
+                self.downgrade_streaming_assistant_entry_to_thinking();
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 if let Some(preview) = preview.as_ref() {
@@ -332,6 +329,10 @@ impl EventHandler for AppState {
                 } else {
                     self.runtime.run_phase = RunPhase::Streaming;
                     self.push_phase_marker("streaming".to_owned());
+                }
+                if message.assistant_kind == Some(sigil_kernel::AssistantMessageKind::ToolPreamble)
+                {
+                    self.downgrade_streaming_assistant_entry_to_thinking();
                 }
                 self.finish_streaming_assistant_entry();
                 if message

@@ -23,6 +23,14 @@ fn maps_tool_card_key_events_to_commands() {
         Some(UiCommand::CheckChangedFilesDiagnostics)
     );
     assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL,)),
+        Some(UiCommand::OpenCheckpointRestore)
+    );
+    assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)),
+        None
+    );
+    assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::ALT)),
         Some(UiCommand::ToggleInfoRailDetail)
     );
@@ -69,6 +77,11 @@ fn command_metadata_generates_help_and_control_hints() {
             .any(|hint| hint == "Shift-Alt-A: previous agent")
     );
     assert!(global.iter().any(|hint| hint == "Alt-D: check changes"));
+    assert!(
+        global
+            .iter()
+            .any(|hint| hint == "Ctrl-R: restore checkpoint")
+    );
     assert!(
         global_control_hints(true)
             .iter()

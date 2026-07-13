@@ -80,6 +80,7 @@ pub(crate) use crate::timeline::{
 };
 pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
+pub(crate) use self::checkpoint_flow::{CheckpointRestoreModalPhase, CheckpointRestoreModalView};
 pub(crate) use self::egress_disclosure_flow::EGRESS_DISCLOSURE_HEIGHT;
 use self::egress_disclosure_flow::{EgressDisclosureCard, PendingEgressDisclosure};
 use self::formatting::*;
@@ -283,6 +284,9 @@ pub struct AppState {
     pub activity_scroll_back: usize,
     info_rail_detail: bool,
     checkpoint_restore_preview: Option<ControlledCheckpointRestorePreview>,
+    checkpoint_expected_request: Option<ControlledCheckpointRestoreRequest>,
+    checkpoint_request_id: Option<u64>,
+    checkpoint_action_pending: bool,
     latest_checkpoint_restore_sequence: Option<u64>,
     readiness_sequences_by_scope: BTreeMap<sigil_kernel::EvidenceScope, u64>,
     config_snapshot: Option<RootConfig>,
@@ -447,12 +451,15 @@ pub enum AppAction {
         request: sigil_kernel::TaskVerificationRerunRequest,
     },
     PreviewCheckpointRestore {
+        request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
     ExecuteCheckpointRestore {
+        request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
     ForkConversationAtCheckpoint {
+        request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
     ActivateLazyMcp {
@@ -548,6 +555,9 @@ impl AppState {
             activity_scroll_back: 0,
             info_rail_detail: false,
             checkpoint_restore_preview: None,
+            checkpoint_expected_request: None,
+            checkpoint_request_id: None,
+            checkpoint_action_pending: false,
             latest_checkpoint_restore_sequence: None,
             readiness_sequences_by_scope: BTreeMap::new(),
             config_snapshot: Some(root_config.clone()),
@@ -671,6 +681,9 @@ impl AppState {
             activity_scroll_back: 0,
             info_rail_detail: false,
             checkpoint_restore_preview: None,
+            checkpoint_expected_request: None,
+            checkpoint_request_id: None,
+            checkpoint_action_pending: false,
             latest_checkpoint_restore_sequence: None,
             readiness_sequences_by_scope: BTreeMap::new(),
             config_snapshot: None,
@@ -927,6 +940,13 @@ impl AppState {
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.checkpoint_mutation_pending() {
+                self.last_notice = Some(
+                    "checkpoint operation is already applying; wait for completion before quitting"
+                        .to_owned(),
+                );
+                return Ok(None);
+            }
             if let Some(text) = self.selected_timeline_text() {
                 self.last_notice = Some(format!(
                     "copy pending {}",
@@ -946,6 +966,9 @@ impl AppState {
             }
             self.should_quit = true;
             return Ok(None);
+        }
+        if self.checkpoint_restore_modal_open() {
+            return Ok(self.handle_checkpoint_restore_modal_key_event(key));
         }
         if self.has_modal() {
             let outcome = if key.code == KeyCode::Enter {
@@ -977,10 +1000,6 @@ impl AppState {
         }
 
         if let Some(outcome) = self.handle_verification_card_key_event(key) {
-            return Ok(outcome);
-        }
-
-        if let Some(outcome) = self.handle_checkpoint_review_key_event(key) {
             return Ok(outcome);
         }
 
@@ -1043,6 +1062,9 @@ impl AppState {
         }
 
         if let Some(command) = command_for_key_event(key) {
+            if command == UiCommand::OpenCheckpointRestore {
+                return Ok(self.open_checkpoint_restore_modal());
+            }
             if command == UiCommand::CheckChangedFilesDiagnostics {
                 return Ok(self.request_changed_files_diagnostics());
             }

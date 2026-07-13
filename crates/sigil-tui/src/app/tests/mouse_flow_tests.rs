@@ -297,6 +297,28 @@ fn layout_snapshot_hits_main_regions() {
 }
 
 #[test]
+fn checkpoint_restore_modal_blocks_mouse_passthrough_to_composer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.composer.input = "preserved draft".to_owned();
+    app.modal_state = Some(ModalState::CheckpointRestore(
+        super::super::checkpoint_flow::CheckpointRestoreModalState::default(),
+    ));
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = point_in(layout.composer_input);
+
+    let click = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(click, AppMouseOutcome::Noop));
+    assert_eq!(app.composer.input, "preserved draft");
+    assert!(app.checkpoint_restore_modal_open());
+
+    let scroll = app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
+    assert!(matches!(scroll, AppMouseOutcome::Redraw));
+    assert_eq!(app.composer.input, "preserved draft");
+    Ok(())
+}
+
+#[test]
 fn mouse_click_setup_field_selects_then_activates() -> Result<()> {
     let temp = tempdir()?;
     let mut app = AppState::from_setup(

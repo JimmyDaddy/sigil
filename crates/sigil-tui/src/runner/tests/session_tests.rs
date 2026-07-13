@@ -54,6 +54,7 @@ fn worker_previews_and_executes_exact_checkpoint_restore() -> Result<()> {
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
     worker.send(WorkerCommand::PreviewCheckpointRestore {
+        request_id: 1,
         request: request.clone(),
     })?;
     let preview = worker.recv_until(|message| {
@@ -61,10 +62,13 @@ fn worker_previews_and_executes_exact_checkpoint_restore() -> Result<()> {
     })?;
     assert!(matches!(
         preview,
-        WorkerMessage::CheckpointRestorePreviewed { ref preview }
+        WorkerMessage::CheckpointRestorePreviewed { ref preview, .. }
             if preview.ready && preview.files.len() == 1
     ));
-    worker.send(WorkerCommand::ExecuteCheckpointRestore { request })?;
+    worker.send(WorkerCommand::ExecuteCheckpointRestore {
+        request_id: 2,
+        request,
+    })?;
     let completed = worker.recv_until(|message| {
         matches!(message, WorkerMessage::CheckpointRestoreCompleted { .. })
     })?;
@@ -141,7 +145,10 @@ fn worker_forks_complete_conversation_and_switches_to_destination() -> Result<()
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
     let parent_before = fs::read(&session_log_path)?;
 
-    worker.send(WorkerCommand::ForkConversationAtCheckpoint { request })?;
+    worker.send(WorkerCommand::ForkConversationAtCheckpoint {
+        request_id: 1,
+        request,
+    })?;
     let forked =
         worker.recv_until(|message| matches!(message, WorkerMessage::ConversationForked { .. }))?;
     let WorkerMessage::ConversationForked {
@@ -207,6 +214,7 @@ fn worker_checkpoint_restore_fails_closed_when_file_drifts_after_preview() -> Re
     let agent = Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
     worker.send(WorkerCommand::PreviewCheckpointRestore {
+        request_id: 1,
         request: request.clone(),
     })?;
     let _ = worker.recv_until(|message| {
@@ -214,12 +222,17 @@ fn worker_checkpoint_restore_fails_closed_when_file_drifts_after_preview() -> Re
     })?;
     fs::write(&note, "external drift\n")?;
 
-    worker.send(WorkerCommand::ExecuteCheckpointRestore { request })?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    worker.send(WorkerCommand::ExecuteCheckpointRestore {
+        request_id: 2,
+        request,
+    })?;
+    let failure = worker
+        .recv_until(|message| matches!(message, WorkerMessage::CheckpointOperationFailed { .. }))?;
 
     assert!(matches!(
         failure,
-        WorkerMessage::RunFailed(ref error) if error.contains("preflight found conflicts")
+        WorkerMessage::CheckpointOperationFailed { ref error, .. }
+            if error.contains("preflight found conflicts")
     ));
     assert_eq!(fs::read_to_string(note)?, "external drift\n");
     assert!(

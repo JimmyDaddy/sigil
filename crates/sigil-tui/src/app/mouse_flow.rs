@@ -17,6 +17,19 @@ impl AppState {
         input: crate::mouse::MouseInput,
         layout: &crate::ui::LayoutSnapshot,
     ) -> Result<crate::mouse::AppMouseOutcome> {
+        if self.checkpoint_restore_modal_open() {
+            return Ok(match input.kind {
+                crate::mouse::MouseInputKind::ScrollUp => {
+                    self.scroll_checkpoint_restore_modal(true, 3);
+                    crate::mouse::AppMouseOutcome::Redraw
+                }
+                crate::mouse::MouseInputKind::ScrollDown => {
+                    self.scroll_checkpoint_restore_modal(false, 3);
+                    crate::mouse::AppMouseOutcome::Redraw
+                }
+                _ => crate::mouse::AppMouseOutcome::Noop,
+            });
+        }
         let target = layout.hit_target(input.column, input.row);
         match input.kind {
             crate::mouse::MouseInputKind::ScrollUp => self.handle_mouse_scroll_target(target, true),

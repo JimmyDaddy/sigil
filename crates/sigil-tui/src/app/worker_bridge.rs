@@ -520,25 +520,45 @@ impl AppState {
                     }
                 }
             }
-            WorkerMessage::CheckpointRestorePreviewed { preview } => {
-                self.apply_checkpoint_restore_preview(preview);
+            WorkerMessage::CheckpointRestorePreviewed {
+                request_id,
+                preview,
+            } => {
+                self.apply_checkpoint_restore_preview(request_id, preview);
             }
             WorkerMessage::CheckpointRestoreCompleted {
+                request_id,
                 preview,
                 batch_id,
                 entries,
             } => {
-                self.sync_current_session_state(entries);
-                self.apply_checkpoint_restore_completed(&preview);
-                self.push_event("checkpoint", format!("restore batch {batch_id} applied"));
+                if self.checkpoint_request_matches(request_id) {
+                    self.sync_current_session_state(entries);
+                    if self.apply_checkpoint_restore_completed(request_id, &preview) {
+                        self.push_event("checkpoint", format!("restore batch {batch_id} applied"));
+                    }
+                } else {
+                    self.push_event(
+                        "checkpoint",
+                        format!("ignored stale restore response {request_id}"),
+                    );
+                }
             }
             WorkerMessage::ConversationForked {
+                request_id,
                 session_log_path,
                 provider_name,
                 model_name,
                 copied_message_count,
                 entries,
             } => {
+                if !self.checkpoint_request_matches(request_id) {
+                    self.push_event(
+                        "checkpoint",
+                        format!("ignored stale fork response {request_id}"),
+                    );
+                    return Ok(());
+                }
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
@@ -558,6 +578,22 @@ impl AppState {
                     "Conversation fork created. Active approvals/tasks were not copied; workspace files remain shared.",
                 );
                 self.schedule_balance_refresh();
+            }
+            WorkerMessage::CheckpointOperationFailed { request_id, error } => {
+                let summary = summarize_error(&error);
+                if self.apply_checkpoint_operation_failed(request_id, &summary) {
+                    self.last_notice = Some(summary.clone());
+                    self.push_timeline(
+                        TimelineRole::Notice,
+                        format!("Checkpoint operation failed: {summary}"),
+                    );
+                    self.push_event("checkpoint:error", error);
+                } else {
+                    self.push_event(
+                        "checkpoint",
+                        format!("ignored stale failure response {request_id}"),
+                    );
+                }
             }
             WorkerMessage::Notice(message) => {
                 self.last_notice = Some(message.clone());
@@ -609,6 +645,7 @@ impl AppState {
                 self.open_egress_disclosure(disclosure, receipt_tx);
             }
             WorkerMessage::RunFailed(error) => {
+                self.clear_checkpoint_interaction();
                 self.clear_worker_run_state();
                 self.discard_worker_streaming_assistant_and_finish_reasoning();
                 self.refresh_usage_sidebar_cache();

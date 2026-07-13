@@ -1867,3 +1867,40 @@ fn tool_card_diff_and_json_helpers_cover_deleted_lines_and_nested_arrays() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn checkpoint_restore_card_distinguishes_preview_blocked_and_restored_states() {
+    let preview = parsed_summary(json!({
+        "call_id": "checkpoint-preview:1",
+        "tool_name": "checkpoint_restore",
+        "status": "ok",
+        "summary": "1 controlled file · ready to restore",
+        "preview_kind": "text",
+        "preview_lines": ["src/lib.rs · restore previous content · ready"],
+        "metadata": { "details": { "action": "preview" } }
+    }));
+    let display = build_tool_card_display(&preview);
+    assert_eq!(display.title.plain(), "Review checkpoint restore");
+    assert_eq!(display.status.label, "PREVIEW");
+    assert_eq!(display.status.kind, StatusKind::Pending);
+    assert!(build_tool_activity_view(&preview, "preview").defaults_expanded);
+
+    let blocked = parsed_summary(json!({
+        "tool_name": "checkpoint_restore",
+        "status": "error",
+        "metadata": { "details": { "action": "blocked" } }
+    }));
+    let blocked_display = build_tool_card_display(&blocked);
+    assert_eq!(blocked_display.status.label, "BLOCKED");
+    assert_eq!(blocked_display.status.kind, StatusKind::Error);
+
+    let restored = parsed_summary(json!({
+        "tool_name": "checkpoint_restore",
+        "status": "ok",
+        "metadata": { "details": { "action": "restored" } }
+    }));
+    let restored_display = build_tool_card_display(&restored);
+    assert_eq!(restored_display.title.plain(), "Restored checkpoint files");
+    assert_eq!(restored_display.status.label, "RESTORED");
+    assert_eq!(restored_display.status.kind, StatusKind::Success);
+}

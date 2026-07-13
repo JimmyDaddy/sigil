@@ -14,6 +14,7 @@ use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
 
 use super::{
     approval::render_approval_modal,
+    checkpoint_restore::render_checkpoint_restore_modal,
     composer::{composer_cursor_origin, render_agent_panel_with_theme, render_input_with_theme},
     egress_disclosure::{egress_disclosure_layout, render_active_egress_disclosure_card},
     geometry::inset_rect,
@@ -91,7 +92,11 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         }
     }
 
-    render_modal(frame, app);
+    if app.checkpoint_restore_modal_open() {
+        render_checkpoint_restore_modal(frame, app);
+    } else {
+        render_modal(frame, app);
+    }
 }
 
 fn render_footer_status(

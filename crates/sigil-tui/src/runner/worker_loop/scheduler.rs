@@ -1797,11 +1797,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 }
             }
-            Ok(WorkerCommand::PreviewCheckpointRestore { request }) => {
+            Ok(WorkerCommand::PreviewCheckpointRestore {
+                request_id,
+                request,
+            }) => {
                 if active_run.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot preview checkpoint restore while the agent is running".to_owned(),
-                    ));
+                    let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
+                        request_id,
+                        error: "cannot preview checkpoint restore while the agent is running"
+                            .to_owned(),
+                    });
                     continue;
                 }
                 match preview_current_checkpoint_restore(
@@ -1811,19 +1816,26 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     &request,
                 ) {
                     Ok(preview) => {
-                        let _ =
-                            message_tx.send(WorkerMessage::CheckpointRestorePreviewed { preview });
+                        let _ = message_tx.send(WorkerMessage::CheckpointRestorePreviewed {
+                            request_id,
+                            preview,
+                        });
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx
+                            .send(WorkerMessage::CheckpointOperationFailed { request_id, error });
                     }
                 }
             }
-            Ok(WorkerCommand::ExecuteCheckpointRestore { request }) => {
+            Ok(WorkerCommand::ExecuteCheckpointRestore {
+                request_id,
+                request,
+            }) => {
                 if active_run.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot restore checkpoint while the agent is running".to_owned(),
-                    ));
+                    let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
+                        request_id,
+                        error: "cannot restore checkpoint while the agent is running".to_owned(),
+                    });
                     continue;
                 }
                 let output = match execute_current_checkpoint_restore(
@@ -1834,7 +1846,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 ) {
                     Ok(output) => output,
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx
+                            .send(WorkerMessage::CheckpointOperationFailed { request_id, error });
                         continue;
                     }
                 };
@@ -1848,23 +1861,31 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         let entries = session.entries().to_vec();
                         current_session = Some(session);
                         let _ = message_tx.send(WorkerMessage::CheckpointRestoreCompleted {
+                            request_id,
                             preview: output.preview,
                             batch_id: output.batch_id,
                             entries,
                         });
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                            "checkpoint restored but session reload failed: {error:#}"
-                        )));
+                        let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
+                            request_id,
+                            error: format!(
+                                "checkpoint restored but session reload failed: {error:#}"
+                            ),
+                        });
                     }
                 }
             }
-            Ok(WorkerCommand::ForkConversationAtCheckpoint { request }) => {
+            Ok(WorkerCommand::ForkConversationAtCheckpoint {
+                request_id,
+                request,
+            }) => {
                 if active_run.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot fork conversation while the agent is running".to_owned(),
-                    ));
+                    let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
+                        request_id,
+                        error: "cannot fork conversation while the agent is running".to_owned(),
+                    });
                     continue;
                 }
                 let output = match fork_current_conversation(
@@ -1874,7 +1895,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 ) {
                     Ok(output) => output,
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx
+                            .send(WorkerMessage::CheckpointOperationFailed { request_id, error });
                         continue;
                     }
                 };
@@ -1892,7 +1914,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             &workspace_root,
                             "trusted workspace carried into conversation fork",
                         ) {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
+                                request_id,
+                                error,
+                            });
                             continue;
                         }
                         exact_conversation_prompts.clear();
@@ -1902,6 +1927,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         current_session_log_path = output.destination_path.clone();
                         current_session = Some(session);
                         let _ = message_tx.send(WorkerMessage::ConversationForked {
+                            request_id,
                             session_log_path: output.destination_path,
                             provider_name,
                             model_name,
@@ -1910,9 +1936,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         });
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                            "conversation fork created but session switch failed: {error:#}"
-                        )));
+                        let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
+                            request_id,
+                            error: format!(
+                                "conversation fork created but session switch failed: {error:#}"
+                            ),
+                        });
                     }
                 }
             }

@@ -92,8 +92,8 @@ impl AppState {
         if command == UiCommand::FocusVerificationCard {
             return self.focus_verification_card();
         }
-        if command == UiCommand::FocusCheckpointReview {
-            return self.focus_checkpoint_review();
+        if command == UiCommand::OpenCheckpointRestore {
+            return false;
         }
         if command == UiCommand::CycleAgentView {
             if self.approval.pending.is_some() {
@@ -137,7 +137,7 @@ impl AppState {
             | UiCommand::CycleAgentView
             | UiCommand::CycleAgentViewPrevious
             | UiCommand::CheckChangedFilesDiagnostics => false,
-            UiCommand::FocusVerificationCard | UiCommand::FocusCheckpointReview => false,
+            UiCommand::FocusVerificationCard | UiCommand::OpenCheckpointRestore => false,
         }
     }
 }

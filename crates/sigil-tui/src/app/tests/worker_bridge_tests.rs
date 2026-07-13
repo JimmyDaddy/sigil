@@ -496,6 +496,7 @@ fn plan_approved_message_syncs_session_and_clears_pending_surface() -> Result<()
 #[test]
 fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.checkpoint_action_pending = true;
 
     app.handle_worker_message(WorkerMessage::RunFailed(
         "deepseek request failed\n\nCaused by:\n    0: failed to send DeepSeek request\n    1: error sending request for url (https://api.example.com)"
@@ -506,6 +507,7 @@ fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
         app.last_notice(),
         Some("error sending request for url (https://api.example.com)")
     );
+    assert!(!app.checkpoint_action_pending);
     assert!(app.timeline.iter().any(|entry| {
         entry
             .text
@@ -1457,7 +1459,7 @@ fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages(
 }
 
 #[test]
-fn assistant_message_with_tool_call_preserves_tool_phase_and_dedupes_text() -> Result<()> {
+fn assistant_tool_preamble_becomes_thinking_before_one_final_reply() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.runtime.is_busy = true;
 
@@ -1480,18 +1482,39 @@ fn assistant_message_with_tool_call_preserves_tool_phase_and_dedupes_text() -> R
         ),
     ))?;
 
-    let matching = app
+    let preamble_replies = app
         .timeline
         .iter()
         .filter(|entry| entry.role == TimelineRole::Assistant && entry.text == progress_text)
         .count();
-    assert_eq!(matching, 1);
+    assert_eq!(preamble_replies, 0);
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking && entry.text == progress_text)
+    );
     assert_eq!(app.run_phase(), RunPhase::Tool("bash".to_owned()));
     let summary = app
         .live_activity_summary()
         .expect("expected live tool activity");
     assert_eq!(summary.label, "tool");
     assert_eq!(summary.detail, "running bash");
+
+    app.handle(RunEvent::TextDelta("done".to_owned()))?;
+    app.handle(RunEvent::AssistantMessage(
+        ModelMessage::assistant_with_kind(
+            Some("done".to_owned()),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        ),
+    ))?;
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        1
+    );
 
     app.handle(RunEvent::Control(ControlEntry::ToolExecution(Box::new(
         ToolExecutionEntry {
