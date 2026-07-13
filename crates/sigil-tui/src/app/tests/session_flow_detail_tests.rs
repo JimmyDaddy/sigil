@@ -387,6 +387,37 @@ fn render_verification_control_entries_for_audit_view() -> Result<()> {
         )
     );
 
+    let receipt_link = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::VerificationReceiptLinkRecorded(
+            sigil_kernel::VerificationReceiptLinkRecorded {
+                receipt_id: "receipt-1".to_owned(),
+                receipt_event_id: "event-receipt".to_owned(),
+                scope: sigil_kernel::EvidenceScope::Task("task-1".to_owned()),
+                workspace_snapshot_id: "snapshot-1".to_owned(),
+                changeset_id: None,
+                changeset_apply_event_id: None,
+            },
+        ),
+    ));
+    assert!(receipt_link.contains(
+        "[ctl] verification receipt link receipt=receipt-1 scope=task:task-1 snapshot=snapshot-1 changeset=- apply_event=-"
+    ));
+
+    let failure_locator = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::VerificationFailureLocatorRecorded(
+            sigil_kernel::VerificationFailureLocatorRecorded {
+                check_run_id: "run-1".to_owned(),
+                receipt_id: Some("receipt-1".to_owned()),
+                command_event_id: Some("event-command".to_owned()),
+                output_artifact_id: None,
+                summary: "command exited with status 1".to_owned(),
+            },
+        ),
+    ));
+    assert!(failure_locator.contains(
+        "[ctl] verification failure run=run-1 receipt=receipt-1 command_event=event-command artifact=- summary=command exited with status 1"
+    ));
+
     let readiness = render_session_log_entry(&SessionLogEntry::Control(
         ControlEntry::ReadinessEvaluated(sigil_kernel::ReadinessEvaluatedEntry {
             scope: sigil_kernel::EvidenceScope::Step("task-1:step-1".to_owned()),

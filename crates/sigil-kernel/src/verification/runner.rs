@@ -47,6 +47,23 @@ pub async fn run_verification_check(
     execution_backend: &dyn ExecutionBackend,
     request: VerificationCheckRunRequest,
 ) -> Result<VerificationRecordedEntry> {
+    Ok(
+        run_verification_check_with_evidence(session, execution_backend, request)
+            .await?
+            .recorded,
+    )
+}
+
+pub(crate) struct VerificationCheckExecutionEvidence {
+    pub recorded: VerificationRecordedEntry,
+    pub command_event_id: Option<EventId>,
+}
+
+pub(crate) async fn run_verification_check_with_evidence(
+    session: &mut Session,
+    execution_backend: &dyn ExecutionBackend,
+    request: VerificationCheckRunRequest,
+) -> Result<VerificationCheckExecutionEvidence> {
     let workspace_root = fs::canonicalize(&request.workspace_root).with_context(|| {
         format!(
             "failed to canonicalize verification workspace {}",
@@ -190,8 +207,11 @@ pub async fn run_verification_check(
         failure_reason,
         mutates_verification_scope,
     };
-    Ok(VerificationRecordedEntry {
-        receipt: verification_receipt,
+    Ok(VerificationCheckExecutionEvidence {
+        recorded: VerificationRecordedEntry {
+            receipt: verification_receipt,
+        },
+        command_event_id: command_event.map(|event| event.event_id),
     })
 }
 

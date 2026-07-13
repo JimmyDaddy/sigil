@@ -123,6 +123,8 @@ pub struct VerificationStateProjection {
     pub policies: BTreeMap<EvidenceScope, VerificationPolicyChangedEntry>,
     pub check_runs: BTreeMap<VerificationCheckRunId, VerificationCheckRunEntry>,
     pub receipts: BTreeMap<ReceiptId, VerificationRecordedEntry>,
+    pub receipt_links: BTreeMap<ReceiptId, VerificationReceiptLinkRecorded>,
+    pub failure_locators: BTreeMap<VerificationCheckRunId, VerificationFailureLocatorRecorded>,
     pub readiness: BTreeMap<EvidenceScope, ReadinessEvaluatedEntry>,
     pub child_receipt_links: Vec<ChildVerificationReceiptLinked>,
     pub workspace_trust: BTreeMap<WorkspaceId, WorkspaceTrustDecisionEntry>,
@@ -155,6 +157,17 @@ impl VerificationStateProjection {
 
     pub fn check_run(&self, run_id: &str) -> Option<&VerificationCheckRunEntry> {
         self.check_runs.get(run_id)
+    }
+
+    pub fn receipt_link(&self, receipt_id: &str) -> Option<&VerificationReceiptLinkRecorded> {
+        self.receipt_links.get(receipt_id)
+    }
+
+    pub fn failure_locator(
+        &self,
+        check_run_id: &str,
+    ) -> Option<&VerificationFailureLocatorRecorded> {
+        self.failure_locators.get(check_run_id)
     }
 
     pub fn check_spec(
@@ -201,6 +214,14 @@ impl VerificationStateProjection {
             ControlEntry::VerificationRecorded(entry) => {
                 self.receipts
                     .insert(entry.receipt.receipt.receipt_id.clone(), entry.clone());
+            }
+            ControlEntry::VerificationReceiptLinkRecorded(entry) => {
+                self.receipt_links
+                    .insert(entry.receipt_id.clone(), entry.clone());
+            }
+            ControlEntry::VerificationFailureLocatorRecorded(entry) => {
+                self.failure_locators
+                    .insert(entry.check_run_id.clone(), entry.clone());
             }
             ControlEntry::ReadinessEvaluated(entry) => {
                 self.readiness.insert(entry.scope.clone(), entry.clone());
@@ -264,6 +285,10 @@ pub struct VerificationStateProjectionSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub receipts: Vec<VerificationRecordedEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receipt_links: Vec<VerificationReceiptLinkRecorded>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_locators: Vec<VerificationFailureLocatorRecorded>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readiness: Vec<ReadinessEvaluatedEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_receipt_links: Vec<ChildVerificationReceiptLinked>,
@@ -278,6 +303,8 @@ impl From<&VerificationStateProjection> for VerificationStateProjectionSnapshot 
             policies: projection.policies.values().cloned().collect(),
             check_runs: projection.check_runs.values().cloned().collect(),
             receipts: projection.receipts.values().cloned().collect(),
+            receipt_links: projection.receipt_links.values().cloned().collect(),
+            failure_locators: projection.failure_locators.values().cloned().collect(),
             readiness: projection.readiness.values().cloned().collect(),
             child_receipt_links: projection.child_receipt_links.clone(),
             workspace_trust: projection.workspace_trust.values().cloned().collect(),
@@ -299,6 +326,13 @@ impl From<VerificationStateProjectionSnapshot> for VerificationStateProjection {
         }
         for entry in snapshot.receipts {
             projection.apply_control_entry(&ControlEntry::VerificationRecorded(entry));
+        }
+        for entry in snapshot.receipt_links {
+            projection.apply_control_entry(&ControlEntry::VerificationReceiptLinkRecorded(entry));
+        }
+        for entry in snapshot.failure_locators {
+            projection
+                .apply_control_entry(&ControlEntry::VerificationFailureLocatorRecorded(entry));
         }
         for entry in snapshot.readiness {
             projection.apply_control_entry(&ControlEntry::ReadinessEvaluated(entry));

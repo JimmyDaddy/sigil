@@ -411,6 +411,25 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             ),
             truncate_session_view_text(&entry.receipt.binding.workspace_trust_snapshot_id, 16)
         ),
+        ControlEntry::VerificationReceiptLinkRecorded(entry) => format!(
+            "[ctl] verification receipt link receipt={} scope={} snapshot={} changeset={} apply_event={}",
+            truncate_session_view_text(&entry.receipt_id, 48),
+            evidence_scope_label(&entry.scope),
+            truncate_session_view_text(&entry.workspace_snapshot_id, 16),
+            truncate_session_view_text(entry.changeset_id.as_deref().unwrap_or("-"), 48),
+            truncate_session_view_text(
+                entry.changeset_apply_event_id.as_deref().unwrap_or("-"),
+                48
+            )
+        ),
+        ControlEntry::VerificationFailureLocatorRecorded(entry) => format!(
+            "[ctl] verification failure run={} receipt={} command_event={} artifact={} summary={}",
+            truncate_session_view_text(&entry.check_run_id, 48),
+            truncate_session_view_text(entry.receipt_id.as_deref().unwrap_or("-"), 48),
+            truncate_session_view_text(entry.command_event_id.as_deref().unwrap_or("-"), 48),
+            truncate_session_view_text(entry.output_artifact_id.as_deref().unwrap_or("-"), 48),
+            truncate_session_view_text(&entry.summary, 64)
+        ),
         ControlEntry::ReadinessEvaluated(entry) => format!(
             "[ctl] readiness {} run={} verification={} policy={} snapshot={} actions={} reasons={}",
             evidence_scope_label(&entry.scope),

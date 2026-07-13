@@ -95,6 +95,37 @@ pub struct VerificationRecordedEntry {
     pub receipt: VerificationReceipt,
 }
 
+/// Durable link from a verification receipt to its exact evidence scope and workspace snapshot.
+///
+/// Changeset fields remain absent unless both an applied changeset event and a matching durable
+/// workspace-lineage event precede the receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationReceiptLinkRecorded {
+    pub receipt_id: ReceiptId,
+    pub receipt_event_id: EventId,
+    pub scope: EvidenceScope,
+    pub workspace_snapshot_id: WorkspaceSnapshotId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changeset_id: Option<ChangesetId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changeset_apply_event_id: Option<EventId>,
+}
+
+/// Durable location summary for a terminal failed, inconclusive, or errored check run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationFailureLocatorRecorded {
+    pub check_run_id: VerificationCheckRunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<ReceiptId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_event_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_artifact_id: Option<ArtifactId>,
+    pub summary: String,
+}
+
 pub type VerificationCheckRunId = String;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

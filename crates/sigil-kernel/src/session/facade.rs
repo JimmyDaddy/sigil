@@ -135,6 +135,21 @@ impl Session {
         self.append(SessionLogEntry::Control(control))
     }
 
+    /// Appends a control entry and returns its durable envelope when this session is store-backed.
+    pub(crate) fn append_control_with_event(
+        &mut self,
+        control: ControlEntry,
+    ) -> Result<Option<StoredEvent>> {
+        let entry = SessionLogEntry::Control(control);
+        let event = self
+            .store
+            .as_ref()
+            .map(|store| store.append_session_entry_event(&entry))
+            .transpose()?;
+        self.entries.push(entry);
+        Ok(event)
+    }
+
     /// Returns the live session scope used to bind URL capabilities and external provenance.
     pub fn session_scope_id(&self) -> &str {
         &self.session_scope_id

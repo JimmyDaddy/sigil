@@ -25,7 +25,7 @@ use crate::{
     WorkspaceMutationDetected, WorkspaceMutationEvidence, WorkspaceSnapshotId, WorkspaceTrust,
     WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus,
     WriteLeaseReleased, WriteLeaseScope, build_workspace_snapshot,
-    build_workspace_snapshot_for_event, evaluate_readiness, run_verification_check,
+    build_workspace_snapshot_for_event, evaluate_readiness,
     session::ControlEntry,
     stable_event_uuid, stable_workspace_id,
     task::{
@@ -35,6 +35,10 @@ use crate::{
         TaskStepStatus,
     },
     verification::PolicyHash,
+    verification::{
+        run_verification_check_with_evidence, verification_failure_locator_from_records,
+        verification_receipt_link_from_records,
+    },
     verification_check_run_id,
 };
 #[cfg(test)]
@@ -104,7 +108,9 @@ use scheduler::{
     step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
     task_status_from_step_status,
 };
-use shared::{append_task_control, append_task_run, append_task_step};
+use shared::{
+    append_task_control, append_task_control_with_event, append_task_run, append_task_step,
+};
 #[cfg(test)]
 use shared::{hash_text, route_id_for_call};
 #[cfg(test)]

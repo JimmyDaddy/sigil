@@ -7,14 +7,15 @@ use std::{
 use anyhow::{Result, anyhow};
 
 use crate::{
-    CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
-    CheckSpecRecordedEntry, ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType,
-    EvidenceReceipt, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
-    ExecutionBackendKind, ExecutionCoverageLabel, ExecutionFuture, ExecutionNetworkPolicy,
-    ExecutionNetworkReceipt, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
-    FileMetadataPlatform, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
-    PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry, PluginHookExecutionStatus,
-    PluginHookKind, PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream,
+    CandidateCheck, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, CheckCommand,
+    CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
+    ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType, EvidenceReceipt,
+    EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionCoverageLabel, ExecutionFuture, ExecutionNetworkPolicy, ExecutionNetworkReceipt,
+    ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile, FileMetadataPlatform, FileType,
+    JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, PluginHookExecutionFinishedEntry,
+    PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
+    PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream,
     PluginVerificationHookReceiptRequest, ReadinessInput, ReadinessReason, ReceiptStatus,
     RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session, SessionLogEntry,
     SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationAutoRunPolicy,
@@ -29,6 +30,117 @@ use crate::{
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
     record_plugin_verification_hook_receipt, run_verification_check, session::ControlEntry,
 };
+
+#[test]
+fn receipt_link_requires_applied_changeset_and_matching_snapshot_lineage() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let applied = store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ChangeSetApplied(ChangeSetResult {
+            id: ChangeSetId::new("changeset-1")?,
+            status: ChangeSetResultStatus::Applied,
+            file_results: Vec::new(),
+            message: None,
+        }),
+    ))?;
+    store.append_event(
+        DurableEventType::ChildChangesetMerged,
+        crate::EventClass::Critical,
+        serde_json::json!({
+            "changeset_id": "changeset-1",
+            "parent_workspace_snapshot_before_id": "snapshot-before",
+            "parent_workspace_snapshot_after_id": "snapshot-current"
+        }),
+    )?;
+    let check_event = store.append_event(
+        DurableEventType::CheckFinished,
+        crate::EventClass::Critical,
+        serde_json::json!({ "command_event_id": "event-command-finished" }),
+    )?;
+    let mut receipt = verification_receipt(
+        "receipt-link",
+        &check_spec("cargo-test"),
+        "snapshot-current",
+        check_event.stream_sequence,
+        ReceiptStatus::Succeeded,
+        false,
+    );
+    receipt.receipt.source_session_id = check_event.session_id.clone();
+    receipt.receipt.source_event_id = check_event.event_id.clone();
+    receipt.receipt.changeset_id = Some("changeset-1".to_owned());
+    let receipt_event = store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::VerificationRecorded(crate::VerificationRecordedEntry {
+            receipt: receipt.clone(),
+        }),
+    ))?;
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+
+    let link =
+        super::verification_receipt_link_from_records(&receipt, Some(&receipt_event), &records)?;
+
+    assert_eq!(link.receipt_event_id, receipt_event.event_id);
+    assert_eq!(link.workspace_snapshot_id, "snapshot-current");
+    assert_eq!(link.changeset_id.as_deref(), Some("changeset-1"));
+    assert_eq!(link.changeset_apply_event_id, Some(applied.event_id));
+
+    receipt.binding.workspace_snapshot_id = "snapshot-other".to_owned();
+    assert!(
+        super::verification_receipt_link_from_records(&receipt, Some(&receipt_event), &records)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn receipt_link_and_failure_locator_do_not_infer_missing_evidence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let check_event = store.append_event(
+        DurableEventType::CheckFinished,
+        crate::EventClass::Critical,
+        serde_json::json!({ "status": "failed" }),
+    )?;
+    let check = check_spec("cargo-test");
+    let mut receipt = verification_receipt(
+        "receipt-failed",
+        &check,
+        "snapshot-current",
+        check_event.stream_sequence,
+        ReceiptStatus::Failed,
+        false,
+    );
+    receipt.receipt.source_session_id = check_event.session_id.clone();
+    receipt.receipt.source_event_id = check_event.event_id;
+    receipt.receipt.changeset_id = Some("changeset-without-proof".to_owned());
+    receipt.failure_reason = Some("command exited with status 1".to_owned());
+    let receipt_event = store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::VerificationRecorded(crate::VerificationRecordedEntry {
+            receipt: receipt.clone(),
+        }),
+    ))?;
+    let run = VerificationCheckRunEntry::new(
+        "run-failed".to_owned(),
+        receipt.receipt.scope.clone(),
+        &check,
+        VerificationCheckRunStatus::Running,
+    )
+    .with_terminal_receipt(&receipt);
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+
+    let link =
+        super::verification_receipt_link_from_records(&receipt, Some(&receipt_event), &records)?;
+    let locator =
+        super::verification_failure_locator_from_records(&run, Some(&receipt), None, &records)?
+            .expect("failed run must have a locator");
+
+    assert_eq!(link.changeset_id, None);
+    assert_eq!(link.changeset_apply_event_id, None);
+    assert_eq!(locator.receipt_id.as_deref(), Some("receipt-failed"));
+    assert_eq!(locator.command_event_id, None);
+    assert_eq!(locator.output_artifact_id, None);
+    assert_eq!(locator.summary, "command exited with status 1");
+    Ok(())
+}
 
 #[derive(Debug, Default)]
 struct FakeVerificationBackend;

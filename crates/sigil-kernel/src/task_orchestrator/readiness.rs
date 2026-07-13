@@ -294,7 +294,7 @@ where
         handler,
         ControlEntry::VerificationCheckRun(running),
     )?;
-    let verification = match run_verification_check(
+    let verification_evidence = match run_verification_check_with_evidence(
         session,
         execution_backend,
         VerificationCheckRunRequest {
@@ -313,25 +313,28 @@ where
     {
         Ok(recorded) => recorded,
         Err(error) => {
+            let error_summary = error.to_string();
+            let check_run = VerificationCheckRunEntry::new(
+                run_id,
+                scope.clone(),
+                check_spec,
+                VerificationCheckRunStatus::Errored,
+            )
+            .with_timeout_ms(policy.timeout_ms)
+            .with_error(error_summary);
             append_task_control(
                 session,
                 handler,
-                ControlEntry::VerificationCheckRun(
-                    VerificationCheckRunEntry::new(
-                        run_id,
-                        scope.clone(),
-                        check_spec,
-                        VerificationCheckRunStatus::Errored,
-                    )
-                    .with_timeout_ms(policy.timeout_ms)
-                    .with_error(error.to_string()),
-                ),
+                ControlEntry::VerificationCheckRun(check_run.clone()),
             )?;
+            append_verification_evidence_records(session, handler, &check_run, None, None, None)?;
             return Err(error);
         }
     };
+    let verification = verification_evidence.recorded;
+    let command_event_id = verification_evidence.command_event_id;
     let receipt = verification.receipt.clone();
-    append_task_control(
+    let receipt_event = append_task_control_with_event(
         session,
         handler,
         ControlEntry::VerificationRecorded(verification.clone()),
@@ -349,10 +352,64 @@ where
         handler,
         ControlEntry::VerificationCheckRun(check_run.clone()),
     )?;
+    append_verification_evidence_records(
+        session,
+        handler,
+        &check_run,
+        Some(&receipt),
+        receipt_event.as_ref(),
+        command_event_id.as_deref(),
+    )?;
     Ok(TaskVerificationRerunOutput {
         check_run,
         verification,
     })
+}
+
+fn append_verification_evidence_records<H>(
+    session: &mut Session,
+    handler: &mut H,
+    check_run: &VerificationCheckRunEntry,
+    receipt: Option<&VerificationReceipt>,
+    receipt_event: Option<&StoredEvent>,
+    command_event_id: Option<&str>,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let needs_stream_records =
+        receipt.is_some_and(|receipt| receipt.receipt.changeset_id.is_some());
+    let records = if needs_stream_records {
+        verification_stream_records(session)?
+    } else {
+        Vec::new()
+    };
+    if let Some(receipt) = receipt {
+        let link = verification_receipt_link_from_records(receipt, receipt_event, &records)?;
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::VerificationReceiptLinkRecorded(link),
+        )?;
+    }
+    let Some(locator) =
+        verification_failure_locator_from_records(check_run, receipt, command_event_id, &records)?
+    else {
+        return Ok(());
+    };
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::VerificationFailureLocatorRecorded(locator),
+    )
+}
+
+fn verification_stream_records(session: &Session) -> Result<Vec<SessionStreamRecord>> {
+    session
+        .store_path()
+        .map(JsonlSessionStore::read_event_records)
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 fn latest_task_check_run<'a>(

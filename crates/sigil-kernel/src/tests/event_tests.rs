@@ -38,9 +38,10 @@ use crate::{
     ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
     ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, TypedDomainEvent,
     TypedStoredEventDecode, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
-    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationFailureLocatorRecorded,
+    VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
+    VerificationReceiptLinkRecorded, VerificationRecordedEntry, VerificationScope,
+    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected,
     WorkspaceMutationDetectionReason, WorkspaceRootSnapshot, WorkspaceTrust,
     WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, decode_stored_event,
     decode_typed_stored_event, is_transient_run_event, projection_apply_decision,
@@ -407,6 +408,49 @@ fn typed_event_decode_covers_mutation_and_verification_family() {
         panic!("expected typed verification check run");
     };
     assert_eq!(run.run_id, "run-1");
+
+    let link_event = stored_control_event(
+        DurableEventType::VerificationReceiptLinkRecorded,
+        ControlEntry::VerificationReceiptLinkRecorded(VerificationReceiptLinkRecorded {
+            receipt_id: "receipt-1".to_owned(),
+            receipt_event_id: "event-check".to_owned(),
+            scope: EvidenceScope::Task("task-1".to_owned()),
+            workspace_snapshot_id: "snapshot-1".to_owned(),
+            changeset_id: None,
+            changeset_apply_event_id: None,
+        }),
+        3,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(link_event).expect("typed receipt link should decode")
+    else {
+        panic!("expected typed receipt link");
+    };
+    let TypedDomainEvent::VerificationReceiptLinkRecorded(link) = *event else {
+        panic!("expected typed receipt link");
+    };
+    assert_eq!(link.receipt_id, "receipt-1");
+
+    let locator_event = stored_control_event(
+        DurableEventType::VerificationFailureLocatorRecorded,
+        ControlEntry::VerificationFailureLocatorRecorded(VerificationFailureLocatorRecorded {
+            check_run_id: "run-1".to_owned(),
+            receipt_id: Some("receipt-1".to_owned()),
+            command_event_id: Some("event-command".to_owned()),
+            output_artifact_id: None,
+            summary: "verification check failed".to_owned(),
+        }),
+        4,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(locator_event).expect("typed failure locator should decode")
+    else {
+        panic!("expected typed failure locator");
+    };
+    let TypedDomainEvent::VerificationFailureLocatorRecorded(locator) = *event else {
+        panic!("expected typed failure locator");
+    };
+    assert_eq!(locator.check_run_id, "run-1");
 
     let receipt = VerificationReceipt {
         receipt: EvidenceReceipt {

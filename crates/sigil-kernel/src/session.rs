@@ -79,7 +79,8 @@ use crate::{
     },
     verification::{
         CheckSpecRecordedEntry, ChildVerificationReceiptLinked, ReadinessEvaluatedEntry,
-        VerificationCheckRunEntry, VerificationPolicyChangedEntry, VerificationRecordedEntry,
+        VerificationCheckRunEntry, VerificationFailureLocatorRecorded,
+        VerificationPolicyChangedEntry, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
         VerificationStateProjection, WorkspaceTrustDecisionEntry,
     },
     write_isolation::{

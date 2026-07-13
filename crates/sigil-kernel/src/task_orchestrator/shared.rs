@@ -12,6 +12,19 @@ where
     handler.handle(RunEvent::Control(control))
 }
 
+pub(super) fn append_task_control_with_event<H>(
+    session: &mut Session,
+    handler: &mut H,
+    control: ControlEntry,
+) -> Result<Option<StoredEvent>>
+where
+    H: EventHandler + Send,
+{
+    let event = session.append_control_with_event(control.clone())?;
+    handler.handle(RunEvent::Control(control))?;
+    Ok(event)
+}
+
 pub(super) fn append_task_run<H>(
     session: &mut Session,
     handler: &mut H,

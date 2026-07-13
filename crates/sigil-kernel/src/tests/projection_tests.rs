@@ -19,8 +19,9 @@ use crate::{
     ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolEffect, ToolError,
     ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolResultMeta,
     ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats, VerificationAutoRunPolicy,
-    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationRecordedEntry, VerificationScope,
+    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus,
+    VerificationFailureLocatorRecorded, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationReceiptLinkRecorded, VerificationRecordedEntry, VerificationScope,
     VerificationStateProjection, VerificationStateProjectionSnapshot, VerificationVerdict,
     VisibleCompletionState, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     WorkspaceTrustRequirement, agent_graph_projection_from_records,
@@ -175,6 +176,27 @@ fn sample_receipt_entry() -> VerificationRecordedEntry {
             failure_reason: None,
             mutates_verification_scope: false,
         },
+    }
+}
+
+fn sample_receipt_link() -> VerificationReceiptLinkRecorded {
+    VerificationReceiptLinkRecorded {
+        receipt_id: "receipt-1".to_owned(),
+        receipt_event_id: "event-check-finished".to_owned(),
+        scope: EvidenceScope::Task("task-1".to_owned()),
+        workspace_snapshot_id: "snapshot-1".to_owned(),
+        changeset_id: None,
+        changeset_apply_event_id: None,
+    }
+}
+
+fn sample_failure_locator() -> VerificationFailureLocatorRecorded {
+    VerificationFailureLocatorRecorded {
+        check_run_id: "check-run-1".to_owned(),
+        receipt_id: Some("receipt-1".to_owned()),
+        command_event_id: Some("event-command-finished".to_owned()),
+        output_artifact_id: None,
+        summary: "verification check failed".to_owned(),
     }
 }
 
@@ -381,6 +403,8 @@ fn verification_projection_snapshot_roundtrips_all_entry_vectors() -> Result<()>
         policies: vec![sample_policy_entry()?],
         check_runs: vec![sample_check_run_entry()],
         receipts: vec![sample_receipt_entry()],
+        receipt_links: vec![sample_receipt_link()],
+        failure_locators: vec![sample_failure_locator()],
         readiness: vec![sample_readiness_entry()],
         child_receipt_links: vec![sample_child_link()],
         workspace_trust: vec![workspace_trust_entry("workspace-1", "trust-event")],

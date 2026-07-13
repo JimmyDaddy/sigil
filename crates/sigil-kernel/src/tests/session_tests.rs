@@ -32,11 +32,12 @@ use crate::{
     ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
     ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats,
     VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
-    plan_draft_created_entry, provider::ModelMessage, stable_event_hash,
+    VerificationCheckRunStatus, VerificationFailureLocatorRecorded, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationReceipt, VerificationReceiptLinkRecorded,
+    VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, plan_draft_created_entry,
+    provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -279,6 +280,27 @@ fn sample_verification_check_run_entry() -> VerificationCheckRunEntry {
         source_event_id: Some("event-check-finished".to_owned()),
         timeout_ms: Some(60_000),
         reason: None,
+    }
+}
+
+fn sample_verification_receipt_link_recorded() -> VerificationReceiptLinkRecorded {
+    VerificationReceiptLinkRecorded {
+        receipt_id: "receipt-1".to_owned(),
+        receipt_event_id: "event-check-finished".to_owned(),
+        scope: EvidenceScope::Task("task-1".to_owned()),
+        workspace_snapshot_id: "snapshot-1".to_owned(),
+        changeset_id: None,
+        changeset_apply_event_id: None,
+    }
+}
+
+fn sample_verification_failure_locator_recorded() -> VerificationFailureLocatorRecorded {
+    VerificationFailureLocatorRecorded {
+        check_run_id: "check-run-1".to_owned(),
+        receipt_id: Some("receipt-1".to_owned()),
+        command_event_id: Some("event-command-finished".to_owned()),
+        output_artifact_id: None,
+        summary: "verification check failed".to_owned(),
     }
 }
 
@@ -1037,6 +1059,18 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
                 sample_verification_recorded_entry(),
             )),
             DurableEventType::VerificationRecorded,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::VerificationReceiptLinkRecorded(
+                sample_verification_receipt_link_recorded(),
+            )),
+            DurableEventType::VerificationReceiptLinkRecorded,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::VerificationFailureLocatorRecorded(
+                sample_verification_failure_locator_recorded(),
+            )),
+            DurableEventType::VerificationFailureLocatorRecorded,
         ),
         (
             SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
@@ -2343,6 +2377,8 @@ fn verification_state_projection_replays_control_entries() -> Result<()> {
     let policy_entry = sample_verification_policy_changed_entry()?;
     let check_run_entry = sample_verification_check_run_entry();
     let recorded_entry = sample_verification_recorded_entry();
+    let receipt_link = sample_verification_receipt_link_recorded();
+    let failure_locator = sample_verification_failure_locator_recorded();
     let readiness_entry = sample_readiness_evaluated_entry();
     let child_link = sample_child_verification_receipt_linked();
     let trust_entry = sample_workspace_trust_decision_entry();
@@ -2361,6 +2397,12 @@ fn verification_state_projection_replays_control_entries() -> Result<()> {
         )),
         SessionLogEntry::Control(ControlEntry::VerificationCheckRun(check_run_entry.clone())),
         SessionLogEntry::Control(ControlEntry::VerificationRecorded(recorded_entry.clone())),
+        SessionLogEntry::Control(ControlEntry::VerificationReceiptLinkRecorded(
+            receipt_link.clone(),
+        )),
+        SessionLogEntry::Control(ControlEntry::VerificationFailureLocatorRecorded(
+            failure_locator.clone(),
+        )),
         SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness_entry.clone())),
         SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(
             child_link.clone(),
@@ -2377,6 +2419,11 @@ fn verification_state_projection_replays_control_entries() -> Result<()> {
     assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
     assert_eq!(projection.check_run(&check_run_id), Some(&check_run_entry));
     assert_eq!(projection.receipt(&receipt_id), Some(&recorded_entry));
+    assert_eq!(projection.receipt_link(&receipt_id), Some(&receipt_link));
+    assert_eq!(
+        projection.failure_locator(&check_run_id),
+        Some(&failure_locator)
+    );
     assert_eq!(projection.latest_readiness(&scope), Some(&readiness_entry));
     assert_eq!(projection.child_receipt_links, vec![child_link]);
     assert_eq!(
@@ -3110,6 +3157,8 @@ fn verification_state_projection_replays_durable_stream_records() -> Result<()> 
     let policy_entry = sample_verification_policy_changed_entry()?;
     let check_run_entry = sample_verification_check_run_entry();
     let recorded_entry = sample_verification_recorded_entry();
+    let receipt_link = sample_verification_receipt_link_recorded();
+    let failure_locator = sample_verification_failure_locator_recorded();
     let readiness_entry = sample_readiness_evaluated_entry();
     let scope = policy_entry.scope.clone();
     let check_run_id = check_run_entry.run_id.clone();
@@ -3121,6 +3170,12 @@ fn verification_state_projection_replays_durable_stream_records() -> Result<()> 
         )),
         SessionLogEntry::Control(ControlEntry::VerificationCheckRun(check_run_entry.clone())),
         SessionLogEntry::Control(ControlEntry::VerificationRecorded(recorded_entry.clone())),
+        SessionLogEntry::Control(ControlEntry::VerificationReceiptLinkRecorded(
+            receipt_link.clone(),
+        )),
+        SessionLogEntry::Control(ControlEntry::VerificationFailureLocatorRecorded(
+            failure_locator.clone(),
+        )),
         SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness_entry.clone())),
     ] {
         store.append_session_entry_event(&entry)?;
@@ -3138,6 +3193,11 @@ fn verification_state_projection_replays_durable_stream_records() -> Result<()> 
     assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
     assert_eq!(projection.check_run(&check_run_id), Some(&check_run_entry));
     assert_eq!(projection.receipt(&receipt_id), Some(&recorded_entry));
+    assert_eq!(projection.receipt_link(&receipt_id), Some(&receipt_link));
+    assert_eq!(
+        projection.failure_locator(&check_run_id),
+        Some(&failure_locator)
+    );
     assert_eq!(projection.latest_readiness(&scope), Some(&readiness_entry));
     Ok(())
 }

@@ -15,7 +15,8 @@ use crate::{
     QueryEgressOutcome, QueryEgressStarted, SessionLogEntry, StepLeaseEntry,
     StepLeaseHeartbeatEntry, TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview,
     ToolProgressEvent, ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
-    VerificationRecordedEntry, WebFetchTransportAuthorization, WorkspaceMutationDetected,
+    VerificationFailureLocatorRecorded, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
+    WebFetchTransportAuthorization, WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -212,6 +213,8 @@ durable_event_types! {
     VerificationRecorded => ("verification_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     VerificationPolicyChanged => ("verification_policy_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     VerificationCheckRun => ("verification_check_run", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    VerificationReceiptLinkRecorded => ("verification_receipt_link_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    VerificationFailureLocatorRecorded => ("verification_failure_locator_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     EnvironmentFingerprintRecorded => ("environment_fingerprint_recorded", RecoveryCritical, Critical, DirectJson, "environment_fingerprint_recorded"),
     ReadinessEvaluated => ("readiness_evaluated", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -451,6 +454,8 @@ pub enum TypedDomainEvent {
     WorkspaceMutationDetected(WorkspaceMutationDetected),
     VerificationRecorded(VerificationRecordedEntry),
     VerificationCheckRun(VerificationCheckRunEntry),
+    VerificationReceiptLinkRecorded(VerificationReceiptLinkRecorded),
+    VerificationFailureLocatorRecorded(VerificationFailureLocatorRecorded),
     JobIntentRecorded(JobIntentEntry),
     StepLeaseRecorded(StepLeaseEntry),
     StepLeaseHeartbeatRecorded(StepLeaseHeartbeatEntry),
@@ -548,6 +553,16 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         DurableEventType::VerificationCheckRun => {
             TypedDomainEvent::VerificationCheckRun(decode_verification_check_run(&event)?)
         }
+        DurableEventType::VerificationReceiptLinkRecorded => {
+            TypedDomainEvent::VerificationReceiptLinkRecorded(
+                decode_verification_receipt_link_recorded(&event)?,
+            )
+        }
+        DurableEventType::VerificationFailureLocatorRecorded => {
+            TypedDomainEvent::VerificationFailureLocatorRecorded(
+                decode_verification_failure_locator_recorded(&event)?,
+            )
+        }
         DurableEventType::JobIntentRecorded => {
             TypedDomainEvent::JobIntentRecorded(decode_job_intent_recorded(&event)?)
         }
@@ -642,6 +657,24 @@ fn decode_verification_check_run(event: &StoredEvent) -> Result<VerificationChec
     match decode_control_entry(event)? {
         ControlEntry::VerificationCheckRun(entry) => Ok(entry),
         _ => bail!("verification check run event carried non-check-run payload"),
+    }
+}
+
+fn decode_verification_receipt_link_recorded(
+    event: &StoredEvent,
+) -> Result<VerificationReceiptLinkRecorded> {
+    match decode_control_entry(event)? {
+        ControlEntry::VerificationReceiptLinkRecorded(entry) => Ok(entry),
+        _ => bail!("verification receipt link event carried non-link payload"),
+    }
+}
+
+fn decode_verification_failure_locator_recorded(
+    event: &StoredEvent,
+) -> Result<VerificationFailureLocatorRecorded> {
+    match decode_control_entry(event)? {
+        ControlEntry::VerificationFailureLocatorRecorded(entry) => Ok(entry),
+        _ => bail!("verification failure locator event carried non-locator payload"),
     }
 }
 
@@ -1223,6 +1256,10 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::VerificationPolicyChanged(_) => "verification_policy_changed",
         ControlEntry::VerificationCheckRun(_) => "verification_check_run",
         ControlEntry::VerificationRecorded(_) => "verification_recorded",
+        ControlEntry::VerificationReceiptLinkRecorded(_) => "verification_receipt_link_recorded",
+        ControlEntry::VerificationFailureLocatorRecorded(_) => {
+            "verification_failure_locator_recorded"
+        }
         ControlEntry::ReadinessEvaluated(_) => "readiness_evaluated",
         ControlEntry::ChildVerificationReceiptLinked(_) => "child_verification_receipt_linked",
         ControlEntry::WorkspaceTrustDecision(_) => "workspace_trust_decision",

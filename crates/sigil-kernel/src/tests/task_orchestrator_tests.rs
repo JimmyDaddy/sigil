@@ -3812,8 +3812,16 @@ fn exact_task_verification_rerun_reuses_durable_check_lifecycle() -> Result<()> 
             .iter()
             .filter(|event| matches!(event, RunEvent::Control(_)))
             .count(),
-        4
+        5
     );
+    let receipt_id = output.verification.receipt.receipt.receipt_id.as_str();
+    let projection = session.verification_state_projection();
+    assert!(projection.receipt_link(receipt_id).is_some_and(|link| {
+        !link.receipt_event_id.is_empty()
+            && link.workspace_snapshot_id == request.workspace_snapshot_id
+            && link.changeset_id.is_none()
+            && link.changeset_apply_event_id.is_none()
+    }));
     let error = futures::executor::block_on(rerun_task_verification_check(
         &mut session,
         &mut handler,
@@ -4150,6 +4158,34 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
             && entry.check_spec_id == "always-fails"
             && entry.receipt_id.is_some()
     }));
+    let failed_run = projection
+        .check_runs
+        .values()
+        .find(|entry| {
+            entry.status == crate::VerificationCheckRunStatus::Failed
+                && entry.check_spec_id == "always-fails"
+        })
+        .expect("failed check run should be projected");
+    let failed_receipt_id = failed_run
+        .receipt_id
+        .as_deref()
+        .expect("failed check should retain its receipt");
+    assert_eq!(
+        projection
+            .receipt_link(failed_receipt_id)
+            .map(|link| link.workspace_snapshot_id.as_str()),
+        projection
+            .receipt(failed_receipt_id)
+            .map(|recorded| { recorded.receipt.binding.workspace_snapshot_id.as_str() })
+    );
+    assert!(
+        projection
+            .failure_locator(&failed_run.run_id)
+            .is_some_and(|locator| {
+                locator.receipt_id.as_deref() == Some(failed_receipt_id)
+                    && locator.command_event_id.is_some()
+            })
+    );
 
     let spawn_error = CandidateCheck {
         source: CheckDiscoverySource::UserExplicitConfig,
@@ -4207,6 +4243,22 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
                         .is_some_and(|reason| reason.contains("failed to spawn"))
         )
     }));
+    let projection = session.verification_state_projection();
+    let errored_run = projection
+        .check_runs
+        .values()
+        .find(|run| {
+            run.check_spec_id == "spawn-error"
+                && run.status == crate::VerificationCheckRunStatus::Errored
+        })
+        .expect("errored run should be projected");
+    assert!(
+        projection
+            .failure_locator(&errored_run.run_id)
+            .is_some_and(|locator| locator.receipt_id.is_none()
+                && locator.command_event_id.is_none()
+                && locator.summary.contains("failed to spawn"))
+    );
     Ok(())
 }
 

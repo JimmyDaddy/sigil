@@ -604,6 +604,12 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::VerificationPolicyChanged(_) => DurableEventType::VerificationPolicyChanged,
         ControlEntry::VerificationCheckRun(_) => DurableEventType::VerificationCheckRun,
         ControlEntry::VerificationRecorded(_) => DurableEventType::VerificationRecorded,
+        ControlEntry::VerificationReceiptLinkRecorded(_) => {
+            DurableEventType::VerificationReceiptLinkRecorded
+        }
+        ControlEntry::VerificationFailureLocatorRecorded(_) => {
+            DurableEventType::VerificationFailureLocatorRecorded
+        }
         ControlEntry::ReadinessEvaluated(_) => DurableEventType::ReadinessEvaluated,
         ControlEntry::ChildVerificationReceiptLinked(_) => {
             DurableEventType::ChildVerificationReceiptLinked

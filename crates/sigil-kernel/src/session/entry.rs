@@ -221,6 +221,8 @@ pub enum ControlEntry {
     VerificationPolicyChanged(VerificationPolicyChangedEntry),
     VerificationCheckRun(VerificationCheckRunEntry),
     VerificationRecorded(VerificationRecordedEntry),
+    VerificationReceiptLinkRecorded(VerificationReceiptLinkRecorded),
+    VerificationFailureLocatorRecorded(VerificationFailureLocatorRecorded),
     ReadinessEvaluated(ReadinessEvaluatedEntry),
     ChildVerificationReceiptLinked(ChildVerificationReceiptLinked),
     WorkspaceTrustDecision(WorkspaceTrustDecisionEntry),
