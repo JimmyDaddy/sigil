@@ -9,4 +9,5 @@ mod event_bridge_tests;
 mod plan_handoff_e2e_tests;
 mod session_tests;
 mod spawn_tests;
+mod verification_e2e_tests;
 mod worker_loop_tests;

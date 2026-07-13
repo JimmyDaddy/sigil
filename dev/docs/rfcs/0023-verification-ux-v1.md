@@ -1,6 +1,6 @@
 # RFC-0023 Verification UX V1
 
-状态：accepted / implementation in progress
+状态：accepted / Verification UX V1 implemented
 
 创建日期：2026-07-13
 
@@ -117,3 +117,11 @@ Existing keyboard-help metadata, focus routing, mouse hit testing, narrow layout
 3. Add failure locator and receipt-link records/projections with recovery tests.
 4. Render the card, inspect surface, input/mouse routing and help metadata.
 5. Add TUI runner E2E and update user documentation.
+
+## 10. Implementation Result
+
+- The task status band projects one deterministic Verification card from durable readiness, trusted check specs and latest exact-scope check state.
+- `Alt-V` or mouse focus exposes an explicit `Enter` action bound to task, step, check hash, policy hash and workspace snapshot. `I` expands durable failure and receipt evidence.
+- Manual rerun reuses the kernel verification runner and configured execution backend. Queued, running, terminal, receipt-link and failure-locator records remain append-only and recoverable.
+- A successful current-snapshot receipt removes the obsolete rerun action. Stale, unlinked or mismatched success cannot override the current readiness verdict.
+- EN/ZH user guide and command reference document the workflow. Kernel reducer/recovery tests, TUI input/render tests and a real worker-loop rerun E2E cover the V1 acceptance path.
