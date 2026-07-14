@@ -25,7 +25,9 @@ const IDLE_AUTO_COMPACTION_COOLDOWN_MS: u64 = 60_000;
 pub(in crate::runner) const V2_COMPACTION_APPLY_FREEZE_REASON: &str =
     "V2 context compaction apply is temporarily frozen while correctness fixes are in progress";
 
-const V2_COMPACTION_APPLY_FROZEN: bool = true;
+fn v2_compaction_apply_is_frozen(initiation: &CompactionInitiation) -> bool {
+    !matches!(initiation, CompactionInitiation::Manual)
+}
 
 /// Process-local post-run policy state for the deliberately narrow K25.11 automation path.
 ///
@@ -94,6 +96,7 @@ pub(in crate::runner) enum IdleAutoCompactionPreparation {
 pub(in crate::runner) struct PendingV2Compaction {
     request_id: u64,
     session_scope_id: String,
+    initiation: CompactionInitiation,
     idle_auto_scope_fingerprint: Option<String>,
     preflight: PortableSemanticCompactionPreflight,
     target_material: PortableTargetRequestMaterial,
@@ -106,6 +109,7 @@ pub(in crate::runner) struct PendingV2Compaction {
 struct PreparedPortableV2Compaction {
     request_id: u64,
     session_scope_id: String,
+    initiation: CompactionInitiation,
     idle_auto_scope_fingerprint: Option<String>,
     cache_root: std::path::PathBuf,
     preflight: PortableSemanticCompactionPreflight,
@@ -125,6 +129,7 @@ impl PreparedPortableV2Compaction {
         Ok(PendingV2Compaction {
             request_id: self.request_id,
             session_scope_id: self.session_scope_id,
+            initiation: self.initiation,
             idle_auto_scope_fingerprint: self.idle_auto_scope_fingerprint,
             preflight: self.preflight,
             target_material,
@@ -186,6 +191,7 @@ impl PreparedPortableV2Compaction {
         Ok(PendingV2Compaction {
             request_id: self.request_id,
             session_scope_id: self.session_scope_id,
+            initiation: self.initiation,
             idle_auto_scope_fingerprint: self.idle_auto_scope_fingerprint,
             preflight: self.preflight,
             target_material,
@@ -304,7 +310,7 @@ impl PendingV2Compaction {
         session: &Session,
         session_log_path: &std::path::Path,
     ) -> Result<PortableSemanticCompactionOutcome> {
-        if V2_COMPACTION_APPLY_FROZEN {
+        if v2_compaction_apply_is_frozen(&self.initiation) {
             bail!(V2_COMPACTION_APPLY_FREEZE_REASON);
         }
         if session.session_scope_id() != self.session_scope_id {
@@ -367,7 +373,10 @@ pub(in crate::runner) async fn prepare_overflow_recovery_compaction<P>(
 where
     P: sigil_kernel::Provider,
 {
-    if V2_COMPACTION_APPLY_FROZEN {
+    let initiation = CompactionInitiation::OverflowRecovery {
+        source_physical_attempt_id: source_physical_attempt_id.clone(),
+    };
+    if v2_compaction_apply_is_frozen(&initiation) {
         bail!(V2_COMPACTION_APPLY_FREEZE_REASON);
     }
     if !sigil_runtime::is_openai_responses_portable_target_profile(
@@ -402,9 +411,7 @@ where
     };
     prepare_portable_v2_compaction(
         request_id,
-        CompactionInitiation::OverflowRecovery {
-            source_physical_attempt_id: source_physical_attempt_id.clone(),
-        },
+        initiation,
         root_config,
         workspace_root,
         session_log_path,
@@ -538,7 +545,7 @@ fn prepare_v2_compaction(
         preview: preview.clone(),
         admission,
     };
-    if V2_COMPACTION_APPLY_FROZEN {
+    if v2_compaction_apply_is_frozen(&initiation) {
         return Ok((
             review(V2CompactionAdmission::Unavailable {
                 reason: V2_COMPACTION_APPLY_FREEZE_REASON.to_owned(),
@@ -742,6 +749,7 @@ fn prepare_portable_v2_compaction(
     Ok(PreparedPortableV2Compaction {
         request_id,
         session_scope_id: session.session_scope_id().to_owned(),
+        initiation: initiation.clone(),
         idle_auto_scope_fingerprint: match initiation {
             CompactionInitiation::IdleAutomatic { scope_fingerprint } => Some(scope_fingerprint),
             CompactionInitiation::Manual
@@ -807,7 +815,9 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
         }
         QueuedConversationPressureAdmission::PortablePreflightRequired { candidate, .. } => {
             let queue_id = candidate.promotion.queue_id.clone();
-            if V2_COMPACTION_APPLY_FROZEN {
+            if v2_compaction_apply_is_frozen(&CompactionInitiation::PreTurnPressure {
+                queue_id: queue_id.clone(),
+            }) {
                 return Ok(QueuedConversationPreTurnAdmission::Blocked {
                     queue_id,
                     reason: V2_COMPACTION_APPLY_FREEZE_REASON.to_owned(),
@@ -868,7 +878,9 @@ fn prepare_queued_portable_preflight(
     let Some(preview) = session.v2_compaction_preview(effective_config.tail_messages)? else {
         return Ok(None);
     };
-    if V2_COMPACTION_APPLY_FROZEN {
+    if v2_compaction_apply_is_frozen(&CompactionInitiation::PreTurnPressure {
+        queue_id: candidate.promotion.queue_id.clone(),
+    }) {
         bail!(V2_COMPACTION_APPLY_FREEZE_REASON);
     }
 

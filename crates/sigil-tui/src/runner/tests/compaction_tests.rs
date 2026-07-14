@@ -373,7 +373,7 @@ fn compact_preview_is_read_only_and_reports_the_v2_fold_plan() -> Result<()> {
     assert!(matches!(
         review.admission,
         V2CompactionAdmission::Unavailable { ref reason }
-            if reason == "V2 context compaction apply is temporarily frozen while correctness fixes are in progress"
+            if reason.contains("local exact target proof is unavailable")
     ));
     assert_eq!(std::fs::read(&session_log_path)?, before);
 
@@ -479,6 +479,103 @@ fn compact_preview_without_older_history_reports_message_count_and_raw_tail() ->
     ));
 
     worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the explicitly installed checksum-pinned DeepSeek V4 Flash tokenizer"]
+fn manual_compaction_applies_reloads_and_repeats_with_installed_tokenizer() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-manual-compact-live.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+    }))?;
+    for turn in 0..4 {
+        store.append(&SessionLogEntry::User(ModelMessage::user(format!(
+            "continue the same coding objective at turn {turn}"
+        ))))?;
+        store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!(
+                "completed detailed implementation evidence for turn {turn}: {}",
+                "verified-state ".repeat(400)
+            )),
+            Vec::new(),
+        )))?;
+    }
+
+    let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+    root_config.providers.insert(
+        "deepseek".to_owned(),
+        serde_json::json!({
+            "api_key": std::env::var("SIGIL_API_KEY")?
+        }),
+    );
+    root_config.compaction.tail_messages = 2;
+
+    for iteration in 0..3 {
+        let worker = spawn_test_worker(
+            root_config.clone(),
+            session_log_path.clone(),
+            Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new()),
+            workspace_root.clone(),
+        )?;
+        worker.send(WorkerCommand::PreviewV2Compaction)?;
+        let preview = worker
+            .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
+        let WorkerMessage::V2CompactionPreviewed {
+            state: V2CompactionPreviewState::Review(review),
+        } = preview
+        else {
+            panic!("expected an admitted manual compaction review");
+        };
+        assert!(
+            matches!(review.admission, V2CompactionAdmission::Ready { .. }),
+            "manual compaction was not admitted: {:?}",
+            review.admission
+        );
+        let request_id = review.request_id;
+        worker.send(WorkerCommand::ApplyV2Compaction { request_id })?;
+        let applied = worker
+            .recv_until(|message| matches!(message, WorkerMessage::V2CompactionApplied { .. }))?;
+        assert!(matches!(
+            applied,
+            WorkerMessage::V2CompactionApplied {
+                request_id: applied_request_id,
+                source: super::super::V2CompactionApplySource::ManualConfirmation,
+                ..
+            } if applied_request_id == request_id
+        ));
+        worker.shutdown()?;
+
+        if iteration < 2 {
+            store.append(&SessionLogEntry::User(ModelMessage::user(format!(
+                "continue after compact iteration {iteration}"
+            ))))?;
+            store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+                Some(format!(
+                    "new durable progress after compact iteration {iteration}: {}",
+                    "new-evidence ".repeat(400)
+                )),
+                Vec::new(),
+            )))?;
+        }
+    }
+
+    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_type == DurableEventType::CompactionAppliedV2.as_str()
+            })
+            .count(),
+        3
+    );
     Ok(())
 }
 

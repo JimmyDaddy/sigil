@@ -17,6 +17,29 @@ use super::*;
 
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=pre-turn-secret exactly";
 
+#[test]
+fn only_manual_compaction_is_unfrozen_before_automatic_slices() -> Result<()> {
+    assert!(!v2_compaction_apply_is_frozen(
+        &CompactionInitiation::Manual
+    ));
+    assert!(v2_compaction_apply_is_frozen(
+        &CompactionInitiation::IdleAutomatic {
+            scope_fingerprint: "scope-a".to_owned(),
+        }
+    ));
+    assert!(v2_compaction_apply_is_frozen(
+        &CompactionInitiation::PreTurnPressure {
+            queue_id: ConversationInputQueueId::new("queue_1")?,
+        }
+    ));
+    assert!(v2_compaction_apply_is_frozen(
+        &CompactionInitiation::OverflowRecovery {
+            source_physical_attempt_id: "attempt-1".to_owned(),
+        }
+    ));
+    Ok(())
+}
+
 fn append_context_window_rejection(
     store: &JsonlSessionStore,
     physical_attempt_id: &str,

@@ -146,7 +146,7 @@ Use `/resume` to select a session. If a planned task is still unfinished, contin
 
 ## Context Usage Is High
 
-The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`. Soft and hard thresholds show context pressure. Compaction apply is currently frozen, so idle automation does not alter session context or start a recovery request.
+The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`. Soft and hard thresholds show context pressure. Idle, pre-turn, and overflow compaction apply remain frozen, so automatic paths do not alter session context or start a recovery request.
 
 Manual compaction:
 
@@ -154,9 +154,9 @@ Manual compaction:
 /compact
 ```
 
-This opens a read-only V2 fold preview. Opening it does not append a compaction record or rewrite session history. Apply is currently frozen; `Enter` closes the preview and no automatic or overflow path changes the active boundary.
+This opens a read-only V2 fold preview. Opening it does not append a compaction record or rewrite session history. If the review says the target is ready, `Enter` confirms one manual apply; otherwise the review explains which local admission prerequisite is missing. Automatic and overflow paths still do not change the active boundary.
 
-You can pre-install the checksum-verified DeepSeek V4 Flash tokenizer for a future portable-compaction release with:
+You can install the checksum-verified DeepSeek V4 Flash tokenizer required by local manual admission with:
 
 ```text
 sigil tokenizer install deepseek-v4-flash

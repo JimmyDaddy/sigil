@@ -6,7 +6,9 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have been documented after `v0.0.1-alpha.2` yet.
+### Changed
+
+- `/compact` can now confirm one manual Context Compaction V2 apply when the selected profile has an installed checksum-pinned tokenizer and exact local target-fit proof. Automatic apply paths remain frozen.
 
 ## v0.0.1-alpha.2 - 2026-07-15
 

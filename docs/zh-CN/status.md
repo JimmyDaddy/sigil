@@ -20,7 +20,7 @@
 | Checkpoint recovery | `Ctrl-R` 预览绑定证据的 checkpoint，并提供受控文件 restore，或保持文件不变的 conversation fork。 |
 | Planning | `/plan` 运行只读 planning prompt，并可在用户显式接受后交接为 durable `/task` 执行；`/task <task>` 直接创建 durable 多步骤任务，`/task continue` 继续最新任务。 |
 | 任务验证 | Verification card 展示 readiness、推荐检查，以及可检查的 snapshot 和 changeset 证据；`Alt-V` 用于聚焦。 |
-| 上下文控制 | 界面持续显示 context pressure；`/compact` 打开只读 Context Compaction V2 preview。Apply 仍暂时冻结。 |
+| 上下文控制 | 界面持续显示 context pressure；`/compact` 打开只读 V2 preview，并仅在本地 exact admission 通过后允许用户明确确认手动应用。idle、pre-turn 与 overflow apply 仍暂时冻结。 |
 | DeepSeek provider | DeepSeek 是默认 Quick Setup 路径。 |
 | OpenAI-compatible provider | 通过 `[providers.openai_compat]` 支持兼容 Chat Completions endpoint。 |
 | OpenAI Responses provider | 通过 `[providers.openai_responses]` 支持 Responses streaming endpoint；Context Compaction V2 apply（包括受控 overflow recovery）在修复正确性问题期间暂时冻结。 |

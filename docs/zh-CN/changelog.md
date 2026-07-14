@@ -6,7 +6,9 @@
 
 ## Unreleased - main
 
-`v0.0.1-alpha.2` 之后暂时没有新增的用户可见变更。
+### 调整
+
+- 所选 profile 已安装 checksum-pinned tokenizer 且本地 exact target-fit proof 通过时，`/compact` 现在可以确认一次手动 Context Compaction V2 apply；自动 apply 路径仍保持冻结。
 
 ## v0.0.1-alpha.2 - 2026-07-15
 

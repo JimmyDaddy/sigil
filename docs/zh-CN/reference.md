@@ -52,7 +52,7 @@
 | `/task continue` | 不带额外 guidance 继续最新 planned task |
 | `/model <flash|pro|id>` | 切换下一轮 run 的 model，并开始新 session |
 | `/effort <low|medium|high|max>` | 切换下一轮 run 的 reasoning effort |
-| `/compact` | 审查 V2 折叠计划；修复正确性问题期间暂时冻结应用 |
+| `/compact` | 审查 V2 折叠计划；本地 exact admission ready 时确认一次手动应用 |
 | `/quit` | 退出 TUI |
 
 Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。

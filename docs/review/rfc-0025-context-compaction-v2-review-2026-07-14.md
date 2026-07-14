@@ -314,3 +314,9 @@
 | P2-15 legacy raw line | 识别 raw legacy `control.compaction_applied` 以及 legacy `SessionLogEntry`，返回结构化 compatibility error 且不触发 tail truncation；覆盖 EOF 损坏尾的 byte-equality 场景。 |
 
 这轮修复不把 deferred provider-native activation、model-switch transfer、export rewrap/delete-time key destruction 或真实在线 provider/TUI smoke 伪装为已完成能力。它们仍是解除冻结后的独立交付与验收项。
+
+## 分阶段解除冻结记录（2026-07-15）
+
+- P2-12 已由 K25.18A 关闭：manual snapshot、tokenizer parse 与 tokenization 全部转入 request/session-owned blocking task；replacement、dismiss、session switch 和 shutdown 会取消或使 owner 失效，worker 只接收仍匹配当前 scope 与 preview 的结果。
+- K25.18B 只解除 `CompactionInitiation::Manual`，idle、pre-turn 与 overflow 仍由 initiation policy fail closed。使用已安装的 checksum-pinned DeepSeek V4 Flash tokenizer 与真实 provider credential，三轮 preview → apply → reload → 再 compact 均通过，并产生恰好三条 durable `CompactionAppliedV2`。
+- 自动路径仍必须分别完成 owned preparation、stale frontier revalidation 与真实 smoke，不能从 manual 的验收结果推导为已解除冻结。

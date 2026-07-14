@@ -50,4 +50,4 @@ Press `Ctrl-R` while idle to rebuild the latest controlled checkpoint from durab
 
 ![Sigil context compaction preview](../../site/assets/screenshots/compaction-preview.svg)
 
-Use `/compact` to review which older messages would fold and why the target request is or is not admissible. This is currently a read-only review surface: Context Compaction V2 apply remains temporarily frozen while correctness fixes are in progress.
+Use `/compact` to review which older messages would fold and why the target request is or is not admissible. Opening the review is read-only; when exact local admission is ready, `Enter` confirms one manual V2 apply. Automatic apply remains temporarily frozen.
