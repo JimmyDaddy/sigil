@@ -4,7 +4,7 @@
 
 Sigil 是一个 TUI-first coding agent。本页只提供精简的用户文档路径地图，不重复 release 版本、安装命令或 provider 凭据。需要当前细节时，请进入对应主题的权威页面。
 
-这些文档跟随 `main`，已打包发布的 alpha 仍是 `v0.0.1-alpha.1`。请通过 [Unreleased](changelog.md#unreleased-main) 确认哪些能力可能仍需要从源码安装。
+这些文档跟随 `main`，已打包发布的 alpha 仍是 `v0.0.1-alpha.2`。请通过 [Unreleased](changelog.md#unreleased-main) 确认哪些能力可能仍需要从源码安装。
 
 ## 从这里开始
 

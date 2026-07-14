@@ -6,7 +6,11 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-These changes are available on `main` and in the website documentation, but are not guaranteed to be present in the packaged `v0.0.1-alpha.1` release. Use a source install when you need them before the next tagged alpha.
+No user-facing changes have been documented after `v0.0.1-alpha.2` yet.
+
+## v0.0.1-alpha.2 - 2026-07-15
+
+These changes are included in the packaged `v0.0.1-alpha.2` release.
 
 ### Added
 

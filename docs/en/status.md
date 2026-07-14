@@ -4,7 +4,7 @@
 
 This page separates what users can rely on today from what is experimental, limited, or future packaging work. The current alpha line is an early preview, not a stable API or plugin compatibility promise. Release versions and install commands are maintained in [Installation](installation.md) and the [Changelog](changelog.md).
 
-**Version boundary:** this page and the GitHub Pages site track `main`. The packaged alpha remains `v0.0.1-alpha.1` and can lag behind the capabilities below; check [Unreleased](changelog.md#unreleased-main) before relying on a newer feature.
+**Version boundary:** this page and the GitHub Pages site track `main`. The packaged alpha remains `v0.0.1-alpha.2` and can lag behind the capabilities below; check [Unreleased](changelog.md#unreleased-main) before relying on a newer feature.
 
 ## Supported Today
 

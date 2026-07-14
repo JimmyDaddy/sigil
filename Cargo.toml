@@ -19,7 +19,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 
 [workspace.dependencies]
 aho-corasick = "1.1.4"

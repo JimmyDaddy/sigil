@@ -4,7 +4,7 @@
 
 这一页把用户今天可以依赖的能力，与 experimental、limited 或 future packaging work 分开说明。当前 alpha 仍是 early preview，不承诺稳定 API 或插件兼容性。Release 版本与安装命令统一由[安装](installation.md)和 [Changelog](changelog.md)维护。
 
-**版本边界：** 本页与 GitHub Pages 网站跟随 `main`。已打包发布的 alpha 仍是 `v0.0.1-alpha.1`，可能晚于下方能力；依赖新功能前请先检查 [Unreleased](changelog.md#unreleased-main)。
+**版本边界：** 本页与 GitHub Pages 网站跟随 `main`。已打包发布的 alpha 仍是 `v0.0.1-alpha.2`，可能晚于下方能力；依赖新功能前请先检查 [Unreleased](changelog.md#unreleased-main)。
 
 ## 当前支持
 

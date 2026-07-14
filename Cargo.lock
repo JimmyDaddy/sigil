@@ -2680,7 +2680,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sigil"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-code-intel"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-http"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -2731,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-kernel"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2757,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-mcp"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-anthropic"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2797,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-deepseek"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-gemini"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-openai-compat"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-provider-openai-responses"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-runtime"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tools-builtin"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -2923,7 +2923,7 @@ dependencies = [
 
 [[package]]
 name = "sigil-tui"
-version = "0.0.1-alpha.1"
+version = "0.0.1-alpha.2"
 dependencies = [
  "anyhow",
  "async-trait",
