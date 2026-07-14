@@ -16,6 +16,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  HOMEBREW_TAP_REPOSITORY: JimmyDaddy/homebrew-sigil
   RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
@@ -173,3 +174,59 @@ jobs:
             --notes-file RELEASE_NOTES.md \
             --verify-tag \
             "${release_flags[@]}"
+
+  sync-homebrew:
+    name: Sync Homebrew tap
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: sigil-homebrew-tap-sync
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.HOMEBREW_TAP_REPOSITORY }}
+          ref: main
+          path: homebrew-sigil
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+
+      - name: Download published formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          formula_dir="${RUNNER_TEMP}/sigil-homebrew-formula"
+          mkdir -p "${formula_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern sigil-ai.rb \
+            --dir "${formula_dir}"
+          test -s "${formula_dir}/sigil-ai.rb"
+
+      - name: Commit and push formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          formula_source="${RUNNER_TEMP}/sigil-homebrew-formula/sigil-ai.rb"
+          formula_target="homebrew-sigil/Formula/sigil-ai.rb"
+
+          grep -Fq "version \"${version}\"" "${formula_source}"
+          install -m 0644 "${formula_source}" "${formula_target}"
+          ruby -c "${formula_target}"
+
+          git -C homebrew-sigil add Formula/sigil-ai.rb
+          if git -C homebrew-sigil diff --cached --quiet; then
+            echo "Homebrew tap already references ${version}"
+            exit 0
+          fi
+
+          git -C homebrew-sigil config user.name "github-actions[bot]"
+          git -C homebrew-sigil config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-sigil commit -m "chore: update sigil-ai to ${version}"
+          git -C homebrew-sigil push origin HEAD:main

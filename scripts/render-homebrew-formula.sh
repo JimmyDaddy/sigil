@@ -143,8 +143,8 @@ formula="$(
 class ${formula_class} < Formula
   desc "TUI-first Rust AI coding agent"
   homepage "https://github.com/JimmyDaddy/sigil"
-  license "MIT"
   version "${version}"
+  license "MIT"
 
 ${source_block}
 

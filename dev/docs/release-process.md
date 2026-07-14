@@ -40,6 +40,9 @@ GitHub artifact attestations require `id-token: write`, `contents: read`, and
 `attestations: write` permissions on the build job. The publish job requires
 `contents: write` for the GitHub release and `id-token: write` for npm trusted
 publishing. It uses Node `22.22.0`, npm `11.18.0`, and no long-lived npm token.
+The Homebrew sync job has read-only access to this repository and pushes to the
+tap with the `HOMEBREW_TAP_DEPLOY_KEY` SSH deploy key, which is scoped to
+`JimmyDaddy/homebrew-sigil` only.
 
 ## Assets
 
@@ -57,9 +60,19 @@ Each tar archive should include the `sigil` binary, `LICENSE`, README files,
 README image links remain available after extraction.
 
 The generated `sigil-ai.rb` is the source of truth for the
-`JimmyDaddy/homebrew-sigil` tap update. After the GitHub release succeeds, copy
-that asset into `Formula/sigil-ai.rb` in the tap repository, run `ruby -c`, commit
-the update, and push it before announcing the Homebrew path as current.
+`JimmyDaddy/homebrew-sigil` tap update. After the GitHub release succeeds, the
+separate `Sync Homebrew tap` job downloads that published asset, validates its
+version and Ruby syntax, and commits it to `Formula/sigil-ai.rb`. Keeping this in
+a separate job allows a failed tap push to be rerun without republishing npm
+packages or recreating the GitHub release.
+
+The repository secret `HOMEBREW_TAP_DEPLOY_KEY` must contain the private half of
+a write-enabled deploy key registered only on `JimmyDaddy/homebrew-sigil`. Do
+not reuse a maintainer PAT or the local GitHub CLI token for this job. The
+default `GITHUB_TOKEN` remains limited to the `sigil` repository.
+
+If the sync job needs manual recovery, download and validate the exact release
+asset before committing it to the tap:
 
 ```bash
 tmp_formula_dir="$(mktemp -d)"
@@ -81,14 +94,8 @@ Verify the pushed tap formula references the same tag and version:
 
 ```bash
 gh api repos/JimmyDaddy/homebrew-sigil/contents/Formula/sigil-ai.rb \
-  --jq .content | base64 --decode | grep -E '0\.0\.1-alpha\.1|v0\.0\.1-alpha\.1'
+  --jq .content | base64 --decode | grep -E '0\.0\.1-alpha\.2|v0\.0\.1-alpha\.2'
 ```
-
-This cross-repository tap sync is currently a required maintainer step. To
-automate it inside `.github/workflows/release.yml`, use a fine-scoped GitHub App
-token or PAT secret with `contents:write` on `JimmyDaddy/homebrew-sigil`; the
-default `GITHUB_TOKEN` for this repository must not be assumed to have
-cross-repository write permission.
 
 The npm package tarballs are generated from the same release archives:
 
