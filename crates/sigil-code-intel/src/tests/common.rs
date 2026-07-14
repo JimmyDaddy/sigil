@@ -62,8 +62,14 @@ def maybe_record(record_file, record_env, messages):
         "env": {key: os.environ.get(key) for key in record_env},
         "messages": messages,
     }
-    with open(record_file, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
+    temp_file = f"{record_file}.{os.getpid()}.tmp"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(temp_file, record_file)
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
 
 
 def run_scenario_mode(scenario_path):
