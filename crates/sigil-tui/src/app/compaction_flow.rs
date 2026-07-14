@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use sigil_kernel::CompactionFoldProtectionReason;
 
 use super::{AppState, PaneFocus, TimelineRole, modal_flow::ModalState};
-use crate::runner::{V2CompactionAdmission, V2CompactionApplySource, V2CompactionReview};
+use crate::runner::{
+    V2CompactionAdmission, V2CompactionApplySource, V2CompactionPreviewState, V2CompactionReview,
+};
 
 #[derive(Debug)]
 pub(super) struct V2CompactionPreviewModalState {
@@ -84,13 +86,21 @@ impl V2CompactionPreviewModalState {
 }
 
 impl AppState {
-    pub(super) fn apply_v2_compaction_preview(&mut self, review: Option<V2CompactionReview>) {
-        let Some(review) = review else {
-            let notice = "no newly foldable history for V2 compaction".to_owned();
-            self.last_notice = Some(notice.clone());
-            self.push_timeline(TimelineRole::Notice, notice.clone());
-            self.push_event("compact:preview", notice);
-            return;
+    pub(super) fn apply_v2_compaction_preview(&mut self, state: V2CompactionPreviewState) {
+        let review = match state {
+            V2CompactionPreviewState::NoFoldableHistory {
+                durable_message_count,
+                configured_tail_message_count,
+            } => {
+                let notice = format!(
+                    "no newly foldable history: {durable_message_count} durable message(s); raw tail is {configured_tail_message_count}. Add completed turns or lower compaction.tail_messages."
+                );
+                self.last_notice = Some(notice.clone());
+                self.push_timeline(TimelineRole::Notice, notice.clone());
+                self.push_event("compact:preview", notice);
+                return;
+            }
+            V2CompactionPreviewState::Review(review) => *review,
         };
 
         let fold_count = review.preview.plan.folded_event_ids.len();

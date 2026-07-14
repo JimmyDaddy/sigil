@@ -19,7 +19,7 @@ use std::{
 use tempfile::tempdir;
 
 use super::{
-    super::{V2CompactionAdmission, WorkerCommand, WorkerMessage},
+    super::{V2CompactionAdmission, V2CompactionPreviewState, WorkerCommand, WorkerMessage},
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
 
@@ -316,7 +316,7 @@ fn compact_preview_is_read_only_and_reports_the_v2_fold_plan() -> Result<()> {
     let preview = worker
         .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
     let WorkerMessage::V2CompactionPreviewed {
-        review: Some(review),
+        state: V2CompactionPreviewState::Review(review),
     } = preview
     else {
         panic!("expected a V2 compaction preview with foldable history");
@@ -382,7 +382,53 @@ fn compact_preview_without_foldable_history_returns_an_empty_preview() -> Result
         .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
     assert!(matches!(
         preview,
-        WorkerMessage::V2CompactionPreviewed { review: None }
+        WorkerMessage::V2CompactionPreviewed {
+            state: V2CompactionPreviewState::NoFoldableHistory {
+                durable_message_count: 0,
+                configured_tail_message_count: 6,
+            },
+        }
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn compact_preview_without_older_history_reports_message_count_and_raw_tail() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-compact-raw-tail.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("first request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("first response".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("second request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("second response".to_owned()),
+        Vec::new(),
+    )))?;
+
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::PreviewV2Compaction)?;
+    let preview = worker
+        .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
+    assert!(matches!(
+        preview,
+        WorkerMessage::V2CompactionPreviewed {
+            state: V2CompactionPreviewState::NoFoldableHistory {
+                durable_message_count: 4,
+                configured_tail_message_count: 6,
+            },
+        }
     ));
 
     worker.shutdown()?;

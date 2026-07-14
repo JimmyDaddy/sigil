@@ -473,8 +473,8 @@ impl AppState {
                 );
                 self.schedule_balance_refresh();
             }
-            WorkerMessage::V2CompactionPreviewed { review } => {
-                self.apply_v2_compaction_preview(review.map(|review| *review));
+            WorkerMessage::V2CompactionPreviewed { state } => {
+                self.apply_v2_compaction_preview(state);
             }
             WorkerMessage::V2CompactionApplied {
                 request_id: _,

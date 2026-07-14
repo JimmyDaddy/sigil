@@ -15,7 +15,7 @@ pub(crate) use protocol::{
 };
 pub use protocol::{
     McpActivationStatus, QueueMoveDirection, V2CompactionAdmission, V2CompactionApplySource,
-    V2CompactionReview, WorkerCommand, WorkerMessage,
+    V2CompactionPreviewState, V2CompactionReview, WorkerCommand, WorkerMessage,
 };
 pub use spawn::spawn_agent_worker;
 

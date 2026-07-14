@@ -1,5 +1,6 @@
 use super::agent_runtime::chat_agent_run_input_with_repo_context;
 use super::*;
+use crate::runner::V2CompactionPreviewState;
 
 pub(in crate::runner) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
@@ -2229,7 +2230,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             Ok((review, pending)) => {
                                 pending_v2_compaction = pending;
                                 let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
-                                    review: Some(Box::new(review)),
+                                    state: V2CompactionPreviewState::Review(Box::new(review)),
                                 });
                             }
                             Err(error) => {
@@ -2240,8 +2241,24 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         }
                     }
                     Ok(None) => {
-                        let _ =
-                            message_tx.send(WorkerMessage::V2CompactionPreviewed { review: None });
+                        let durable_message_count = session
+                            .entries()
+                            .iter()
+                            .filter(|entry| {
+                                matches!(
+                                    entry,
+                                    SessionLogEntry::User(_)
+                                        | SessionLogEntry::Assistant(_)
+                                        | SessionLogEntry::ToolResult(_)
+                                )
+                            })
+                            .count();
+                        let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
+                            state: V2CompactionPreviewState::NoFoldableHistory {
+                                durable_message_count,
+                                configured_tail_message_count: effective_config.tail_messages,
+                            },
+                        });
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!(

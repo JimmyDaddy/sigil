@@ -1,5 +1,5 @@
 use super::*;
-use crate::runner::{V2CompactionAdmission, V2CompactionReview};
+use crate::runner::{V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview};
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
 fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
@@ -541,13 +541,18 @@ fn empty_v2_compaction_preview_keeps_usage_status_and_reports_no_foldable_histor
     }))?;
     assert_eq!(app.runtime.compaction_status, "hard");
 
-    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed { review: None })?;
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        state: V2CompactionPreviewState::NoFoldableHistory {
+            durable_message_count: 4,
+            configured_tail_message_count: 6,
+        },
+    })?;
 
     assert_eq!(app.runtime.compaction_status, "hard");
     assert_eq!(app.runtime.stats.last_prompt_tokens, 90);
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice
-            && entry.text == "no newly foldable history for V2 compaction"
+            && entry.text == "no newly foldable history: 4 durable message(s); raw tail is 6. Add completed turns or lower compaction.tail_messages."
     }));
     Ok(())
 }
@@ -2803,7 +2808,7 @@ fn v2_compaction_review_requires_admission_before_it_can_apply() -> Result<()> {
         .expect("fixture should have foldable history");
 
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
-        review: Some(Box::new(V2CompactionReview {
+        state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 41,
             preview,
             admission: V2CompactionAdmission::Unavailable {
@@ -2847,7 +2852,7 @@ fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
         .expect("fixture should have foldable history");
 
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
-        review: Some(Box::new(V2CompactionReview {
+        state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 42,
             preview,
             admission: V2CompactionAdmission::Ready {
@@ -2893,7 +2898,7 @@ fn dismissed_v2_compaction_review_clears_the_worker_pending_state() -> Result<()
         .expect("fixture should have foldable history");
 
     app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
-        review: Some(Box::new(V2CompactionReview {
+        state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
             request_id: 43,
             preview,
             admission: V2CompactionAdmission::Ready {

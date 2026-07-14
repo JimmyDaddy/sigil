@@ -57,6 +57,16 @@ pub struct V2CompactionReview {
     pub(crate) admission: V2CompactionAdmission,
 }
 
+/// Read-only outcome of a V2 compaction preview request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V2CompactionPreviewState {
+    Review(Box<V2CompactionReview>),
+    NoFoldableHistory {
+        durable_message_count: usize,
+        configured_tail_message_count: usize,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerCommandEnvelope<T> {
     pub(crate) protocol_version: u16,
@@ -376,7 +386,7 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     V2CompactionPreviewed {
-        review: Option<Box<V2CompactionReview>>,
+        state: V2CompactionPreviewState,
     },
     V2CompactionApplied {
         request_id: u64,
