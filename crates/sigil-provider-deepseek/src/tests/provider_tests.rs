@@ -322,7 +322,7 @@ async fn prefix_completion_rejects_unsupported_user_id_strategy() -> Result<()> 
 }
 
 #[tokio::test]
-async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
+async fn provider_surfaces_reasoning_400_without_a_second_send() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
         http_response(
             400,
@@ -368,18 +368,17 @@ async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
         deterministic_materialization: true,
         hosted_tools: Vec::new(),
     };
-    let chunks = provider
-        .stream(request)
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let error = match provider.stream(request).await {
+        Ok(_) => panic!("reasoning replay rejection should surface without an internal retry"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("deepseek invalid request"));
     assert!(
-        chunks
-            .iter()
-            .any(|chunk| matches!(chunk, ProviderChunk::TextDelta(text) if text == "hello"))
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains("missing reasoning_content"))
     );
+    assert_eq!(responses.lock().expect("responses lock").len(), 1);
     Ok(())
 }
 
@@ -737,7 +736,7 @@ async fn fim_completion_yields_first_delta_before_stream_finishes() -> Result<()
 }
 
 #[tokio::test]
-async fn provider_retries_rate_limited_status_once() -> Result<()> {
+async fn provider_surfaces_rate_limited_status_without_a_second_send() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
         http_response(
             429,
@@ -762,68 +761,20 @@ async fn provider_retries_rate_limited_status_once() -> Result<()> {
         strict_tools_mode: crate::StrictToolsMode::Auto,
     })?;
 
-    let chunks = provider
+    let error = match provider
         .stream(simple_chat_request("deepseek-v4-flash"))
-        .await?
-        .collect::<Vec<_>>()
         .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert!(
-        chunks
-            .iter()
-            .any(|chunk| matches!(chunk, ProviderChunk::TextDelta(text) if text == "after-retry"))
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn provider_retries_retryable_status_when_error_body_times_out() -> Result<()> {
-    let server = spawn_hanging_error_then_success_server(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
-         data: {\"choices\":[{\"delta\":{\"content\":\"after-timeout\"},\"finish_reason\":null}]}\n\n\
-         data: [DONE]\n\n",
-    )
-    .await?;
-    let provider = {
-        let _guard = crate::test_env::lock();
-        DeepSeekProvider::new(
-            crate::DeepSeekProviderConfig {
-                base_url: server.clone(),
-                beta_base_url: server.clone(),
-                anthropic_base_url: server,
-                model: "deepseek-v4-flash".to_owned(),
-                fim_model: "deepseek-v4-pro".to_owned(),
-                api_key: Some("test".to_owned()),
-                user_id_strategy: None,
-                strict_tools_mode: crate::StrictToolsMode::Auto,
-            },
-            ModelRequestTimeouts {
-                request_timeout: Duration::from_millis(200),
-                stream_idle_timeout: Duration::from_secs(1),
-                stream_total_timeout: None,
-            },
-        )?
+    {
+        Ok(_) => panic!("rate limit should surface without an internal retry"),
+        Err(error) => error,
     };
-
-    let chunks = provider
-        .stream(simple_chat_request("deepseek-v4-flash"))
-        .await?
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-
-    assert!(matches!(
-        chunks.as_slice(),
-        [ProviderChunk::TextDelta(text), ProviderChunk::Done] if text == "after-timeout"
-    ));
+    assert!(error.to_string().contains("deepseek rate limited"));
+    assert_eq!(responses.lock().expect("responses lock").len(), 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn provider_returns_invalid_request_after_reasoning_retry_is_exhausted() -> Result<()> {
+async fn provider_returns_the_first_reasoning_rejection() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
         http_response(
             400,
@@ -860,8 +811,9 @@ async fn provider_returns_invalid_request_after_reasoning_retry_is_exhausted() -
     assert!(
         error
             .chain()
-            .any(|cause| cause.to_string().contains("reasoning_content again"))
+            .any(|cause| cause.to_string().contains("missing reasoning_content"))
     );
+    assert_eq!(responses.lock().expect("responses lock").len(), 1);
     Ok(())
 }
 
@@ -1600,31 +1552,6 @@ async fn spawn_hanging_error_body_server() -> Result<String> {
         let _ = socket.write_all(header.as_bytes()).await;
         let _ = socket.flush().await;
         sleep(Duration::from_secs(1)).await;
-    });
-    Ok(format!("http://{}", address))
-}
-
-async fn spawn_hanging_error_then_success_server(success: &'static str) -> Result<String> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    tokio::spawn(async move {
-        for attempt in 0..2 {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            tokio::spawn(async move {
-                let mut buffer = vec![0u8; 8192];
-                let _ = socket.read(&mut buffer).await;
-                if attempt == 0 {
-                    let header = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
-                    let _ = socket.write_all(header.as_bytes()).await;
-                    let _ = socket.flush().await;
-                    sleep(Duration::from_secs(1)).await;
-                } else {
-                    let _ = socket.write_all(success.as_bytes()).await;
-                }
-            });
-        }
     });
     Ok(format!("http://{}", address))
 }

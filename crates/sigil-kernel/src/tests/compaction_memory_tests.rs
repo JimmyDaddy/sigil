@@ -5,11 +5,11 @@ use crate::{
     ModelAssistedMemoryFact, ModelAssistedTaskMemorySummary, MutationCommitted, MutationSubject,
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RunStatus,
     SessionLogEntry, SessionStreamRecord, SourcedDecision, SourcedFact, StoredEvent,
-    TaskMemoryExtractionInput, TaskMemoryV1, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepStatus, ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationBinding,
-    VerificationReceipt, VerificationRecordedEntry, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState, extract_task_memory_from_stream_records,
-    task_memory_context_items,
+    TaskMemoryExtractionInput, TaskMemoryV1, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepEntry, TaskStepSpec, TaskStepStatus, ToolExecutionEntry,
+    ToolExecutionStatus, ToolResultMeta, VerificationBinding, VerificationReceipt,
+    VerificationRecordedEntry, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState, extract_task_memory_from_stream_records, task_memory_context_items,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -22,6 +22,7 @@ fn sample_task_memory() -> TaskMemoryV1 {
         supersedes: None,
         source_event_ids: vec!["event-1".to_owned()],
         objective: "Implement plugin trust hardening".to_owned(),
+        active_plan: None,
         constraints: vec![SourcedFact::system_derived(
             "Do not run plugin code before trust",
             "event-1",
@@ -348,6 +349,87 @@ fn compaction_extraction_builds_task_memory_from_structured_durable_events() -> 
         file.path == std::path::Path::new("README.md")
             && file.mutation_receipt_id.as_deref() == Some("op-1")
     }));
+    Ok(())
+}
+
+#[test]
+fn compaction_extraction_keeps_active_task_objective_and_accepted_plan() -> Result<()> {
+    let task_id = crate::TaskId::new("task-active")?;
+    let step_id = crate::TaskStepId::new("implement")?;
+    let records = vec![
+        stored_session_entry(
+            1,
+            "event-user",
+            SessionLogEntry::User(crate::ModelMessage::user("implement durable compaction")),
+        )?,
+        stored_session_entry(
+            2,
+            "event-task",
+            SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: crate::SessionRef::new_relative("session-parent.jsonl")?,
+                objective: "Ship the durable compaction contract".to_owned(),
+                status: TaskRunStatus::Running,
+                reason: None,
+            })),
+        )?,
+        stored_session_entry(
+            3,
+            "event-plan",
+            SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+                task_id: task_id.clone(),
+                plan_version: 2,
+                status: TaskPlanStatus::Accepted,
+                steps: vec![TaskStepSpec {
+                    step_id: step_id.clone(),
+                    title: "Bind retained history to the fold plan".to_owned(),
+                    display_name: None,
+                    detail: None,
+                    role: crate::AgentRole::Executor,
+                    depends_on: Vec::new(),
+                    mode: None,
+                    isolation: None,
+                }],
+                reason: None,
+            })),
+        )?,
+        stored_session_entry(
+            4,
+            "event-step",
+            SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+                task_id,
+                plan_version: 2,
+                step_id,
+                role: crate::AgentRole::Executor,
+                status: TaskStepStatus::Running,
+                title: None,
+                summary: None,
+                reason: None,
+            })),
+        )?,
+    ];
+
+    let memory = extract_task_memory_from_stream_records(
+        &records,
+        TaskMemoryExtractionInput {
+            memory_id: "memory-active".to_owned(),
+            valid_for_snapshot: "snapshot-active".to_owned(),
+            branch_id: None,
+            supersedes: None,
+            objective: None,
+        },
+    )?;
+
+    assert_eq!(memory.objective, "Ship the durable compaction contract");
+    assert!(memory.source_event_ids.contains(&"event-task".to_owned()));
+    let plan = memory
+        .active_plan
+        .expect("active task should retain its accepted plan");
+    assert_eq!(plan.plan_version, 2);
+    assert_eq!(plan.source_event_id, "event-plan");
+    assert_eq!(plan.steps.len(), 1);
+    assert_eq!(plan.steps[0].status, TaskStepStatus::Running);
+    assert_eq!(plan.steps[0].source_event_id, "event-step");
     Ok(())
 }
 

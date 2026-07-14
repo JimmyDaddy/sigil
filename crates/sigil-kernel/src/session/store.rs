@@ -78,6 +78,16 @@ pub(super) fn classify_session_stream_line(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return Ok(None);
     };
+    // The removed pre-release compaction payload was written as a raw JSON object rather than a
+    // `SessionLogEntry` enum or V2 event envelope. Treat it as an explicitly unsupported format
+    // before tail recovery gets a chance to interpret its final line as malformed bytes.
+    if value
+        .get("control")
+        .and_then(|control| control.get("compaction_applied"))
+        .is_some()
+    {
+        return Err(unsupported_legacy_compaction_record(path, physical_line));
+    }
     let looks_like_stored_event = ["schema_version", "event_type"]
         .into_iter()
         .all(|field| value.get(field).is_some());

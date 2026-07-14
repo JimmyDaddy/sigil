@@ -109,16 +109,19 @@ struct PreparedPortableV2Compaction {
     idle_auto_scope_fingerprint: Option<String>,
     cache_root: std::path::PathBuf,
     preflight: PortableSemanticCompactionPreflight,
+    frozen_before_request: FrozenProviderRequestMaterial,
     frozen_target_request: FrozenProviderRequestMaterial,
     folded_event_count: usize,
 }
 
 impl PreparedPortableV2Compaction {
     fn into_pending(self) -> Result<PendingV2Compaction> {
-        let target_material = sigil_runtime::deepseek_v4_flash_portable_target_material(
-            &self.cache_root,
-            self.frozen_target_request,
-        )?;
+        let target_material =
+            sigil_runtime::deepseek_v4_flash_portable_target_material_with_economics(
+                &self.cache_root,
+                &self.frozen_before_request,
+                self.frozen_target_request,
+            )?;
         Ok(PendingV2Compaction {
             request_id: self.request_id,
             session_scope_id: self.session_scope_id,
@@ -228,9 +231,16 @@ impl PendingQueuedConversationPortablePreflight {
         self,
         session: &Session,
         session_log_path: &std::path::Path,
-    ) -> Result<PreparedQueuedConversationCandidate> {
-        self.pending_compaction.apply(session, session_log_path)?;
-        Ok(self.candidate)
+    ) -> Result<(
+        PreparedQueuedConversationCandidate,
+        PortableSemanticCompactionOutcome,
+    )> {
+        let outcome = self.pending_compaction.apply(session, session_log_path)?;
+        Ok((self.candidate, outcome))
+    }
+
+    pub(in crate::runner) fn folded_event_count(&self) -> usize {
+        self.pending_compaction.folded_event_count()
     }
 }
 
@@ -559,13 +569,22 @@ fn prepare_v2_compaction(
     {
         Ok(pending) => {
             let budget = &pending.target_material.proof().budget;
+            let economics = pending
+                .target_material
+                .portable_economics()
+                .context("portable target material has no before/after economics proof")?;
             match &pending.target_material.proof().input {
                 sigil_kernel::InputTokenEvidence::Exact { tokens, .. } => Ok((
                     review(V2CompactionAdmission::Ready {
+                        before_input_tokens: economics.before_input.admission_tokens(),
                         input_tokens: *tokens,
                         context_window_tokens: budget.context_window_tokens,
                         output_tokens: budget.requested_output_tokens,
                         safety_buffer_tokens: budget.safety_buffer_tokens,
+                        savings_tokens: economics.savings_tokens,
+                        savings_ratio_ppm: economics.savings_ratio_ppm,
+                        minimum_savings_tokens: economics.minimum_savings_tokens,
+                        minimum_savings_ratio_ppm: economics.minimum_savings_ratio_ppm,
                     }),
                     Some(pending),
                 )),
@@ -607,6 +626,12 @@ fn prepare_portable_v2_compaction(
     target_input: PortableV2TargetRequestInput,
     preview: V2CompactionPreview,
 ) -> Result<PreparedPortableV2Compaction> {
+    if sigil_runtime::is_deepseek_v4_flash_portable_target_profile(
+        session.provider_name(),
+        session.model_name(),
+    ) {
+        sigil_runtime::require_default_deepseek_v4_flash_portable_transport(root_config)?;
+    }
     let workspace_id = stable_workspace_id(workspace_root)?;
     let scope = root_config
         .verification
@@ -674,6 +699,24 @@ fn prepare_portable_v2_compaction(
     };
     let store = JsonlSessionStore::new(session_log_path)?;
     let preflight = store.prepare_portable_semantic_compaction(request)?;
+    let target_max_tokens = sigil_runtime::portable_compaction_target_output_tokens(
+        session.provider_name(),
+        session.model_name(),
+    );
+    let before_request = session.build_pre_turn_candidate_request(
+        workspace_root,
+        memory_config,
+        target_input.tools.clone(),
+        target_max_tokens,
+        target_input.reasoning_effort.clone(),
+        target_input.previous_response_handle.clone(),
+        target_input.traffic_partition_key.clone(),
+        &target_input.transient_messages,
+        target_input.runtime_context.clone(),
+        &[],
+    )?;
+    let frozen_before_request =
+        FrozenProviderRequestMaterial::freeze(session.session_scope_id(), before_request)?;
     let target_request = session.build_portable_compaction_candidate_request(
         workspace_root,
         memory_config,
@@ -681,10 +724,7 @@ fn prepare_portable_v2_compaction(
         preflight.task_memory(),
         preflight.candidate_messages().to_vec(),
         target_input.tools,
-        sigil_runtime::portable_compaction_target_output_tokens(
-            session.provider_name(),
-            session.model_name(),
-        ),
+        target_max_tokens,
         target_input.reasoning_effort,
         target_input.previous_response_handle,
         target_input.traffic_partition_key,
@@ -710,6 +750,7 @@ fn prepare_portable_v2_compaction(
         },
         cache_root: paths.cache_root,
         preflight,
+        frozen_before_request,
         frozen_target_request,
         folded_event_count: preview.plan.folded_event_ids.len(),
     })

@@ -6,9 +6,10 @@ use sigil_kernel::{
     TokenMeasurementBinding,
 };
 use sigil_provider_deepseek::{
-    DEFAULT_DEEPSEEK_V4_FLASH_MODEL, DeepSeekV4FlashPortableTargetAdmission,
-    DeepSeekV4FlashTokenCounter, default_deepseek_v4_flash_portable_target_output_tokens,
-    default_deepseek_v4_flash_tokenizer_cache_path,
+    DEFAULT_DEEPSEEK_V4_FLASH_MODEL, DeepSeekProviderConfig,
+    DeepSeekV4FlashPortableTargetAdmission, DeepSeekV4FlashTokenCounter, StrictToolsMode,
+    default_deepseek_v4_flash_portable_target_output_tokens,
+    default_deepseek_v4_flash_tokenizer_cache_path, download_default_deepseek_v4_flash_tokenizer,
 };
 use sigil_provider_openai_responses::{
     OPENAI_RESPONSES_PORTABLE_TARGET_MODEL, OPENAI_RESPONSES_PORTABLE_TARGET_OUTPUT_TOKENS,
@@ -31,6 +32,37 @@ pub fn is_deepseek_v4_flash_portable_target_profile(provider_name: &str, model_n
 #[must_use]
 pub fn is_openai_responses_portable_target_profile(provider_name: &str, model_name: &str) -> bool {
     provider_name == "openai_responses" && model_name == OPENAI_RESPONSES_PORTABLE_TARGET_MODEL
+}
+
+/// Requires the resolved DeepSeek transport to match the pinned portable-token profile.
+///
+/// The local tokenizer profile is only evidence for DeepSeek's default public routes and their
+/// default request shaping. A proxy, route override, or alternate user/strict-tool policy can
+/// change the wire request without changing the `CompletionRequest`, so those configurations are
+/// deliberately unavailable for portable compaction rather than inheriting the default proof.
+///
+/// # Errors
+///
+/// Returns an error when the resolved DeepSeek configuration is unavailable or differs from the
+/// pinned default transport profile.
+pub fn require_default_deepseek_v4_flash_portable_transport(
+    root_config: &sigil_kernel::RootConfig,
+) -> Result<()> {
+    let resolved = crate::resolve_deepseek_config(root_config)
+        .context("could not resolve DeepSeek transport for portable compaction")?;
+    let expected = DeepSeekProviderConfig::default_for_model(DEFAULT_DEEPSEEK_V4_FLASH_MODEL);
+    let matches_pinned_transport = resolved.model == expected.model
+        && resolved.base_url == expected.base_url
+        && resolved.beta_base_url == expected.beta_base_url
+        && resolved.anthropic_base_url == expected.anthropic_base_url
+        && resolved.user_id_strategy == expected.user_id_strategy
+        && resolved.strict_tools_mode == StrictToolsMode::Auto;
+    if !matches_pinned_transport {
+        bail!(
+            "local exact portable target proof requires the resolved default DeepSeek V4 Flash transport; custom routes, user_id_strategy, and strict_tools_mode are unsupported"
+        );
+    }
+    Ok(())
 }
 
 /// Returns the explicit output reservation required by an admitted portable target profile.
@@ -155,6 +187,45 @@ pub fn deepseek_v4_flash_portable_target_material(
         binding,
         proof,
     ))
+}
+
+/// Builds portable target material only when separately frozen pre-activation material proves
+/// that the checkpoint saves both the configured absolute and relative token minima.
+///
+/// Both requests are rendered through the same checksum-pinned tokenizer profile. The before
+/// request remains process-local; only its fingerprint and exact token evidence become durable
+/// if the caller later activates the checkpoint.
+pub fn deepseek_v4_flash_portable_target_material_with_economics(
+    cache_root: &Path,
+    frozen_before_request: &FrozenProviderRequestMaterial,
+    frozen_target_request: FrozenProviderRequestMaterial,
+) -> Result<PortableTargetRequestMaterial> {
+    let tokenizer_path = default_deepseek_v4_flash_tokenizer_cache_path(cache_root);
+    let counter = DeepSeekV4FlashTokenCounter::from_official_tokenizer_path(&tokenizer_path)
+        .with_context(|| {
+            format!(
+                "verified DeepSeek V4 tokenizer is unavailable at {}",
+                tokenizer_path.display()
+            )
+        })?;
+    let (binding, proof) =
+        counter.exact_default_portable_target_request_fit(&frozen_target_request)?;
+    let before_input = counter.exact_target_input_evidence(frozen_before_request)?;
+    PortableTargetRequestMaterial::new(frozen_target_request, binding, proof)
+        .with_portable_economics(frozen_before_request, before_input)
+}
+
+/// Installs the checksum-pinned tokenizer required by the admitted DeepSeek portable profile.
+///
+/// Callers must make the network destination and artifact purpose visible and obtain user intent
+/// before invoking this explicit setup action. Normal compaction preview and apply never call it.
+pub async fn install_default_deepseek_v4_flash_tokenizer(
+    cache_root: &Path,
+) -> Result<std::path::PathBuf> {
+    let client = reqwest::Client::builder()
+        .build()
+        .context("failed to create tokenizer download client")?;
+    download_default_deepseek_v4_flash_tokenizer(&client, cache_root).await
 }
 
 #[cfg(test)]

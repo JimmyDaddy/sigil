@@ -201,7 +201,7 @@ pub fn build_doctor_report_with_options(
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     check_storage_paths(&mut report, &sigil_paths);
     check_session_streams(&mut report, &sigil_paths.session_log_dir);
-    check_provider(&mut report, &root_config);
+    check_provider(&mut report, &root_config, &sigil_paths.cache_root);
     check_mcp_servers(&mut report, &root_config, &workspace_root);
     append_web_doctor_snapshot(
         &mut report,

@@ -120,15 +120,17 @@ fn target_material_for_request(
         model_name: "deepseek-v4-flash".to_owned(),
         wire_profile: profile("portable-test-wire"),
         token_measurement_profile: profile("portable-test-tokenizer"),
-        hosted_parity_profile: None,
+        hosted_parity_profile: Some(profile("portable-test-hosted-parity")),
     };
     let proof = RequestFitProof {
         schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
-        input: InputTokenEvidence::ConservativeUpperBound {
-            tokens_upper_bound: 10,
+        input: InputTokenEvidence::Exact {
+            tokens: 10,
             material_fingerprint: frozen_request.fingerprint().to_owned(),
             measurement_scope: TokenMeasurementScope::RenderedTargetInput,
             binding: binding.clone(),
+            provider_model_snapshot: None,
+            provider_system_fingerprint: None,
         },
         budget: EffectiveTokenBudget {
             schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
@@ -138,11 +140,17 @@ fn target_material_for_request(
             safety_buffer_tokens: 10,
         },
     };
-    Ok(PortableTargetRequestMaterial {
-        frozen_request,
-        binding,
-        proof,
-    })
+    let frozen_before_request = frozen_request.clone();
+    let before_input = InputTokenEvidence::Exact {
+        tokens: 80,
+        material_fingerprint: frozen_before_request.fingerprint().to_owned(),
+        measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+        binding: binding.clone(),
+        provider_model_snapshot: None,
+        provider_system_fingerprint: None,
+    };
+    PortableTargetRequestMaterial::new(frozen_request, binding, proof)
+        .with_portable_economics(&frozen_before_request, before_input)
 }
 
 fn execute_with_target<F>(

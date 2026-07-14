@@ -225,6 +225,38 @@ api_key = "test-secret-key"
 }
 
 #[test]
+fn doctor_explains_how_to_install_the_missing_deepseek_v4_tokenizer() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+    let tokenizer = report
+        .checks
+        .iter()
+        .find(|check| check.name == "compaction:deepseek-v4-tokenizer")
+        .expect("DeepSeek V4 Flash must receive a tokenizer readiness check");
+    assert_eq!(tokenizer.status, DoctorStatus::Warn);
+    assert!(tokenizer.remediation.as_deref().is_some_and(|remediation| {
+        remediation.contains("sigil tokenizer install deepseek-v4-flash")
+    }));
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_valid_config_without_leaking_plaintext_secret() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();

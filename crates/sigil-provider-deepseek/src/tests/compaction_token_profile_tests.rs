@@ -321,6 +321,7 @@ async fn pinned_official_tokenizer_produces_exact_frozen_target_proof() -> Resul
         material_fingerprint: frozen.fingerprint().to_owned(),
         binding: default_deepseek_v4_flash_token_binding(),
         proof,
+        portable_economics: None,
     };
     target_fit.validate_for_frozen_request("token-profile-test-session", &frozen)?;
     match target_fit.proof.input {

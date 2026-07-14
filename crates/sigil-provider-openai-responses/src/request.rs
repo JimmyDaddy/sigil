@@ -44,20 +44,23 @@ pub fn build_responses_request(request: &CompletionRequest) -> Result<OpenAiResp
     }
 
     let tools = responses_tools(&request.tools);
+    let reasoning = request
+        .reasoning_effort
+        .as_ref()
+        .map(reasoning_effort)
+        .transpose()?;
     Ok(OpenAiResponsesRequest {
         model: request.model_name.clone(),
         input,
         stream: true,
         store: request.store,
+        include: (reasoning.is_some() && !request.store)
+            .then(|| vec!["reasoning.encrypted_content".to_owned()]),
         tool_choice: tools.as_ref().map(|_| "auto".to_owned()),
         tools,
         temperature: request.temperature,
         max_output_tokens: request.max_tokens,
-        reasoning: request
-            .reasoning_effort
-            .as_ref()
-            .map(reasoning_effort)
-            .transpose()?,
+        reasoning,
     })
 }
 

@@ -2466,6 +2466,10 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         WorkerCommand::ApplyV2Compaction { request_id: 7 }
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::CancelV2CompactionReview { request_id: 7 }),
+        WorkerCommand::CancelV2CompactionReview { request_id: 7 }
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::CheckChangedFilesDiagnostics),
         WorkerCommand::CheckChangedFilesDiagnostics
     ));
@@ -2818,7 +2822,10 @@ fn v2_compaction_review_requires_admission_before_it_can_apply() -> Result<()> {
         Some("review V2 compaction; local target request admission is unavailable")
     );
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(action.is_none());
+    assert!(matches!(
+        action,
+        Some(AppAction::CancelV2CompactionReview { request_id: 41 })
+    ));
     assert!(!app.has_modal());
     assert_eq!(app.last_notice(), Some("closed V2 compaction preview"));
     Ok(())
@@ -2844,10 +2851,15 @@ fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
             request_id: 42,
             preview,
             admission: V2CompactionAdmission::Ready {
+                before_input_tokens: 200,
                 input_tokens: 120,
                 context_window_tokens: 1_000_000,
                 output_tokens: 32_768,
                 safety_buffer_tokens: 8_192,
+                savings_tokens: 80,
+                savings_ratio_ppm: 400_000,
+                minimum_savings_tokens: 64,
+                minimum_savings_ratio_ppm: 50_000,
             },
         })),
     })?;
@@ -2862,6 +2874,49 @@ fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
     ));
     assert!(!app.has_modal());
     assert_eq!(app.last_notice(), Some("applying V2 compaction"));
+    Ok(())
+}
+
+#[test]
+fn dismissed_v2_compaction_review_clears_the_worker_pending_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("dismissed-preview.jsonl"))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("old request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("old response".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
+    let preview = store
+        .v2_compaction_preview(1, None)?
+        .expect("fixture should have foldable history");
+
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        review: Some(Box::new(V2CompactionReview {
+            request_id: 43,
+            preview,
+            admission: V2CompactionAdmission::Ready {
+                before_input_tokens: 200,
+                input_tokens: 120,
+                context_window_tokens: 1_000_000,
+                output_tokens: 32_768,
+                safety_buffer_tokens: 8_192,
+                savings_tokens: 80,
+                savings_ratio_ppm: 400_000,
+                minimum_savings_tokens: 64,
+                minimum_savings_ratio_ppm: 50_000,
+            },
+        })),
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::CancelV2CompactionReview { request_id: 43 })
+    ));
+    assert!(!app.has_modal());
+    assert_eq!(app.last_notice(), Some("closed V2 compaction preview"));
     Ok(())
 }
 
@@ -2933,6 +2988,41 @@ fn idle_auto_compaction_renders_an_automatic_notice_without_an_assistant_reply()
             && entry
                 .text
                 .contains("Context compacted automatically: 2 message(s) folded")
+    }));
+    Ok(())
+}
+
+#[test]
+fn pre_turn_compaction_renders_a_lifecycle_notice_before_queue_dispatch() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let assistant_count = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Assistant)
+        .count();
+
+    app.handle_worker_message(WorkerMessage::V2CompactionApplied {
+        request_id: 0,
+        source: crate::runner::V2CompactionApplySource::PreTurnPressure,
+        compaction_id: "portable-pre-turn-activation".to_owned(),
+        folded_event_count: 2,
+        entries: vec![SessionLogEntry::User(ModelMessage::user(
+            "queued follow-up",
+        ))],
+    })?;
+
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        assistant_count
+    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry.text.contains(
+                "Context compacted before dispatching the queued follow-up: 2 message(s) folded",
+            )
     }));
     Ok(())
 }

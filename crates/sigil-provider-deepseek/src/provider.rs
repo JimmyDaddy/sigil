@@ -1,12 +1,11 @@
-use std::{collections::VecDeque, pin::Pin};
+use std::{collections::VecDeque, pin::Pin, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{Stream, stream};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
-use tokio::time::{Duration, sleep};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use sigil_kernel::{
     CompletionRequest, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
@@ -99,7 +98,7 @@ impl DeepSeekProvider {
             user_id,
             &self.profile.quirks,
         );
-        self.stream_chat_chunks(endpoint, "/chat/completions", &body.model, &body, false)
+        self.stream_chat_chunks(endpoint, "/chat/completions", &body.model, &body)
             .await
     }
 
@@ -167,7 +166,6 @@ impl DeepSeekProvider {
             "/chat/completions",
             &request.model_name,
             &prepared.body,
-            true,
         )
         .await
     }
@@ -178,65 +176,32 @@ impl DeepSeekProvider {
         path: &str,
         model_name: &str,
         body: &T,
-        retry_on_reasoning_400: bool,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let mut attempts = 0usize;
-        loop {
-            attempts += 1;
-            let url = format!("{}{}", self.base_url_for_endpoint(endpoint), path);
-            let response = timeout_provider_request(self.post_json(&url, body), self.timeouts)
-                .await
-                .map_err(|phase| {
-                    provider_timeout_error(phase, self.timeouts, self.name(), model_name)
-                })?
-                .context("deepseek request failed")?;
-            let status = response.status();
+        let url = format!("{}{}", self.base_url_for_endpoint(endpoint), path);
+        let response = timeout_provider_request(self.post_json(&url, body), self.timeouts)
+            .await
+            .map_err(|phase| provider_timeout_error(phase, self.timeouts, self.name(), model_name))?
+            .context("deepseek request failed")?;
+        let status = response.status();
 
-            if !status.is_success() {
-                let status_code = status.as_u16();
-                let error_body = read_error_response_body(
-                    response,
-                    self.timeouts.request_timeout,
-                    &SecretRedactor::from_values([self.api_key()?]),
-                    self.name(),
-                    model_name,
-                    status_code,
-                )
-                .await;
-                let retryable = is_retryable_status(status_code)
-                    || (retry_on_reasoning_400
-                        && status_code == 400
-                        && error_body
-                            .as_ref()
-                            .is_ok_and(|body| body.text().contains("reasoning_content")));
-                if retryable && attempts < 2 {
-                    match &error_body {
-                        Ok(error_body) => warn!(
-                            status = status_code,
-                            error_body_bytes = error_body.captured_bytes(),
-                            error_body_truncated = error_body.truncated(),
-                            "retrying deepseek request after retryable status"
-                        ),
-                        Err(error) => warn!(
-                            status = status_code,
-                            error = %error,
-                            "retrying deepseek request after retryable status and bounded body read failure"
-                        ),
-                    }
-                    sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-                let error_body = error_body?;
-                let classified = classify_status(status_code, error_body.text());
-                return Err(classified.into());
-            }
-
+        if status.is_success() {
             return Ok(chat_response_stream(
                 response,
                 model_name.to_owned(),
                 self.timeouts,
             ));
         }
+        let status_code = status.as_u16();
+        let error_body = read_error_response_body(
+            response,
+            self.timeouts.request_timeout,
+            &SecretRedactor::from_values([self.api_key()?]),
+            self.name(),
+            model_name,
+            status_code,
+        )
+        .await?;
+        Err(classify_status(status_code, error_body.text()).into())
     }
 
     async fn stream_completion_chunks<T: Serialize>(
@@ -288,10 +253,6 @@ impl DeepSeekProvider {
             .await
             .context("failed to send DeepSeek request")
     }
-}
-
-fn is_retryable_status(status: u16) -> bool {
-    status == 429 || (500..=599).contains(&status)
 }
 
 fn truncate_event_payload(payload: &str) -> String {

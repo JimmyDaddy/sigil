@@ -27,6 +27,21 @@ fn budget() -> EffectiveTokenBudget {
     }
 }
 
+fn exact_input_evidence(
+    tokens: u64,
+    material_fingerprint: &str,
+    binding: &TokenMeasurementBinding,
+) -> InputTokenEvidence {
+    InputTokenEvidence::Exact {
+        tokens,
+        material_fingerprint: material_fingerprint.to_owned(),
+        measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+        binding: binding.clone(),
+        provider_model_snapshot: Some("2026-07-14".to_owned()),
+        provider_system_fingerprint: Some("fp-test".to_owned()),
+    }
+}
+
 #[test]
 fn exact_token_proof_requires_matching_material_scope_and_hosted_parity() -> Result<()> {
     let binding = exact_binding();
@@ -131,4 +146,50 @@ fn upper_bound_proof_rejects_hosted_parity_and_budget_overflow() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn portable_economics_requires_exact_positive_savings_and_revalidates_the_record() -> Result<()> {
+    let binding = exact_binding();
+    let before = exact_input_evidence(100, "hmac-sha256:before", &binding);
+    let after = RequestFitProof {
+        schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        input: exact_input_evidence(20, "hmac-sha256:after", &binding),
+        budget: budget(),
+    };
+
+    let economics = PortableCompactionEconomicsV1::from_before_and_after(
+        before.clone(),
+        "hmac-sha256:before",
+        &after,
+        &binding,
+        64,
+        50_000,
+    )?;
+    assert_eq!(economics.savings_tokens, 80);
+    assert_eq!(economics.savings_ratio_ppm, 800_000);
+    economics.validate_for_after("hmac-sha256:after", &after, &binding)?;
+
+    let zero_savings = PortableCompactionEconomicsV1::from_before_and_after(
+        exact_input_evidence(20, "hmac-sha256:before", &binding),
+        "hmac-sha256:before",
+        &after,
+        &binding,
+        1,
+        1,
+    )
+    .expect_err("equal before/after token counts must not activate a boundary");
+    assert!(zero_savings.to_string().contains("zero token savings"));
+
+    let below_minimum = PortableCompactionEconomicsV1::from_before_and_after(
+        exact_input_evidence(83, "hmac-sha256:before", &binding),
+        "hmac-sha256:before",
+        &after,
+        &binding,
+        64,
+        800_000,
+    )
+    .expect_err("both minimum savings thresholds must be enforced");
+    assert!(below_minimum.to_string().contains("minimum"));
+    Ok(())
 }

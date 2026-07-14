@@ -66,6 +66,10 @@ enum Commands {
         session: Option<String>,
     },
     Doctor,
+    Tokenizer {
+        #[command(subcommand)]
+        command: TokenizerCommand,
+    },
     Serve {
         #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
         host: IpAddr,
@@ -102,6 +106,12 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum TokenizerCommand {
+    /// Explicitly download and checksum-verify the public tokenizer needed for DeepSeek V4 Flash portable compaction.
+    Install { profile: String },
+}
+
 #[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -120,6 +130,7 @@ async fn main() -> Result<()> {
         Commands::Run { prompt } => run_command(&config_path, &cwd, prompt).await,
         Commands::Resume { session } => sigil_tui::launcher::run_tui_resume(cli.config, session),
         Commands::Doctor => doctor_command(&config_path, &cwd),
+        Commands::Tokenizer { command } => tokenizer_command(&config_path, &cwd, command).await,
         Commands::Serve {
             host,
             port,
@@ -155,6 +166,32 @@ async fn main() -> Result<()> {
             max_tokens,
         } => fim_command(&config_path, prompt, suffix, stop, model, max_tokens).await,
     }
+}
+
+#[cfg(not(test))]
+async fn tokenizer_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    command: TokenizerCommand,
+) -> Result<()> {
+    let TokenizerCommand::Install { profile } = command;
+    if profile != "deepseek-v4-flash" {
+        anyhow::bail!("unsupported tokenizer profile {profile}; supported: deepseek-v4-flash");
+    }
+    let config = RootConfig::load(config_path)?;
+    let workspace_root = resolve_workspace_root(config_path, launch_cwd, &config.workspace.root);
+    let paths =
+        sigil_runtime::resolve_sigil_paths(&config.storage, &config.session, &workspace_root);
+    eprintln!(
+        "network disclosure: downloading the public checksum-pinned DeepSeek V4 Flash tokenizer artifact for local portable-compaction setup"
+    );
+    let installed =
+        sigil_runtime::install_default_deepseek_v4_flash_tokenizer(&paths.cache_root).await?;
+    println!(
+        "installed verified DeepSeek V4 Flash tokenizer at {}",
+        installed.display()
+    );
+    Ok(())
 }
 
 fn render_version(info: BuildInfo) -> String {

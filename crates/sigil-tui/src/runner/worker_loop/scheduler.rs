@@ -778,8 +778,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let Some(session) = current_session.as_ref() else {
                         continue;
                     };
+                    let folded_event_count = pending.folded_event_count();
                     match pending.apply_compaction(session, &current_session_log_path) {
-                        Ok(candidate) => {
+                        Ok((candidate, outcome)) => {
                             match load_session_with_url_capability_attachment(
                                 session.provider_name(),
                                 session.model_name(),
@@ -787,8 +788,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                 current_session.as_ref(),
                             ) {
                                 Ok(reloaded) => {
+                                    let entries = reloaded.entries().to_vec();
                                     current_session = Some(reloaded);
                                     last_queued_pre_turn_block = None;
+                                    let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                                        request_id: 0,
+                                        source: V2CompactionApplySource::PreTurnPressure,
+                                        compaction_id: outcome.compaction_id,
+                                        folded_event_count,
+                                        entries,
+                                    });
                                     Some(candidate)
                                 }
                                 Err(error) => {
@@ -2318,6 +2327,17 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::CancelV2CompactionReview { request_id }) => {
+                if pending_v2_compaction
+                    .as_ref()
+                    .is_some_and(|pending| pending.request_id() == request_id)
+                {
+                    pending_v2_compaction = None;
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "discarded pending V2 compaction review".to_owned(),
+                    ));
+                }
+            }
             Ok(WorkerCommand::CheckChangedFilesDiagnostics) => {
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
@@ -2805,6 +2825,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
+                pending_v2_compaction = None;
+
                 match load_session_with_url_capability_attachment(
                     &root_config.agent.provider,
                     &root_config.agent.model,
@@ -2863,6 +2885,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     ));
                     continue;
                 }
+
+                pending_v2_compaction = None;
 
                 match load_session_with_url_capability_attachment(
                     &root_config.agent.provider,

@@ -86,7 +86,9 @@ pub use checkpoint::{
 };
 pub use compaction_token_proof::{
     COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, EffectiveTokenBudget, InputTokenEvidence,
-    RequestFitProof, TokenMeasurementBinding, TokenMeasurementScope, VersionedProfileIdentity,
+    PORTABLE_COMPACTION_MINIMUM_SAVINGS_RATIO_PPM, PORTABLE_COMPACTION_MINIMUM_SAVINGS_TOKENS,
+    PortableCompactionEconomicsV1, RequestFitProof, TokenMeasurementBinding, TokenMeasurementScope,
+    VersionedProfileIdentity,
 };
 pub use config::{
     AgentConfig, AppearanceConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,

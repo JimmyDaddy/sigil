@@ -210,6 +210,9 @@ pub(super) enum ModalOutcome {
     V2CompactionConfirmed {
         request_id: u64,
     },
+    V2CompactionDismissed {
+        request_id: u64,
+    },
 }
 
 impl AppState {
@@ -673,8 +676,9 @@ impl AppState {
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => match key.code {
                 KeyCode::Esc => {
+                    let request_id = state.request_id();
                     self.modal_state = None;
-                    ModalOutcome::Dismissed("closed V2 compaction preview".to_owned())
+                    ModalOutcome::V2CompactionDismissed { request_id }
                 }
                 KeyCode::Enter if state.is_admitted() => {
                     let request_id = state.request_id();
@@ -682,8 +686,9 @@ impl AppState {
                     ModalOutcome::V2CompactionConfirmed { request_id }
                 }
                 KeyCode::Enter => {
+                    let request_id = state.request_id();
                     self.modal_state = None;
-                    ModalOutcome::Dismissed("closed V2 compaction preview".to_owned())
+                    ModalOutcome::V2CompactionDismissed { request_id }
                 }
                 _ => ModalOutcome::None,
             },
@@ -776,8 +781,9 @@ impl AppState {
                     self.modal_state = None;
                     ModalOutcome::V2CompactionConfirmed { request_id }
                 } else {
+                    let request_id = state.request_id();
                     self.modal_state = None;
-                    ModalOutcome::Dismissed("closed V2 compaction preview".to_owned())
+                    ModalOutcome::V2CompactionDismissed { request_id }
                 }
             }
             ModalState::KeyboardHelp => {
@@ -871,6 +877,9 @@ impl AppState {
             },
             ModalOutcome::V2CompactionConfirmed { .. } => {
                 self.last_notice = Some("applying V2 compaction".to_owned());
+            }
+            ModalOutcome::V2CompactionDismissed { .. } => {
+                self.last_notice = Some("closed V2 compaction preview".to_owned());
             }
         }
     }

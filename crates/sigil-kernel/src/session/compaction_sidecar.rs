@@ -11,8 +11,8 @@ use super::compaction_v2::{
 use super::*;
 use crate::{
     ArtifactId, ContextSensitivity, ContextTrustLevel, EventId, FrozenProviderRequestMaterial,
-    MessageRole, RequestFitProof, TaskMemoryId, TaskMemoryV1, TokenMeasurementBinding,
-    TokenMeasurementScope, projection_apply_decision,
+    MessageRole, PortableCompactionEconomicsV1, RequestFitProof, TaskMemoryId, TaskMemoryV1,
+    TokenMeasurementBinding, TokenMeasurementScope, projection_apply_decision,
 };
 
 /// Schema version for the V2 compaction sidecar projection.
@@ -45,6 +45,8 @@ pub struct ContinuationTargetRequestFitV1 {
     pub material_fingerprint: String,
     pub binding: TokenMeasurementBinding,
     pub proof: RequestFitProof,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_economics: Option<PortableCompactionEconomicsV1>,
 }
 
 impl ContinuationTargetRequestFitV1 {
@@ -53,7 +55,11 @@ impl ContinuationTargetRequestFitV1 {
             &self.material_fingerprint,
             TokenMeasurementScope::RenderedTargetInput,
             &self.binding,
-        )
+        )?;
+        if let Some(economics) = &self.portable_economics {
+            economics.validate_for_after(&self.material_fingerprint, &self.proof, &self.binding)?;
+        }
+        Ok(())
     }
 
     /// Validates that this durable proof belongs to the exact frozen request about to be sent.
@@ -747,7 +753,28 @@ impl ContinuationCheckpointV1 {
         self.target_request_fit
             .as_ref()
             .context("portable continuation checkpoint has no target request-fit proof")?
-            .validate_shape()
+            .validate_shape()?;
+        self.target_request_fit
+            .as_ref()
+            .and_then(|fit| fit.portable_economics.as_ref())
+            .context("portable continuation checkpoint has no before/after economics proof")?
+            .validate_for_after(
+                self.target_request_fit
+                    .as_ref()
+                    .expect("target proof was checked above")
+                    .material_fingerprint
+                    .as_str(),
+                &self
+                    .target_request_fit
+                    .as_ref()
+                    .expect("target proof was checked above")
+                    .proof,
+                &self
+                    .target_request_fit
+                    .as_ref()
+                    .expect("target proof was checked above")
+                    .binding,
+            )
     }
 
     pub(crate) fn attach_target_request_fit(
@@ -918,6 +945,15 @@ fn render_portable_checkpoint(
         "Goal",
         std::iter::once(memory.objective.as_str()),
     );
+    if let Some(plan) = &memory.active_plan {
+        render_section(
+            &mut rendered,
+            "Active Plan",
+            plan.steps
+                .iter()
+                .map(|step| format!("[{:?}] {}", step.status, step.title)),
+        );
+    }
     render_section(
         &mut rendered,
         "Constraints & Preferences",

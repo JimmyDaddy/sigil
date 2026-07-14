@@ -3,9 +3,11 @@ all-features = true
 
 [advisories]
 # syntect 5.3 uses bincode only for its version-pinned embedded syntax/theme dumps. Sigil does not
-# deserialize user- or network-provided bincode. No maintained compatible replacement exists yet;
-# keep this explicit exception under the dependency ledger and remove it when syntect migrates.
-ignore = ["RUSTSEC-2025-0141"]
+# deserialize user- or network-provided bincode. `tokenizers 0.23.1` also reaches the archived
+# `paste` macro through `macro_rules_attribute`; Cargo reports no safe compatible upgrade. It is
+# compile-time-only in Sigil's checksum-pinned DeepSeek tokenizer path. Both exceptions are owned
+# by the dependency ledger and must be removed when their upstream dependency paths migrate.
+ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2024-0436"]
 
 [licenses]
 confidence-threshold = 0.93

@@ -431,6 +431,35 @@ fn recovery_with_a_missing_session_key_fails_closed_without_lifecycle_mutation()
 }
 
 #[test]
+fn persisted_manifest_with_a_missing_session_key_never_creates_a_replacement() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let payload = b"key-must-not-be-regenerated-during-persist";
+    let manifest = append_started_manifest(&store, payload)?;
+    let root = temp.path().join("payloads");
+    let session_id = store_session_id(&store)?;
+    let keyed_backend = payload_store(&root, &session_id)?;
+    keyed_backend.stage(&manifest, payload)?;
+    append_committed_manifest(&store, &manifest)?;
+    let before = fs::read(store.path())?;
+    drop(keyed_backend);
+
+    let missing_key_backend = payload_store(&root, &session_id)?;
+    let coordinator = ProviderContinuationPayloadCoordinatorInner::with_payload_store(
+        store.clone(),
+        missing_key_backend,
+    );
+    let error = coordinator
+        .persist_committed_payload(&manifest, payload)
+        .expect_err("an existing durable payload manifest must never mint a replacement key");
+
+    assert!(error.to_string().contains("session key is unavailable"));
+    assert_eq!(fs::read(store.path())?, before);
+    assert!(staged_payload_path(&root)?.exists());
+    Ok(())
+}
+
+#[test]
 fn recovery_marks_missing_authenticated_payload_orphan_then_deleted() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

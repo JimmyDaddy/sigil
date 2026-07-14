@@ -1,3 +1,4 @@
+use crate::ToolCall;
 use anyhow::Result;
 
 use super::*;
@@ -20,6 +21,7 @@ fn task_memory() -> TaskMemoryV1 {
         supersedes: None,
         source_event_ids: vec!["event-source".to_owned()],
         objective: "Keep the compaction contract durable".to_owned(),
+        active_plan: None,
         constraints: Vec::new(),
         decisions: Vec::new(),
         files_changed: Vec::new(),
@@ -147,6 +149,44 @@ fn v2_context_projection_preserves_raw_messages_until_applied_then_uses_v2_bound
         .map(|message| message.content.as_deref())
         .collect::<Vec<_>>();
     assert!(request_contents.ends_with(&[Some("first"), Some("second"), Some("third")]));
+    Ok(())
+}
+
+#[test]
+fn portable_fold_projection_keeps_protected_messages_before_the_fold_cursor() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    session.append_user_message(ModelMessage::user("safe old request"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("safe old response".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "missing-result".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: r#"{"path":"src/lib.rs"}"#.to_owned(),
+        }],
+    ))?;
+    session.append_user_message(ModelMessage::user("latest request"))?;
+
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let plan = CompactionFoldPlan::from_records(&records, 1)?;
+    let unsafe_tool_call = plan
+        .protected_events
+        .iter()
+        .find(|protected| protected.reason == CompactionFoldProtectionReason::UnsafeToolPair)
+        .expect("unpaired tool call must remain protected");
+    let retained = portable_retained_raw_event_ids_for_plan(&records, &plan)?;
+
+    assert!(retained.contains(&unsafe_tool_call.event.event_id));
+    assert!(
+        plan.folded_event_ids
+            .iter()
+            .all(|event_id| !retained.contains(event_id))
+    );
     Ok(())
 }
 

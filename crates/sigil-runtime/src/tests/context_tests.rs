@@ -114,6 +114,7 @@ fn runtime_task_memory() -> TaskMemoryV1 {
         supersedes: None,
         source_event_ids: vec!["event-objective".to_owned()],
         objective: "Keep context provenance inspectable".to_owned(),
+        active_plan: None,
         constraints: Vec::new(),
         decisions: Vec::new(),
         files_changed: vec![FileChangeRef {

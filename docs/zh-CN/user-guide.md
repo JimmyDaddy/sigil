@@ -188,6 +188,8 @@ Info rail 会显示上一轮 provider 返回的 prompt token 相对模型 contex
 
 打开审查不会改写旧历史，也不会追加 compaction record；它不会下载 tokenizer 或联系 provider。应用冻结期间，`Enter` 只会关闭审查。
 
+如需在不改变任何 session state 的前提下提前准备经过验证的本地 DeepSeek V4 Flash tokenizer，可运行 `sigil tokenizer install deepseek-v4-flash`。命令会在开始 public network 下载前披露该操作；安装 tokenizer 不会解除 compaction 冻结。
+
 idle 自动化不会抢占 streaming work、排队输入、model switch 或 overflow recovery。应用冻结期间，它不会创建 lifecycle record 或改变 session context。
 
 受控 overflow apply path 同样冻结。修复正确性问题期间，它不会计数、压缩或重试请求。

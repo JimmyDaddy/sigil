@@ -42,9 +42,9 @@ use super::{
     load_openai_responses_config, provider_capabilities_for_name, provider_capability_view,
     refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
-    register_lazy_mcp_activation_tool, resolve_anthropic_api_key, resolve_deepseek_api_key,
-    resolve_deepseek_api_key_with_session, resolve_gemini_api_key,
-    resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
+    register_lazy_mcp_activation_tool, require_default_deepseek_v4_flash_portable_transport,
+    resolve_anthropic_api_key, resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
+    resolve_gemini_api_key, resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, resolve_openai_responses_api_key,
     resolve_openai_responses_api_key_with_session, secret_redactor_for_root_config,
     shutdown_registered_tools,
@@ -341,6 +341,27 @@ fn load_deepseek_config_reads_provider_block() -> Result<()> {
     assert_eq!(config.model, "deepseek-v4-flash");
     assert_eq!(config.fim_model, "deepseek-v4-pro");
     assert_eq!(config.api_key.as_deref(), Some("test-key"));
+    Ok(())
+}
+
+#[test]
+fn portable_compaction_requires_the_resolved_default_deepseek_transport() -> Result<()> {
+    let mut config = test_root_config("deepseek");
+    let error = require_default_deepseek_v4_flash_portable_transport(&config)
+        .expect_err("a custom DeepSeek route must not inherit the default local token proof");
+    assert!(
+        error
+            .to_string()
+            .contains("resolved default DeepSeek V4 Flash transport")
+    );
+
+    config.providers.insert(
+        "deepseek".to_owned(),
+        json!({
+            "api_key": "test-key",
+        }),
+    );
+    require_default_deepseek_v4_flash_portable_transport(&config)?;
     Ok(())
 }
 

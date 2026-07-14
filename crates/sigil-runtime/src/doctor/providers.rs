@@ -1,8 +1,12 @@
 use super::*;
 
-pub(super) fn check_provider(report: &mut DoctorReport, root_config: &RootConfig) {
+pub(super) fn check_provider(
+    report: &mut DoctorReport,
+    root_config: &RootConfig,
+    cache_root: &std::path::Path,
+) {
     match provider_config_key(&root_config.agent.provider) {
-        "deepseek" => check_deepseek_provider(report, root_config),
+        "deepseek" => check_deepseek_provider(report, root_config, cache_root),
         "openai_compat" => check_openai_compat_provider(report, root_config),
         "openai_responses" => check_openai_responses_provider(report, root_config),
         "anthropic" => check_anthropic_provider(report, root_config),
@@ -89,7 +93,11 @@ fn execution_capability_summary(
     }
 }
 
-fn check_deepseek_provider(report: &mut DoctorReport, root_config: &RootConfig) {
+fn check_deepseek_provider(
+    report: &mut DoctorReport,
+    root_config: &RootConfig,
+    cache_root: &std::path::Path,
+) {
     let config = match load_deepseek_config(root_config).and_then(|config| config.resolved()) {
         Ok(config) => config,
         Err(error) => {
@@ -115,6 +123,25 @@ fn check_deepseek_provider(report: &mut DoctorReport, root_config: &RootConfig) 
         "[providers.deepseek].api_key",
     );
     push_provider_capability_checks(report, "deepseek");
+    if config.model == sigil_provider_deepseek::DEFAULT_DEEPSEEK_V4_FLASH_MODEL {
+        let tokenizer_path =
+            sigil_provider_deepseek::default_deepseek_v4_flash_tokenizer_cache_path(cache_root);
+        match sigil_provider_deepseek::DeepSeekV4FlashTokenCounter::from_official_tokenizer_path(
+            &tokenizer_path,
+        ) {
+            Ok(_) => report.push(
+                DoctorStatus::Ok,
+                "compaction:deepseek-v4-tokenizer",
+                format!("verified tokenizer at {}", tokenizer_path.display()),
+            ),
+            Err(error) => report.push_with_remediation(
+                DoctorStatus::Warn,
+                "compaction:deepseek-v4-tokenizer",
+                format!("portable compaction unavailable: {error}"),
+                Some("run `sigil tokenizer install deepseek-v4-flash`; this explicitly downloads and checksum-verifies the public tokenizer artifact"),
+            ),
+        }
+    }
 }
 
 fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootConfig) {

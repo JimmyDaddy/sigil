@@ -256,8 +256,22 @@ where
         create_key_if_absent: bool,
         operation: impl FnOnce(&ProviderContinuationPayloadStoreGuard<'_, '_, K>) -> Result<T>,
     ) -> Result<T> {
+        self.with_locked_manifest_key_policy(manifest, || Ok(create_key_if_absent), operation)
+    }
+
+    /// Holds the payload lock while deciding whether a new session key may be created.
+    ///
+    /// The key policy is evaluated only after the cross-process lock is held, so a durable
+    /// manifest appended by another writer cannot race a replacement-key decision.
+    pub(crate) fn with_locked_manifest_key_policy<T>(
+        &self,
+        manifest: &ProviderContinuationPayloadLifecycleEntry,
+        create_key_if_absent: impl FnOnce() -> Result<bool>,
+        operation: impl FnOnce(&ProviderContinuationPayloadStoreGuard<'_, '_, K>) -> Result<T>,
+    ) -> Result<T> {
         self.validate_manifest(manifest)?;
         self.with_root_lock(|| {
+            let create_key_if_absent = create_key_if_absent()?;
             let key = self.session_key(key_slot_for_manifest(manifest)?, create_key_if_absent)?;
             let guard = ProviderContinuationPayloadStoreGuard {
                 store: self,

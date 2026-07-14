@@ -58,6 +58,10 @@ fn responses_request_maps_messages_tools_and_reasoning() -> Result<()> {
     assert_eq!(body["store"], false);
     assert_eq!(body["max_output_tokens"], 512);
     assert_eq!(body["reasoning"]["effort"], "high");
+    assert_eq!(
+        body["include"],
+        serde_json::json!(["reasoning.encrypted_content"])
+    );
     assert_eq!(body["input"][0]["role"], "developer");
     assert_eq!(body["input"][1]["role"], "user");
     assert_eq!(body["input"][2]["type"], "function_call");
@@ -65,6 +69,28 @@ fn responses_request_maps_messages_tools_and_reasoning() -> Result<()> {
     assert_eq!(body["input"][3]["type"], "function_call_output");
     assert_eq!(body["input"][3]["call_id"], "call-1");
     assert_eq!(body["tools"][0]["type"], "function");
+    Ok(())
+}
+
+#[test]
+fn responses_request_only_requests_encrypted_reasoning_for_stateless_reasoning_turns() -> Result<()>
+{
+    let mut request = simple_request(vec![ModelMessage::user("hello")]);
+    request.reasoning_effort = Some(ReasoningEffort::High);
+    request.store = true;
+
+    let stored = serde_json::to_value(build_responses_request(&request)?)?;
+    assert!(
+        stored.get("include").is_none(),
+        "server-stored requests do not need the stateless encrypted-reasoning include"
+    );
+
+    request.store = false;
+    let stateless = serde_json::to_value(build_responses_request(&request)?)?;
+    assert_eq!(
+        stateless["include"],
+        serde_json::json!(["reasoning.encrypted_content"])
+    );
     Ok(())
 }
 
@@ -152,6 +178,10 @@ fn input_token_count_request_keeps_every_prompt_bearing_responses_field() -> Res
             "{omitted} must not enter count wire"
         );
     }
+    assert!(
+        count.get("include").is_none(),
+        "input-token count must not request response output fields"
+    );
     Ok(())
 }
 

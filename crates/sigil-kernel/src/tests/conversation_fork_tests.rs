@@ -56,28 +56,37 @@ fn portable_target_material(
         model_name: "chat".to_owned(),
         wire_profile: portable_target_profile("fork-portable-wire"),
         token_measurement_profile: portable_target_profile("fork-portable-tokenizer"),
-        hosted_parity_profile: None,
+        hosted_parity_profile: Some(portable_target_profile("fork-portable-hosted-parity")),
     };
-    Ok(PortableTargetRequestMaterial {
-        proof: RequestFitProof {
-            schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
-            input: InputTokenEvidence::ConservativeUpperBound {
-                tokens_upper_bound: 10,
-                material_fingerprint: frozen_request.fingerprint().to_owned(),
-                measurement_scope: TokenMeasurementScope::RenderedTargetInput,
-                binding: binding.clone(),
-            },
-            budget: EffectiveTokenBudget {
-                schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
-                budget_profile: portable_target_profile("fork-portable-budget"),
-                context_window_tokens: 100,
-                requested_output_tokens: 20,
-                safety_buffer_tokens: 10,
-            },
+    let proof = RequestFitProof {
+        schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+        input: InputTokenEvidence::Exact {
+            tokens: 10,
+            material_fingerprint: frozen_request.fingerprint().to_owned(),
+            measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+            binding: binding.clone(),
+            provider_model_snapshot: None,
+            provider_system_fingerprint: None,
         },
-        frozen_request,
-        binding,
-    })
+        budget: EffectiveTokenBudget {
+            schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
+            budget_profile: portable_target_profile("fork-portable-budget"),
+            context_window_tokens: 100,
+            requested_output_tokens: 20,
+            safety_buffer_tokens: 10,
+        },
+    };
+    let frozen_before_request = frozen_request.clone();
+    let before_input = InputTokenEvidence::Exact {
+        tokens: 80,
+        material_fingerprint: frozen_before_request.fingerprint().to_owned(),
+        measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+        binding: binding.clone(),
+        provider_model_snapshot: None,
+        provider_system_fingerprint: None,
+    };
+    PortableTargetRequestMaterial::new(frozen_request, binding, proof)
+        .with_portable_economics(&frozen_before_request, before_input)
 }
 
 #[test]

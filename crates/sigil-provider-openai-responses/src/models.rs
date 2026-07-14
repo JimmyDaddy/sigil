@@ -8,6 +8,8 @@ pub struct OpenAiResponsesRequest {
     pub stream: bool,
     pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<String>,

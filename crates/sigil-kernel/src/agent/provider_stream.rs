@@ -100,6 +100,7 @@ where
     };
     let mut physical_attempt =
         ProviderPhysicalAttemptAudit::start(session, logical_run_id, &frozen_request).await?;
+    let mut generation_observed = false;
     let result = collect_provider_turn_after_send_barrier(
         provider,
         session,
@@ -112,9 +113,10 @@ where
         hosted_enabled,
         hosted_context,
         &mut physical_attempt,
+        &mut generation_observed,
     )
     .await;
-    let rejection = (!physical_attempt.has_durable_output_or_side_effect())
+    let rejection = (!generation_observed && !physical_attempt.has_durable_output_or_side_effect())
         .then(|| {
             result
                 .as_ref()
@@ -136,6 +138,9 @@ where
         }
         Err(_) if physical_attempt.has_durable_output_or_side_effect() => {
             ProviderPhysicalAttemptOutcome::FailedAfterOutputOrSideEffect
+        }
+        Err(_) if generation_observed => {
+            ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput
         }
         Err(_) => ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
     };
@@ -163,6 +168,7 @@ async fn collect_provider_turn_after_send_barrier<H>(
     hosted_enabled: bool,
     hosted_context: crate::HostedFinalizationContext,
     physical_attempt: &mut ProviderPhysicalAttemptAudit,
+    generation_observed: &mut bool,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
@@ -186,6 +192,7 @@ where
             hosted_processor.ok_or(crate::HostedTurnError::MissingProcessor)?,
             hosted_context,
             physical_attempt,
+            generation_observed,
         )
         .await;
     }
@@ -210,6 +217,7 @@ where
             break;
         };
         let chunk = chunk.context("provider stream failed")?;
+        *generation_observed |= provider_chunk_observes_generation(&chunk);
         match chunk {
             ProviderChunk::TextDelta(delta) => {
                 assistant_text.push_str(&delta);
@@ -378,6 +386,7 @@ async fn collect_hosted_provider_turn<H>(
     processor: &std::sync::Arc<dyn crate::HostedEvidenceProcessor>,
     context: crate::HostedFinalizationContext,
     physical_attempt: &mut ProviderPhysicalAttemptAudit,
+    generation_observed: &mut bool,
 ) -> Result<ProviderTurnOutput>
 where
     H: EventHandler + Send,
@@ -402,6 +411,9 @@ where
         let chunk = chunk.context("hosted provider stream failed before safe finalization")?;
         if matches!(chunk, ProviderChunk::Done) {
             break;
+        }
+        if !matches!(chunk, ProviderChunk::ToolCallStreamError(_)) {
+            *generation_observed = true;
         }
         match chunk {
             ProviderChunk::ToolCallStart { id, name } => {
@@ -530,6 +542,28 @@ where
         pending_states,
         hosted_finalized: Some(finalized),
     })
+}
+
+fn provider_chunk_observes_generation(chunk: &ProviderChunk) -> bool {
+    matches!(
+        chunk,
+        ProviderChunk::TextDelta(_)
+            | ProviderChunk::ReasoningDelta(_)
+            | ProviderChunk::ReasoningSummaryDelta(_)
+            | ProviderChunk::ToolCallStart { .. }
+            | ProviderChunk::ToolCallArgsDelta { .. }
+            | ProviderChunk::ToolCallComplete(_)
+            | ProviderChunk::Usage(_)
+            | ProviderChunk::ResponseHandle(_)
+            | ProviderChunk::BackgroundTaskAccepted(_)
+            | ProviderChunk::BackgroundTaskStatus(_)
+            | ProviderChunk::ReasoningArtifact(_)
+            | ProviderChunk::ContinuationState(_)
+            | ProviderChunk::HostedToolStarted { .. }
+            | ProviderChunk::HostedEvidence { .. }
+            | ProviderChunk::HostedToolFailed { .. }
+            | ProviderChunk::HostedRequestUsage { .. }
+    )
 }
 
 fn validate_streamed_tool_identity(id: &str, name: &str) -> Result<()> {

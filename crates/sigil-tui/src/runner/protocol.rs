@@ -25,10 +25,15 @@ pub(crate) const WORKER_COMMAND_PROTOCOL_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum V2CompactionAdmission {
     Ready {
+        before_input_tokens: u64,
         input_tokens: u64,
         context_window_tokens: u64,
         output_tokens: u64,
         safety_buffer_tokens: u64,
+        savings_tokens: u64,
+        savings_ratio_ppm: u32,
+        minimum_savings_tokens: u64,
+        minimum_savings_ratio_ppm: u32,
     },
     Unavailable {
         reason: String,
@@ -40,6 +45,7 @@ pub enum V2CompactionAdmission {
 pub enum V2CompactionApplySource {
     ManualConfirmation,
     IdleAutomatic,
+    PreTurnPressure,
     OverflowRecovery,
 }
 
@@ -199,6 +205,9 @@ pub enum WorkerCommand {
     },
     PreviewV2Compaction,
     ApplyV2Compaction {
+        request_id: u64,
+    },
+    CancelV2CompactionReview {
         request_id: u64,
     },
     CheckChangedFilesDiagnostics,

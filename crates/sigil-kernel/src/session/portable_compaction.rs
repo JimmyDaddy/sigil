@@ -4,7 +4,9 @@ use super::compaction_v2::{compaction_lifecycle_event_id, compaction_session_id}
 use super::writer::PendingStoredEvent;
 use super::*;
 use crate::{
-    EventId, FrozenProviderRequestMaterial, ProviderNonGeneratingAttemptReceipt, RequestFitProof,
+    EventId, FrozenProviderRequestMaterial, InputTokenEvidence,
+    PORTABLE_COMPACTION_MINIMUM_SAVINGS_RATIO_PPM, PORTABLE_COMPACTION_MINIMUM_SAVINGS_TOKENS,
+    PortableCompactionEconomicsV1, ProviderNonGeneratingAttemptReceipt, RequestFitProof,
     TokenMeasurementBinding,
 };
 
@@ -152,11 +154,13 @@ impl PortableSemanticCompactionPreflight {
             frozen_request,
             binding,
             proof,
+            portable_economics,
         } = target_material;
         let target_request_fit = ContinuationTargetRequestFitV1 {
             material_fingerprint: frozen_request.fingerprint().to_owned(),
             binding,
             proof,
+            portable_economics,
         };
         self.prepared
             .applied
@@ -186,6 +190,7 @@ pub struct PortableTargetRequestMaterial {
     pub(crate) frozen_request: FrozenProviderRequestMaterial,
     pub(crate) binding: TokenMeasurementBinding,
     pub(crate) proof: RequestFitProof,
+    pub(crate) portable_economics: Option<PortableCompactionEconomicsV1>,
 }
 
 impl PortableTargetRequestMaterial {
@@ -200,13 +205,43 @@ impl PortableTargetRequestMaterial {
             frozen_request,
             binding,
             proof,
+            portable_economics: None,
         }
+    }
+
+    /// Binds exact frozen pre-activation evidence and enforces the portable savings policy.
+    ///
+    /// This consumes no durable state. It must be called before the material is handed to the
+    /// append-only executor, which persists only the resulting evidence and thresholds.
+    pub fn with_portable_economics(
+        mut self,
+        frozen_before_request: &FrozenProviderRequestMaterial,
+        before_input: InputTokenEvidence,
+    ) -> Result<Self> {
+        if frozen_before_request.session_scope_id() != self.frozen_request.session_scope_id() {
+            bail!("portable compaction before request belongs to a different session scope");
+        }
+        self.portable_economics = Some(PortableCompactionEconomicsV1::from_before_and_after(
+            before_input,
+            frozen_before_request.fingerprint(),
+            &self.proof,
+            &self.binding,
+            PORTABLE_COMPACTION_MINIMUM_SAVINGS_TOKENS,
+            PORTABLE_COMPACTION_MINIMUM_SAVINGS_RATIO_PPM,
+        )?);
+        Ok(self)
     }
 
     /// Returns the fit proof that will be persisted with the activated checkpoint.
     #[must_use]
     pub fn proof(&self) -> &RequestFitProof {
         &self.proof
+    }
+
+    /// Returns the minimum-savings evidence required for portable activation.
+    #[must_use]
+    pub fn portable_economics(&self) -> Option<&PortableCompactionEconomicsV1> {
+        self.portable_economics.as_ref()
     }
 
     /// Returns the process-local frozen target that is bound to this proof.
@@ -243,7 +278,7 @@ impl JsonlSessionStore {
         let candidate_messages =
             crate::session::context_projection::portable_candidate_model_messages(
                 &source_records,
-                &prepared.applied.folded_through,
+                &request.plan,
                 &prepared.applied.checkpoint,
                 &prepared.task_memory_record.memory,
             )?;

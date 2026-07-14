@@ -29,7 +29,6 @@ use crate::{
     stream::{OpenAiResponsesSseDecoder, OpenAiResponsesSseFrame},
 };
 
-const OPENAI_RESPONSES_MAX_ATTEMPTS: usize = 2;
 const OPENAI_RESPONSES_COMPACT_RESPONSE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const OPENAI_RESPONSES_INPUT_TOKEN_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
 
@@ -372,38 +371,31 @@ impl Provider for OpenAiResponsesProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let body = build_responses_request(&request)?;
         let url = self.responses_url();
-        let mut attempt = 0usize;
-        loop {
-            attempt += 1;
-            let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
-                .await
-                .map_err(|phase| {
-                    provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
-                })?
-                .context("OpenAI Responses request failed")?;
-            let status = response.status();
-            if status.is_success() {
-                return Ok(response_stream(
-                    response,
-                    request.model_name.clone(),
-                    self.timeouts,
-                ));
-            }
-            let status_code = status.as_u16();
-            let error_body = read_error_response_body(
+        let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
+            .await
+            .map_err(|phase| {
+                provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
+            })?
+            .context("OpenAI Responses request failed")?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response_stream(
                 response,
-                self.timeouts.request_timeout,
-                &SecretRedactor::from_values([self.api_key()?]),
-                self.name(),
-                &request.model_name,
-                status_code,
-            )
-            .await;
-            if attempt < OPENAI_RESPONSES_MAX_ATTEMPTS && is_retryable_status(status_code) {
-                continue;
-            }
-            return Err(classify_status(status_code, error_body?.text()).into());
+                request.model_name.clone(),
+                self.timeouts,
+            ));
         }
+        let status_code = status.as_u16();
+        let error_body = read_error_response_body(
+            response,
+            self.timeouts.request_timeout,
+            &SecretRedactor::from_values([self.api_key()?]),
+            self.name(),
+            &request.model_name,
+            status_code,
+        )
+        .await?;
+        Err(classify_status(status_code, error_body.text()).into())
     }
 }
 
@@ -428,10 +420,6 @@ fn openai_responses_server_count_binding(model_name: &str) -> TokenMeasurementBi
             b"official pinned gpt-4.1-2025-04-14 server count over identical prompt-bearing Responses fields",
         )),
     }
-}
-
-fn is_retryable_status(status: u16) -> bool {
-    status == 429 || (500..=599).contains(&status)
 }
 
 impl OpenAiResponsesProvider {

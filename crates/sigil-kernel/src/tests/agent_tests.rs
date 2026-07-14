@@ -6328,6 +6328,7 @@ struct ContextWindowRejectedBeforeGeneration;
 
 struct ContextWindowErrorProvider;
 struct ContextWindowErrorAfterOutputProvider;
+struct ContextWindowErrorAfterGeneratedTextProvider;
 
 #[async_trait]
 impl Provider for StreamErrorProvider {
@@ -6418,6 +6419,34 @@ impl Provider for ContextWindowErrorAfterOutputProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::Usage(UsageStats::default())),
+            Err(ContextWindowRejectedBeforeGeneration.into()),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ContextWindowErrorAfterGeneratedTextProvider {
+    fn name(&self) -> &str {
+        "mock-context-window-after-generated-text"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        ContextWindowErrorProvider.classify_pre_generation_rejection(error)
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("partial output".to_owned())),
             Err(ContextWindowRejectedBeforeGeneration.into()),
         ])))
     }
@@ -6896,6 +6925,63 @@ async fn agent_never_marks_a_rejection_after_durable_output_as_pre_generation() 
             durable_output_event_ids,
             ..
         }) if !durable_output_event_ids.is_empty()
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_never_marks_a_rejection_after_observed_generation_as_pre_generation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let agent = Agent::new(
+        ContextWindowErrorAfterGeneratedTextProvider,
+        ToolRegistry::new(),
+    );
+    let mut session =
+        Session::new("mock-context-window-after-generated-text", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("a rejection after generated text should fail the current run");
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let terminal = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::ProviderPhysicalAttemptTerminal.as_str() =>
+        {
+            serde_json::from_value::<ProviderPhysicalAttemptTerminalEntry>(event.payload.clone())
+                .ok()
+        }
+        _ => None,
+    });
+    assert!(matches!(
+        terminal,
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::ProtocolRejectedAfterOutput,
+            rejection: None,
+            durable_output_event_ids,
+            durable_side_effect_event_ids,
+            ..
+        }) if durable_output_event_ids.is_empty() && durable_side_effect_event_ids.is_empty()
     ));
     Ok(())
 }

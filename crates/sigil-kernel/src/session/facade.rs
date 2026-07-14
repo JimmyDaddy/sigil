@@ -89,8 +89,14 @@ impl Session {
     ) -> Result<Self> {
         let fallback_provider_name = provider_name.into();
         let fallback_model_name = model_name.into();
+        // Establish the V2 session envelope (including tail repair and identity) before the
+        // continuation coordinator reads the stream. Otherwise coordinator recovery can expose
+        // a repaired-but-not-yet-initialized file to concurrent readers during startup.
         let (entries, provider_name, model_name) =
             store.load_entries_writer_reconciled(fallback_provider_name, fallback_model_name)?;
+        ProviderContinuationPayloadCoordinator::for_store(store.clone())?
+            .recover()
+            .context("failed to recover provider continuation payload lifecycle")?;
         crate::EgressAuditRecorder::new(store.clone()).reconcile_interrupted()?;
         let session_scope_id = session_id_for_path(store.path());
         let (entries, audit_needed) = validated_recovered_entries(&session_scope_id, entries);

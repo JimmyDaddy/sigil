@@ -26,8 +26,6 @@ use crate::{
     stream::{GeminiSseDecoder, GeminiSseFrame},
 };
 
-const GEMINI_MAX_ATTEMPTS: usize = 2;
-
 #[derive(Clone)]
 pub struct GeminiProvider {
     config: GeminiProviderConfig,
@@ -121,66 +119,41 @@ impl Provider for GeminiProvider {
         }
         let body = build_generate_content_request(&request)?;
         let url = self.stream_generate_content_url(&request.model_name);
-        let mut attempt = 0usize;
         let mut hosted_wire_state = HostedRequestWireState::Prepared;
-        loop {
-            attempt += 1;
-            let response = timeout_provider_request(
-                self.post_json(
-                    &url,
-                    &body,
-                    hosted_enabled.then_some(&mut hosted_wire_state),
-                ),
-                self.timeouts,
-            )
-            .await
-            .map_err(|phase| {
-                provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
-            })?;
-            let response = match response {
-                Ok(response) => response,
-                Err(error)
-                    if hosted_enabled
-                        && attempt < GEMINI_MAX_ATTEMPTS
-                        && hosted_wire_state.retry_allowed()
-                        && is_zero_wire_connect_error(&error) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error).context("Gemini request failed"),
-            };
-            let status = response.status();
-            if status.is_success() {
-                return Ok(response_stream(
-                    response,
-                    request.model_name.clone(),
-                    self.timeouts,
-                    hosted_invocation,
-                ));
-            }
-            let status_code = status.as_u16();
-            let error_body = read_error_response_body(
+        let response = timeout_provider_request(
+            self.post_json(
+                &url,
+                &body,
+                hosted_enabled.then_some(&mut hosted_wire_state),
+            ),
+            self.timeouts,
+        )
+        .await
+        .map_err(|phase| {
+            provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
+        })?
+        .context("Gemini request failed")?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response_stream(
                 response,
-                self.timeouts.request_timeout,
-                &SecretRedactor::from_values([self.api_key()?]),
-                self.name(),
-                &request.model_name,
-                status_code,
-            )
-            .await;
-            if attempt < GEMINI_MAX_ATTEMPTS && is_retryable_status(status_code) && !hosted_enabled
-            {
-                continue;
-            }
-            let error_body = error_body?;
-            let error = classify_status(status_code, error_body.text());
-            return Err(error.into());
+                request.model_name.clone(),
+                self.timeouts,
+                hosted_invocation,
+            ));
         }
+        let status_code = status.as_u16();
+        let error_body = read_error_response_body(
+            response,
+            self.timeouts.request_timeout,
+            &SecretRedactor::from_values([self.api_key()?]),
+            self.name(),
+            &request.model_name,
+            status_code,
+        )
+        .await?;
+        Err(classify_status(status_code, error_body.text()).into())
     }
-}
-
-fn is_retryable_status(status: u16) -> bool {
-    status == 429 || (500..=599).contains(&status)
 }
 
 impl GeminiProvider {
@@ -224,13 +197,6 @@ impl GeminiProvider {
             }
         }
     }
-}
-
-fn is_zero_wire_connect_error(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .find_map(|source| source.downcast_ref::<reqwest::Error>())
-        .is_some_and(reqwest::Error::is_connect)
 }
 
 fn response_stream(

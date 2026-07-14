@@ -22,6 +22,7 @@ fn memory() -> TaskMemoryV1 {
         supersedes: None,
         source_event_ids: vec!["event-source".to_owned()],
         objective: "Keep the durable compaction contract narrow".to_owned(),
+        active_plan: None,
         constraints: Vec::new(),
         decisions: Vec::new(),
         files_changed: Vec::new(),

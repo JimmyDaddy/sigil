@@ -170,8 +170,10 @@ where
         manifest: &ProviderContinuationPayloadLifecycleEntry,
         payload: &[u8],
     ) -> Result<ProviderContinuationPayloadCommitResult> {
-        self.payload_store
-            .with_locked_manifest(manifest, true, |guard| {
+        self.payload_store.with_locked_manifest_key_policy(
+            manifest,
+            || self.key_may_be_created(manifest),
+            |guard| {
                 let stage = guard.stage(payload)?;
                 let manifest_appended = self
                     .append_committed_manifest_if_absent(manifest)?
@@ -182,7 +184,28 @@ where
                     manifest_appended,
                     finalize,
                 })
-            })
+            },
+        )
+    }
+
+    fn key_may_be_created(
+        &self,
+        manifest: &ProviderContinuationPayloadLifecycleEntry,
+    ) -> Result<bool> {
+        let projection = self.payload_projection()?;
+        match projection.payload(&manifest.payload_id) {
+            None => Ok(true),
+            Some(existing)
+                if existing.manifest == *manifest
+                    && existing.latest_lifecycle.state
+                        == ProviderContinuationPayloadLifecycleState::Committed =>
+            {
+                Ok(false)
+            }
+            Some(_) => bail!(
+                "provider continuation payload manifest already has a different durable lifecycle"
+            ),
+        }
     }
 
     /// Recovers unfinished stage/finalize/cleanup work without activating or materializing a

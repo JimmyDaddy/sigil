@@ -456,6 +456,19 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
 }
 
 #[test]
+fn cli_parses_explicit_tokenizer_install_command() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "tokenizer", "install", "deepseek-v4-flash"])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Tokenizer {
+            command: super::TokenizerCommand::Install { ref profile },
+        }) if profile == "deepseek-v4-flash"
+    ));
+    Ok(())
+}
+
+#[test]
 fn cli_parses_serve_command_with_secure_defaults() -> Result<()> {
     let cli = Cli::try_parse_from(["sigil", "serve"])?;
 

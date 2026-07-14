@@ -171,6 +171,14 @@ pub(super) fn insert_task_memory_context_snippets(
         format!("task-memory:{}:objective", memory.memory_id),
         truncate_runtime_context_body(&memory.objective, 160),
     );
+    if let Some(plan) = &memory.active_plan {
+        for (index, step) in plan.steps.iter().enumerate() {
+            snippets.insert(
+                format!("task-memory:{}:active-plan:{index}", memory.memory_id),
+                truncate_runtime_context_body(&format!("{:?}: {}", step.status, step.title), 160),
+            );
+        }
+    }
     for (index, decision) in memory.decisions.iter().enumerate() {
         snippets.insert(
             format!("task-memory:{}:decision:{index}", memory.memory_id),

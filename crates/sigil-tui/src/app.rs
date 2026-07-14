@@ -435,6 +435,9 @@ pub enum AppAction {
     ApplyV2Compaction {
         request_id: u64,
     },
+    CancelV2CompactionReview {
+        request_id: u64,
+    },
     CheckChangedFilesDiagnostics,
     CleanMutationArtifacts {
         target: MutationArtifactCleanupTarget,
@@ -981,6 +984,12 @@ impl AppState {
                         request_id,
                     });
                     return Ok(Some(AppAction::ApplyV2Compaction { request_id }));
+                }
+                modal_flow::ModalOutcome::V2CompactionDismissed { request_id } => {
+                    self.apply_modal_outcome(modal_flow::ModalOutcome::V2CompactionDismissed {
+                        request_id,
+                    });
+                    return Ok(Some(AppAction::CancelV2CompactionReview { request_id }));
                 }
                 outcome => self.apply_modal_outcome(outcome),
             }

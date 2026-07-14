@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -7,7 +10,8 @@ use crate::{
     ArtifactId, ChangeSetResultStatus, ContextBodyRef, ContextInclusionReason, ContextItem,
     ContextSensitivity, ContextSource, ContextTrustLevel, ControlEntry, DurableEventType, EventId,
     MutationCommitted, MutationSubject, ReceiptId, SessionLogEntry, SessionStreamRecord,
-    ToolExecutionStatus, WorkspaceSnapshotId,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskStepStatus, ToolExecutionStatus,
+    WorkspaceSnapshotId,
 };
 
 pub type TaskMemoryId = String;
@@ -161,6 +165,67 @@ pub struct AttemptRef {
     pub summary: Option<String>,
 }
 
+/// A source-bound view of the accepted plan for the currently active durable task.
+///
+/// This is a continuation aid, not an executable task graph: task lifecycle records remain the
+/// authority for scheduling and status transitions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ActiveTaskPlanV1 {
+    pub task_id: String,
+    pub plan_version: u32,
+    pub source_event_id: EventId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ActiveTaskPlanStepV1>,
+}
+
+impl ActiveTaskPlanV1 {
+    fn validate(&self) -> Result<()> {
+        if self.task_id.trim().is_empty() {
+            bail!("active task plan task id is empty");
+        }
+        if self.source_event_id.trim().is_empty() {
+            bail!("active task plan source event id is empty");
+        }
+        if self.steps.is_empty() {
+            bail!("active task plan has no steps");
+        }
+        let mut step_ids = std::collections::BTreeSet::new();
+        for step in &self.steps {
+            step.validate()?;
+            if !step_ids.insert(step.step_id.as_str()) {
+                bail!("active task plan has duplicate step ids");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One source-bound step in [`ActiveTaskPlanV1`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ActiveTaskPlanStepV1 {
+    pub step_id: String,
+    pub title: String,
+    pub status: TaskStepStatus,
+    pub source_event_id: EventId,
+}
+
+impl ActiveTaskPlanStepV1 {
+    fn validate(&self) -> Result<()> {
+        if self.step_id.trim().is_empty() {
+            bail!("active task plan step id is empty");
+        }
+        if self.title.trim().is_empty() {
+            bail!("active task plan step title is empty");
+        }
+        if self.source_event_id.trim().is_empty() {
+            bail!("active task plan step source event id is empty");
+        }
+        Ok(())
+    }
+}
+
 impl AttemptRef {
     /// Validates attempt metadata.
     ///
@@ -187,6 +252,10 @@ pub struct TaskMemoryV1 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_event_ids: Vec<EventId>,
     pub objective: String,
+    /// Accepted task plan for the currently non-terminal task, reconstructed only from durable
+    /// task lifecycle records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_plan: Option<ActiveTaskPlanV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<SourcedFact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -221,6 +290,9 @@ impl TaskMemoryV1 {
         }
         if self.objective.trim().is_empty() {
             bail!("task memory objective is empty");
+        }
+        if let Some(active_plan) = &self.active_plan {
+            active_plan.validate()?;
         }
         for fact in self
             .constraints
@@ -425,18 +497,28 @@ fn session_entry_from_stream_record(
 struct TaskMemoryExtractionBuilder {
     input: TaskMemoryExtractionInput,
     source_event_ids: Vec<EventId>,
-    objective: Option<String>,
     files_changed: Vec<FileChangeRef>,
     commands_run: Vec<CommandReceiptId>,
     verification_results: Vec<VerificationReceiptId>,
     failed_attempts: Vec<AttemptRef>,
     unresolved_issues: Vec<SourcedFact>,
+    latest_user_objective: Option<(String, EventId)>,
+    task_runs: BTreeMap<String, TaskRunObservation>,
+    accepted_plans: BTreeMap<(String, u32), (TaskPlanEntry, EventId)>,
+    latest_step_statuses: BTreeMap<(String, u32, String), (TaskStepStatus, EventId)>,
+    next_task_run_order: usize,
+}
+
+#[derive(Clone)]
+struct TaskRunObservation {
+    entry: TaskRunEntry,
+    source_event_id: EventId,
+    order: usize,
 }
 
 impl TaskMemoryExtractionBuilder {
     fn new(input: TaskMemoryExtractionInput) -> Self {
         Self {
-            objective: input.objective.clone(),
             input,
             source_event_ids: Vec::new(),
             files_changed: Vec::new(),
@@ -444,108 +526,149 @@ impl TaskMemoryExtractionBuilder {
             verification_results: Vec::new(),
             failed_attempts: Vec::new(),
             unresolved_issues: Vec::new(),
+            latest_user_objective: None,
+            task_runs: BTreeMap::new(),
+            accepted_plans: BTreeMap::new(),
+            latest_step_statuses: BTreeMap::new(),
+            next_task_run_order: 0,
         }
     }
 
     fn apply_session_entry(&mut self, event_id: &str, entry: &SessionLogEntry) {
-        let SessionLogEntry::Control(control) = entry else {
-            return;
-        };
-        match control {
-            ControlEntry::TaskRun(task) => {
-                self.push_source(event_id);
-                if self.objective.is_none() && !task.objective.trim().is_empty() {
-                    self.objective = Some(task.objective.clone());
-                }
-                if task.status.is_terminal()
-                    && task.status != crate::TaskRunStatus::Completed
-                    && let Some(reason) = &task.reason
+        match entry {
+            SessionLogEntry::User(message) => {
+                if let Some(content) = message
+                    .content
+                    .as_deref()
+                    .filter(|content| !content.trim().is_empty())
                 {
-                    self.push_failed_attempt(AttemptRef {
-                        attempt_id: task.task_id.as_str().to_owned(),
-                        source_event_id: Some(event_id.to_owned()),
-                        summary: Some(reason.clone()),
-                    });
+                    self.latest_user_objective = Some((content.to_owned(), event_id.to_owned()));
                 }
             }
-            ControlEntry::TaskStep(step) => {
-                self.push_source(event_id);
-                if matches!(
-                    step.status,
-                    crate::TaskStepStatus::Failed
-                        | crate::TaskStepStatus::Blocked
-                        | crate::TaskStepStatus::Interrupted
-                ) {
-                    let summary = step
-                        .reason
-                        .clone()
-                        .or_else(|| step.summary.clone())
-                        .or_else(|| step.title.clone());
-                    self.push_failed_attempt(AttemptRef {
-                        attempt_id: format!("{}:{}", step.task_id.as_str(), step.step_id.as_str()),
-                        source_event_id: Some(event_id.to_owned()),
-                        summary,
-                    });
-                    if step.status == crate::TaskStepStatus::Blocked {
-                        self.unresolved_issues.push(SourcedFact::system_derived(
-                            step.reason
-                                .clone()
-                                .or_else(|| step.title.clone())
-                                .unwrap_or_else(|| "task step blocked".to_owned()),
-                            event_id.to_owned(),
-                        ));
-                    }
-                }
-            }
-            ControlEntry::ToolExecution(execution) => {
-                self.push_source(event_id);
-                if execution.status == ToolExecutionStatus::Completed {
-                    self.push_command(execution.call_id.clone());
-                    for path in &execution.changed_files {
-                        self.push_file_change(FileChangeRef {
-                            path: path.into(),
+            SessionLogEntry::Assistant(_) | SessionLogEntry::ToolResult(_) => {}
+            SessionLogEntry::Control(control) => match control {
+                ControlEntry::TaskRun(task) => {
+                    self.push_source(event_id);
+                    self.next_task_run_order = self.next_task_run_order.saturating_add(1);
+                    self.task_runs.insert(
+                        task.task_id.as_str().to_owned(),
+                        TaskRunObservation {
+                            entry: task.clone(),
+                            source_event_id: event_id.to_owned(),
+                            order: self.next_task_run_order,
+                        },
+                    );
+                    if task.status.is_terminal()
+                        && task.status != crate::TaskRunStatus::Completed
+                        && let Some(reason) = &task.reason
+                    {
+                        self.push_failed_attempt(AttemptRef {
+                            attempt_id: task.task_id.as_str().to_owned(),
                             source_event_id: Some(event_id.to_owned()),
-                            mutation_receipt_id: None,
+                            summary: Some(reason.clone()),
                         });
                     }
-                } else if matches!(
-                    execution.status,
-                    ToolExecutionStatus::Failed
-                        | ToolExecutionStatus::Cancelled
-                        | ToolExecutionStatus::Interrupted
-                ) {
-                    self.push_failed_attempt(AttemptRef {
-                        attempt_id: execution.call_id.clone(),
-                        source_event_id: Some(event_id.to_owned()),
-                        summary: execution.error.as_ref().map(|error| error.message.clone()),
-                    });
                 }
-            }
-            ControlEntry::VerificationRecorded(entry) => {
-                self.push_source(event_id);
-                self.push_verification(entry.receipt.receipt.receipt_id.clone());
-            }
-            ControlEntry::ChangeSetApplied(result) => {
-                self.push_source(event_id);
-                for file in &result.file_results {
-                    self.push_file_change(FileChangeRef {
-                        path: file.path.clone().into(),
-                        source_event_id: Some(event_id.to_owned()),
-                        mutation_receipt_id: Some(result.id.as_str().to_owned()),
-                    });
+                ControlEntry::TaskPlan(plan) => {
+                    self.push_source(event_id);
+                    if plan.status == TaskPlanStatus::Accepted {
+                        self.accepted_plans.insert(
+                            (plan.task_id.as_str().to_owned(), plan.plan_version),
+                            (plan.clone(), event_id.to_owned()),
+                        );
+                    }
                 }
-                if !matches!(
-                    result.status,
-                    ChangeSetResultStatus::Applied | ChangeSetResultStatus::PartiallyApplied
-                ) {
-                    self.push_failed_attempt(AttemptRef {
-                        attempt_id: result.id.as_str().to_owned(),
-                        source_event_id: Some(event_id.to_owned()),
-                        summary: result.message.clone(),
-                    });
+                ControlEntry::TaskStep(step) => {
+                    self.push_source(event_id);
+                    self.latest_step_statuses.insert(
+                        (
+                            step.task_id.as_str().to_owned(),
+                            step.plan_version,
+                            step.step_id.as_str().to_owned(),
+                        ),
+                        (step.status, event_id.to_owned()),
+                    );
+                    if matches!(
+                        step.status,
+                        crate::TaskStepStatus::Failed
+                            | crate::TaskStepStatus::Blocked
+                            | crate::TaskStepStatus::Interrupted
+                    ) {
+                        let summary = step
+                            .reason
+                            .clone()
+                            .or_else(|| step.summary.clone())
+                            .or_else(|| step.title.clone());
+                        self.push_failed_attempt(AttemptRef {
+                            attempt_id: format!(
+                                "{}:{}",
+                                step.task_id.as_str(),
+                                step.step_id.as_str()
+                            ),
+                            source_event_id: Some(event_id.to_owned()),
+                            summary,
+                        });
+                        if step.status == crate::TaskStepStatus::Blocked {
+                            self.unresolved_issues.push(SourcedFact::system_derived(
+                                step.reason
+                                    .clone()
+                                    .or_else(|| step.title.clone())
+                                    .unwrap_or_else(|| "task step blocked".to_owned()),
+                                event_id.to_owned(),
+                            ));
+                        }
+                    }
                 }
-            }
-            _ => {}
+                ControlEntry::ToolExecution(execution) => {
+                    self.push_source(event_id);
+                    if execution.status == ToolExecutionStatus::Completed {
+                        self.push_command(execution.call_id.clone());
+                        for path in &execution.changed_files {
+                            self.push_file_change(FileChangeRef {
+                                path: path.into(),
+                                source_event_id: Some(event_id.to_owned()),
+                                mutation_receipt_id: None,
+                            });
+                        }
+                    } else if matches!(
+                        execution.status,
+                        ToolExecutionStatus::Failed
+                            | ToolExecutionStatus::Cancelled
+                            | ToolExecutionStatus::Interrupted
+                    ) {
+                        self.push_failed_attempt(AttemptRef {
+                            attempt_id: execution.call_id.clone(),
+                            source_event_id: Some(event_id.to_owned()),
+                            summary: execution.error.as_ref().map(|error| error.message.clone()),
+                        });
+                    }
+                }
+                ControlEntry::VerificationRecorded(entry) => {
+                    self.push_source(event_id);
+                    self.push_verification(entry.receipt.receipt.receipt_id.clone());
+                }
+                ControlEntry::ChangeSetApplied(result) => {
+                    self.push_source(event_id);
+                    for file in &result.file_results {
+                        self.push_file_change(FileChangeRef {
+                            path: file.path.clone().into(),
+                            source_event_id: Some(event_id.to_owned()),
+                            mutation_receipt_id: Some(result.id.as_str().to_owned()),
+                        });
+                    }
+                    if !matches!(
+                        result.status,
+                        ChangeSetResultStatus::Applied | ChangeSetResultStatus::PartiallyApplied
+                    ) {
+                        self.push_failed_attempt(AttemptRef {
+                            attempt_id: result.id.as_str().to_owned(),
+                            source_event_id: Some(event_id.to_owned()),
+                            summary: result.message.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
@@ -562,16 +685,76 @@ impl TaskMemoryExtractionBuilder {
         }
     }
 
-    fn finish(self) -> Result<TaskMemoryV1> {
+    fn finish(mut self) -> Result<TaskMemoryV1> {
+        let latest_task = self
+            .task_runs
+            .values()
+            .max_by_key(|task| task.order)
+            .cloned();
+        let active_task = self
+            .task_runs
+            .values()
+            .filter(|task| !task.entry.status.is_terminal())
+            .max_by_key(|task| task.order)
+            .cloned();
+        let active_plan = active_task.as_ref().and_then(|task| {
+            self.accepted_plans
+                .iter()
+                .filter(|((task_id, _), _)| task_id == task.entry.task_id.as_str())
+                .max_by_key(|((_, version), _)| *version)
+                .map(
+                    |((task_id, plan_version), (plan, plan_event_id))| ActiveTaskPlanV1 {
+                        task_id: task_id.clone(),
+                        plan_version: *plan_version,
+                        source_event_id: plan_event_id.clone(),
+                        steps: plan
+                            .steps
+                            .iter()
+                            .map(|step| {
+                                let key = (
+                                    task_id.clone(),
+                                    *plan_version,
+                                    step.step_id.as_str().to_owned(),
+                                );
+                                let (status, source_event_id) = self
+                                    .latest_step_statuses
+                                    .get(&key)
+                                    .cloned()
+                                    .unwrap_or((TaskStepStatus::Pending, plan_event_id.clone()));
+                                ActiveTaskPlanStepV1 {
+                                    step_id: step.step_id.as_str().to_owned(),
+                                    title: step.title.clone(),
+                                    status,
+                                    source_event_id,
+                                }
+                            })
+                            .collect(),
+                    },
+                )
+        });
+        let (objective, objective_source_event_id) =
+            if let Some(objective) = self.input.objective.clone() {
+                (objective, None)
+            } else if let Some(task) = active_task {
+                (task.entry.objective, Some(task.source_event_id))
+            } else if let Some(task) = latest_task {
+                (task.entry.objective, Some(task.source_event_id))
+            } else if let Some((objective, source_event_id)) = self.latest_user_objective.clone() {
+                (objective, Some(source_event_id))
+            } else {
+                ("No task objective recorded".to_owned(), None)
+            };
+        if let Some(source_event_id) = objective_source_event_id.as_deref() {
+            self.push_source(source_event_id);
+        }
         let memory = TaskMemoryV1 {
             memory_id: self.input.memory_id,
             branch_id: self.input.branch_id,
             valid_for_snapshot: self.input.valid_for_snapshot,
             supersedes: self.input.supersedes,
             source_event_ids: self.source_event_ids,
-            objective: self
-                .objective
-                .unwrap_or_else(|| "No task objective recorded".to_owned()),
+            objective,
+            active_plan,
             constraints: Vec::new(),
             decisions: Vec::new(),
             files_changed: self.files_changed,

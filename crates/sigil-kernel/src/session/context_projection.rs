@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::*;
+use crate::EventId;
 
 /// Schema version for the provider-neutral chat context projection.
 pub const SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION: u16 = 1;
@@ -116,7 +117,16 @@ impl SessionContextProjection {
                 .outputs_for_compaction(&applied.compaction_id)
                 .unwrap_or_default();
             let raw_messages = raw_model_messages_from_durable_records(records, outputs)?;
-            projection.activate_v2_boundary(applied, sidecar, raw_messages)?;
+            let portable_retained_raw_event_ids = (sidecar.is_some()
+                && applied.checkpoint.kind == ContinuationCheckpointKind::PortableSemantic)
+                .then(|| portable_retained_raw_event_ids(records, &applied))
+                .transpose()?;
+            projection.activate_v2_boundary(
+                applied,
+                sidecar,
+                raw_messages,
+                portable_retained_raw_event_ids.as_ref(),
+            )?;
         }
         Ok(projection)
     }
@@ -183,6 +193,7 @@ impl SessionContextProjection {
         applied: CompactionAppliedV2,
         sidecar: Option<ResolvedCompactionSidecar>,
         raw_messages: Vec<DurableProjectionMessage>,
+        portable_retained_raw_event_ids: Option<&BTreeSet<EventId>>,
     ) -> Result<()> {
         self.active_compaction_id = Some(applied.compaction_id);
         self.folded_through = Some(applied.folded_through);
@@ -208,12 +219,9 @@ impl SessionContextProjection {
                     raw_messages
                         .into_iter()
                         .filter(|message| {
-                            message.stream_sequence
-                                > self
-                                    .folded_through
-                                    .as_ref()
-                                    .expect("activated V2 boundary is set")
-                                    .through_stream_sequence
+                            portable_retained_raw_event_ids
+                                .expect("portable activation rebuilt retained raw event ids")
+                                .contains(&message.event_id)
                         })
                         .map(|message| message.message),
                 );
@@ -255,7 +263,7 @@ pub(super) fn raw_model_messages(entries: &[SessionLogEntry]) -> Vec<ModelMessag
 
 #[derive(Debug, Clone)]
 struct DurableProjectionMessage {
-    stream_sequence: u64,
+    event_id: EventId,
     message: ModelMessage,
 }
 
@@ -291,7 +299,7 @@ fn raw_model_messages_from_durable_records(
             SessionLogEntry::Control(_) => continue,
         };
         messages.push(DurableProjectionMessage {
-            stream_sequence: event.stream_sequence,
+            event_id: event.event_id.clone(),
             message,
         });
     }
@@ -302,21 +310,107 @@ fn raw_model_messages_from_durable_records(
 /// after activation, without writing a lifecycle or sidecar record.
 pub(crate) fn portable_candidate_model_messages(
     records: &[SessionStreamRecord],
-    folded_through: &CompactionCursor,
+    plan: &CompactionFoldPlan,
     checkpoint: &ContinuationCheckpointV1,
     task_memory: &TaskMemoryV1,
 ) -> Result<Vec<ModelMessage>> {
     let checkpoint_message = checkpoint.render_for_provider(task_memory)?;
     let raw_messages = raw_model_messages_from_durable_records(records, &[])?;
+    let retained_raw_event_ids = portable_retained_raw_event_ids_for_plan(records, plan)?;
     let mut candidate = Vec::with_capacity(raw_messages.len().saturating_add(1));
     candidate.push(checkpoint_message);
     candidate.extend(
         raw_messages
             .into_iter()
-            .filter(|message| message.stream_sequence > folded_through.through_stream_sequence)
+            .filter(|message| retained_raw_event_ids.contains(&message.event_id))
             .map(|message| message.message),
     );
     Ok(repair_orphan_tool_results(&candidate))
+}
+
+/// Returns the raw provider-visible event ids that remain beside a portable checkpoint for one
+/// exact fold plan. Messages protected by the current plan remain visible; only messages already
+/// represented by a prior checkpoint or selected for this fold are hidden.
+fn portable_retained_raw_event_ids_for_plan(
+    records: &[SessionStreamRecord],
+    plan: &CompactionFoldPlan,
+) -> Result<BTreeSet<EventId>> {
+    plan.validate_against(records)?;
+    let folded = plan.folded_event_ids.iter().collect::<BTreeSet<_>>();
+    let prior_boundary = plan
+        .protected_events
+        .iter()
+        .filter(|protected| {
+            protected.reason == CompactionFoldProtectionReason::ExistingCompactionBoundary
+        })
+        .map(|protected| &protected.event.event_id)
+        .collect::<BTreeSet<_>>();
+
+    let mut retained = BTreeSet::new();
+    for record in records {
+        let event = record.stored_event();
+        let Some(entry) = session_entry_from_stored_event(event)? else {
+            continue;
+        };
+        if matches!(
+            entry,
+            SessionLogEntry::User(_)
+                | SessionLogEntry::Assistant(_)
+                | SessionLogEntry::ToolResult(_)
+        ) && !folded.contains(&event.event_id)
+            && !prior_boundary.contains(&event.event_id)
+        {
+            retained.insert(event.event_id.clone());
+        }
+    }
+    Ok(retained)
+}
+
+/// Reconstructs the retained raw event ids for an activated portable checkpoint and includes
+/// provider-visible messages appended after the frozen source cursor. The reconstruction is
+/// intentionally fail-closed: a tampered source plan cannot silently hide raw history.
+fn portable_retained_raw_event_ids(
+    records: &[SessionStreamRecord],
+    applied: &CompactionAppliedV2,
+) -> Result<BTreeSet<EventId>> {
+    let checkpoint = &applied.checkpoint;
+    let source_cursor = checkpoint
+        .source_plan_cursor
+        .as_ref()
+        .context("portable checkpoint is missing its source plan cursor")?;
+    let source_count = usize::try_from(source_cursor.last_applied_stream_sequence)
+        .context("portable checkpoint source plan cursor overflows usize")?;
+    let source_records = records
+        .get(..source_count)
+        .context("portable checkpoint source plan cursor is missing")?;
+    let plan = CompactionFoldPlan::from_records_after(
+        source_records,
+        checkpoint
+            .requested_tail_message_count
+            .context("portable checkpoint is missing its requested tail size")?,
+        checkpoint.prior_folded_through.as_ref(),
+    )?;
+    if plan.base_stream_cursor != *source_cursor
+        || plan.folded_through.as_ref() != Some(&applied.folded_through)
+    {
+        bail!("portable checkpoint does not match its deterministic retained-history plan");
+    }
+
+    let mut retained = portable_retained_raw_event_ids_for_plan(source_records, &plan)?;
+    for record in &records[source_count..] {
+        let event = record.stored_event();
+        if matches!(
+            session_entry_from_stored_event(event)?,
+            Some(
+                SessionLogEntry::User(_)
+                    | SessionLogEntry::Assistant(_)
+                    | SessionLogEntry::ToolResult(_)
+            )
+        ) {
+            retained.insert(event.event_id.clone());
+        }
+    }
+    Ok(retained)
 }
 
 fn into_projection_entries(messages: Vec<ModelMessage>) -> Vec<SessionProjectionEntry> {

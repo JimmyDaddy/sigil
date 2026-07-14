@@ -926,6 +926,48 @@ fn session_writer_rejects_legacy_session_log_entries_without_mutating_the_stream
 }
 
 #[test]
+fn session_writer_rejects_a_raw_legacy_compaction_tail_without_truncating_it() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let legacy = serde_json::json!({
+        "control": {
+            "compaction_applied": {
+                "summary": "old compact summary",
+                "compacted_message_count": 2,
+            }
+        }
+    });
+    let content = format!("{legacy}\n{{unterminated-tail");
+    fs::write(&path, &content)?;
+
+    let read_error = JsonlSessionStore::read_event_records(&path)
+        .expect_err("raw legacy compaction payload must fail closed");
+    let compatibility = read_error
+        .downcast_ref::<SessionStreamCompatibilityError>()
+        .expect("raw legacy payload must return a structured compatibility error");
+    assert_eq!(compatibility.path, path);
+    assert_eq!(compatibility.physical_line, 1);
+    assert_eq!(compatibility.format_name, "legacy CompactionRecord payload");
+
+    let store = JsonlSessionStore::new(&path)?;
+    let append_error = store
+        .append_session_entry_event(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("v2".to_owned()),
+            Vec::new(),
+        )))
+        .expect_err("legacy stream must not enter tail recovery before append");
+    assert!(
+        append_error
+            .downcast_ref::<SessionStreamCompatibilityError>()
+            .is_some()
+    );
+    assert_eq!(fs::read_to_string(&path)?, content);
+    assert!(!super::tail_recovery_intent_path(&path).exists());
+    assert!(!temp.path().join(".sigil-recovery").exists());
+    Ok(())
+}
+
+#[test]
 fn session_writer_partial_batch_failure_poison_reloads_before_retry() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

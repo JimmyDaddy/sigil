@@ -23,8 +23,6 @@ use crate::{
     stream::{OpenAiSseDecoder, OpenAiSseFrame},
 };
 
-const OPENAI_COMPAT_MAX_ATTEMPTS: usize = 2;
-
 #[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleProviderConfig,
@@ -85,45 +83,32 @@ impl Provider for OpenAiCompatibleProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let body = build_chat_request(&request)?;
         let url = self.chat_completions_url();
-        let mut attempt = 0usize;
-        loop {
-            attempt += 1;
-            let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
-                .await
-                .map_err(|phase| {
-                    provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
-                })?
-                .context("OpenAI-compatible request failed")?;
-            let status = response.status();
-            if status.is_success() {
-                return Ok(response_stream(
-                    response,
-                    request.model_name.clone(),
-                    self.timeouts,
-                ));
-            }
-            let status_code = status.as_u16();
-            let error_body = read_error_response_body(
+        let response = timeout_provider_request(self.post_json(&url, &body), self.timeouts)
+            .await
+            .map_err(|phase| {
+                provider_timeout_error(phase, self.timeouts, self.name(), &request.model_name)
+            })?
+            .context("OpenAI-compatible request failed")?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response_stream(
                 response,
-                self.timeouts.request_timeout,
-                &SecretRedactor::from_values([self.api_key()?]),
-                self.name(),
-                &request.model_name,
-                status_code,
-            )
-            .await;
-            if attempt < OPENAI_COMPAT_MAX_ATTEMPTS && is_retryable_status(status_code) {
-                continue;
-            }
-            let error_body = error_body?;
-            let error = classify_status(status_code, error_body.text());
-            return Err(error.into());
+                request.model_name.clone(),
+                self.timeouts,
+            ));
         }
+        let status_code = status.as_u16();
+        let error_body = read_error_response_body(
+            response,
+            self.timeouts.request_timeout,
+            &SecretRedactor::from_values([self.api_key()?]),
+            self.name(),
+            &request.model_name,
+            status_code,
+        )
+        .await?;
+        Err(classify_status(status_code, error_body.text()).into())
     }
-}
-
-fn is_retryable_status(status: u16) -> bool {
-    status == 429 || (500..=599).contains(&status)
 }
 
 impl OpenAiCompatibleProvider {

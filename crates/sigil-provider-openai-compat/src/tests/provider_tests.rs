@@ -296,13 +296,6 @@ fn enqueue_decoded_frames_ignores_comment_and_blank_frames() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn retryable_status_helper_accepts_only_rate_limits_and_server_errors() {
-    assert!(super::is_retryable_status(429));
-    assert!(super::is_retryable_status(503));
-    assert!(!super::is_retryable_status(401));
-}
-
 #[tokio::test]
 async fn provider_stream_maps_http_error_status() -> Result<()> {
     let server = TinySseServer::start_sequence(vec![
@@ -325,74 +318,7 @@ async fn provider_stream_maps_http_error_status() -> Result<()> {
         error.to_string(),
         "OpenAI-compatible request was rate limited"
     );
-    assert_eq!(server.request_count(), 2);
-    Ok(())
-}
-
-#[tokio::test]
-async fn provider_stream_retries_retryable_status_once() -> Result<()> {
-    let server = TinySseServer::start_sequence(vec![
-        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\n\r\nbusy".as_bytes(),
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
-          data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
-          data: [DONE]\n\n"
-            .as_bytes(),
-    ])
-    .await?;
-    let provider = new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
-        base_url: server.base_url(),
-        api_key: Some("test-key".to_owned()),
-        ..OpenAiCompatibleProviderConfig::default()
-    })?;
-
-    let chunks = provider
-        .stream(test_request())
-        .await?
-        .collect::<Vec<_>>()
-        .await;
-
-    assert_eq!(server.request_count(), 2);
-    assert!(
-        matches!(chunks[0].as_ref().expect("text"), ProviderChunk::TextDelta(text) if text == "ok")
-    );
-    assert!(matches!(
-        chunks[1].as_ref().expect("done"),
-        ProviderChunk::Done
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn provider_retries_retryable_status_when_error_body_times_out() -> Result<()> {
-    let server = TinySseServer::start_hanging_error_then_success(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
-         data: {\"choices\":[{\"delta\":{\"content\":\"after-timeout\"}}]}\n\n\
-         data: [DONE]\n\n",
-    )
-    .await?;
-    let provider = OpenAiCompatibleProvider::new(
-        OpenAiCompatibleProviderConfig {
-            base_url: server.base_url(),
-            api_key: Some("test-key".to_owned()),
-            ..OpenAiCompatibleProviderConfig::default()
-        },
-        retry_test_timeouts(),
-    )?;
-
-    let chunks = provider
-        .stream(test_request())
-        .await?
-        .collect::<Vec<_>>()
-        .await;
-
-    assert_eq!(server.request_count(), 2);
-    assert!(
-        matches!(chunks[0].as_ref().expect("text"), ProviderChunk::TextDelta(text) if text == "after-timeout")
-    );
-    assert!(matches!(
-        chunks[1].as_ref().expect("done"),
-        ProviderChunk::Done
-    ));
+    assert_eq!(server.request_count(), 1);
     Ok(())
 }
 
@@ -412,14 +338,6 @@ fn test_request() -> CompletionRequest {
         store: false,
         deterministic_materialization: true,
         hosted_tools: Vec::new(),
-    }
-}
-
-fn retry_test_timeouts() -> ModelRequestTimeouts {
-    ModelRequestTimeouts {
-        request_timeout: std::time::Duration::from_millis(200),
-        stream_idle_timeout: std::time::Duration::from_secs(1),
-        stream_total_timeout: None,
     }
 }
 
@@ -573,43 +491,6 @@ impl TinySseServer {
         })
     }
 
-    async fn start_hanging_error_then_success(success: &'static str) -> Result<Self> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let request_capture = Arc::new(Mutex::new(Vec::new()));
-        let task_request_capture = Arc::clone(&request_capture);
-        tokio::spawn(async move {
-            for attempt in 0..2 {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let requests = Arc::clone(&task_request_capture);
-                tokio::spawn(async move {
-                    let request = read_request_head(&mut socket).await;
-                    requests
-                        .lock()
-                        .expect("request capture mutex should not be poisoned")
-                        .push(request);
-                    if attempt == 0 {
-                        let header = "HTTP/1.1 500 Internal Server Error\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
-                        let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, header.as_bytes())
-                            .await;
-                        let _ = tokio::io::AsyncWriteExt::flush(&mut socket).await;
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    } else {
-                        let _ =
-                            tokio::io::AsyncWriteExt::write_all(&mut socket, success.as_bytes())
-                                .await;
-                    }
-                });
-            }
-        });
-        Ok(Self {
-            address,
-            requests: request_capture,
-        })
-    }
-
     fn base_url(&self) -> String {
         format!("http://{}", self.address)
     }
@@ -629,24 +510,6 @@ impl TinySseServer {
             .expect("request capture mutex should not be poisoned")
             .len()
     }
-}
-
-async fn read_request_head(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
-    let mut request = Vec::new();
-    let mut buffer = [0u8; 1024];
-    loop {
-        let Ok(read) = tokio::io::AsyncReadExt::read(socket, &mut buffer).await else {
-            break;
-        };
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&buffer[..read]);
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-    request
 }
 
 fn multibyte_split_chunks(body: &str) -> Vec<Vec<u8>> {

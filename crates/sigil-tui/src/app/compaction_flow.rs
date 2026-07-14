@@ -53,14 +53,23 @@ impl V2CompactionPreviewModalState {
         ];
         match &self.review.admission {
             V2CompactionAdmission::Ready {
+                before_input_tokens,
                 input_tokens,
                 context_window_tokens,
                 output_tokens,
                 safety_buffer_tokens,
+                savings_tokens,
+                savings_ratio_ppm,
+                minimum_savings_tokens,
+                minimum_savings_ratio_ppm,
             } => {
                 lines.push("target request: verified locally".to_owned());
                 lines.push(format!(
                     "tokens: input {input_tokens} + output {output_tokens} + safety {safety_buffer_tokens} <= {context_window_tokens}"
+                ));
+                lines.push(format!(
+                    "savings: {before_input_tokens} -> {input_tokens} ({savings_tokens} tokens, {} ppm; minimum {minimum_savings_tokens} tokens / {minimum_savings_ratio_ppm} ppm)",
+                    savings_ratio_ppm,
                 ));
                 lines.push("Enter apply  Esc cancel".to_owned());
             }
@@ -116,6 +125,9 @@ impl AppState {
         let prefix = match source {
             V2CompactionApplySource::ManualConfirmation => "Context compacted",
             V2CompactionApplySource::IdleAutomatic => "Context compacted automatically",
+            V2CompactionApplySource::PreTurnPressure => {
+                "Context compacted before dispatching the queued follow-up"
+            }
             V2CompactionApplySource::OverflowRecovery => {
                 "Context compacted after a context-window rejection"
             }

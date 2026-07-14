@@ -136,9 +136,11 @@ pub use plugins::{
 };
 pub use portable_compaction::{
     DeepSeekV4FlashPortableTargetPressure, deepseek_v4_flash_portable_target_material,
+    deepseek_v4_flash_portable_target_material_with_economics,
     deepseek_v4_flash_portable_target_output_tokens, deepseek_v4_flash_portable_target_pressure,
-    deepseek_v4_flash_portable_target_proof, is_deepseek_v4_flash_portable_target_profile,
-    is_openai_responses_portable_target_profile, portable_compaction_target_output_tokens,
+    deepseek_v4_flash_portable_target_proof, install_default_deepseek_v4_flash_tokenizer,
+    is_deepseek_v4_flash_portable_target_profile, is_openai_responses_portable_target_profile,
+    portable_compaction_target_output_tokens, require_default_deepseek_v4_flash_portable_transport,
 };
 pub use product_view::{
     AgentGraphProductSummary, agent_graph_product_summary_from_entries,

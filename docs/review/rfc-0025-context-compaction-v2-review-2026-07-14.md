@@ -290,3 +290,27 @@
 - 本次是当前 dirty worktree 的只读代码/完整度评审；除本报告外未修改实现文件。
 - 未把工作区中与 RFC-0025 无关的既有 E21/文档改动纳入 finding。
 - 未执行真实 provider 请求，因此 provider 结论来自 frozen request、wire builder、retry code、官方 API contract 与本地竞品实现的交叉验证。
+
+## 修复执行记录（2026-07-14）
+
+先行冻结提交为 `08a93697 fix(compaction): freeze context activation`。它让 manual、idle、pre-turn 和 overflow recovery 都在任何 checkpoint、provider count 或 active-boundary mutation 之前 fail closed；`/compact` 仍只能查看只读 fold preview。
+
+| Finding | 修复结果 |
+| --- | --- |
+| P1-1 safe fold | Portable projection 现在基于 fold plan 的 retained/protected event IDs 投影 raw message；新增 protected message 位于 fold cursor 之前的 apply/reload/provider-projection 反例。 |
+| P1-2 semantic continuity | `TaskMemoryV1` 提取并持久化最新用户目标与已接受 active plan；checkpoint provider projection 会渲染 active plan。当前仍是 deterministic extraction，不再把它称作已接入 LLM semantic compressor。 |
+| P1-3 economics | Portable target 绑定精确 before/after evidence、绝对/PPM 最小收益门槛和重放验证；preview 显示 token 变化与阈值。 |
+| P1-4 tokenizer provisioning | 新增显式 `sigil tokenizer install deepseek-v4-flash`，在下载前披露网络操作并校验 artifact；`doctor` 在缺失时给出同一修复命令。安装 tokenizer 不会解除冻结。 |
+| P1-5 OpenAI reasoning | stateless reasoning request 显式请求 `reasoning.encrypted_content`；server-stored reasoning request 不多请求该字段。 |
+| P1-6 physical attempt | 移除各 provider 对 429/5xx/推理 replay 400 的内部 HTTP retry；一次 logical stream 调用只会发送一次 POST。 |
+| P1-7 resolved transport | DeepSeek 本地 exact proof 只接受 resolved default V4 Flash transport；自定义 route、user ID strategy 或 strict-tools policy 均 fail closed。 |
+| P1-8 continuation recovery | payload key 只会在 durable manifest 不存在时创建；`Session::load_from_store` 现在拥有 recovery。修复过程中发现并修正了 startup tail-recovery 与 session identity 之间的短暂竞态。 |
+| P1-9 supply chain | 记录 `tokenizers` 及其暂时无法上游消除的 build-time `paste` 例外、删除条件和复核责任；offline deny advisory gate 可通过。 |
+| P1-10 status/docs | RFC-0025 改为 `frozen-pending-remediation`，旧 shipping conclusion 标记为 superseded；EN/ZH 用户文档不再声称 `/compact` 或 guarded overflow recovery 当前可 apply。 |
+| P2-11 preview ownership | Esc/unavailable Enter 发送带 request ID 的 cancel；worker 仅清除匹配 pending review，并在 session 切换时丢弃它。 |
+| P2-12 worker blocking | 当前所有 activation path 均在 snapshot、tokenizer parse 与 tokenization 前被硬冻结，因此发布构建没有可达的阻塞 compaction work。**解除冻结的前置条件**仍是将这些工作移交给具备 cancellation/ownership 的后台任务；不能只把常量改为 `false`。 |
+| P2-13 pre-turn visibility | pre-turn 成功路径改为发送 `V2CompactionApplied { source: PreTurnPressure }`，与 manual/idle 共用恰好一个可见 timeline lifecycle，而不是无关联 notice。 |
+| P2-14 generation guard | 第一条 generation-bearing chunk 会阻止后续错误被记为 `ConfirmedNoModelConsumption`；新增 text 后 rejection contract test。 |
+| P2-15 legacy raw line | 识别 raw legacy `control.compaction_applied` 以及 legacy `SessionLogEntry`，返回结构化 compatibility error 且不触发 tail truncation；覆盖 EOF 损坏尾的 byte-equality 场景。 |
+
+这轮修复不把 deferred provider-native activation、model-switch transfer、export rewrap/delete-time key destruction 或真实在线 provider/TUI smoke 伪装为已完成能力。它们仍是解除冻结后的独立交付与验收项。

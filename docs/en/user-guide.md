@@ -193,6 +193,8 @@ The info rail shows the latest provider-reported prompt usage against the model 
 
 Opening the review never rewrites history or appends a compaction record. It does not download the tokenizer or contact a provider. While apply is frozen, `Enter` only closes the review.
 
+To prepare a verified local DeepSeek V4 Flash tokenizer without changing any session state, run `sigil tokenizer install deepseek-v4-flash`. The command discloses its public network download before it starts; installing the tokenizer does not unfreeze compaction.
+
 Idle automation never preempts streaming work, queued input, model switching, or overflow recovery. While apply is frozen, it does not create a lifecycle record or alter the session context.
 
 The guarded overflow apply path is also frozen. It does not count, compact, or retry a request while correctness fixes are in progress.
