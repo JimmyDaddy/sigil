@@ -4,6 +4,7 @@ These snippets are copyable starting points. Review paths, model names, API key 
 
 - [deepseek-basic.toml](deepseek-basic.toml)
 - [openai-compatible.toml](openai-compatible.toml)
+- [openai-responses.toml](openai-responses.toml)
 - [anthropic.toml](anthropic.toml)
 - [gemini.toml](gemini.toml)
 - [mcp-safe-defaults.toml](mcp-safe-defaults.toml)

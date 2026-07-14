@@ -14,11 +14,11 @@ use sigil_kernel::{
     ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
     ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionTerminationCause,
     ExecutionTimeoutSource, JsonlSessionStore, MutationEventRecorder, PathTrustZone,
-    PermissionRisk, RunCancellationOwner, SessionStreamRecord,
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolCall,
-    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolProgressEvent,
-    ToolProgressSink, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    PermissionRisk, RunCancellationOwner, TerminalExecutionBackendCapabilities,
+    TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
+    ToolPreviewCapability, ToolProgressEvent, ToolProgressSink, ToolRegistry, ToolResultStatus,
+    ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -2059,9 +2059,7 @@ fn apply_changeset_tool() -> ApplyChangeSetTool {
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record else {
-            panic!("builtin tool test should not emit legacy session records");
-        };
+        let event = record.into_stored_event();
         event_types.push(event.event_type);
     }
     Ok(event_types)

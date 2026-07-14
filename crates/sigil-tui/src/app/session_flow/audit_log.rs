@@ -4,9 +4,8 @@ use std::{
 };
 
 use sigil_kernel::{
-    CompactionPreview, ControlEntry, ExternalEvidenceLevel, ExternalProvenanceEntry, ModelMessage,
-    SessionLogEntry, ToolCall, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreviewSnapshot,
+    ControlEntry, ExternalEvidenceLevel, ExternalProvenanceEntry, ModelMessage, SessionLogEntry,
+    ToolCall, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
 };
 
 use super::super::formatting::truncate_session_view_text;
@@ -258,10 +257,6 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             task.handle.task_id.as_str(),
             task.status.as_str(),
             truncate_session_view_text(&task.handle.log_path.display().to_string(), 48)
-        ),
-        ControlEntry::CompactionApplied(record) => format!(
-            "[ctl] compacted={} tail={}",
-            record.compacted_message_count, record.retained_tail_message_count
         ),
         ControlEntry::PlanApproved(entry) => format!(
             "[ctl] plan grant v{} permission={} expires={} hash={}",
@@ -582,6 +577,12 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             "[ctl] queue {} status={:?}",
             entry.queue_id.as_str(),
             entry.status
+        ),
+        ControlEntry::ConversationInputPromoted(entry) => format!(
+            "[ctl] queue {} promoted run={} capabilities={}",
+            entry.queue_id.as_str(),
+            truncate_session_view_text(&entry.dispatch_run_id, 24),
+            entry.capability_descriptors.len()
         ),
         ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
     }
@@ -1202,22 +1203,4 @@ pub(super) fn plugin_hook_execution_status_label(
         sigil_kernel::PluginHookExecutionStatus::Failed => "failed",
         sigil_kernel::PluginHookExecutionStatus::TimedOut => "timed_out",
     }
-}
-
-pub(super) fn render_compaction_preview_lines(preview: &CompactionPreview) -> Vec<String> {
-    let mut lines = vec![
-        format!(
-            "/compact preview: fold {}",
-            preview.record.compacted_message_count
-        ),
-        "Before:".to_owned(),
-    ];
-    for message in &preview.folded_messages {
-        lines.push(format!("  {}", render_model_message_line(message)));
-    }
-    lines.push("After:".to_owned());
-    for message in &preview.projected_messages {
-        lines.push(format!("  {}", render_model_message_line(message)));
-    }
-    lines
 }

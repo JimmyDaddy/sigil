@@ -1,19 +1,18 @@
-use anyhow::Result;
-use serde_json::json;
-
 use crate::{
     ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus, ChangeSetId,
-    ChangeSetResult, ChangeSetResultStatus, CompactionRecord, ControlEntry, DurableEventType,
-    EventClass, EvidenceReceipt, EvidenceScope, FileChangeRef, FileType,
-    ModelAssistedMemoryDecision, ModelAssistedMemoryFact, ModelAssistedTaskMemorySummary,
-    MutationCommitted, MutationSubject, ReadinessEvaluatedEntry, ReadinessEvaluation,
-    ReceiptStatus, RedactionState, RunStatus, SessionLogEntry, SessionStreamRecord,
-    SourcedDecision, SourcedFact, StoredEvent, TaskMemoryExtractionInput, TaskMemoryV1,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus, ToolExecutionEntry,
-    ToolExecutionStatus, ToolResultMeta, VerificationBinding, VerificationReceipt,
-    VerificationRecordedEntry, VerificationStateProjection, VerificationVerdict,
-    VisibleCompletionState, extract_task_memory_from_stream_records, task_memory_context_items,
+    ChangeSetResult, ChangeSetResultStatus, ControlEntry, DurableEventType, EventClass,
+    EvidenceReceipt, EvidenceScope, FileChangeRef, FileType, ModelAssistedMemoryDecision,
+    ModelAssistedMemoryFact, ModelAssistedTaskMemorySummary, MutationCommitted, MutationSubject,
+    ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RunStatus,
+    SessionLogEntry, SessionStreamRecord, SourcedDecision, SourcedFact, StoredEvent,
+    TaskMemoryExtractionInput, TaskMemoryV1, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepStatus, ToolExecutionEntry, ToolExecutionStatus, ToolResultMeta, VerificationBinding,
+    VerificationReceipt, VerificationRecordedEntry, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, extract_task_memory_from_stream_records,
+    task_memory_context_items,
 };
+use anyhow::Result;
+use serde_json::json;
 
 fn sample_task_memory() -> TaskMemoryV1 {
     TaskMemoryV1 {
@@ -67,31 +66,6 @@ fn compaction_memory_task_memory_v1_roundtrips_with_sources() -> Result<()> {
         Some("mutation-1")
     );
     assert_eq!(restored.verification_results, vec!["check-1"]);
-    Ok(())
-}
-
-#[test]
-fn compaction_memory_record_can_attach_typed_task_memory() -> Result<()> {
-    let record = CompactionRecord {
-        summary: "local summary".to_owned(),
-        compacted_message_count: 4,
-        retained_tail_message_count: 2,
-        task_memory: Some(sample_task_memory()),
-        external_trust: None,
-        external_provenance_message_ids: Vec::new(),
-        external_source_ids: Vec::new(),
-    };
-
-    record
-        .task_memory
-        .as_ref()
-        .expect("task memory should exist")
-        .validate()?;
-    let json = serde_json::to_string(&record)?;
-    let restored: CompactionRecord = serde_json::from_str(&json)?;
-
-    assert_eq!(restored, record);
-    assert!(json.contains("task_memory"));
     Ok(())
 }
 
@@ -189,20 +163,9 @@ fn compaction_model_summary_marks_imported_facts_unverified() -> Result<()> {
 
 #[test]
 fn compaction_model_summary_text_does_not_update_verification_verdict() -> Result<()> {
-    let mut memory = sample_task_memory();
-    memory.merge_model_summary(ModelAssistedTaskMemorySummary {
-        source_event_id: "event-model-summary".to_owned(),
-        constraints: Vec::new(),
-        decisions: Vec::new(),
-        risks: Vec::new(),
-        unresolved_issues: vec![ModelAssistedMemoryFact {
-            text: "tests passed and verification succeeded".to_owned(),
-            confidence_percent: Some(90),
-        }],
-    })?;
     let scope = EvidenceScope::Task("task-1".to_owned());
-    let entries = vec![
-        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(ReadinessEvaluatedEntry {
+    let entries = vec![SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+        ReadinessEvaluatedEntry {
             scope: scope.clone(),
             evaluation: ReadinessEvaluation {
                 run_status: RunStatus::Completed,
@@ -213,17 +176,8 @@ fn compaction_model_summary_text_does_not_update_verification_verdict() -> Resul
             },
             policy_hash: None,
             workspace_snapshot_id: Some("snapshot-1".to_owned()),
-        })),
-        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
-            summary: "model summary says tests passed".to_owned(),
-            compacted_message_count: 8,
-            retained_tail_message_count: 2,
-            task_memory: Some(memory),
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        })),
-    ];
+        },
+    ))];
 
     let projection = VerificationStateProjection::from_entries(&entries);
     let readiness = projection

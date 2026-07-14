@@ -19,7 +19,7 @@
 
 | 区块 / 字段 | 默认值 | 用途 |
 | --- | --- | --- |
-| `[agent].provider` | setup 选择 | `deepseek`、`openai_compat`、`anthropic` 或 `gemini`。 |
+| `[agent].provider` | setup 选择 | `deepseek`、`openai_compat`、`openai_responses`、`anthropic` 或 `gemini`。 |
 | `[agent].model` | provider setup 选择 | 默认 chat model。 |
 | `[agent].tool_timeout_secs` | `30` | 工具超时秒数。 |
 | `[agent].max_turns` | 禁用 | 未收敛工具循环的可选上限。 |
@@ -105,7 +105,7 @@ Role 包括 `planner`、`executor`、`subagent_read` 和 `subagent_write`。
 | `[skills].enabled` / `.user_skills` / `.user_agents` | `true` | 开启发现到的可复用资源。 |
 | `[skills].compatibility_sources` | `[]` | 可选 `claude` 或 `reasonix` 导入。 |
 | `[compaction].enabled` | `true` | 开启对话 compaction。 |
-| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | 提醒与自动阈值。 |
+| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | 提醒与有限 idle 自动阈值；自动应用仍要求本地 target admission。 |
 | `[compaction].fallback_context_window_tokens` | 未设置 | 后备 model window 值。 |
 | `[compaction].tail_messages` | `6` | 原样保留的最近消息数。 |
 

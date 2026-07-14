@@ -1,7 +1,7 @@
 use std::cell::Ref;
 
 use sigil_kernel::{
-    AgentResultContinuationProjection, AgentThreadStateProjection, Session, SessionLogEntry,
+    AgentResultContinuationProjection, AgentThreadStateProjection, SessionLogEntry,
     TaskStateProjection,
 };
 
@@ -80,28 +80,7 @@ impl AppState {
     }
 
     pub(crate) fn task_memory_sidebar_lines(&self) -> Vec<String> {
-        let Some(task_memory) = self
-            .latest_compaction_record
-            .as_ref()
-            .and_then(|record| record.task_memory.as_ref())
-        else {
-            return vec!["task memory: none yet".to_owned()];
-        };
-
-        let mut parts = vec!["task memory: ready".to_owned()];
-        if !task_memory.decisions.is_empty() {
-            parts.push(format!("{} decisions", task_memory.decisions.len()));
-        }
-        if !task_memory.files_changed.is_empty() {
-            parts.push(format!("{} files", task_memory.files_changed.len()));
-        }
-        if !task_memory.unresolved_issues.is_empty() {
-            parts.push(format!(
-                "{} unresolved",
-                task_memory.unresolved_issues.len()
-            ));
-        }
-        vec![parts.join(" · ")]
+        vec!["task memory: no active V2 checkpoint".to_owned()]
     }
 
     pub(crate) fn session_review_sidebar_lines(&self) -> Vec<String> {
@@ -197,24 +176,9 @@ impl AppState {
     }
 
     fn compaction_preview_sidebar_line(&self, entries: &[SessionLogEntry]) -> Option<String> {
-        if entries.is_empty() {
+        if entries.is_empty() || !self.compaction_config.enabled {
             return None;
         }
-        let session = Session::from_entries(
-            self.runtime.provider_name.clone(),
-            self.runtime.model_name.clone(),
-            entries.to_vec(),
-        );
-        match session.compaction_preview(&self.compaction_config) {
-            Ok(Some(preview)) => Some(format!(
-                "compact: fold {} keep {}",
-                preview.record.compacted_message_count, preview.record.retained_tail_message_count
-            )),
-            Ok(None) => Some("compact: nothing to fold".to_owned()),
-            Err(error) => Some(format!(
-                "compact: {}",
-                truncate_session_view_text(&error.to_string(), 28)
-            )),
-        }
+        Some("compact: inspect V2 plan with /compact".to_owned())
     }
 }

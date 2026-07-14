@@ -944,9 +944,7 @@ fn egress_records_from_stream(
 ) -> Result<EgressLifecycleProjection, EgressAuditError> {
     let mut projection = EgressLifecycleProjection::default();
     for record in records {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let event = record.stored_event();
         match event.event_kind() {
             Some(DurableEventType::HostedToolAuthorization) => {
                 let entry: HostedToolAuthorization = serde_json::from_value(event.payload.clone())?;

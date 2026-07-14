@@ -638,7 +638,8 @@ fn latest_user_prompt_preview_reflects_recent_submission() -> Result<()> {
 }
 
 #[test]
-fn restored_session_view_shows_compaction_block_and_restored_prompt_pressure() -> Result<()> {
+fn restored_session_view_shows_v2_compaction_invitation_and_restored_prompt_pressure() -> Result<()>
+{
     let mut config = test_config();
     config.compaction.context_window_tokens = Some(100);
     config.compaction.soft_threshold_ratio = 0.5;
@@ -660,15 +661,6 @@ fn restored_session_view_shows_compaction_block_and_restored_prompt_pressure() -
             cache_savings: 0.0,
             system_fingerprint: None,
         })),
-        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
-            summary: "Compacted 2 earlier messages into a stable local summary.\n01. user hello\n02. assistant world".to_owned(),
-            compacted_message_count: 2,
-            retained_tail_message_count: 3,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        })),
         SessionLogEntry::User(ModelMessage::user("latest prompt")),
     ];
 
@@ -681,91 +673,16 @@ fn restored_session_view_shows_compaction_block_and_restored_prompt_pressure() -
 
     let lines = app.approval_preview_lines();
     assert_eq!(app.runtime.compaction_status, "ready");
-    assert!(lines.iter().any(|line| line.contains("prompt=0")));
+    assert!(lines.iter().any(|line| line.contains("prompt=65")));
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("summary: compacted=2 tail=3"))
+            .any(|line| line.contains("/compact: inspect the V2 durable fold plan"))
     );
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("[assistant] Compacted 2 earlier messages"))
-    );
-    assert!(lines.iter().any(|line| line.contains("/compact preview")));
-    Ok(())
-}
-
-#[test]
-fn restored_session_view_shows_typed_task_memory_summary() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let session_log_path = app.session_log_path.clone();
-    let entries = vec![
-        SessionLogEntry::Control(ControlEntry::SessionIdentity {
-            provider_name: "deepseek".to_owned(),
-            model_name: "deepseek-v4-flash".to_owned(),
-        }),
-        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
-            summary: "Compacted older context.".to_owned(),
-            compacted_message_count: 4,
-            retained_tail_message_count: 2,
-            task_memory: Some(sigil_kernel::TaskMemoryV1 {
-                memory_id: "memory-readme-1".to_owned(),
-                branch_id: None,
-                valid_for_snapshot: "snapshot-readme-1".to_owned(),
-                supersedes: None,
-                source_event_ids: vec!["event-1".to_owned()],
-                objective: "Fix README typo".to_owned(),
-                constraints: Vec::new(),
-                decisions: vec![sigil_kernel::SourcedDecision {
-                    decision: sigil_kernel::SourcedFact::system_derived(
-                        "Use a focused README edit",
-                        "event-2",
-                    ),
-                    rationale: None,
-                }],
-                files_changed: vec![sigil_kernel::FileChangeRef::new("README.md")],
-                commands_run: Vec::new(),
-                verification_results: vec!["receipt-readme-check".to_owned()],
-                failed_attempts: Vec::new(),
-                risks: Vec::new(),
-                unresolved_issues: vec![sigil_kernel::SourcedFact::model_inferred(
-                    "Decide whether docs links need checking",
-                    "event-3",
-                )],
-            }),
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        })),
-        SessionLogEntry::User(ModelMessage::user("latest prompt")),
-    ];
-
-    app.handle_worker_message(WorkerMessage::SessionSwitched {
-        session_log_path,
-        provider_name: "deepseek".to_owned(),
-        model_name: "deepseek-v4-flash".to_owned(),
-        entries,
-    })?;
-
-    let lines = app.approval_preview_lines().join("\n");
-    assert!(lines.contains("[memory]"));
-    assert!(lines.contains("objective: Fix README typo"));
-    assert!(lines.contains("decision: Use a focused README edit"));
-    assert!(lines.contains("file: README.md"));
-    assert!(lines.contains("check: receipt-readme-check"));
-    assert!(
-        lines.contains(
-            "unresolved: Decide whether docs links need checking [model summary context]"
-        )
-    );
-    let view_model = crate::view_model::UiViewModel::from_app(&app);
-    assert!(
-        view_model
-            .info_rail
-            .session_lines
-            .iter()
-            .any(|line| line == "task memory: ready · 1 decisions · 1 files · 1 unresolved")
+            .all(|line| !line.contains("Compacted 2 earlier messages"))
     );
     Ok(())
 }
@@ -782,15 +699,6 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
             }),
-            SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
-                summary: "Compacted 1 earlier messages into a stable local summary.".to_owned(),
-                compacted_message_count: 1,
-                retained_tail_message_count: 1,
-                task_memory: None,
-                external_trust: None,
-                external_provenance_message_ids: Vec::new(),
-                external_source_ids: Vec::new(),
-            })),
             SessionLogEntry::User(ModelMessage::user("latest prompt")),
         ],
     })?;
@@ -803,7 +711,7 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
     let audit_lines = app.approval_preview_lines().join("\n");
     assert!(audit_lines.contains("audit view"));
     assert!(audit_lines.contains("Audit:"));
-    assert!(audit_lines.contains("[ctl] compacted=1 tail=1"));
+    assert!(audit_lines.contains("[user] latest prompt"));
     Ok(())
 }
 
@@ -1330,15 +1238,6 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                 updated_at_ms: 120,
             },
         )),
-        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
-            summary: "summary".to_owned(),
-            compacted_message_count: 3,
-            retained_tail_message_count: 2,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        })),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "checkpoint".to_owned(),
             data: serde_json::Value::Null,
@@ -1362,7 +1261,6 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
     assert!(rendered.contains("[ctl] changeset change-1 proposed risk=low files=0 Update README"));
     assert!(rendered.contains("[ctl] changeset change-1 status=applied files=0"));
     assert!(rendered.contains("[ctl] terminal terminal-1 status=running"));
-    assert!(rendered.contains("[ctl] compacted=3 tail=2"));
     assert!(rendered.contains("[ctl] note checkpoint"));
     Ok(())
 }

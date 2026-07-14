@@ -14,11 +14,12 @@ This page separates what users can rely on today from what is experimental, limi
 | Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |
 | Chat workflow | Users can work through the composer with visible tool activity. |
 | Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |
-| Session recovery | Session and control records are append-only and can restore visible state after restart. |
+| Session recovery | Session and control records are append-only and restore visible state after restart for current V2 session logs. Older raw session logs are reported as unsupported and left unchanged. |
 | Planning | `/plan` runs read-only planning prompts and can explicitly hand an accepted plan to durable `/task` execution; `/task <task>` creates durable multi-step task state directly, and `/task continue` resumes the latest task. |
 | DeepSeek provider | DeepSeek is the default Quick Setup path. |
 | OpenAI-compatible provider | Supported through `[providers.openai_compat]` for compatible Chat Completions endpoints. |
-| Anthropic provider | Supported through `[providers.anthropic]` for Anthropic Messages streaming. |
+| OpenAI Responses provider | Supported through `[providers.openai_responses]` for Responses streaming endpoints. Context Compaction V2 apply, including guarded overflow recovery, is temporarily frozen while correctness fixes are in progress. |
+| Anthropic provider | Supported through `[providers.anthropic]` for Anthropic Messages streaming. Its native-compaction beta driver records encrypted candidates only; it is not a user action and does not automatically change context. |
 | Gemini provider | Supported through `[providers.gemini]` for Gemini `streamGenerateContent` streaming. |
 | MCP stdio servers | Supported through `[[mcp_servers]]` with trust and approval policy. |
 | Code intelligence | Optional, disabled by default, with LSP discovery and Rust fallback behavior. |

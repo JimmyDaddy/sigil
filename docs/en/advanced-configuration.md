@@ -72,7 +72,7 @@ server_startup = "lazy"
 auto_discover = true
 ```
 
-Compaction manages long conversations; the default thresholds provide an early warning and a later automatic limit. Code intelligence is off by default. When enabled, it can use installed language servers and can provide code navigation, diagnostics, and reviewed edit suggestions. Enabling it does not bypass workspace trust, file approval, or diff review.
+Compaction manages long conversations. Context Compaction V2 apply is temporarily frozen while correctness fixes are in progress, so this configuration currently controls review and pressure reporting only; it does not create an automatic or manual boundary change. Code intelligence is off by default. When enabled, it can use installed language servers and can provide code navigation, diagnostics, and reviewed edit suggestions. Enabling it does not bypass workspace trust, file approval, or diff review.
 
 Use `Alt-D` in the TUI to inspect diagnostics for changed source files. If a language server is missing, ordinary chat and file tools remain available.
 

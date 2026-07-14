@@ -40,6 +40,43 @@ fn record_expectation(
     )?)
 }
 
+fn linked_audit_record(
+    record_id: &str,
+    event_id: &str,
+    correlation_id: &str,
+    causation_id: Option<&str>,
+) -> Result<DurableAuditRecord> {
+    let record = DurableAuditRecord::new(
+        DurableEventType::MutationPrepared,
+        serde_json::to_value(test_mutation_prepared(record_id, None))?,
+        record_id,
+        Some(correlation_id.to_owned()),
+    )?
+    .with_event_id(event_id)?;
+    match causation_id {
+        Some(causation_id) => Ok(record.with_causation_id(causation_id)?),
+        None => Ok(record),
+    }
+}
+
+fn linked_record_expectation(
+    record_id: &str,
+    event_id: &str,
+    correlation_id: &str,
+    causation_id: Option<&str>,
+) -> Result<DurableAppendRecordExpectation> {
+    let expectation = DurableAppendRecordExpectation::new(
+        DurableEventType::MutationPrepared,
+        record_id,
+        Some(correlation_id.to_owned()),
+    )?
+    .with_event_id(event_id)?;
+    match causation_id {
+        Some(causation_id) => Ok(expectation.with_causation_id(causation_id)?),
+        None => Ok(expectation),
+    }
+}
+
 fn audit_record_with_authorization(
     _event_type: DurableEventType,
     record_id: &str,
@@ -71,6 +108,10 @@ fn test_mutation_prepared(record_id: &str, authorization_id: Option<&str>) -> Mu
         base_workspace_revision: 0,
         sync_class: MutationSyncClass::RecoveryCritical,
     }
+}
+
+fn store_session_id(store: &JsonlSessionStore) -> String {
+    session_id_for_path(store.path())
 }
 
 #[test]
@@ -187,7 +228,6 @@ fn session_writer_batch_receipt_binds_order_offsets_and_envelope_correlation() -
     let correlations = records
         .iter()
         .map(|record| match record {
-            SessionStreamRecord::Legacy { .. } => None,
             SessionStreamRecord::Stored(event) => event.correlation_id.as_deref(),
         })
         .collect::<Vec<_>>();
@@ -213,6 +253,479 @@ fn session_writer_batch_receipt_binds_order_offsets_and_envelope_correlation() -
         permit.durable_end_offset(),
         fs::metadata(store.path())?.len()
     );
+    Ok(())
+}
+
+#[test]
+fn session_writer_preallocated_identity_and_causation_are_exactly_bound() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let root_event_id = "event-compaction-root";
+    let child_event_id = "event-compaction-child";
+    let receipt = store.append_batch_and_sync(DurableAuditBatch::new(
+        "batch-linked",
+        vec![
+            linked_audit_record("record-linked-root", root_event_id, root_event_id, None)?,
+            linked_audit_record(
+                "record-linked-child",
+                child_event_id,
+                root_event_id,
+                Some(root_event_id),
+            )?,
+        ],
+    )?)?;
+
+    assert_eq!(receipt.records()[0].event_id(), root_event_id);
+    assert_eq!(receipt.records()[0].correlation_id(), Some(root_event_id));
+    assert_eq!(receipt.records()[0].causation_id(), None);
+    assert_eq!(receipt.records()[1].event_id(), child_event_id);
+    assert_eq!(receipt.records()[1].correlation_id(), Some(root_event_id));
+    assert_eq!(receipt.records()[1].causation_id(), Some(root_event_id));
+
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let root = records[0].stored_event();
+    let child = records[1].stored_event();
+    assert_eq!(root.event_id, root_event_id);
+    assert_eq!(root.correlation_id.as_deref(), Some(root_event_id));
+    assert_eq!(root.causation_id, None);
+    assert_eq!(child.event_id, child_event_id);
+    assert_eq!(child.correlation_id.as_deref(), Some(root_event_id));
+    assert_eq!(child.causation_id.as_deref(), Some(root_event_id));
+
+    let expectation = DurableAppendExpectation::new(
+        receipt.session_id(),
+        "batch-linked",
+        vec![
+            linked_record_expectation("record-linked-root", root_event_id, root_event_id, None)?,
+            linked_record_expectation(
+                "record-linked-child",
+                child_event_id,
+                root_event_id,
+                Some(root_event_id),
+            )?,
+        ],
+    )?;
+    store.validate_and_consume(receipt, expectation)?;
+
+    let mismatch_receipt = store.append_and_sync(linked_audit_record(
+        "record-linked-mismatch",
+        "event-linked-mismatch",
+        root_event_id,
+        Some(child_event_id),
+    )?)?;
+    let mismatch_expectation = DurableAppendExpectation::new(
+        mismatch_receipt.session_id(),
+        "record-linked-mismatch",
+        vec![linked_record_expectation(
+            "record-linked-mismatch",
+            "event-linked-mismatch",
+            root_event_id,
+            Some(root_event_id),
+        )?],
+    )?;
+    assert!(matches!(
+        store.validate_and_consume(mismatch_receipt, mismatch_expectation),
+        Err(DurableAuditError::ReceiptMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_preallocated_receipt_requires_exact_event_id_expectation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let receipt = store.append_and_sync(linked_audit_record(
+        "record-receipt-event-id",
+        "event-receipt-event-id",
+        "event-receipt-event-id",
+        None,
+    )?)?;
+    let expectation = DurableAppendExpectation::new(
+        receipt.session_id(),
+        "record-receipt-event-id",
+        vec![DurableAppendRecordExpectation::new(
+            DurableEventType::MutationPrepared,
+            "record-receipt-event-id",
+            Some("event-receipt-event-id".to_owned()),
+        )?],
+    )?;
+
+    assert!(matches!(
+        store.validate_and_consume(receipt, expectation),
+        Err(DurableAuditError::ReceiptMismatch)
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_rejects_orphaned_preallocated_correlation_root() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+
+    assert!(matches!(
+        store.append_and_sync(linked_audit_record(
+            "record-orphaned-root",
+            "event-orphaned-root",
+            "not-a-durable-event-id",
+            None,
+        )?),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+    assert!(JsonlSessionStore::read_event_records(store.path())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn session_writer_rejects_causal_chain_with_non_event_correlation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let unanchored = store.append_and_sync(audit_record(
+        DurableEventType::MutationPrepared,
+        "record-unanchored-correlation",
+        "external-correlation-id",
+    )?)?;
+    let predecessor = unanchored.records()[0].event_id().to_owned();
+
+    assert!(matches!(
+        store.append_and_sync(linked_audit_record(
+            "record-unanchored-child",
+            "event-unanchored-child",
+            "external-correlation-id",
+            Some(&predecessor),
+        )?),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_preallocated_chain_reuses_event_link_index() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let root_event_id = "event-index-root";
+    store.append_and_sync(linked_audit_record(
+        "record-index-root",
+        root_event_id,
+        root_event_id,
+        None,
+    )?)?;
+
+    let mut predecessor = root_event_id.to_owned();
+    for index in 0..16 {
+        let event_id = format!("event-index-child-{index}");
+        store.append_and_sync(linked_audit_record(
+            &format!("record-index-child-{index}"),
+            &event_id,
+            root_event_id,
+            Some(&predecessor),
+        )?)?;
+        predecessor = event_id;
+    }
+
+    assert_eq!(store.writer_full_scan_count()?, 1);
+    Ok(())
+}
+
+#[test]
+fn session_writer_conditional_preallocated_append_reuses_loaded_link_index() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let receipt = store
+        .append_audit_batch_if(
+            DurableAuditBatch::new(
+                "batch-conditional-index",
+                vec![linked_audit_record(
+                    "record-conditional-index",
+                    "event-conditional-index",
+                    "event-conditional-index",
+                    None,
+                )?],
+            )?,
+            |_| Ok(true),
+        )?
+        .expect("conditional append should produce a receipt");
+
+    assert_eq!(receipt.records()[0].event_id(), "event-conditional-index");
+    assert_eq!(store.writer_full_scan_count()?, 1);
+    Ok(())
+}
+
+#[test]
+fn session_writer_reconciles_exact_absent_and_conflicting_events() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let record = linked_audit_record(
+        "record-ambiguous",
+        "event-ambiguous",
+        "event-ambiguous",
+        None,
+    )?;
+    let exact = record.reconciliation_expectation(store_session_id(&store))?;
+    store.inject_writer_fault(SessionWriterFault::BeforeSync)?;
+    assert!(matches!(
+        store.append_and_sync(record),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+    assert!(matches!(
+        store.append_and_sync(linked_audit_record(
+            "record-ambiguous",
+            "event-ambiguous",
+            "event-ambiguous",
+            None,
+        )?),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+    assert!(matches!(
+        store.append_and_sync(linked_audit_record(
+            "record-ambiguous-conflict",
+            "event-ambiguous",
+            "event-other-chain",
+            None,
+        )?),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+
+    let DurableEventReconciliation::ExactPresent(event) = store.reconcile_durable_event(&exact)
+    else {
+        panic!("complete pre-sync write should reconcile as exact present");
+    };
+    assert_eq!(event.event_id, "event-ambiguous");
+    assert_eq!(event.correlation_id.as_deref(), Some("event-ambiguous"));
+
+    let absent_record = linked_audit_record("record-absent", "event-absent", "event-absent", None)?;
+    let absent = absent_record.reconciliation_expectation(store_session_id(&store))?;
+    assert!(matches!(
+        store.reconcile_durable_event(&absent),
+        DurableEventReconciliation::ConfirmedAbsent
+    ));
+
+    let conflicting = DurableEventReconciliationExpectation::new(
+        store_session_id(&store),
+        DurableEventType::MutationPrepared,
+        "event-ambiguous",
+        serde_json::to_value(test_mutation_prepared("record-conflict", None))?,
+        Some("event-ambiguous".to_owned()),
+        None,
+    )?;
+    assert!(matches!(
+        store.reconcile_durable_event(&conflicting),
+        DurableEventReconciliation::Conflict { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_reconciliation_is_bound_to_the_expected_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let first = JsonlSessionStore::new(temp.path().join("first.jsonl"))?;
+    let second = JsonlSessionStore::new(temp.path().join("second.jsonl"))?;
+    let record = linked_audit_record(
+        "record-session-bound",
+        "event-session-bound",
+        "event-session-bound",
+        None,
+    )?;
+    let expectation = record.reconciliation_expectation(store_session_id(&first))?;
+    first.append_and_sync(record)?;
+    second.append_and_sync(linked_audit_record(
+        "record-session-bound",
+        "event-session-bound",
+        "event-session-bound",
+        None,
+    )?)?;
+
+    let writer: &dyn DurableAuditWriter = &second;
+    assert!(matches!(
+        writer.reconcile_event(&expectation),
+        DurableEventReconciliation::Conflict { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_reconciliation_recovers_partial_tail_as_confirmed_absent() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let record = linked_audit_record(
+        "record-partial-reconcile",
+        "event-partial-reconcile",
+        "event-partial-reconcile",
+        None,
+    )?;
+    let expectation = record.reconciliation_expectation(store_session_id(&store))?;
+    store.inject_writer_fault(SessionWriterFault::PartialFirstRecord)?;
+    assert!(matches!(
+        store.append_and_sync(record),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+
+    assert!(matches!(
+        store.reconcile_durable_event(&expectation),
+        DurableEventReconciliation::ConfirmedAbsent
+    ));
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert!(
+        records
+            .iter()
+            .all(|record| record.event_id() != expectation.event_id())
+    );
+    assert!(records.iter().any(|record| {
+        matches!(
+            record,
+            SessionStreamRecord::Stored(event)
+                if event.event_kind() == Some(DurableEventType::LogTailRecovered)
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn session_writer_reconciliation_reports_prewrite_failure_as_confirmed_absent() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let record = linked_audit_record(
+        "record-prewrite-reconcile",
+        "event-prewrite-reconcile",
+        "event-prewrite-reconcile",
+        None,
+    )?;
+    let expectation = record.reconciliation_expectation(store_session_id(&store))?;
+    store.inject_writer_fault(SessionWriterFault::BeforeWrite)?;
+    assert!(matches!(
+        store.append_and_sync(record),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+
+    assert!(matches!(
+        store.reconcile_durable_event(&expectation),
+        DurableEventReconciliation::ConfirmedAbsent
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_reconciliation_reports_unreadable_stream_as_indeterminate() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let record = linked_audit_record(
+        "record-indeterminate",
+        "event-indeterminate",
+        "event-indeterminate",
+        None,
+    )?;
+    let expectation = record.reconciliation_expectation(store_session_id(&store))?;
+    store.append_and_sync(record)?;
+    fs::write(&path, b"not a durable event\n")?;
+
+    assert!(matches!(
+        store.reconcile_durable_event(&expectation),
+        DurableEventReconciliation::Indeterminate { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_rejects_invalid_causal_identity_requests() -> Result<()> {
+    let no_correlation = DurableAuditRecord::new(
+        DurableEventType::MutationPrepared,
+        serde_json::to_value(test_mutation_prepared("record-no-correlation", None))?,
+        "record-no-correlation",
+        None,
+    )?
+    .with_causation_id("event-cause");
+    assert!(matches!(
+        no_correlation,
+        Err(DurableAuditError::InvalidRequest { .. })
+    ));
+
+    let self_caused = linked_audit_record(
+        "record-self-caused",
+        "event-self-caused",
+        "event-self-caused",
+        Some("event-self-caused"),
+    );
+    assert!(self_caused.is_err());
+
+    let duplicate_event_ids = DurableAuditBatch::new(
+        "batch-duplicate-events",
+        vec![
+            linked_audit_record(
+                "record-duplicate-1",
+                "event-duplicate",
+                "event-duplicate",
+                None,
+            )?,
+            linked_audit_record(
+                "record-duplicate-2",
+                "event-duplicate",
+                "event-duplicate",
+                None,
+            )?,
+        ],
+    );
+    assert!(matches!(
+        duplicate_event_ids,
+        Err(DurableAuditError::InvalidRequest { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_writer_rejects_missing_forward_and_cross_chain_causes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    store.append_and_sync(linked_audit_record(
+        "record-cause-root",
+        "event-cause-root",
+        "event-cause-root",
+        None,
+    )?)?;
+
+    assert!(matches!(
+        store.append_and_sync(linked_audit_record(
+            "record-missing-cause",
+            "event-missing-cause",
+            "event-missing-root",
+            Some("event-does-not-exist"),
+        )?),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+    assert!(matches!(
+        store.append_and_sync(linked_audit_record(
+            "record-cross-chain",
+            "event-cross-chain",
+            "event-other-root",
+            Some("event-cause-root"),
+        )?),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+
+    let forward_reference = DurableAuditBatch::new(
+        "batch-forward-cause",
+        vec![
+            linked_audit_record(
+                "record-forward-child",
+                "event-forward-child",
+                "event-forward-root",
+                Some("event-forward-root"),
+            )?,
+            linked_audit_record(
+                "record-forward-root",
+                "event-forward-root",
+                "event-forward-root",
+                None,
+            )?,
+        ],
+    )?;
+    assert!(matches!(
+        store.append_batch_and_sync(forward_reference),
+        Err(DurableAuditError::AppendFailed(_))
+    ));
+
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].event_id(), "event-cause-root");
     Ok(())
 }
 
@@ -317,12 +830,8 @@ fn session_writer_rejects_external_prefix_rewrite_even_when_tail_record_is_uncha
         serde_json::json!({ "value": "unchanged-tail" }),
     )?;
     let records = JsonlSessionStore::read_event_records(&path)?;
-    let SessionStreamRecord::Stored(original_first) = &records[0] else {
-        panic!("owner stream should contain v2 events");
-    };
-    let SessionStreamRecord::Stored(original_second) = &records[1] else {
-        panic!("owner stream should contain v2 events");
-    };
+    let original_first = records[0].stored_event();
+    let original_second = records[1].stored_event();
     let rewritten_first = StoredEvent::new(
         DurableEventType::RunStatusChanged,
         EventClass::Critical,
@@ -383,71 +892,36 @@ fn session_writer_canonical_aliases_share_the_same_owner() -> Result<()> {
 }
 
 #[test]
-fn session_writer_preserves_legacy_prefix_when_appending_v2() -> Result<()> {
+fn session_writer_rejects_legacy_session_log_entries_without_mutating_the_stream() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let legacy = SessionLogEntry::User(ModelMessage::user("legacy"));
-    fs::write(&path, format!("{}\n", serde_json::to_string(&legacy)?))?;
-    let before = JsonlSessionStore::read_event_records(&path)?;
-    let legacy_event_id = before[0].event_id().to_owned();
-    let legacy_session_id = before[0].session_id().to_owned();
+    let content = format!("\n{}\n{{unterminated-tail", serde_json::to_string(&legacy)?);
+    fs::write(&path, &content)?;
+
+    let read_error = JsonlSessionStore::read_event_records(&path)
+        .expect_err("legacy SessionLogEntry lines must be rejected");
+    let compatibility = read_error
+        .downcast_ref::<SessionStreamCompatibilityError>()
+        .expect("reader must return a structured compatibility error");
+    assert_eq!(compatibility.path, path);
+    assert_eq!(compatibility.physical_line, 2);
+
     let store = JsonlSessionStore::new(&path)?;
-
-    let appended = store.append_session_entry_event(&SessionLogEntry::Assistant(
-        ModelMessage::assistant(Some("v2".to_owned()), Vec::new()),
-    ))?;
-    let records = JsonlSessionStore::read_event_records(&path)?;
-
-    assert_eq!(appended.stream_sequence, 2);
-    assert!(matches!(records[0], SessionStreamRecord::Legacy { .. }));
-    assert!(matches!(records[1], SessionStreamRecord::Stored(_)));
-    assert_eq!(records[0].event_id(), legacy_event_id);
-    assert_eq!(records[0].session_id(), legacy_session_id);
-    let legacy_domain = records[0]
-        .domain_event_record()?
-        .expect("legacy record should upcast to a domain event");
-    assert!(matches!(legacy_domain.event, DomainEvent::Legacy(_)));
-    assert!(records[0].typed_domain_event_record()?.is_none());
-    let entries = JsonlSessionStore::read_entries(&path)?;
-    assert_eq!(entries.len(), 2);
-    assert!(matches!(entries[0], SessionLogEntry::User(_)));
-    assert!(matches!(entries[1], SessionLogEntry::Assistant(_)));
-    Ok(())
-}
-
-#[test]
-fn session_writer_legacy_blank_lines_keep_effective_ordinals_stable() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let path = temp.path().join("session.jsonl");
-    let first = SessionLogEntry::User(ModelMessage::user("first"));
-    let second = SessionLogEntry::Assistant(ModelMessage::assistant(
-        Some("second".to_owned()),
-        Vec::new(),
-    ));
-    fs::write(
-        &path,
-        format!(
-            "\n{}\n\n{}\n\n",
-            serde_json::to_string(&first)?,
-            serde_json::to_string(&second)?
-        ),
-    )?;
-
-    let before = JsonlSessionStore::read_event_records(&path)?;
-    assert_eq!(before[0].stream_sequence(), 1);
-    assert_eq!(before[1].stream_sequence(), 2);
-    let ids = before
-        .iter()
-        .map(|record| record.event_id().to_owned())
-        .collect::<Vec<_>>();
-    let store = JsonlSessionStore::new(&path)?;
-    let appended =
-        store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user("third")))?;
-    let after = JsonlSessionStore::read_event_records(&path)?;
-
-    assert_eq!(appended.stream_sequence, 3);
-    assert_eq!(after[0].event_id(), ids[0]);
-    assert_eq!(after[1].event_id(), ids[1]);
+    let append_error = store
+        .append_session_entry_event(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("v2".to_owned()),
+            Vec::new(),
+        )))
+        .expect_err("legacy stream must not accept v2 appends");
+    assert!(
+        append_error
+            .downcast_ref::<SessionStreamCompatibilityError>()
+            .is_some()
+    );
+    assert_eq!(fs::read_to_string(&path)?, content);
+    assert!(!super::tail_recovery_intent_path(&path).exists());
+    assert!(!temp.path().join(".sigil-recovery").exists());
     Ok(())
 }
 

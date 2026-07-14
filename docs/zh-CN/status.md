@@ -14,11 +14,12 @@
 | Doctor | `sigil doctor` 和 `/doctor` 报告 config、auth、workspace、MCP、code intelligence 和 terminal readiness。 |
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
 | Tool approvals | 文件变更、shell execution、外部路径和外部工具可在执行前 review。 |
-| Session recovery | Session 和 control records 是 append-only，可在重启后恢复可见状态。 |
+| Session recovery | Session 和 control records 是 append-only；当前 V2 session log 可在重启后恢复可见状态。旧 raw session log 会明确提示为不受支持并保持原样。 |
 | Planning | `/plan` 运行只读 planning prompt，并可在用户显式接受后交接为 durable `/task` 执行；`/task <task>` 直接创建 durable 多步骤任务，`/task continue` 继续最新任务。 |
 | DeepSeek provider | DeepSeek 是默认 Quick Setup 路径。 |
 | OpenAI-compatible provider | 通过 `[providers.openai_compat]` 支持兼容 Chat Completions endpoint。 |
-| Anthropic provider | 通过 `[providers.anthropic]` 支持 Anthropic Messages streaming。 |
+| OpenAI Responses provider | 通过 `[providers.openai_responses]` 支持 Responses streaming endpoint；Context Compaction V2 apply（包括受控 overflow recovery）在修复正确性问题期间暂时冻结。 |
+| Anthropic provider | 通过 `[providers.anthropic]` 支持 Anthropic Messages streaming。其原生 compaction beta driver 仅记录加密候选，不是用户操作，也不会自动改变上下文。 |
 | Gemini provider | 通过 `[providers.gemini]` 支持 Gemini `streamGenerateContent` streaming。 |
 | MCP stdio servers | 通过 `[[mcp_servers]]` 支持，并带 trust 和 approval policy。 |
 | Code intelligence | 可选，默认关闭，支持 LSP discovery 和 Rust fallback 行为。 |

@@ -1,17 +1,27 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    EventId, ProjectionApplyDecision, ProjectionCursor, StoredEventDecode,
+    WebUrlCapabilityDescriptor,
     agent_thread::AgentThreadId,
-    provider::ReasoningEffort,
-    session::{ControlEntry, SessionLogEntry},
+    event::{canonical_json_content_hash, decode_stored_event},
+    projection_apply_decision,
+    provider::{MessageRole, ModelMessage, ReasoningEffort},
+    session::{ControlEntry, SessionLogEntry, SessionStreamRecord},
 };
 
 /// Durable hash prefix proving that dispatch requires process-local exact prompt material.
 pub const CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX: &str = "exact-required:";
+
+/// Schema version for the durable queue-promotion projection cursor.
+pub const CONVERSATION_QUEUE_DURABLE_PROJECTION_SCHEMA_VERSION: u16 = 1;
+
+/// Maximum URL capabilities bound to one promoted queued input.
+pub const MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS: usize = 64;
 
 /// Secret-safe durable projection for one queued or edited conversation prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +72,125 @@ impl ConversationInputQueueId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// A precise durable queue cursor used as the compare-and-swap revision for promotion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationQueueRevision {
+    pub stream_sequence: u64,
+    pub event_id: EventId,
+}
+
+impl ConversationQueueRevision {
+    fn from_record(record: &SessionStreamRecord) -> Self {
+        Self {
+            stream_sequence: record.stream_sequence(),
+            event_id: record.event_id().to_owned(),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.stream_sequence == 0 {
+            bail!("conversation queue revision stream sequence must be non-zero");
+        }
+        validate_stable_id("conversation queue revision event id", &self.event_id)
+    }
+}
+
+/// Critical direct event which atomically binds one queued input to its safe durable user
+/// message. The exact prompt remains process-local and is never represented here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ConversationInputPromotedEntry {
+    pub queue_id: ConversationInputQueueId,
+    pub expected_queue_revision: ConversationQueueRevision,
+    pub prompt_hash: String,
+    pub exact_prompt_required: bool,
+    pub durable_user_message: ModelMessage,
+    pub capability_descriptors: Vec<WebUrlCapabilityDescriptor>,
+    pub capability_digest: String,
+    pub dispatch_run_id: String,
+    pub promoted_at_ms: u64,
+}
+
+impl ConversationInputPromotedEntry {
+    /// Validates content-free shape and safe-message ownership without relying on a stream.
+    pub fn validate_shape(&self) -> Result<()> {
+        self.expected_queue_revision.validate()?;
+        if self.prompt_hash.trim().is_empty() {
+            bail!("conversation promotion prompt hash is empty");
+        }
+        validate_stable_id(
+            "conversation promotion dispatch run id",
+            &self.dispatch_run_id,
+        )?;
+        if self.promoted_at_ms == 0 {
+            bail!("conversation promotion timestamp must be non-zero");
+        }
+        validate_promoted_user_message(
+            &self.durable_user_message,
+            &self.prompt_hash,
+            self.exact_prompt_required,
+        )?;
+        if self.capability_descriptors.len() > MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS {
+            bail!(
+                "conversation promotion has more than {} capability descriptors",
+                MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS
+            );
+        }
+        let mut previous_source_id = None;
+        let mut source_ids = BTreeSet::new();
+        for descriptor in &self.capability_descriptors {
+            descriptor.validate()?;
+            if descriptor.durable_entry_id != self.durable_user_message.id {
+                bail!(
+                    "conversation promotion capability descriptor belongs to a different message"
+                );
+            }
+            if !source_ids.insert(descriptor.source_id.clone()) {
+                bail!("conversation promotion capability descriptor source id is duplicated");
+            }
+            if previous_source_id
+                .as_ref()
+                .is_some_and(|previous| previous >= &descriptor.source_id)
+            {
+                bail!("conversation promotion capability descriptors must be sorted by source id");
+            }
+            previous_source_id = Some(descriptor.source_id.clone());
+        }
+        let digest = conversation_promotion_capability_digest(&self.capability_descriptors)?;
+        if self.capability_digest != digest {
+            bail!("conversation promotion capability digest does not match descriptors");
+        }
+        Ok(())
+    }
+
+    /// Validates that all capability descriptors are owned by the same durable session stream.
+    pub fn validate_for_session(&self, session_id: &str) -> Result<()> {
+        self.validate_shape()?;
+        if session_id.trim().is_empty() {
+            bail!("conversation promotion session id is empty");
+        }
+        if self
+            .capability_descriptors
+            .iter()
+            .any(|descriptor| descriptor.session_scope_id != session_id)
+        {
+            bail!("conversation promotion capability descriptor belongs to a different session");
+        }
+        Ok(())
+    }
+}
+
+/// Canonical digest committed by one promoted input's URL capability descriptors.
+pub fn conversation_promotion_capability_digest(
+    descriptors: &[WebUrlCapabilityDescriptor],
+) -> Result<String> {
+    canonical_json_content_hash(
+        &serde_json::to_value(descriptors)
+            .context("failed to encode conversation promotion capability descriptors")?,
+    )
 }
 
 /// Destination for a queued conversation input.
@@ -182,6 +311,109 @@ pub struct ConversationQueueProjection {
     pub next_dispatchable: Option<ConversationInputQueueId>,
 }
 
+/// Queue state rebuilt from the complete durable event stream, including its exact CAS revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConversationQueueDurableProjection {
+    pub queue: ConversationQueueProjection,
+    pub revision: Option<ConversationQueueRevision>,
+    cursor: Option<ProjectionCursor>,
+}
+
+impl ConversationQueueDurableProjection {
+    /// Rebuilds queue state and its compare-and-swap revision from a validated durable stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a promoted record is malformed, cross-session, stale, or conflicts
+    /// with the queue state reconstructed immediately before it.
+    pub fn from_records(records: &[SessionStreamRecord]) -> Result<Self> {
+        let mut projection = Self::default();
+        for record in records {
+            projection.apply_record(record)?;
+        }
+        Ok(projection)
+    }
+
+    /// Validates a not-yet-appended promotion against the exact current durable queue state.
+    pub fn validate_promotion(&self, entry: &ConversationInputPromotedEntry) -> Result<()> {
+        entry.validate_shape()?;
+        if self.revision.as_ref() != Some(&entry.expected_queue_revision) {
+            bail!("conversation promotion queue revision is stale");
+        }
+        if self.queue.paused {
+            bail!("conversation promotion cannot proceed while the queue is paused");
+        }
+        if self.queue.next_dispatchable.as_ref() != Some(&entry.queue_id) {
+            bail!("conversation promotion queue item is no longer next dispatchable");
+        }
+        let item = self
+            .queue
+            .items
+            .iter()
+            .find(|item| item.queued.queue_id == entry.queue_id)
+            .context("conversation promotion references an unknown queue item")?;
+        if item.status != ConversationInputStatus::Queued {
+            bail!("conversation promotion queue item is not queued");
+        }
+        if item.queued.target != ConversationInputTarget::MainThread {
+            bail!("conversation promotion queue item is not a main-thread input");
+        }
+        if item.queued.prompt_hash != entry.prompt_hash {
+            bail!("conversation promotion prompt hash does not match the queue item");
+        }
+        if entry.durable_user_message.content.as_deref() != Some(item.queued.prompt.as_str()) {
+            bail!(
+                "conversation promotion durable user message does not match the queued safe prompt"
+            );
+        }
+        Ok(())
+    }
+
+    fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
+        let event = record.stored_event();
+        let decision = projection_apply_decision(self.cursor.as_ref(), event)?;
+        if decision == ProjectionApplyDecision::IgnoreAlreadyApplied {
+            return Ok(());
+        }
+        match decode_stored_event(event.clone())? {
+            StoredEventDecode::Known(_) | StoredEventDecode::UnknownNonCritical(_) => {}
+        }
+
+        match event.event_kind() {
+            Some(crate::DurableEventType::ConversationInputPromoted) => {
+                let entry: ConversationInputPromotedEntry =
+                    serde_json::from_value(event.payload.clone())
+                        .context("failed to decode conversation input promoted payload")?;
+                entry.validate_for_session(&event.session_id)?;
+                self.validate_promotion(&entry)?;
+                self.queue
+                    .apply_control_entry(&ControlEntry::ConversationInputPromoted(entry));
+                self.revision = Some(ConversationQueueRevision::from_record(record));
+            }
+            Some(event_type)
+                if event_type.payload_metadata().storage
+                    == crate::DurableEventPayloadStorage::SessionLogEntry =>
+            {
+                if let Some(value) = event.payload.get("session_log_entry") {
+                    let entry: SessionLogEntry = serde_json::from_value(value.clone())
+                        .context("failed to decode conversation queue session log entry")?;
+                    if let SessionLogEntry::Control(control) = entry
+                        && is_queue_affecting_control(&control)
+                    {
+                        self.queue.apply_control_entry(&control);
+                        self.revision = Some(ConversationQueueRevision::from_record(record));
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+
+        self.cursor =
+            Some(record.projection_cursor(CONVERSATION_QUEUE_DURABLE_PROJECTION_SCHEMA_VERSION));
+        Ok(())
+    }
+}
+
 impl ConversationQueueProjection {
     #[must_use]
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
@@ -212,11 +444,7 @@ impl ConversationQueueProjection {
         match control {
             ControlEntry::ConversationInputQueued(queued) => {
                 let mut queued = queued.clone();
-                let safe = project_conversation_prompt_for_persistence(&queued.prompt);
-                if safe.exact_prompt_required {
-                    queued.prompt = safe.safe_prompt;
-                    queued.prompt_hash = safe.prompt_hash;
-                }
+                normalize_queue_prompt_for_projection(&mut queued.prompt, &mut queued.prompt_hash);
                 if !indexed.contains_key(&queued.queue_id) {
                     order.push(queued.queue_id.clone());
                 }
@@ -230,15 +458,12 @@ impl ConversationQueueProjection {
                 );
             }
             ControlEntry::ConversationInputEdited(edited) => {
-                let safe = project_conversation_prompt_for_persistence(&edited.prompt);
+                let mut prompt = edited.prompt.clone();
+                let mut prompt_hash = edited.prompt_hash.clone();
+                normalize_queue_prompt_for_projection(&mut prompt, &mut prompt_hash);
                 if let Some(item) = indexed.get_mut(&edited.queue_id) {
-                    if safe.exact_prompt_required {
-                        item.queued.prompt_hash = safe.prompt_hash;
-                        item.queued.prompt = safe.safe_prompt;
-                    } else {
-                        item.queued.prompt_hash = edited.prompt_hash.clone();
-                        item.queued.prompt = edited.prompt.clone();
-                    }
+                    item.queued.prompt_hash = prompt_hash;
+                    item.queued.prompt = prompt;
                     item.queued.reasoning_effort = edited.reasoning_effort.clone();
                 }
             }
@@ -260,6 +485,12 @@ impl ConversationQueueProjection {
                     item.reason = status.reason.clone();
                 }
             }
+            ControlEntry::ConversationInputPromoted(promoted) => {
+                if let Some(item) = indexed.get_mut(&promoted.queue_id) {
+                    item.status = ConversationInputStatus::Dispatching;
+                    item.reason = Some("promotion_bound".to_owned());
+                }
+            }
             _ => return,
         }
 
@@ -278,6 +509,106 @@ impl ConversationQueueProjection {
             })
             .map(|item| item.queued.queue_id.clone());
     }
+}
+
+fn is_queue_affecting_control(control: &ControlEntry) -> bool {
+    matches!(
+        control,
+        ControlEntry::ConversationInputQueued(_)
+            | ControlEntry::ConversationInputQueueControl(_)
+            | ControlEntry::ConversationInputEdited(_)
+            | ControlEntry::ConversationInputReordered(_)
+            | ControlEntry::ConversationInputStatusChanged(_)
+            | ControlEntry::ConversationInputPromoted(_)
+    )
+}
+
+fn normalize_queue_prompt_for_projection(prompt: &mut String, prompt_hash: &mut String) {
+    let mut hasher = Sha256::new();
+    hasher.update(prompt.as_bytes());
+    let safe_hash = format!("sha256:{:x}", hasher.finalize());
+    let already_safe_exact_projection = *prompt_hash
+        == format!("{CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX}{safe_hash}")
+        && is_known_safe_redacted_text(prompt);
+    if already_safe_exact_projection {
+        return;
+    }
+    let safe = project_conversation_prompt_for_persistence(prompt);
+    if safe.exact_prompt_required {
+        *prompt = safe.safe_prompt;
+        *prompt_hash = safe.prompt_hash;
+    }
+}
+
+fn validate_promoted_user_message(
+    message: &ModelMessage,
+    prompt_hash: &str,
+    exact_prompt_required: bool,
+) -> Result<()> {
+    if message.role != MessageRole::User
+        || message.tool_call_id.is_some()
+        || message.assistant_kind.is_some()
+        || !message.tool_calls.is_empty()
+    {
+        bail!("conversation promotion durable message must be a plain user message");
+    }
+    if message.id.trim().is_empty() || message.id.len() > 512 {
+        bail!("conversation promotion durable user message id is invalid");
+    }
+    if crate::safe_persistence_text(&message.id) != message.id {
+        bail!("conversation promotion durable user message id is not safe");
+    }
+    let content = message
+        .content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+        .context("conversation promotion durable user message content is empty")?;
+    let persistence_projection = crate::safe_persistence_text(content);
+    if persistence_projection != content && !is_known_safe_redacted_text(content) {
+        bail!("conversation promotion durable user message content is not safe");
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let safe_hash = format!("sha256:{:x}", hasher.finalize());
+    let expected_prompt_hash = if exact_prompt_required {
+        format!("{CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX}{safe_hash}")
+    } else {
+        format!("safe:{safe_hash}")
+    };
+    if prompt_hash != expected_prompt_hash {
+        bail!("conversation promotion prompt hash does not match durable user message");
+    }
+    Ok(())
+}
+
+fn is_known_safe_redacted_text(value: &str) -> bool {
+    if !value.contains("[redacted]") {
+        return false;
+    }
+    for token in value.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        for marker in [
+            "token=",
+            "secret=",
+            "password=",
+            "api_key=",
+            "apikey=",
+            "authorization=",
+        ] {
+            if let Some(index) = lower.find(marker)
+                && !token[index + marker.len()..].starts_with("[redacted]")
+            {
+                return false;
+            }
+        }
+        if (lower.starts_with("https://") || lower.starts_with("http://"))
+            && let Some((_, query)) = token.split_once('?')
+            && query != "[redacted]"
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn move_order_entry(

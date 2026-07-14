@@ -32,6 +32,11 @@ impl std::fmt::Debug for SessionRuntimeAttachments {
     }
 }
 
+struct AssembledRequest {
+    request: CompletionRequest,
+    prefix_snapshot: PrefixSnapshot,
+}
+
 impl Session {
     /// Creates a new in-memory session with the given provider and model identity.
     pub fn new(provider_name: impl Into<String>, model_name: impl Into<String>) -> Self {
@@ -148,6 +153,18 @@ impl Session {
             .transpose()?;
         self.entries.push(entry);
         Ok(event)
+    }
+
+    /// Returns a clone of the durable store for a blocking-I/O bridge.
+    pub(crate) fn durable_store(&self) -> Option<JsonlSessionStore> {
+        self.store.clone()
+    }
+
+    /// Updates the in-memory projection after a caller has synchronously persisted a control.
+    ///
+    /// The blocking append must have completed successfully before this method is called.
+    pub(crate) fn record_durably_appended_control(&mut self, control: ControlEntry) {
+        self.entries.push(SessionLogEntry::Control(control));
     }
 
     /// Returns the live session scope used to bind URL capabilities and external provenance.
@@ -332,9 +349,79 @@ impl Session {
         &self.model_name
     }
 
-    /// Returns the provider-visible message projection, including the latest compaction summary.
+    /// Returns the in-memory provider-visible message projection.
+    ///
+    /// Store-backed V2 context projection is fallible and therefore intentionally exposed through
+    /// [`Session::try_context_projection_from_durable`]. Request construction uses that durable
+    /// projection, while this in-memory query remains read-only and infallible.
     pub fn messages(&self) -> Vec<ModelMessage> {
-        self.projected_messages()
+        self.context_projection().model_messages()
+    }
+
+    /// Builds the in-memory chat context projection without reading or mutating the durable stream.
+    #[must_use]
+    pub fn context_projection(&self) -> SessionContextProjection {
+        SessionContextProjection::from_entries(&self.entries)
+    }
+
+    /// Rebuilds the chat context projection from the V2 durable stream when a store is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the V2 lifecycle or sidecar stream is malformed. This query never
+    /// performs recovery writes.
+    pub fn try_context_projection_from_durable(&self) -> Result<Option<SessionContextProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        SessionContextProjection::from_durable_records(&self.entries, &records, None).map(Some)
+    }
+
+    /// Rebuilds a V2 fold preview from this session's durable stream without mutating it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this session has no durable store or the V2 stream cannot safely be
+    /// planned.
+    pub fn v2_compaction_preview(
+        &self,
+        requested_tail_message_count: usize,
+    ) -> Result<Option<V2CompactionPreview>> {
+        let store = self
+            .store
+            .as_ref()
+            .context("v2 compaction preview requires a durable session store")?;
+        store.v2_compaction_preview(requested_tail_message_count, None)
+    }
+
+    /// Rebuilds provider physical-attempt evidence from the durable stream without recovery
+    /// writes. Queue recovery uses this to distinguish a confirmed no-send from an uncertain
+    /// provider outcome after a process restart.
+    pub fn provider_physical_attempt_projection(
+        &self,
+    ) -> Result<crate::ProviderPhysicalAttemptProjection> {
+        let store = self
+            .store
+            .as_ref()
+            .context("provider physical-attempt projection requires a durable session store")?;
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        crate::ProviderPhysicalAttemptProjection::from_records(&records)
+    }
+
+    /// Reads native-continuation observations and inactive candidates from the durable stream.
+    ///
+    /// This query never activates a candidate, creates a provider request, or performs cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this session has no durable store or its V2 stream is invalid.
+    pub fn provider_continuation_projection(&self) -> Result<ProviderContinuationProjection> {
+        let store = self
+            .store
+            .as_ref()
+            .context("provider continuation projection requires a durable session store")?;
+        store.provider_continuation_projection()
     }
 
     pub fn continuation_states(&self, provider_name: &str) -> Vec<ProviderContinuationState> {
@@ -380,10 +467,6 @@ impl Session {
             }
             _ => None,
         })
-    }
-
-    pub fn latest_compaction_record(&self) -> Option<CompactionRecord> {
-        latest_compaction_record(&self.entries)
     }
 
     /// Returns durable plan approvals reconstructed from append-only control entries.
@@ -735,16 +818,22 @@ impl Session {
     pub fn try_conversation_queue_projection_from_durable(
         &self,
     ) -> Result<Option<ConversationQueueProjection>> {
+        Ok(self
+            .try_conversation_queue_durable_projection_from_durable()?
+            .map(|projection| projection.queue))
+    }
+
+    /// Rebuilds queue state together with the precise revision required by the promotion CAS.
+    pub fn try_conversation_queue_durable_projection_from_durable(
+        &self,
+    ) -> Result<Option<ConversationQueueDurableProjection>> {
         let Some(store) = &self.store else {
             return Ok(None);
         };
         let records = JsonlSessionStore::read_event_records(store.path())?;
-        let mut projection = ConversationQueueProjection::default();
-        let mut cursor: Option<ProjectionCursor> = None;
-        for record in records {
-            apply_conversation_queue_projection_record(&mut projection, &mut cursor, &record)?;
-        }
-        Ok(Some(projection))
+        Ok(Some(ConversationQueueDurableProjection::from_records(
+            &records,
+        )?))
     }
 
     pub fn agent_result_continuation_projection(&self) -> AgentResultContinuationProjection {
@@ -873,12 +962,144 @@ impl Session {
         runtime_context: RuntimeContextCandidates,
         overlays: &[crate::TransientMessageOverlay],
     ) -> Result<CompletionRequest> {
+        let session_projection = self.request_context_projection()?;
         let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
-        let projected_messages = self.projected_messages();
+        let projected_messages = session_projection.model_messages();
+        let context_message = self.runtime_context_v0_message(
+            &session_projection,
+            &projected_messages,
+            runtime_context,
+        )?;
+        let assembled = self.assemble_request_from_components(
+            &memory,
+            projected_messages,
+            context_message,
+            tools,
+            None,
+            reasoning_effort,
+            previous_response_handle,
+            traffic_partition_key,
+            transient_messages,
+            overlays,
+        )?;
+        self.append_control(ControlEntry::PrefixSnapshotCaptured(
+            assembled.prefix_snapshot,
+        ))?;
+        Ok(assembled.request)
+    }
+
+    /// Builds a complete candidate provider request without appending request-side controls.
+    ///
+    /// This is the pre-turn admission surface: it accepts process-local transient message
+    /// material, applies the same safe/exact overlay assembly as an ordinary request, and leaves
+    /// the session stream and in-memory history unchanged. Callers must separately establish a
+    /// promotion and pre-send barrier before using this material for provider I/O.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_pre_turn_candidate_request(
+        &self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        tools: Vec<ToolSpec>,
+        target_max_tokens: Option<u32>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
+        overlays: &[crate::TransientMessageOverlay],
+    ) -> Result<CompletionRequest> {
+        let session_projection = self.request_context_projection()?;
+        let memory = self.memory_snapshot_for_pure_request(workspace_root, memory_config)?;
+        let projected_messages = session_projection.model_messages();
+        let context_message = self.build_runtime_context_v0_message(
+            &session_projection,
+            &projected_messages,
+            runtime_context,
+        )?;
+        Ok(self
+            .assemble_request_from_components(
+                &memory,
+                projected_messages,
+                context_message,
+                tools,
+                target_max_tokens,
+                reasoning_effort,
+                previous_response_handle,
+                traffic_partition_key,
+                transient_messages,
+                overlays,
+            )?
+            .request)
+    }
+
+    /// Materializes the exact request that would follow a portable compaction activation without
+    /// appending a `MemorySnapshot`, `ContextAssemblySkipped`, or `PrefixSnapshot` control entry.
+    ///
+    /// The caller must freeze and prove the returned request before it records the compaction
+    /// `Started` barrier. Context V0 assembly errors are returned rather than downgraded because
+    /// a downgraded request would no longer be the reviewed candidate target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_portable_compaction_candidate_request(
+        &self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        checkpoint: &ContinuationCheckpointV1,
+        task_memory: &TaskMemoryV1,
+        candidate_messages: Vec<ModelMessage>,
+        tools: Vec<ToolSpec>,
+        target_max_tokens: Option<u32>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
+        overlays: &[crate::TransientMessageOverlay],
+    ) -> Result<CompletionRequest> {
+        let durable_projection = self.request_context_projection()?;
+        let candidate_projection = durable_projection.with_portable_candidate(
+            checkpoint,
+            task_memory,
+            candidate_messages,
+        )?;
+        let memory = self.memory_snapshot_for_pure_request(workspace_root, memory_config)?;
+        let projected_messages = candidate_projection.model_messages();
+        let context_message = self.build_runtime_context_v0_message(
+            &candidate_projection,
+            &projected_messages,
+            runtime_context,
+        )?;
+        Ok(self
+            .assemble_request_from_components(
+                &memory,
+                projected_messages,
+                context_message,
+                tools,
+                target_max_tokens,
+                reasoning_effort,
+                previous_response_handle,
+                traffic_partition_key,
+                transient_messages,
+                overlays,
+            )?
+            .request)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_request_from_components(
+        &self,
+        memory: &MemorySnapshot,
+        projected_messages: Vec<ModelMessage>,
+        context_message: Option<ModelMessage>,
+        tools: Vec<ToolSpec>,
+        target_max_tokens: Option<u32>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+        overlays: &[crate::TransientMessageOverlay],
+    ) -> Result<AssembledRequest> {
         let mut safe_request_messages = memory.messages.clone();
-        if let Some(context_message) =
-            self.runtime_context_v0_message(&projected_messages, runtime_context)?
-        {
+        if let Some(context_message) = context_message {
             safe_request_messages.push(context_message);
         }
         safe_request_messages.extend(projected_messages);
@@ -896,7 +1117,7 @@ impl Session {
             serde_json::to_string(&tools).context("failed to serialize tool specs")?;
         let prefix_materialized = format!("{materialized_messages}\n{materialized_tools}");
         let digest = Sha256::digest(prefix_materialized.as_bytes());
-        let mut snapshot = PrefixSnapshot {
+        let mut prefix_snapshot = PrefixSnapshot {
             materialized_text: prefix_materialized,
             sha256: format!("{digest:x}"),
             provider_name: self.provider_name.clone(),
@@ -905,30 +1126,33 @@ impl Session {
             tool_schema_fingerprint: format!("{:x}", Sha256::digest(materialized_tools.as_bytes())),
             skill_index_fingerprint: "none".to_owned(),
         };
-        apply_memory_report(&mut snapshot, &memory.report);
-        self.append_control(ControlEntry::PrefixSnapshotCaptured(snapshot))?;
+        apply_memory_report(&mut prefix_snapshot, &memory.report);
         let request_messages =
             crate::apply_exact_message_overlays(&safe_request_messages, &exact_overlays)?;
-        Ok(CompletionRequest {
-            provider_name: self.provider_name.clone(),
-            model_name: self.model_name.clone(),
-            messages: request_messages,
-            tools,
-            temperature: None,
-            max_tokens: None,
-            reasoning_effort,
-            previous_response_handle,
-            continuation_states: self.continuation_states(&self.provider_name),
-            traffic_partition_key,
-            background: false,
-            store: false,
-            deterministic_materialization: true,
-            hosted_tools: Vec::new(),
+        Ok(AssembledRequest {
+            request: CompletionRequest {
+                provider_name: self.provider_name.clone(),
+                model_name: self.model_name.clone(),
+                messages: request_messages,
+                tools,
+                temperature: None,
+                max_tokens: target_max_tokens,
+                reasoning_effort,
+                previous_response_handle,
+                continuation_states: self.continuation_states(&self.provider_name),
+                traffic_partition_key,
+                background: false,
+                store: false,
+                deterministic_materialization: true,
+                hosted_tools: Vec::new(),
+            },
+            prefix_snapshot,
         })
     }
 
     fn runtime_context_v0_message(
         &mut self,
+        session_projection: &SessionContextProjection,
         projected_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
     ) -> Result<Option<ModelMessage>> {
@@ -939,7 +1163,11 @@ impl Session {
             .take(12)
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
-        match self.build_runtime_context_v0_message(projected_messages, runtime_context) {
+        match self.build_runtime_context_v0_message(
+            session_projection,
+            projected_messages,
+            runtime_context,
+        ) {
             Ok(message) => Ok(message),
             Err(error) => {
                 self.append_control(ControlEntry::ContextAssemblySkipped(
@@ -956,6 +1184,7 @@ impl Session {
 
     fn build_runtime_context_v0_message(
         &self,
+        session_projection: &SessionContextProjection,
         projected_messages: &[ModelMessage],
         runtime_context: RuntimeContextCandidates,
     ) -> Result<Option<ModelMessage>> {
@@ -968,11 +1197,13 @@ impl Session {
                 .into_iter()
                 .map(|provenance| provenance.message_id)
                 .collect::<std::collections::BTreeSet<_>>();
-            if let Some(record) = self.latest_compaction_record()
-                && record.external_trust == Some(ExternalTrust::ExternalUntrusted)
-            {
-                external_message_ids.insert(compaction_summary_message(&record).id);
-            }
+            external_message_ids.extend(
+                session_projection
+                    .trust_projection
+                    .external_untrusted_message_ids
+                    .iter()
+                    .cloned(),
+            );
             let archive = session_archive_from_projected_messages_with_external(
                 projected_messages,
                 latest_user_index,
@@ -985,8 +1216,7 @@ impl Session {
             }
         }
 
-        if let Some(record) = self.latest_compaction_record()
-            && let Some(task_memory) = record.task_memory.as_ref()
+        if let Some(task_memory) = session_projection.task_memory.as_ref()
             && let Ok(task_items) = task_memory_context_items(task_memory)
         {
             insert_task_memory_context_snippets(task_memory, &mut snippets);
@@ -1057,96 +1287,21 @@ impl Session {
         Ok(snapshot)
     }
 
-    /// Applies one stable compaction record and persists it in the append-only control log.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when compaction is disabled or the session does not yet have enough
-    /// history to fold safely.
-    pub fn compact_now(&mut self, config: &CompactionConfig) -> Result<CompactionRecord> {
-        if !config.enabled {
-            bail!("compaction is disabled");
-        }
-
-        let raw_messages = self.raw_messages();
-        if raw_messages.len() < 2 {
-            bail!("session does not have enough history to compact");
-        }
-
-        let compacted_message_count = compaction_boundary(&raw_messages, config.tail_messages);
-        if compacted_message_count == 0 {
-            bail!("session does not have enough stable history to compact");
-        }
-
-        let summary = summarize_messages(&raw_messages[..compacted_message_count]);
-        let task_memory = self.default_compaction_task_memory(&summary, compacted_message_count)?;
-        let (external_trust, external_provenance_message_ids, external_source_ids) =
-            self.compaction_external_projection(&raw_messages[..compacted_message_count]);
-        let record = CompactionRecord {
-            summary,
-            compacted_message_count,
-            retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
-            task_memory,
-            external_trust,
-            external_provenance_message_ids,
-            external_source_ids,
-        };
-        self.append_control(ControlEntry::CompactionApplied(record.clone()))?;
-        self.stats.last_prompt_tokens = 0;
-        Ok(record)
-    }
-
-    /// Returns whether the current session has enough stable history to compact safely.
-    pub fn can_compact(&self, config: &CompactionConfig) -> bool {
-        if !config.enabled {
-            return false;
-        }
-
-        let raw_messages = self.raw_messages();
-        raw_messages.len() >= 2 && compaction_boundary(&raw_messages, config.tail_messages) > 0
-    }
-
-    /// Computes a deterministic manual compaction preview without mutating durable state.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when compaction is disabled. Returns `Ok(None)` when the current session
-    /// does not yet have enough stable history to fold safely.
-    pub fn compaction_preview(
+    fn memory_snapshot_for_pure_request(
         &self,
-        config: &CompactionConfig,
-    ) -> Result<Option<CompactionPreview>> {
-        if !config.enabled {
-            bail!("compaction is disabled");
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+    ) -> Result<MemorySnapshot> {
+        let memory = materialize_memory(workspace_root, memory_config)?;
+        if let Some(snapshot) = self.latest_memory_snapshot()
+            && snapshot.report.fingerprint == memory.report.fingerprint
+        {
+            return Ok(snapshot);
         }
-
-        let raw_messages = self.raw_messages();
-        if raw_messages.len() < 2 {
-            return Ok(None);
-        }
-
-        let compacted_message_count = compaction_boundary(&raw_messages, config.tail_messages);
-        if compacted_message_count == 0 {
-            return Ok(None);
-        }
-
-        let summary = summarize_messages(&raw_messages[..compacted_message_count]);
-        let (external_trust, external_provenance_message_ids, external_source_ids) =
-            self.compaction_external_projection(&raw_messages[..compacted_message_count]);
-        let record = CompactionRecord {
-            task_memory: self.default_compaction_task_memory(&summary, compacted_message_count)?,
-            summary,
-            compacted_message_count,
-            retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
-            external_trust,
-            external_provenance_message_ids,
-            external_source_ids,
-        };
-        Ok(Some(CompactionPreview {
-            folded_messages: raw_messages[..compacted_message_count].to_vec(),
-            projected_messages: projected_messages_with_record(&raw_messages, &record),
-            record,
-        }))
+        Ok(MemorySnapshot {
+            messages: memory.messages,
+            report: memory.report,
+        })
     }
 
     pub fn store_path(&self) -> Option<&Path> {
@@ -1156,7 +1311,7 @@ impl Session {
     /// Returns the next session-stream sequence for synthetic evidence tied to this session.
     ///
     /// Durable-only domain events do not appear in `Session::entries`, so callers that need
-    /// stream ordering must use the durable mixed-stream writer state when a store is present.
+    /// stream ordering must use the durable writer state when a store is present.
     pub fn next_stream_sequence_hint(&self) -> Result<u64> {
         let Some(store) = &self.store else {
             return Ok((self.entries.len() as u64).saturating_add(1));
@@ -1189,52 +1344,6 @@ impl Session {
         Ok(Some(stats))
     }
 
-    fn default_compaction_task_memory(
-        &self,
-        summary: &str,
-        compacted_message_count: usize,
-    ) -> Result<Option<crate::TaskMemoryV1>> {
-        let Some(store) = &self.store else {
-            return Ok(None);
-        };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
-        let Some(valid_for_snapshot) = latest_task_memory_workspace_snapshot_id(&records)? else {
-            return Ok(None);
-        };
-        let digest = Sha256::digest(
-            format!(
-                "{}\n{}\n{}\n{}",
-                store.path().display(),
-                compacted_message_count,
-                valid_for_snapshot,
-                summary
-            )
-            .as_bytes(),
-        );
-        let memory = crate::extract_task_memory_from_stream_records(
-            &records,
-            crate::TaskMemoryExtractionInput {
-                memory_id: format!("task-memory:{digest:x}"),
-                valid_for_snapshot,
-                branch_id: None,
-                supersedes: latest_compaction_record(&self.entries)
-                    .and_then(|record| record.task_memory)
-                    .map(|memory| memory.memory_id),
-                objective: None,
-            },
-        )?;
-        if memory.source_event_ids.is_empty()
-            && memory.files_changed.is_empty()
-            && memory.commands_run.is_empty()
-            && memory.verification_results.is_empty()
-            && memory.failed_attempts.is_empty()
-            && memory.unresolved_issues.is_empty()
-        {
-            return Ok(None);
-        }
-        Ok(Some(memory))
-    }
-
     pub fn ensure_identity_entry(&mut self) -> Result<()> {
         if self.entries.iter().any(|entry| {
             matches!(
@@ -1251,62 +1360,10 @@ impl Session {
         })
     }
 
-    fn raw_messages(&self) -> Vec<ModelMessage> {
-        self.entries
-            .iter()
-            .filter_map(|entry| match entry {
-                SessionLogEntry::User(message)
-                | SessionLogEntry::Assistant(message)
-                | SessionLogEntry::ToolResult(message) => Some(message.clone()),
-                SessionLogEntry::Control(_) => None,
-            })
-            .collect()
-    }
-
-    fn projected_messages(&self) -> Vec<ModelMessage> {
-        let raw_messages = self.raw_messages();
-        let Some(record) = latest_compaction_record(&self.entries) else {
-            return repair_orphan_tool_results(&raw_messages);
-        };
-        if record.compacted_message_count == 0 || record.summary.trim().is_empty() {
-            return repair_orphan_tool_results(&raw_messages);
-        }
-        repair_orphan_tool_results(&projected_messages_with_record(&raw_messages, &record))
-    }
-
-    fn compaction_external_projection(
-        &self,
-        folded_messages: &[ModelMessage],
-    ) -> (Option<ExternalTrust>, Vec<String>, Vec<String>) {
-        let folded_ids = folded_messages
-            .iter()
-            .map(|message| message.id.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut message_ids = Vec::new();
-        let mut source_ids = Vec::new();
-        let inherited_external = self
-            .latest_compaction_record()
-            .filter(|record| record.external_trust == Some(ExternalTrust::ExternalUntrusted));
-        if let Some(record) = &inherited_external {
-            message_ids.extend(record.external_provenance_message_ids.iter().cloned());
-            source_ids.extend(record.external_source_ids.iter().cloned());
-        }
-        for provenance in self.external_provenance_entries() {
-            if !folded_ids.contains(provenance.message_id.as_str()) {
-                continue;
-            }
-            if !message_ids.contains(&provenance.message_id) {
-                message_ids.push(provenance.message_id.clone());
-            }
-            for source in provenance.sources {
-                if !source_ids.contains(&source.source_id) {
-                    source_ids.push(source.source_id);
-                }
-            }
-        }
-        let trust = (inherited_external.is_some() || !message_ids.is_empty())
-            .then_some(ExternalTrust::ExternalUntrusted);
-        (trust, message_ids, source_ids)
+    fn request_context_projection(&self) -> Result<SessionContextProjection> {
+        Ok(self
+            .try_context_projection_from_durable()?
+            .unwrap_or_else(|| self.context_projection()))
     }
 }
 

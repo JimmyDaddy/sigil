@@ -101,7 +101,7 @@ Do not present internal lease/idempotency details in the main path.
 - Job intent and step lease are now first-class append-only control entries with
   durable event types.
 - Resume job state can be reduced from session entries or rebuilt from the
-  mixed-format durable stream.
+  V2 durable stream.
 - Expired acquired leases are projected as `InterruptedNeedsUser`, so restarted
   sessions do not need to keep showing dead work as running.
 - Step lease heartbeat events extend matching acquired leases and leave

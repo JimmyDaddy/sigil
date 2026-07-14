@@ -529,9 +529,7 @@ fn cancellation_records_from_stream(
 ) -> Result<Vec<DurableRunCancellationRecord>> {
     let mut records = Vec::new();
     for record in stream {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let event = record.stored_event();
         if !matches!(
             DurableEventType::from_event_type(&event.event_type),
             Some(DurableEventType::RunStatusChanged | DurableEventType::RunFinalized)

@@ -351,6 +351,13 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
         }),
     );
     config.providers.insert(
+        "openai_responses".to_owned(),
+        serde_json::json!({
+            "api_key": "responses-key",
+            "base_url": "https://responses.example.com/v1"
+        }),
+    );
+    config.providers.insert(
         "anthropic".to_owned(),
         serde_json::json!({
             "api_key": "anthropic-key",
@@ -374,6 +381,11 @@ fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<(
     assert_eq!(state.draft.provider_model, config.agent.model);
     state.draft.provider_model = "openai-edited".to_owned();
     state.draft.provider_api_key = "openai-edited-key".to_owned();
+
+    state.draft.cycle_provider();
+    assert_eq!(state.draft.provider_name, "openai_responses");
+    assert_eq!(state.draft.provider_model, config.agent.model);
+    assert_eq!(state.draft.provider_api_key, "responses-key");
 
     state.draft.cycle_provider();
     assert_eq!(state.draft.provider_name, ANTHROPIC_PROVIDER_KEY);
@@ -1330,6 +1342,10 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
 fn provider_name_helpers_preserve_unknown_names_and_cycle_known_providers() {
     assert_eq!(normalize_provider_name("deepseek"), "deepseek");
     assert_eq!(normalize_provider_name("openai_compat"), "openai_compat");
+    assert_eq!(
+        normalize_provider_name("openai_responses"),
+        "openai_responses"
+    );
     assert_eq!(normalize_provider_name("anthropic"), "anthropic");
     assert_eq!(normalize_provider_name("gemini"), "gemini");
     assert_eq!(
@@ -1339,7 +1355,8 @@ fn provider_name_helpers_preserve_unknown_names_and_cycle_known_providers() {
     assert_eq!(normalize_provider_name("claude"), "claude");
     assert_eq!(normalize_provider_name("google"), "google");
     assert_eq!(cycle_provider_name("deepseek"), "openai_compat");
-    assert_eq!(cycle_provider_name("openai_compat"), "anthropic");
+    assert_eq!(cycle_provider_name("openai_compat"), "openai_responses");
+    assert_eq!(cycle_provider_name("openai_responses"), "anthropic");
     assert_eq!(cycle_provider_name("anthropic"), "gemini");
     assert_eq!(cycle_provider_name("gemini"), "deepseek");
 }
@@ -1364,7 +1381,7 @@ fn config_draft_validates_provider_and_compaction_values() {
             draft.provider_name = "claude".to_owned();
             (
                 draft,
-                "unsupported provider claude; expected one of deepseek, openai_compat, anthropic, or gemini",
+                "unsupported provider claude; expected one of deepseek, openai_compat, openai_responses, anthropic, or gemini",
             )
         },
         {

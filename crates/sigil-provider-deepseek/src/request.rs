@@ -9,7 +9,7 @@ use crate::{
     DeepSeekProviderQuirkProfile, StrictToolsMode,
     endpoint::DeepSeekEndpointClass,
     fim::DeepSeekFimCompletionRequest,
-    models::{DeepSeekChatCompletionRequest, DeepSeekCompletionRequest},
+    models::{DeepSeekChatCompletionRequest, DeepSeekCompletionRequest, DeepSeekStreamOptions},
     prefix::DeepSeekPrefixCompletionRequest,
     tools::ToolSchemaDiagnostic,
     tools::prepare_tools,
@@ -47,6 +47,10 @@ pub fn build_chat_request(
             model: request.model_name.clone(),
             messages,
             stream: true,
+            max_tokens: request.max_tokens,
+            stream_options: Some(DeepSeekStreamOptions {
+                include_usage: true,
+            }),
             tools: prepared_tools.payload,
             stop: None,
             reasoning_effort: request
@@ -140,6 +144,10 @@ pub fn build_prefix_completion_request(
             }),
         ],
         stream: true,
+        max_tokens: None,
+        stream_options: Some(DeepSeekStreamOptions {
+            include_usage: true,
+        }),
         tools: None,
         stop: if request.stop.is_empty() {
             None

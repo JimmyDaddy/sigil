@@ -116,10 +116,10 @@ cargo test -p sigil-tui session
 - 已有 file-backed `FileProjectionStore<T>` 实现 trait，projection 与 cursor 仍保存在同一个 envelope 中，并通过 temporary file + atomic rename + parent dir sync 持久化。
 - 已补 verification file projection specialization，并保持 JSONL 为 truth source；projection store 可删除后从 durable stream 重建。
 - 已补测试覆盖 duplicate replay、sequence gap、cursor ahead、schema/name mismatch、corrupt projection store、trait dispatch 和 rebuild diagnostics。
-- 已新增 session list projection：`SessionListProjectionSnapshot` / `SessionListProjectionEntry` 从 mixed legacy/v2 stream 重建 session metadata、首个用户标题、usage、task 和 readiness 摘要。
+- 已新增 session list projection：`SessionListProjectionSnapshot` / `SessionListProjectionEntry` 从 V2 durable stream 重建 session metadata、首个用户标题、usage、task 和 readiness 摘要。
 - 已新增 file-backed session list projection store specialization，保持 projection + cursor 原子保存。
-- TUI session history 已接入 projection adapter 读取 v2 title，并保留旧 bounded line scanner 作为 fallback；active approval/tool execution 仍不依赖 projection。
-- 已新增 agent graph projection file store specialization，可从 durable mixed stream 重建 `AgentThreadStateProjection`，并通过 cursor rules 保持 duplicate replay idempotent。
+- TUI session history 已接入 projection adapter 读取 V2 title，并保留 bounded line scanner 作为 V2 fallback；旧 raw session 格式会明确标记为不受支持；active approval/tool execution 仍不依赖 projection。
+- 已新增 agent graph projection file store specialization，可从 V2 durable stream 重建 `AgentThreadStateProjection`，并通过 cursor rules 保持 duplicate replay idempotent。
 - 已新增 `AgentGraphSummary`，为 TUI 和 projection audit 提供 agent count、route count、token budget 和 changed paths 摘要。
 - TUI info rail 已显示低噪声 agent graph summary；无 child agent thread 时不额外显示空状态行。
 - 已新增 dispatch trace projection：tool trace 以 `call_id` 聚合 approval、execution、egress、observation truncation、changed files 和 error kind；agent trace 以 `thread_id` 聚合 start/status/result、profile、parent thread 和 token usage。

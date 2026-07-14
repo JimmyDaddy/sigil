@@ -4,14 +4,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(test)]
-use sigil_kernel::{CompactionPreview, ToolEgressEntry, ToolExecutionStatus, ToolPreviewSnapshot};
+use anyhow::Result;
 use sigil_kernel::{
     ControlEntry, JsonlSessionStore, RootConfig, Session, SessionLogEntry,
-    inspect_memory_documents, latest_compaction_record, session_stats_from_entries,
+    inspect_memory_documents, session_stats_from_entries,
 };
 #[cfg(test)]
 use sigil_kernel::{ModelMessage, ToolExecutionEntry};
+#[cfg(test)]
+use sigil_kernel::{ToolEgressEntry, ToolExecutionStatus, ToolPreviewSnapshot};
 use uuid::Uuid;
 
 use super::{
@@ -24,7 +25,7 @@ use super::{
 };
 #[cfg(test)]
 use crate::input::PaneFocus;
-use crate::view_model::{RecoveryPanelViewModel, TaskMemoryInspectViewModel};
+use crate::view_model::RecoveryPanelViewModel;
 
 mod audit_log;
 pub(super) use audit_log::render_control_entry_line;
@@ -43,11 +44,10 @@ use audit_log::{
     verification_stale_reason_label, verification_verdict_label, workspace_trust_label,
 };
 use audit_log::{
-    render_compaction_preview_lines, render_model_message_line, render_session_log_entry,
-    render_tool_execution_line, restored_reasoning_note, restored_tool_call_index,
-    restored_tool_execution_content, restored_tool_execution_index,
-    restored_tool_preview_snapshot_index, restored_tool_result_call_ids,
-    should_render_restored_tool_execution, unix_time_ms,
+    render_model_message_line, render_session_log_entry, render_tool_execution_line,
+    restored_reasoning_note, restored_tool_call_index, restored_tool_execution_content,
+    restored_tool_execution_index, restored_tool_preview_snapshot_index,
+    restored_tool_result_call_ids, should_render_restored_tool_execution, unix_time_ms,
 };
 pub(super) use history::{current_focus_label, session_history_display_label, short_session_token};
 #[cfg(test)]
@@ -86,16 +86,35 @@ impl AppState {
         fallback_model_name: &str,
         notice: &str,
     ) -> bool {
+        match self.restore_session_path_from_disk_result(
+            session_log_path,
+            fallback_provider_name,
+            fallback_model_name,
+            notice,
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                self.last_notice = Some(format!("session restore unavailable: {error:#}"));
+                false
+            }
+        }
+    }
+
+    fn restore_session_path_from_disk_result(
+        &mut self,
+        session_log_path: PathBuf,
+        fallback_provider_name: &str,
+        fallback_model_name: &str,
+        notice: &str,
+    ) -> Result<bool> {
         let Ok(store) = JsonlSessionStore::new(&session_log_path) else {
-            return false;
+            return Ok(false);
         };
-        let Ok(session) = Session::load_from_store(
+        let session = Session::load_from_store(
             fallback_provider_name.to_owned(),
             fallback_model_name.to_owned(),
             store,
-        ) else {
-            return false;
-        };
+        )?;
 
         let provider_name = session.provider_name().to_owned();
         let model_name = session.model_name().to_owned();
@@ -103,7 +122,7 @@ impl AppState {
         self.restore_session_view(session_log_path, provider_name, model_name, entries, notice);
         self.last_notice = Some(notice.to_owned());
         self.refresh_session_history();
-        true
+        Ok(true)
     }
 
     pub fn restore_session_selector_from_disk(
@@ -112,12 +131,12 @@ impl AppState {
         fallback_provider_name: &str,
         fallback_model_name: &str,
         notice: &str,
-    ) -> bool {
+    ) -> Result<bool> {
         self.refresh_session_history();
         let Some(session_log_path) = self.resolve_resume_target(selector) else {
-            return false;
+            return Ok(false);
         };
-        self.restore_session_path_from_disk(
+        self.restore_session_path_from_disk_result(
             session_log_path,
             fallback_provider_name,
             fallback_model_name,
@@ -170,38 +189,12 @@ impl AppState {
         ) {
             lines.extend(panel.lines().into_iter().map(|line| format!("  {line}")));
         }
-        if let Some(record) = &self.latest_compaction_record {
-            lines.push(format!(
-                "  summary: compacted={} tail={}",
-                record.compacted_message_count, record.retained_tail_message_count
-            ));
-            if let Some(task_memory) = &record.task_memory {
-                lines.extend(
-                    TaskMemoryInspectViewModel::from_task_memory(task_memory)
-                        .lines()
-                        .into_iter()
-                        .map(|line| format!("  {line}")),
-                );
-            }
-        }
         for message in messages {
             lines.push(render_model_message_line(&message));
         }
         if !self.runtime.is_busy {
-            match session.compaction_preview(&self.compaction_config) {
-                Ok(Some(preview)) => {
-                    lines.push(String::new());
-                    lines.extend(render_compaction_preview_lines(&preview));
-                }
-                Ok(None) => {
-                    lines.push(String::new());
-                    lines.push("/compact preview: nothing to fold".to_owned());
-                }
-                Err(error) => {
-                    lines.push(String::new());
-                    lines.push(format!("/compact preview unavailable: {error}"));
-                }
-            }
+            lines.push(String::new());
+            lines.push("/compact: inspect the V2 durable fold plan".to_owned());
         }
         lines
     }
@@ -297,7 +290,6 @@ impl AppState {
         let entries =
             preserve_local_ui_control_entries(&self.session_browser.current_entries, entries);
         self.runtime.stats = session_stats_from_entries(&entries);
-        self.latest_compaction_record = latest_compaction_record(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.session_browser.current_entries = entries;
         self.mark_current_session_entries_changed();
@@ -316,8 +308,6 @@ impl AppState {
             self.readiness_sequences_by_scope,
         ) = super::session_review::checkpoint_verification_order(&self.session_log_path);
         self.runtime.stats = session_stats_from_entries(&self.session_browser.current_entries);
-        self.latest_compaction_record =
-            latest_compaction_record(&self.session_browser.current_entries);
         self.tool_preview_snapshots =
             restored_tool_preview_snapshot_index(&self.session_browser.current_entries);
         self.mark_current_session_entries_changed();

@@ -7,19 +7,21 @@ use std::{
 use sigil_kernel::{
     AppearanceConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
     PluginCapability, PluginHookKind, PluginTrustDecision, PluginTrustEntry, RootConfig,
-    SessionStreamRecord, ToolEffect, config::TerminalConfig, resolve_workspace_root,
+    SessionStreamCompatibilityError, SessionStreamRecord, ToolEffect, config::TerminalConfig,
+    resolve_workspace_root,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
 use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
+use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV;
 
 use crate::{
     SecretResolution, SecretSource, load_anthropic_config, load_deepseek_config,
-    load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
-    provider_capability_view, provider_config_key, resolve_anthropic_api_key,
-    resolve_deepseek_api_key, resolve_gemini_api_key, resolve_openai_compat_api_key,
-    resolve_sigil_paths,
+    load_gemini_config, load_openai_compat_config, load_openai_responses_config,
+    provider_capabilities_for_name, provider_capability_view, provider_config_key,
+    resolve_anthropic_api_key, resolve_deepseek_api_key, resolve_gemini_api_key,
+    resolve_openai_compat_api_key, resolve_openai_responses_api_key, resolve_sigil_paths,
 };
 
 const MAX_SESSION_STREAMS_DOCTOR_SCAN: usize = 20;

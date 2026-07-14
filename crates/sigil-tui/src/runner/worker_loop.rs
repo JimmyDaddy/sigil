@@ -18,7 +18,7 @@ use sigil_kernel::{
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
     ConversationInputTarget, ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     DiscoveredCheck, EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore,
-    ModelMessage, MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
+    MemoryConfig, ModelMessage, MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
     PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
@@ -52,18 +52,16 @@ use super::{
     event_bridge::ChannelEventHandler,
     mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
     protocol::{
-        CompactionTrigger, McpActivationStatus, QueueMoveDirection, WorkerApprovalCommand,
+        McpActivationStatus, QueueMoveDirection, V2CompactionApplySource, WorkerApprovalCommand,
         WorkerCommand, WorkerMessage,
     },
-    session_flow::{
-        auto_compact_session, load_session, load_session_with_url_capability_attachment,
-        session_compacted_message,
-    },
+    session_flow::{load_session, load_session_with_url_capability_attachment},
 };
 
 mod active_run;
 mod agent_runtime;
 mod checkpoint_runtime;
+mod compaction_runtime;
 mod mcp_refresh;
 mod provider_status;
 mod queue_driver;
@@ -78,23 +76,35 @@ pub(in crate::runner) use agent_runtime::{
     WorkerAgentEventSink, agent_result_continuation_new_thread_ids, cancel_agent_thread,
     close_agent_thread, collect_finished_background_agent_runs, extend_agent_thread_ids_unique,
     manual_agent_invocation_result, manual_agent_parent_summary, message_agent_thread,
-    start_agent_result_continuation_run, start_queued_conversation_run,
+    start_agent_result_continuation_run, start_portable_overflow_recovery_run,
+    start_queued_conversation_run,
 };
 pub(in crate::runner) use checkpoint_runtime::{
     execute_current_checkpoint_restore, fork_current_conversation,
     preview_current_checkpoint_restore,
 };
+pub(in crate::runner) use compaction_runtime::{
+    IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction,
+    QueuedConversationPreTurnAdmission, exact_context_window_rejection_source,
+    has_failed_idle_automatic_scope, prepare_idle_auto_compaction,
+    prepare_next_queued_conversation_pre_turn_admission, prepare_overflow_recovery_compaction,
+    prepare_v2_compaction_review,
+};
 pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;
 pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;
 pub(in crate::runner) use provider_status::drain_provider_status_results;
 pub(in crate::runner) use queue_driver::{
-    ExactConversationPromptStore, append_agent_result_continuation_status_and_notify,
+    AdmittedQueuedConversationCandidate, ExactConversationPromptStore,
+    PreparedQueuedConversationCandidate, QueuedConversationCandidatePreparation,
+    QueuedConversationPressureAdmission, QueuedConversationTerminalClassification,
+    append_agent_result_continuation_status_and_notify,
     append_agent_result_continuation_status_entries, append_queue_failure_and_pause_and_notify,
     append_queue_status_and_notify, cancel_queued_conversation_input,
-    edit_queued_conversation_input, mark_next_conversation_queue_item_dispatching,
-    mark_stale_dispatching_conversation_queue_items, move_queued_conversation_input,
-    promote_queued_conversation_input, queue_conversation_input, send_conversation_queue_update,
-    set_conversation_queue_paused,
+    classify_promoted_queued_conversation, commit_prepared_queued_conversation_candidate,
+    edit_queued_conversation_input, mark_stale_dispatching_conversation_queue_items,
+    move_queued_conversation_input, prepare_next_queued_conversation_candidate,
+    prepare_next_queued_conversation_pressure_admission, promote_queued_conversation_input,
+    queue_conversation_input, send_conversation_queue_update, set_conversation_queue_paused,
 };
 pub(in crate::runner) use scheduler::run_worker_loop;
 pub(in crate::runner) use task_runtime::{
@@ -114,11 +124,9 @@ pub(in crate::runner) use terminal_refresh::{
 
 #[cfg(test)]
 pub(in crate::runner) use agent_runtime::chat_agent_run_input_with_repo_context;
-#[cfg(test)]
-pub(in crate::runner) use agent_runtime::queued_background_ready_transient_context;
 pub(in crate::runner) use agent_runtime::{
     append_mcp_elicitation_audits, partition_agent_result_continuations,
-    pending_agent_result_continuations_from_session,
+    pending_agent_result_continuations_from_session, queued_background_ready_transient_context,
 };
 pub(in crate::runner) use task_runtime::{RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder};
 pub(in crate::runner) use task_runtime::{

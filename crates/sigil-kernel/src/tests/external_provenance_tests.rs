@@ -113,69 +113,6 @@ fn external_source_validation_rejects_forged_raw_signed_display_and_invalid_meta
 }
 
 #[test]
-fn consecutive_compaction_and_recovery_preserve_inherited_external_trust() -> Result<()> {
-    let mut first_session = crate::Session::new("provider", "model");
-    let external_message = ModelMessage::assistant(Some("external answer".to_owned()), Vec::new());
-    first_session.append_assistant_message(external_message.clone())?;
-    let external_source = source(first_session.session_scope_id(), "remote-source")?;
-    let source_id = external_source.source_id.clone();
-    first_session.append_external_provenance(ExternalProvenanceEntry {
-        session_scope_id: first_session.session_scope_id().to_owned(),
-        message_id: external_message.id.clone(),
-        trust: ExternalTrust::ExternalUntrusted,
-        sources: vec![external_source],
-        citations: Vec::new(),
-    })?;
-    first_session.append_user_message(ModelMessage::user("follow up one"))?;
-    first_session.append_assistant_message(ModelMessage::assistant(
-        Some("local answer".to_owned()),
-        Vec::new(),
-    ))?;
-    first_session.append_user_message(ModelMessage::user("follow up two"))?;
-    let config = crate::CompactionConfig {
-        enabled: true,
-        soft_threshold_ratio: 0.5,
-        hard_threshold_ratio: 0.8,
-        context_window_tokens: Some(1_000),
-        tail_messages: 2,
-    };
-    let first = first_session.compact_now(&config)?;
-    assert_eq!(first.external_trust, Some(ExternalTrust::ExternalUntrusted));
-    assert_eq!(first.external_source_ids, vec![source_id.clone()]);
-
-    // Model a recovery surface that retains the prior compaction control record plus later raw
-    // turns, without replaying the already-folded provenance sidecar itself.
-    let mut recovered = crate::Session::from_entries(
-        "provider",
-        "model",
-        vec![
-            crate::SessionLogEntry::Control(crate::ControlEntry::CompactionApplied(first)),
-            crate::SessionLogEntry::User(ModelMessage::user("recovered one")),
-            crate::SessionLogEntry::Assistant(ModelMessage::assistant(
-                Some("recovered two".to_owned()),
-                Vec::new(),
-            )),
-            crate::SessionLogEntry::User(ModelMessage::user("recovered three")),
-            crate::SessionLogEntry::Assistant(ModelMessage::assistant(
-                Some("recovered four".to_owned()),
-                Vec::new(),
-            )),
-        ],
-    );
-    let second = recovered.compact_now(&config)?;
-    assert_eq!(
-        second.external_trust,
-        Some(ExternalTrust::ExternalUntrusted)
-    );
-    assert_eq!(second.external_source_ids, vec![source_id]);
-    assert_eq!(
-        second.external_provenance_message_ids,
-        vec![external_message.id]
-    );
-    Ok(())
-}
-
-#[test]
 fn external_provenance_enforces_source_and_citation_boundaries() -> Result<()> {
     let session_scope_id = "session-a";
     let message = ModelMessage::assistant(Some("safe claim".to_owned()), Vec::new());

@@ -81,9 +81,9 @@ Sigil 已经是一个真正的 TUI-first coding agent，而不是普通 tool-cal
 
 当前问题：
 
-- 当前 JSONL 直接保存 `SessionLogEntry`，还没有统一事件 envelope。
-- 事件缺少 stream sequence、event id、schema version、event version、correlation / causation 链路。
-- JSONL append 还没有明确的 flush / sync policy、尾部半行恢复策略和跨进程单写者约束。
+- 当前 session JSONL 已统一使用 `StoredEvent` envelope，并具备 stream sequence、event id、schema/event version、correlation / causation 链路。
+- 预发布格式边界只接受当前 V2 schema；旧顶层 `SessionLogEntry` 和旧 compaction payload 都不读取、不 upcast、不迁移。
+- 后续工作应继续审计 append flush / sync、尾部恢复和跨进程单写者在新增 durable event 上是否保持一致，而不是重新引入旧格式 bridge。
 - 后续阶段需要的 reducer、projection、evidence 和 crash reconciliation 目前缺少统一输入契约。
 - 事件日志与文件副作用之间还缺少最小 crash-consistency 协议。
 - 流式 reasoning/text delta、spinner 和短暂 tool progress 不应和 durable state change 混在同一事实日志里。
@@ -139,11 +139,8 @@ enum ProtocolEvent {
 ```
 
 6. Durable Event Stream 只记录恢复、审计和投影需要的状态变化；流式 token、reasoning delta 和瞬时进度属于 Live Event，不进入事实日志。
-7. 支持旧日志兼容读取；旧 `SessionLogEntry` 可投影为 legacy envelope：
-   - `legacy stream_sequence` = 原始物理行号。
-   - `legacy event_id` = `UUIDv5(session_id, line_number + raw_line_hash)`。
-   - 旧记录缺少发生时间时，`occurred_at = None`；不要使用本次读取时间伪造历史。
-8. 定义 event upcaster 链路，例如 `v1 -> v2 -> v3`；未知事件处理策略：
+7. 预发布 V2-only cutover：session JSONL 只接受 `StoredEvent`；顶层裸 `SessionLogEntry` 以结构化 compatibility error 拒绝，且不得被 tail recovery 截断、重写或当成空 session。
+8. 正式发布后如需跨已发布 schema 演进，必须另立 migration RFC 定义 event upcaster 链路；当前预发布 V2 不提供 upcaster。未知事件处理策略：
    - 未知但非关键事件：保留原始 event，跳过相关 projection。
    - 影响权限、写入、验证或恢复的未知事件：fail closed。
    - 任何未知事件都不能静默丢弃。
@@ -232,10 +229,9 @@ struct MutationReconciled {
 
 验收标准：
 
-- 新旧 session log 都能加载，并能产出同一类 reducer 输入。
+- V2 session log 能加载并产出 reducer 输入；旧顶层 JSONL 格式必须在任何写入前明确拒绝且保持字节不变。
 - 尾部损坏恢复不会导致整个 session 不可读。
 - 每个 durable event 都有稳定 stream sequence、event id、event type 和 event version。
-- 旧日志每次 rebuild 生成稳定 legacy event id。
 - `record_checksum` 覆盖 event body，checksum 错误不会被当成普通 JSON parse failure。
 - 尾部恢复后用户可以看到 `LogTailRecovered`，不会静默丢弃损坏尾部。
 - 流式 token、reasoning delta 和瞬时进度不会写入 durable event stream。
@@ -869,7 +865,7 @@ cargo test -p sigil-tui
    - observation size / truncation
    - token usage
    - completion verdict
-4. Projection schema 必须可版本化，并能从旧 JSONL 重建。
+4. Projection schema 必须可版本化，并能从 V2 JSONL 重建。
 5. 明确 live state 与 projection 边界：
    - 活跃 turn、tool、approval 使用 live event bus / runtime state。
    - 历史 session、task、cost、agent graph 使用 projection。
@@ -1018,7 +1014,7 @@ struct TaskMemoryV1 {
 - Task memory 与 `ContextDigestV0` 字段边界清楚，不出现两个不兼容 summary 类型。
 - Task memory 绑定 branch / snapshot；不同分支或 restore 后的事实不会静默混用。
 - 模型摘要不能覆盖旧摘要，只能追加新 memory 或 supersede 旧 memory。
-- 旧 session log 可以继续加载；缺少 typed summary 时回退到旧文本摘要。
+- 预发布 cutover 不读取、upcast 或迁移旧 compaction payload：顶层裸 `SessionLogEntry` 与携带旧 `CompactionRecord` 的 V2 envelope 都必须在任何恢复或追加前 fail closed，且源文件保持不变。
 
 建议验证：
 
@@ -1270,7 +1266,7 @@ Durable Event Foundation、deterministic eval、Verification Contract 和 Eviden
 
 第一个月：
 
-- 完成 Durable Event envelope、schema version、stream sequence、event id 和旧日志兼容读取。
+- 完成 Durable Event envelope、schema version、stream sequence、event id 和 V2-only session format gate。
 - 完成 JSONL 尾部损坏恢复、append flush / sync policy 和单写者策略。
 - 完成 deterministic conformance eval，覆盖 verification stale、policy 继承、approval denial、max turns、interrupted reconciliation、secret redaction 和 sandbox fail-closed。
 - 完成 Verification Contract 和 Evidence Projection MVP。
@@ -1300,7 +1296,7 @@ Durable Event Foundation、deterministic eval、Verification Contract 和 Eviden
 
 | 周 | 必须交付 |
 | --- | --- |
-| 1 | Event envelope、旧日志兼容、stream sequence |
+| 1 | Event envelope、V2-only format gate、stream sequence |
 | 2 | Tail recovery、reducer、fake provider / fake tool |
 | 3 | `RunStatus`、`VerificationVerdict`、evidence events |
 | 4 | `/task` 与 TUI verification 状态接入 |

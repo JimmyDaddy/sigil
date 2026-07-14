@@ -187,6 +187,7 @@ pub(super) enum ModalState {
     TextInput(TextInputState),
     McpElicitation(McpElicitationModalState),
     CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
+    V2CompactionPreview(Box<super::compaction_flow::V2CompactionPreviewModalState>),
     KeyboardHelp,
 }
 
@@ -206,6 +207,9 @@ pub(super) enum ModalOutcome {
         target: TextInputTarget,
         value: String,
     },
+    V2CompactionConfirmed {
+        request_id: u64,
+    },
 }
 
 impl AppState {
@@ -216,6 +220,7 @@ impl AppState {
             ModalState::TextInput(state) => Some(state.target.title()),
             ModalState::McpElicitation(_) => Some("MCP Elicitation"),
             ModalState::CheckpointRestore(_) => Some("Restore Checkpoint"),
+            ModalState::V2CompactionPreview(_) => Some("Context Compaction"),
             ModalState::KeyboardHelp => Some("Keyboard Help"),
         }
     }
@@ -284,6 +289,7 @@ impl AppState {
                 lines
             }
             Some(ModalState::CheckpointRestore(_)) => Vec::new(),
+            Some(ModalState::V2CompactionPreview(state)) => state.lines(),
             Some(ModalState::KeyboardHelp) => {
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());
@@ -340,6 +346,7 @@ impl AppState {
             }
             ModalState::ModelPicker(_) => None,
             ModalState::CheckpointRestore(_) => None,
+            ModalState::V2CompactionPreview(_) => None,
             ModalState::KeyboardHelp => None,
         }
     }
@@ -664,6 +671,22 @@ impl AppState {
             },
             ModalState::McpElicitation(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
+            ModalState::V2CompactionPreview(state) => match key.code {
+                KeyCode::Esc => {
+                    self.modal_state = None;
+                    ModalOutcome::Dismissed("closed V2 compaction preview".to_owned())
+                }
+                KeyCode::Enter if state.is_admitted() => {
+                    let request_id = state.request_id();
+                    self.modal_state = None;
+                    ModalOutcome::V2CompactionConfirmed { request_id }
+                }
+                KeyCode::Enter => {
+                    self.modal_state = None;
+                    ModalOutcome::Dismissed("closed V2 compaction preview".to_owned())
+                }
+                _ => ModalOutcome::None,
+            },
             ModalState::KeyboardHelp => match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
                     self.modal_state = None;
@@ -711,6 +734,7 @@ impl AppState {
             ModalState::ModelPicker(_)
             | ModalState::McpElicitation(_)
             | ModalState::CheckpointRestore(_)
+            | ModalState::V2CompactionPreview(_)
             | ModalState::KeyboardHelp => ModalOutcome::None,
         }
     }
@@ -746,6 +770,16 @@ impl AppState {
             }
             ModalState::McpElicitation(_) => self.accept_mcp_elicitation(),
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
+            ModalState::V2CompactionPreview(state) => {
+                if state.is_admitted() {
+                    let request_id = state.request_id();
+                    self.modal_state = None;
+                    ModalOutcome::V2CompactionConfirmed { request_id }
+                } else {
+                    self.modal_state = None;
+                    ModalOutcome::Dismissed("closed V2 compaction preview".to_owned())
+                }
+            }
             ModalState::KeyboardHelp => {
                 self.modal_state = None;
                 ModalOutcome::Dismissed("closed keyboard help".to_owned())
@@ -835,6 +869,9 @@ impl AppState {
                     self.last_notice = Some("skill arguments submitted".to_owned());
                 }
             },
+            ModalOutcome::V2CompactionConfirmed { .. } => {
+                self.last_notice = Some("applying V2 compaction".to_owned());
+            }
         }
     }
 

@@ -277,6 +277,9 @@ pub(in crate::runner) enum RunTaskPayload {
         result: std::result::Result<AgentRunResult, String>,
         plan_mode: bool,
         queue_id: Option<ConversationInputQueueId>,
+        /// Present only for a first foreground conversation request that may qualify for the
+        /// one-shot overflow-recovery controller. Recovery runs deliberately omit it.
+        provider_logical_run_id: Option<String>,
         agent_result_continuation_thread_ids: Vec<AgentThreadId>,
     },
     Agent {

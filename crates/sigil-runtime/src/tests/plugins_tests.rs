@@ -16,8 +16,8 @@ use sigil_kernel::{
     MAX_PLUGIN_HOOK_ARTIFACT_REFS, McpServerStartup, MutationEventRecorder, NetworkEffect,
     NetworkPolicy, PluginCapability, PluginHookExecutionStatus, PluginHookKind,
     PluginHookOutputArtifactRef, PluginSkillRef, PluginTrustDecision, PluginTrustEntry,
-    RedactionState, SecretRedactor, SessionStreamRecord, SkillIndexSnapshot, SkillSource,
-    ToolAccess, ToolCategory, ToolEffect, WorkspaceMutationDetected,
+    RedactionState, SecretRedactor, SkillIndexSnapshot, SkillSource, ToolAccess, ToolCategory,
+    ToolEffect, WorkspaceMutationDetected,
 };
 
 use super::{
@@ -2111,6 +2111,7 @@ impl ExecutionBackend for RecordingExecutionBackend {
                 fs::write(path, content).expect("workspace write should succeed");
             }
             requests.lock().expect("requests should lock").push(request);
+            let output = output.unwrap_or_else(|| complete_output_receipt(&stdout, &stderr));
             Ok(ExecutionReceipt {
                 backend: backend_kind,
                 capabilities,
@@ -2120,10 +2121,37 @@ impl ExecutionBackend for RecordingExecutionBackend {
                 exit_code: Some(0),
                 stdout,
                 stderr,
-                output: output.unwrap_or_default(),
+                output,
                 timed_out: false,
             })
         })
+    }
+}
+
+fn complete_output_receipt(stdout: &[u8], stderr: &[u8]) -> sigil_kernel::ExecutionOutputReceipt {
+    let stream_capture = |bytes: &[u8]| sigil_kernel::ExecutionStreamCapture {
+        total_bytes: bytes.len() as u64,
+        returned_bytes: bytes.len() as u64,
+        omitted_bytes: 0,
+        retained_head_bytes: bytes.len() as u64,
+        retained_tail_bytes: 0,
+        retained_limit_bytes: bytes.len() as u64,
+        hard_limit_bytes: bytes.len() as u64,
+        total_lines: bytes
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            .saturating_add(usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n")))
+            as u64,
+        truncated: false,
+    };
+    sigil_kernel::ExecutionOutputReceipt {
+        schema_version: sigil_kernel::EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+        stdout: stream_capture(stdout),
+        stderr: stream_capture(stderr),
+        combined_total_bytes: stdout.len().saturating_add(stderr.len()) as u64,
+        combined_hard_limit_bytes: stdout.len().saturating_add(stderr.len()) as u64,
+        termination: sigil_kernel::ExecutionTerminationCause::Exited,
     }
 }
 
@@ -2144,9 +2172,7 @@ fn workspace_mutation_events(
 ) -> Result<Vec<(String, WorkspaceMutationDetected)>> {
     let mut events = Vec::new();
     for record in JsonlSessionStore::read_event_records(session_path)? {
-        let SessionStreamRecord::Stored(event) = record else {
-            panic!("plugin lifecycle test should not emit legacy session records");
-        };
+        let event = record.into_stored_event();
         if event.event_type != "workspace_mutation_detected" {
             continue;
         }

@@ -1362,7 +1362,7 @@ fn mouse_click_dangerous_slash_candidate_requires_second_click() -> Result<()> {
 
     assert!(matches!(
         second,
-        AppMouseOutcome::Action(AppAction::CompactNow)
+        AppMouseOutcome::Action(AppAction::PreviewV2Compaction)
     ));
     assert!(app.composer.input.is_empty());
     Ok(())
@@ -1473,8 +1473,8 @@ fn keyboard_enter_dangerous_slash_command_needs_no_mouse_confirmation() -> Resul
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
-    assert!(matches!(action, Some(AppAction::CompactNow)));
-    assert_eq!(app.last_notice(), Some("compact requested"));
+    assert!(matches!(action, Some(AppAction::PreviewV2Compaction)));
+    assert_eq!(app.last_notice(), Some("V2 compact preview requested"));
     Ok(())
 }
 

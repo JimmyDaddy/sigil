@@ -1577,7 +1577,6 @@ fn dispatch_trace_summary(traces: &[DispatchTraceEntry]) -> DispatchTraceSummary
 
 fn session_list_event_type(record: &SessionStreamRecord) -> String {
     match record {
-        SessionStreamRecord::Legacy { .. } => "legacy".to_owned(),
         SessionStreamRecord::Stored(event) => event.event_type.clone(),
     }
 }

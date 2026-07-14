@@ -21,7 +21,7 @@
 
 1. 用 Rust 构建一个可被 TUI、CLI、HTTP、未来桌面端共同复用的 agent kernel，其中 TUI 是第一用户表面。
 2. 保持 provider、tool、plugin 都由配置和注册机制驱动，而不是写死在核心里。
-3. 通过独立 provider crate 支持 DeepSeek、OpenAI-compatible、Anthropic 和 Gemini，同时保持内核 provider-neutral。
+3. 通过独立 provider crate 支持 DeepSeek、OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic 和 Gemini，同时保持内核 provider-neutral。
 4. 内置工具和 MCP 工具通过统一的工具注册表暴露给 agent。
 5. 保持 cache-stable 的 session 设计，把 prefix-cache 命中率视为顶层架构约束，而不是附带优化。
 6. 提供适合自动化 coding 场景的 permission layer 和 workspace confinement。
@@ -108,6 +108,20 @@ sigil/
           *_tests.rs
           stream_test_support.rs
     sigil-provider-openai-compat/
+      src/
+        capabilities.rs
+        client.rs
+        config.rs
+        errors.rs
+        lib.rs
+        mapper.rs
+        models.rs
+        provider.rs
+        request.rs
+        stream.rs
+        tests/
+          *_tests.rs
+    sigil-provider-openai-responses/
       src/
         capabilities.rs
         client.rs
@@ -243,7 +257,8 @@ sigil/
 - `sigil-kernel`：承载 provider、tool、session、event、approval、permission、memory、config 和 agent loop 等通用契约。当前采用 flat public module 文件，测试统一收纳在 `src/tests/*_tests.rs`；这里不出现 DeepSeek 专有字段，也不持有 TUI 状态。
 - `sigil-provider-deepseek`：首个旗舰 provider，内部拆成 transport、endpoint、request、response、stream、mapper、reasoning、tools、pricing 等模块。DeepSeek 专项能力在这里解释和降级，不反向污染 kernel。
 - `sigil-provider-openai-compat`：OpenAI-compatible Chat Completions provider，覆盖通用 streaming text、tool call、usage 和 endpoint/header 配置，不承载 DeepSeek reasoning replay、strict tools、prefix/FIM 或 beta endpoint 语义。
-- `sigil-provider-anthropic`：Anthropic Messages provider，负责 Anthropic 版本 header、beta header、top-level system、`tool_use` / `tool_result`、incremental tool argument，以及 provider-native `web_search_20250305` server tool / citation / continuation 映射；kernel 只看到中立的 message、tool spec、hosted evidence、usage 和 `ProviderChunk`，不会看到 Anthropic tool version、server block 或 encrypted carrier。
+- `sigil-provider-openai-responses`：OpenAI Responses provider，独立处理 Responses 的 `input` / output-item / SSE 协议，并将每轮完整、原样的原生 output items 作为 provider continuation state 绑定到对应 assistant message；它不修改 Chat Completions wire contract，也不把 OpenAI 字段泄漏到 kernel。后续 `/responses/compact` 返回的 opaque window 仍须走独立的加密 candidate 生命周期，不能把候选明文写入 JSONL。
+- `sigil-provider-anthropic`：Anthropic Messages provider，负责 Anthropic 版本 header、beta header、top-level system、`tool_use` / `tool_result`、incremental tool argument，以及 provider-native `web_search_20250305` server tool / citation / continuation 映射。公开 beta `compact-2026-01-12` 仅以 provider-local paused driver 实现：它发送 `context_management.edits=[compact_20260112]` 和 `pause_after_compaction=true`，只接受一个完整 raw `compaction` content array，再将该数组交给 kernel 的加密 candidate 生命周期；它不是 TUI action、不会自动启用、不会激活 boundary，也不支持 Anthropic-compatible endpoint。kernel 只看到中立的 message、tool spec、hosted evidence、usage 和 `ProviderChunk`，不会看到 Anthropic tool version、server block 或 encrypted carrier。
 - `sigil-provider-gemini`：Gemini GenerateContent provider，负责 `systemInstruction`、`functionDeclarations`、`functionCall` / `functionResponse`、block reason，以及 provider-native `google_search` / grounding metadata 映射；Gemini 的 function-response、hosted model eligibility、streaming grounding index 与 retry 细节保留在 provider crate 内。
 - `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。`lib.rs` 只保留兼容 façade；工具注册、workspace path confinement、文件工具、changeset、shell、persistent terminal 和 non-interactive execution backend 分别维护在对应子模块中，backend 内部再按 local / Seatbelt / Bubblewrap / Docker 拆分。
 - `sigil-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、RepoMapLite request-local source map、符号/诊断缓存、warm LSP context snapshot、代码查询 tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果、warm LSP snapshot 和 RepoMapLite 候选只通过 bounded context/tool result 进入 provider-visible history，不注入 system prompt，也不落成 persistent repo graph。`LanguageServerConfig.trust_required = true` 时，runtime 必须把当前 session 对精确 workspace 的 durable trust projection 传到 code-intel，并在 command resolution 与 process spawn 前 fail-closed；旧调用入口和 fresh headless session 默认 `Unknown`，`trust_required = false` 只显式关闭 LSP 进程启动 gate，不改变写工具权限。外部规划型写入采用 kernel-owned `ToolPreparationDraft -> PreparedToolCall` 一次性 envelope：code-intel 只负责单次 LSP plan、source/version/hash、完整 edit set 与 proposed bytes 的进程内 materialization，kernel 用 exact target subjects 求 permission，并把 args、policy、approval、preview 与 execution 绑定同一 digest；execute 只能按值消费 artifact，不能再次查询 LSP。多文件写入复用 RFC-0002 coordinator，进程内失败采用可审计的补偿回滚，crash 仍按逐文件 reconciliation 处理而不宣称原子事务。
@@ -265,7 +280,7 @@ sigil/
 - Markdown 只由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一解析和缩进，不允许 assistant timeline、tool preview、approval modal 各自维护解析规则。
 - 新增快捷键或命令时，必须同步 `commands.rs` metadata、info rail、keyboard help 和 README。
 
-这里要特别说明：这不意味着 `sigil` 被做成 DeepSeek 专属，而是表示第一套“做深做透”的 provider 先落在 DeepSeek 上；OpenAI-compatible、Anthropic 和 Gemini 也必须服从同一个 `sigil-kernel` 契约，而不是反过来把内核做成某家厂商私有运行时。TUI `/config` 和 `doctor` 只消费 `ProviderCapabilities` 派生出的中立 capability view，不展示 provider 私有字段作为产品主心智。
+这里要特别说明：这不意味着 `sigil` 被做成 DeepSeek 专属，而是表示第一套“做深做透”的 provider 先落在 DeepSeek 上；OpenAI-compatible Chat Completions、OpenAI Responses、Anthropic 和 Gemini 也必须服从同一个 `sigil-kernel` 契约，而不是反过来把内核做成某家厂商私有运行时。TUI `/config` 和 `doctor` 只消费 `ProviderCapabilities` 派生出的中立 capability view，不展示 provider 私有字段作为产品主心智。
 
 ## 6. 核心领域模型
 
@@ -591,7 +606,6 @@ pub enum ControlEntry {
     UsageSnapshot(UsageStats),
     ToolApproval(ToolApprovalEntry),
     ToolExecution(ToolExecutionEntry),
-    CompactionApplied(CompactionRecord),
     Note { kind: String, data: serde_json::Value },
 }
 ```
@@ -606,12 +620,12 @@ pub enum ControlEntry {
 - `UsageSnapshot`：记录 usage、cost 与 cache token 统计，供 resume 后恢复 session 生命周期累计 stats
 - `ToolApproval`：记录权限策略评估、审批请求、审批结果和 preview 失败，包含 call id、tool name、access、subjects、policy/user decision、reason 与 preview hash
 - `ToolExecution`：记录工具执行 started/completed/failed/interrupted，包含 duration、subjects、changed files、metadata、structured error 与 provider-visible result hash
-- `CompactionApplied`：记录稳定 compaction summary 与 tail 计数，供后续 request 做 provider-visible projection
+- compaction 不再作为 `ControlEntry` 记录：它使用 `CompactionStarted`、`TaskMemoryRecordedV1`、`CompactionAppliedV2` 和 terminal direct-JSON durable event；只有经 lifecycle/sidecar resolver 验证的 V2 boundary 才能影响 request context
 - `Note`：承接不值得升格为独立结构的控制面元数据
 
 这样做的好处是，provider continuation、后台任务恢复、缓存诊断都会落在同一条 append-only 审计链上，而不是散在 runtime 内存和 UI 状态里。
 
-当前实现中，`Session` 提供 `latest_response_handle`、`latest_prefix_snapshot`、`latest_compaction_record` 和 `continuation_states` 这类显式查询方法；agent run 初始化下一轮 request 时会从 durable control state 恢复最新匹配 provider 的 response handle，而不是只依赖进程内变量。
+当前实现中，`Session` 提供 `latest_response_handle`、`latest_prefix_snapshot`、`continuation_states` 和 store-backed V2 context projection 等显式查询方法；agent run 初始化下一轮 request 时会从 durable control state 恢复最新匹配 provider 的 response handle，而不是只依赖进程内变量。
 
 工具恢复规则是：只有 `Started` 没有 `Completed / Failed / Cancelled / Interrupted` 终态的 execution，在 `Session::load_from_store` 时追加 `Interrupted` 控制记录；provider-visible history 若仍等待 tool result，则投影一个结构化 `ToolErrorKind::Interrupted` tool result，不自动重放工具。
 
@@ -877,7 +891,7 @@ Planner / executor / subagent 协作已经作为 TUI-first task flow 落地。Du
 - Child agent result 默认只把 bounded summary 和 result ref 带回 parent context；`wait_agent` 只负责轻量状态同步，不返回 child final answer 正文。完整 final answer 保留在 child session，需要更多细节时通过独立的 `read_agent_result` tool 显式分页读取；分页正文只作为当前 request 的 transient context 提供给模型，durable parent tool result 只记录 offset、长度、截断状态和 result ref，不能通过无限调大 summary、反复 wait 重复 summary、恢复后重复回放分页正文或回灌完整 child transcript 解决长报告场景。
 - Parent agent 在发起 Agent 类 tool call 的同一 model turn 中产生的 pre-tool assistant 文本只作为 live stream 展示，不作为持久 parent session history 重放，并在 TUI 中按 Thinking 样式渲染；这避免“先自己补做，再等待子 agent”的内容污染父上下文。最终面向用户的回答必须发生在 child result/status 已回到 parent 后的后续 turn。
 - 普通 chat 如果用户明确要求 subagent / 子 agent delegation，TUI 会把该意图映射为 `AgentDelegationRequirement`；agent loop 在可用 Agent 类工具面存在时会拒绝接受未产生 terminal 或 result-bearing Agent 类工具结果的 final answer，先用 transient retry prompt 要求模型调用 `spawn_agent` 等 agent-thread tool，重试后仍未满足时不写入该 final answer；无效输入、tool execution error 或仍处于 running 状态的 agent tool result 不会解除 hard gate。
-- 主会话 running-input queue 是内部 durable control plane，使用 `ConversationInputQueued`、`ConversationInputEdited`、`ConversationInputReordered`、`ConversationInputStatusChanged` 和 `ConversationInputQueueControl` append-only control entry 持久化；TUI 产品层把它呈现为 visible follow-up，而不是暴露为隐藏队列。普通 chat 在 active run busy 时会显示为 follow-up，不提前写入 provider-visible user history；busy 状态下的 agent mention 不会静默降级成 main-thread chat，而是保留输入并提示用户等待或使用专门的 agent message 入口。worker 在当前 turn 结束后 FIFO dispatch，成功写 `Delivered`，失败写 `Rejected` 并 pause queue。`/queue next` 只调整顺序等待下一 turn；`/queue interrupt`（兼容旧别名 `now`）先走 cancel/interrupted audit，再 dispatch 选中 item。
+- 主会话 running-input queue 是内部 durable control plane，使用 `ConversationInputQueued`、`ConversationInputEdited`、`ConversationInputReordered`、`ConversationInputStatusChanged`、`ConversationInputQueueControl` 和 recovery-critical `ConversationInputPromoted` append-only entry 持久化；TUI 产品层把它呈现为 visible follow-up，而不是暴露为隐藏队列。普通 chat 在 active run busy 时会显示为 follow-up，不提前写入 provider-visible user history；busy 状态下的 agent mention 不会静默降级成 main-thread chat，而是保留输入并提示用户等待或使用专门的 agent message 入口。worker 在当前 turn 结束后先冻结 exact request；可证明压力时先应用 portable compaction，再以 queue-revision CAS promotion、safe user/capability commit 和 provider physical-attempt Started 为唯一 send barrier，并把 promotion 的 `dispatch_run_id` 原样作为该首次 physical attempt 的 logical run id。没有本地 admission 时仍可发送同一冻结请求，但不猜测 provider token limit 或启用未证明 compaction。恢复或 run error 只根据同一 logical run 的 durable physical-attempt evidence 分类：已完成、已有输出或副作用后的终态写 `Delivered`；已确认未消费写 `Rejected` 并 pause queue；缺 terminal、传输结果不确定、interrupted、缺失或多个匹配 attempt 一律写 `Stale`，不自动重放远端请求。`/queue next` 只调整顺序等待下一 turn；`/queue interrupt`（兼容旧别名 `now`）先走 cancel/interrupted audit，再 dispatch 选中 item。
 - Background child result completion 与 follow-up / internal queue 有明确优先级：`join_before_final` / blocking child 完成后优先触发 parent continuation；普通 non-blocking background child 完成只写 `AgentResultContinuation(Pending)` ready 状态。当主会话已经有 pending follow-up 时，non-blocking result 不抢占 queued input，只以 bounded transient system notice 提醒模型可按需 `wait_agent` / `read_agent_result`。
 - `/agent close <child-id|current>` 不再由 TUI 直接追加 `AgentThreadClosed`；TUI 只解析目标并发送 worker `CloseAgent`，worker 通过 runtime `close_agent_thread` 复用 model-visible `close_agent` 的 terminal 校验和 control entry 生成，再把同步后的 session entries 返回给 TUI。`/agent cancel <child-id|current>` 解析 running target 后发送 worker `CancelAgent`，background child 的独立 cancellation owner 会先 durable 记录 request，再 cancel+join；quiescence 成功写 `AgentThreadStatusChanged(Cancelled)`，超时写 `Interrupted`/cleanup-incomplete，并统一追加 `AgentRunInterrupted`。
 - `list_agents`、`message_agent`、`cancel_agent` 和 `close_agent` 已作为 agent coordination tools 注册。`list_agents` 返回所有 agent thread 的 status、objective、result ref、messageable/closable/cancelable 与 approval_pending；`message_agent` 用于给 active background child mailbox 投递 follow-up，记录 `AgentThreadMessageRouted` requested -> resolved/rejected 审计，tool result 明确返回 `delivered_to_mailbox`、`will_apply_after_current_turn`、`interrupt_requested=false` 和 `interrupts_in_flight_provider_stream=false`，语义是 next safe point steering，不承诺 mid-token 或正在执行 tool 时实时中断；`cancel_agent` 只取消仍有 live handle 的 running background child；terminal child、无 mailbox 或无效目标会返回 rejected/unsupported，且不改变 child lifecycle terminal status。
@@ -942,7 +956,11 @@ compaction 规则建议如下：
 第一版可以先定义两个阈值：
 
 - `soft threshold`：上下文窗口 50% 左右时允许手动或后台建议 compaction
-- `hard threshold`：上下文窗口 80% 左右时自动执行 compaction
+- `hard threshold`：上下文窗口 80% 左右时只在当前 chat run 已成功结束、无排队输入且 session idle 的安全边界尝试 compaction；仍需本地精确 target admission。未准入不写 session 并进入有限 cooldown；已 Started 后失败按 durable scope fingerprint latch 阻止同一 fold material/target policy 重试。pre-turn、model-switch、mid-turn 与 overflow recovery 不属于这一自动路径
+
+发生 context-window 拒绝也不能仅凭 HTTP status 或错误文本自动重试。唯一启用的 overflow recovery 是官方 OpenAI Responses `https://api.openai.com/v1` 上固定 `gpt-4.1-2025-04-14` snapshot：同一 foreground logical run 必须恰好一条 `context_window_exceeded + ConfirmedNoModelConsumption` durable terminal 且没有 output/side-effect refs；随后对同一冻结 post-compaction target 调用官方 `/responses/input_tokens`，并以该计数、显式 32K output reservation 与 8K safety buffer 完成完整 fit proof。计数本身先写同步、non-generating 的 `InputTokenMeasurement` start/terminal，成功后才允许新的 portable lifecycle；TUI 先刷新 lifecycle，再把仅存在进程内的一个冻结 target 交给一次新的 conversation attempt。alias、兼容 endpoint、普通错误、计数失败、profile drift、多个 physical attempt、任何 crash/restart 均 fail closed，不重发计数、不 apply、不 replay conversation；恢复后的 run 也不具备递归恢复资格。DeepSeek V4 Flash 仍没有本项 provider rejection contract，因此不进入 overflow path。
+
+模型切换不是 mid-turn recovery：busy 状态下 `/model` 直接拒绝；成功切换时强制新建 session。worker 层同样拒绝在 active run 中切换或新建 session，因此不会让一次已发出的 provider 请求跨 provider/model identity 继续或重放。
 
 除此之外，还应加一条和成本直接相关的策略：
 
@@ -1528,7 +1546,7 @@ pub struct DeepSeekProviderQuirkProfile {
 - agent runtime 特判
 - request builder 的隐式 if/else
 
-已经落地的 `sigil-provider-anthropic`、`sigil-provider-gemini` 和 `sigil-provider-openai-compat` 也沿用同样模式：
+已经落地的 `sigil-provider-anthropic`、`sigil-provider-gemini`、`sigil-provider-openai-compat` 和 `sigil-provider-openai-responses` 也沿用同样模式：
 
 - 通用能力进 `ProviderCapabilities`
 - 厂商怪异行为进 provider-specific quirk profile

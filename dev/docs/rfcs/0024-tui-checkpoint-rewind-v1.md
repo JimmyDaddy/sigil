@@ -18,7 +18,7 @@ Checkpoint / Rewind V1 只承诺两类可证明操作：恢复当前 session 中
 
 ## 2. Goals
 
-1. 从 mixed durable stream 投影按 user turn 聚合的 checkpoint，且只把已 committed 的普通文件 mutation 视为可恢复候选。
+1. 从 V2 durable stream 投影按 user turn 聚合的 checkpoint，且只把已 committed 的普通文件 mutation 视为可恢复候选。
 2. 在任何写入前验证 checkpoint digest、workspace、所有目标当前 hash 与 snapshot artifact 可用性。
 3. 对一个 checkpoint 的受控文件提供可审计 batch restore；restore 本身继续产生 mutation records、`CheckpointRestored` 和 verification stale evidence。
 4. 在 TUI Session Review 中提供恢复预览、明确确认、冲突说明与 conversation fork。
@@ -35,7 +35,7 @@ Checkpoint / Rewind V1 只承诺两类可证明操作：恢复当前 session 中
 
 ## 4. Durable Projection
 
-V1 不新增重复的 `FileSnapshotCaptured` 或第二套 artifact store。`ControlledCheckpointProjection` 从现有 mixed stream 派生：
+V1 不新增重复的 `FileSnapshotCaptured` 或第二套 artifact store。`ControlledCheckpointProjection` 从现有 V2 stream 派生：
 
 - `SessionLogEntry::User` 建立 turn boundary；
 - `MutationPrepared` 提供 path、before hash、snapshot coverage、workspace id 和 operation identity；
@@ -109,7 +109,7 @@ Esc         close without changing files
 
 ## 10. Implementation Progress
 
-- `C24.1` complete：mixed-stream checkpoint projection、same-path folding、stable id/digest 和
+- `C24.1` complete：V2-stream checkpoint projection、same-path folding、stable id/digest 和
   artifact lifecycle availability 已落地。
 - `C24.2` complete：exact restore preview、workspace lease 下的 full preflight、batch restore、
   `CheckpointRestoreConflict` 与 restore verification-stale evidence 已落地。

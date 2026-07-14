@@ -524,7 +524,7 @@ fn restore_initial_session_from_disk(
                 &root_config.agent.provider,
                 &root_config.agent.model,
                 "restored requested session",
-            ) {
+            )? {
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("no saved session matches {selector}"))

@@ -17,6 +17,10 @@ pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
             resolve_openai_compat_config(root_config)?,
             timeouts,
         )?)),
+        "openai_responses" => Ok(Box::new(OpenAiResponsesProvider::new(
+            resolve_openai_responses_config(root_config)?,
+            timeouts,
+        )?)),
         "anthropic" => Ok(Box::new(AnthropicProvider::new(
             resolve_anthropic_config(root_config)?,
             timeouts,
@@ -70,6 +74,7 @@ pub fn provider_capabilities_for_name(provider_name: &str) -> Option<ProviderCap
     match provider_config_key(provider_name) {
         "deepseek" => Some(deepseek_capabilities()),
         "openai_compat" => Some(openai_compatible_capabilities()),
+        "openai_responses" => Some(openai_responses_capabilities()),
         "anthropic" => Some(anthropic_capabilities()),
         "gemini" => Some(gemini_capabilities()),
         _ => None,
@@ -288,6 +293,26 @@ pub fn load_openai_compat_config(
     Ok(config)
 }
 
+/// Parses the OpenAI Responses provider block from the shared root config.
+///
+/// # Errors
+///
+/// Returns an error when `[providers.openai_responses]` is missing or malformed.
+pub fn load_openai_responses_config(
+    root_config: &RootConfig,
+) -> Result<OpenAiResponsesProviderConfig> {
+    let provider_config_value = root_config
+        .providers
+        .get("openai_responses")
+        .cloned()
+        .ok_or_else(|| anyhow!("missing [providers.openai_responses] in sigil.toml"))?;
+    let mut config: OpenAiResponsesProviderConfig =
+        serde_json::from_value(provider_config_value)
+            .context("invalid openai_responses provider config")?;
+    config.model = root_config.agent.model.clone();
+    Ok(config)
+}
+
 /// Parses the Anthropic provider block from the shared root config.
 ///
 /// # Errors
@@ -357,6 +382,18 @@ pub fn resolve_openai_compat_config(
     root_config: &RootConfig,
 ) -> Result<OpenAiCompatibleProviderConfig> {
     load_openai_compat_config(root_config)?.resolved()
+}
+
+/// Resolves OpenAI Responses configuration with runtime overrides applied.
+///
+/// # Errors
+///
+/// Returns an error when provider config is missing, malformed, or an environment override is
+/// invalid.
+pub fn resolve_openai_responses_config(
+    root_config: &RootConfig,
+) -> Result<OpenAiResponsesProviderConfig> {
+    load_openai_responses_config(root_config)?.resolved()
 }
 
 /// Resolves Anthropic configuration with runtime overrides applied.
@@ -431,6 +468,44 @@ pub fn resolve_openai_compat_api_key_with_session(
         return Some(SecretResolution {
             value,
             source: SecretSource::Environment(OPENAI_COMPATIBLE_API_KEY_ENV),
+        });
+    }
+    if let Some(value) = session_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(SecretResolution {
+            value: value.to_owned(),
+            source: SecretSource::Session,
+        });
+    }
+    config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| SecretResolution {
+            value: value.to_owned(),
+            source: SecretSource::ConfigPlaintext,
+        })
+}
+
+#[must_use]
+pub fn resolve_openai_responses_api_key(
+    config: &OpenAiResponsesProviderConfig,
+) -> Option<SecretResolution> {
+    resolve_openai_responses_api_key_with_session(config, None)
+}
+
+#[must_use]
+pub fn resolve_openai_responses_api_key_with_session(
+    config: &OpenAiResponsesProviderConfig,
+    session_value: Option<&str>,
+) -> Option<SecretResolution> {
+    if let Some(value) = read_secret_env(OPENAI_RESPONSES_API_KEY_ENV) {
+        return Some(SecretResolution {
+            value,
+            source: SecretSource::Environment(OPENAI_RESPONSES_API_KEY_ENV),
         });
     }
     if let Some(value) = session_value
@@ -535,6 +610,11 @@ pub fn secret_redactor_for_root_config(root_config: &RootConfig) -> SecretRedact
     }
     if let Ok(config) = load_openai_compat_config(root_config)
         && let Some(api_key) = resolve_openai_compat_api_key(&config)
+    {
+        redactor.add_secret(api_key.value);
+    }
+    if let Ok(config) = load_openai_responses_config(root_config)
+        && let Some(api_key) = resolve_openai_responses_api_key(&config)
     {
         redactor.add_secret(api_key.value);
     }

@@ -46,7 +46,7 @@ fn compact_command_dispatches_worker_action_when_idle() -> Result<()> {
 
     let action = app.submit_input()?;
 
-    assert!(matches!(action, Some(AppAction::CompactNow)));
+    assert!(matches!(action, Some(AppAction::PreviewV2Compaction)));
     Ok(())
 }
 
@@ -57,7 +57,7 @@ fn compact_command_prefix_is_resolved_to_exact_command() -> Result<()> {
 
     let action = app.submit_input()?;
 
-    assert!(matches!(action, Some(AppAction::CompactNow)));
+    assert!(matches!(action, Some(AppAction::PreviewV2Compaction)));
     Ok(())
 }
 
@@ -1400,7 +1400,7 @@ fn submit_root_slash_executes_selected_command() -> Result<()> {
 
     let action = app.submit_input()?;
 
-    assert!(matches!(action, Some(AppAction::CompactNow)));
+    assert!(matches!(action, Some(AppAction::PreviewV2Compaction)));
     Ok(())
 }
 

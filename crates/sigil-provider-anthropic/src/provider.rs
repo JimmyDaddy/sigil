@@ -31,12 +31,12 @@ const ANTHROPIC_MAX_ATTEMPTS: usize = 2;
 
 #[derive(Clone)]
 pub struct AnthropicProvider {
-    config: AnthropicProviderConfig,
-    timeouts: ModelRequestTimeouts,
+    pub(crate) config: AnthropicProviderConfig,
+    pub(crate) timeouts: ModelRequestTimeouts,
     capabilities: ProviderCapabilities,
     client: reqwest::Client,
     hosted_continuations: AnthropicHostedContinuationStore,
-    hosted_platform: AnthropicHostedPlatform,
+    pub(crate) hosted_platform: AnthropicHostedPlatform,
 }
 
 impl AnthropicProvider {
@@ -58,7 +58,7 @@ impl AnthropicProvider {
         })
     }
 
-    fn api_key(&self) -> Result<String> {
+    pub(crate) fn api_key(&self) -> Result<String> {
         if let Some(api_key) = &self.config.api_key
             && !api_key.trim().is_empty()
         {
@@ -67,7 +67,7 @@ impl AnthropicProvider {
         Err(AnthropicProviderError::MissingApiKey.into())
     }
 
-    fn messages_url(&self) -> String {
+    pub(crate) fn messages_url(&self) -> String {
         format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'))
     }
 }
@@ -167,6 +167,15 @@ impl AnthropicProvider {
         url: &str,
         body: &T,
     ) -> Result<reqwest::Response> {
+        self.post_json_with_required_beta(url, body, &[]).await
+    }
+
+    pub(crate) async fn post_json_with_required_beta<T: serde::Serialize>(
+        &self,
+        url: &str,
+        body: &T,
+        required_beta_headers: &[&str],
+    ) -> Result<reqwest::Response> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
@@ -178,7 +187,16 @@ impl AnthropicProvider {
             HeaderValue::from_str(self.config.anthropic_version.trim())
                 .context("invalid Anthropic version header")?,
         );
-        if let Some(beta) = beta_header(&self.config.beta_headers)? {
+        let mut beta_headers = self.config.beta_headers.clone();
+        for required in required_beta_headers {
+            if !beta_headers
+                .iter()
+                .any(|configured| configured.trim() == *required)
+            {
+                beta_headers.push((*required).to_owned());
+            }
+        }
+        if let Some(beta) = beta_header(&beta_headers)? {
             headers.insert("anthropic-beta", beta);
         }
 
@@ -293,7 +311,7 @@ fn response_stream(
     }))
 }
 
-fn provider_timeout_error(
+pub(crate) fn provider_timeout_error(
     phase: ProviderTimeoutPhase,
     timeouts: ModelRequestTimeouts,
     provider: &str,
@@ -330,7 +348,7 @@ fn enqueue_frames(
     enqueue_decoded_frames(mapper, pending, frames)
 }
 
-async fn read_error_response_body(
+pub(crate) async fn read_error_response_body(
     response: reqwest::Response,
     timeout: Duration,
     redactor: &SecretRedactor,

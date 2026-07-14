@@ -133,7 +133,7 @@ impl AppState {
             | UiCommand::OpenConfig
             | UiCommand::OpenDoctor
             | UiCommand::StartNewSession
-            | UiCommand::CompactNow
+            | UiCommand::PreviewV2Compaction
             | UiCommand::CycleAgentView
             | UiCommand::CycleAgentViewPrevious
             | UiCommand::CheckChangedFilesDiagnostics => false,

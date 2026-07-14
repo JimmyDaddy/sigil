@@ -218,7 +218,6 @@ fn safe_prefix_for_complete_turn(
 
 fn session_entry(record: &SessionStreamRecord) -> Result<Option<SessionLogEntry>> {
     match record {
-        SessionStreamRecord::Legacy { entry, .. } => Ok(Some((**entry).clone())),
         SessionStreamRecord::Stored(event) => event
             .payload
             .get("session_log_entry")

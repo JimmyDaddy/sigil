@@ -1,56 +1,56 @@
 use super::*;
-use crate::{CommandPermissionMatch, LegacyEvent};
+use crate::CommandPermissionMatch;
 
 /// Append-only session log entry stored in the durable JSONL session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // Keep the durable JSONL shape unboxed across control variants.
 #[serde(rename_all = "snake_case")]
 pub enum SessionLogEntry {
-    #[serde(alias = "User")]
     User(ModelMessage),
-    #[serde(alias = "Assistant")]
     Assistant(ModelMessage),
-    #[serde(alias = "ToolResult")]
     ToolResult(ModelMessage),
-    #[serde(alias = "Control")]
     Control(ControlEntry),
 }
 
-/// One physical record in a mixed legacy/v2 session stream.
+/// One v2 durable record in a session stream.
 #[derive(Debug, Clone)]
 pub enum SessionStreamRecord {
-    Legacy {
-        event: LegacyEvent,
-        entry: Box<SessionLogEntry>,
-    },
     Stored(StoredEvent),
 }
 
 impl SessionStreamRecord {
+    /// Returns the v2 durable envelope carried by this stream record.
+    pub fn stored_event(&self) -> &StoredEvent {
+        let Self::Stored(event) = self;
+        event
+    }
+
+    /// Consumes this record and returns its v2 durable envelope.
+    pub fn into_stored_event(self) -> StoredEvent {
+        let Self::Stored(event) = self;
+        event
+    }
+
     pub fn stream_sequence(&self) -> u64 {
         match self {
-            Self::Legacy { event, .. } => event.stream_sequence,
             Self::Stored(event) => event.stream_sequence,
         }
     }
 
     pub fn session_id(&self) -> &str {
         match self {
-            Self::Legacy { event, .. } => &event.session_id,
             Self::Stored(event) => &event.session_id,
         }
     }
 
     pub fn event_id(&self) -> &str {
         match self {
-            Self::Legacy { event, .. } => &event.event_id,
             Self::Stored(event) => &event.event_id,
         }
     }
 
     pub fn record_checksum(&self) -> &str {
         match self {
-            Self::Legacy { event, .. } => &event.raw_line_hash,
             Self::Stored(event) => &event.record_checksum,
         }
     }
@@ -67,7 +67,6 @@ impl SessionStreamRecord {
 
     pub fn domain_event_record(&self) -> Result<Option<DomainEventRecord>> {
         let domain_event = match self {
-            Self::Legacy { event, .. } => Some(DomainEvent::Legacy(event.clone())),
             Self::Stored(event) => match decode_stored_event(event.clone())? {
                 StoredEventDecode::Known(event) => Some(event),
                 StoredEventDecode::UnknownNonCritical(_) => None,
@@ -80,17 +79,18 @@ impl SessionStreamRecord {
     }
 
     pub fn typed_domain_event_record(&self) -> Result<Option<TypedDomainEventRecord>> {
-        let Self::Stored(event) = self else {
-            return Ok(None);
-        };
-        let typed_event = match decode_typed_stored_event(event.clone())? {
-            TypedStoredEventDecode::Known(event) => Some(*event),
-            TypedStoredEventDecode::UnknownNonCritical(_) => None,
-        };
-        Ok(typed_event.map(|event| TypedDomainEventRecord {
-            event,
-            cursor: self.projection_cursor(SESSION_ENTRY_PROJECTION_SCHEMA_VERSION),
-        }))
+        match self {
+            Self::Stored(event) => {
+                let typed_event = match decode_typed_stored_event(event.clone())? {
+                    TypedStoredEventDecode::Known(event) => Some(*event),
+                    TypedStoredEventDecode::UnknownNonCritical(_) => None,
+                };
+                Ok(typed_event.map(|event| TypedDomainEventRecord {
+                    event,
+                    cursor: self.projection_cursor(SESSION_ENTRY_PROJECTION_SCHEMA_VERSION),
+                }))
+            }
+        }
     }
 }
 
@@ -123,31 +123,6 @@ pub struct DomainEventRecord {
 pub struct TypedDomainEventRecord {
     pub event: TypedDomainEvent,
     pub cursor: ProjectionCursor,
-}
-
-/// Stable compaction metadata persisted in the append-only control plane.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct CompactionRecord {
-    pub summary: String,
-    pub compacted_message_count: usize,
-    pub retained_tail_message_count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_memory: Option<crate::TaskMemoryV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_trust: Option<ExternalTrust>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external_provenance_message_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external_source_ids: Vec<String>,
-}
-
-/// Deterministic preview of what one manual compaction would fold and project.
-#[derive(Debug, Clone)]
-pub struct CompactionPreview {
-    pub record: CompactionRecord,
-    pub folded_messages: Vec<ModelMessage>,
-    pub projected_messages: Vec<ModelMessage>,
 }
 
 /// Stable memory payload captured for a specific memory fingerprint.
@@ -201,7 +176,6 @@ pub enum ControlEntry {
     ChangeSetProposed(ChangeSet),
     ChangeSetApplied(ChangeSetResult),
     TerminalTask(TerminalTaskEntry),
-    CompactionApplied(CompactionRecord),
     PlanApproved(PlanApprovedEntry),
     PlanDraftCreated(PlanDraftCreatedEntry),
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
@@ -256,6 +230,10 @@ pub enum ControlEntry {
     ConversationInputEdited(ConversationInputEditedEntry),
     ConversationInputReordered(ConversationInputReorderedEntry),
     ConversationInputStatusChanged(ConversationInputStatusEntry),
+    /// Audit projection of the critical direct queue-promotion event. The safe user message is
+    /// bound here for replay, but does not become provider-visible until the pre-turn sender
+    /// consumes the promotion contract.
+    ConversationInputPromoted(crate::ConversationInputPromotedEntry),
     Note {
         kind: String,
         data: serde_json::Value,
@@ -263,7 +241,7 @@ pub enum ControlEntry {
 }
 
 /// Append-only audit entry for permission policy evaluation and interactive approval decisions.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolApprovalEntry {
     pub action: ToolApprovalAuditAction,
@@ -286,7 +264,6 @@ pub struct ToolApprovalEntry {
     pub external_directory_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<PermissionConfirmation>,
-    #[serde(default)]
     pub snapshot_required: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_permission_matches: Vec<CommandPermissionMatch>,
@@ -297,94 +274,6 @@ pub struct ToolApprovalEntry {
     pub user_decision: Option<ToolApprovalUserDecision>,
     pub reason: Option<String>,
     pub preview_hash: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct ToolApprovalEntryWire {
-    action: ToolApprovalAuditAction,
-    call_id: String,
-    tool_name: String,
-    access: ToolAccessWire,
-    #[serde(default)]
-    network_effect: Option<NetworkEffect>,
-    #[serde(default)]
-    local_policy_decision: Option<ApprovalMode>,
-    #[serde(default)]
-    network_policy_decision: Option<ApprovalMode>,
-    #[serde(default)]
-    source_policy_decision: Option<ApprovalMode>,
-    #[serde(default)]
-    operation: Option<ToolOperation>,
-    #[serde(default)]
-    risk: Option<PermissionRisk>,
-    subjects: Vec<ToolSubjectAudit>,
-    #[serde(default)]
-    subject_zones: Vec<PathTrustZone>,
-    policy_decision: ApprovalMode,
-    external_directory_required: bool,
-    #[serde(default)]
-    confirmation: Option<PermissionConfirmation>,
-    #[serde(default)]
-    snapshot_required: bool,
-    #[serde(default)]
-    command_permission_matches: Vec<CommandPermissionMatch>,
-    #[serde(default)]
-    allow_source: Option<ToolApprovalAllowSource>,
-    #[serde(default)]
-    grant_call_id: Option<String>,
-    user_decision: Option<ToolApprovalUserDecision>,
-    reason: Option<String>,
-    preview_hash: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for ToolApprovalEntry {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = ToolApprovalEntryWire::deserialize(deserializer)?;
-        let legacy_network_access = wire.access == ToolAccessWire::Network;
-        let (access, network_effect) = wire.access.upcast_network_effect(wire.network_effect);
-        let local_policy_decision =
-            wire.local_policy_decision
-                .unwrap_or(if legacy_network_access {
-                    ApprovalMode::Allow
-                } else {
-                    wire.policy_decision
-                });
-        let network_policy_decision =
-            wire.network_policy_decision
-                .unwrap_or(if legacy_network_access {
-                    wire.policy_decision
-                } else {
-                    ApprovalMode::Allow
-                });
-        Ok(Self {
-            action: wire.action,
-            call_id: wire.call_id,
-            tool_name: wire.tool_name,
-            access,
-            network_effect,
-            local_policy_decision,
-            network_policy_decision,
-            source_policy_decision: wire.source_policy_decision.unwrap_or(ApprovalMode::Allow),
-            operation: wire.operation,
-            risk: wire.risk,
-            subjects: wire.subjects,
-            subject_zones: wire.subject_zones,
-            policy_decision: wire.policy_decision,
-            external_directory_required: wire.external_directory_required,
-            confirmation: wire.confirmation,
-            snapshot_required: wire.snapshot_required,
-            command_permission_matches: wire.command_permission_matches,
-            allow_source: wire.allow_source,
-            grant_call_id: wire.grant_call_id,
-            user_decision: wire.user_decision,
-            reason: wire.reason,
-            preview_hash: wire.preview_hash,
-        })
-    }
 }
 
 /// Source that allowed a tool call after policy evaluation.
@@ -414,7 +303,7 @@ pub enum ToolApprovalUserDecision {
 }
 
 /// Append-only session-local approval grant created from an interactive tool approval.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolApprovalSessionGrantEntry {
     pub call_id: String,
@@ -428,59 +317,9 @@ pub struct ToolApprovalSessionGrantEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subject_zones: Vec<PathTrustZone>,
     pub facets: Vec<ToolApprovalSessionGrantFacet>,
-    #[serde(default)]
     pub scope: ToolApprovalSessionGrantScope,
     pub expires: ToolApprovalSessionGrantExpiry,
     pub granted_at_ms: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct ToolApprovalSessionGrantEntryWire {
-    call_id: String,
-    tool_name: String,
-    access: ToolAccessWire,
-    #[serde(default)]
-    network_effect: Option<NetworkEffect>,
-    operation: ToolOperation,
-    risk: PermissionRisk,
-    subjects: Vec<ToolSubjectAudit>,
-    #[serde(default)]
-    subject_zones: Vec<PathTrustZone>,
-    #[serde(default = "default_tool_approval_session_grant_facets")]
-    facets: Vec<ToolApprovalSessionGrantFacet>,
-    #[serde(default)]
-    scope: ToolApprovalSessionGrantScope,
-    expires: ToolApprovalSessionGrantExpiry,
-    granted_at_ms: u64,
-}
-
-impl<'de> Deserialize<'de> for ToolApprovalSessionGrantEntry {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = ToolApprovalSessionGrantEntryWire::deserialize(deserializer)?;
-        let (access, network_effect) = wire.access.upcast_network_effect(wire.network_effect);
-        Ok(Self {
-            call_id: wire.call_id,
-            tool_name: wire.tool_name,
-            access,
-            network_effect,
-            operation: wire.operation,
-            risk: wire.risk,
-            subjects: wire.subjects,
-            subject_zones: wire.subject_zones,
-            facets: wire.facets,
-            scope: wire.scope,
-            expires: wire.expires,
-            granted_at_ms: wire.granted_at_ms,
-        })
-    }
-}
-
-fn default_tool_approval_session_grant_facets() -> Vec<ToolApprovalSessionGrantFacet> {
-    vec![ToolApprovalSessionGrantFacet::Local]
 }
 
 /// Expiration policy for a session-local tool approval grant.
@@ -553,6 +392,16 @@ impl McpElicitationEntry {
             content_redacted: content.is_some(),
         }
     }
+}
+
+fn truncate_stable(content: &str, max_chars: usize) -> String {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = normalized.chars().count();
+    if char_count <= max_chars {
+        return normalized;
+    }
+    let truncated = normalized.chars().take(max_chars).collect::<String>();
+    format!("{truncated}...")
 }
 
 /// Stable MCP elicitation user decision persisted in the control log.

@@ -1,6 +1,6 @@
 # RFC-0010 Structured Compaction and Task Memory
 
-状态：draft / E10.1-E10.6 implemented / productization remains
+状态：K25 durable V2 implementation in progress
 
 创建日期：2026-06-28
 
@@ -90,7 +90,7 @@ It should not replay every old tool output into transcript.
 
 ## 8. Implementation Slices
 
-1. Typed compaction record and `TaskMemoryV1` data model.
+1. Typed durable compaction lifecycle and `TaskMemoryV1` sidecar data model.
 2. Deterministic extraction from durable events.
 3. Optional model-assisted summary with sourced/unverified markings.
 4. Context Engine retrieval integration.
@@ -101,8 +101,16 @@ It should not replay every old tool output into transcript.
 
 核心语义已实现：
 
-- `CompactionRecord` can carry typed `TaskMemoryV1` while old sessions without
-  typed memory continue to load from the legacy text summary.
+- V2 compaction lifecycle uses `CompactionStarted`, `TaskMemoryRecordedV1`,
+  `CompactionAppliedV2` and terminal failure/skip events. `TaskMemoryV1` is a
+  canonical-hashed sidecar, rather than a field in a legacy control entry.
+- The pre-release build does not read, upcast or migrate legacy `CompactionRecord`
+  payloads. Raw legacy `SessionLogEntry` JSONL and a legacy compaction payload inside
+  a V2 envelope are rejected before recovery or append can mutate the stream.
+- The same V2-only rule applies to durable nested payloads: removed access variants,
+  missing approval/grant facets, and incomplete execution or terminal-output evidence
+  are rejected directly. The runtime does not infer a replacement value or reserialize
+  an old representation as current state.
 - Deterministic extraction builds `TaskMemoryV1` from durable/control events
   without inventing verification evidence from model text.
 - Model-assisted task memory import preserves `model_generated=true`,
@@ -110,12 +118,19 @@ It should not replay every old tool output into transcript.
   evidence.
 - TaskMemoryV1 can be converted into RFC-0006 ContextItems with TaskDigest
   source, trust/sensitivity labels, token cost and durable event provenance.
-- TUI session provider view now shows a compact memory inspect block when typed
-  memory exists, covering objective, decisions, files changed, checks run and
-  unresolved issues without replaying old tool output.
-- Default store-backed compaction attaches deterministic `TaskMemoryV1` when
-  the durable stream has workspace snapshot evidence; store-less or
-  insufficient-evidence sessions keep textual fallback.
+- `/compact` currently provides a read-only V2 fold/keep/protection preview. It
+  does not create a checkpoint or present legacy memory data. Lifecycle and memory
+  rendering become a user-facing flow only after the verified request-fit admission
+  and confirmed apply slice are complete.
+- K25.3 has added the inactive V2 initiated lifecycle (`CompactionStarted` plus
+  exactly one `CompactionAppliedV2` or `CompactionFailed`) with strict durable
+  lineage and explicit idempotent recovery. It does not yet let a V2 record
+  alter task memory, continuation state, chat context or the TUI flow.
+- K25.4 now persists strict, canonical-hashed `TaskMemoryRecordedV1` sidecars
+  and checkpoint bindings. They remain inactive until the same Start lineage
+  writes `CompactionAppliedV2`; resolver replay validates memory/checkpoint id,
+  branch, snapshot, cursor and supersedes lineage, while explicit invalidation
+  removes the sidecar. This still does not inject context or change the TUI.
 
 Productization remains:
 
@@ -125,13 +140,16 @@ Productization remains:
 - Cross-session retention, memory editing and branch/worktree invalidation UX
   remain future productization topics.
 - Memory editing is intentionally out of scope.
+- K25.5 consumes only K25.4-resolved sidecars in a chat-only context projection,
+  preserving raw messages before the first V2 activation and never letting an orphan
+  record affect context.
 
 ## 9. Acceptance Criteria
 
 - Compaction preserves task objective, constraints, decisions, files, commands and verification references.
 - Model-generated facts are visibly unverified unless backed by durable receipt.
 - Task memory binds to branch/snapshot and can be invalidated.
-- Old sessions without typed memory still load using legacy text summary.
+- Legacy compaction payloads are rejected rather than reconstructed from a text summary.
 
 ## 10. Validation
 

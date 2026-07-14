@@ -229,7 +229,6 @@ async fn transport_barrier_orders_durable_authorization_and_presentation_before_
         .into_iter()
         .filter_map(|record| match record {
             SessionStreamRecord::Stored(event) => event.event_kind(),
-            SessionStreamRecord::Legacy { .. } => None,
         })
         .collect();
     let authorization = order
@@ -287,7 +286,6 @@ async fn query_barrier_orders_presentation_and_start_before_body_and_charges_bud
         .into_iter()
         .filter_map(|record| match record {
             SessionStreamRecord::Stored(event) => event.event_kind(),
-            SessionStreamRecord::Legacy { .. } => None,
         })
         .collect();
     let presented = order

@@ -4,8 +4,7 @@ use ratatui::text::Line;
 use serde_json::Value;
 use sigil_kernel::{
     AgentMailboxStatus, AgentThreadStateProjection, ContextInclusionReason, ContextItem,
-    ContextSource, PackedContext, ResumeJobStateProjection, SessionLogEntry, SourcedFact,
-    TaskMemoryV1,
+    ContextSource, PackedContext, ResumeJobStateProjection, SessionLogEntry,
 };
 
 use crate::{
@@ -425,82 +424,6 @@ pub(crate) struct QueueActionButtonViewModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TaskMemoryInspectViewModel {
-    pub summary: String,
-    pub objective: String,
-    pub decisions: Vec<String>,
-    pub files_changed: Vec<String>,
-    pub checks_run: Vec<String>,
-    pub unresolved: Vec<String>,
-}
-
-impl TaskMemoryInspectViewModel {
-    pub(crate) fn from_task_memory(memory: &TaskMemoryV1) -> Self {
-        Self {
-            summary: format!(
-                "memory: {} · snapshot {}",
-                compact_identifier(&memory.memory_id),
-                compact_identifier(&memory.valid_for_snapshot)
-            ),
-            objective: format!("objective: {}", compact_memory_text(&memory.objective)),
-            decisions: memory
-                .decisions
-                .iter()
-                .take(3)
-                .map(|decision| {
-                    let mut line = format!(
-                        "decision: {}{}",
-                        compact_memory_text(&decision.decision.text),
-                        fact_source_marker(&decision.decision)
-                    );
-                    if let Some(rationale) = &decision.rationale {
-                        line.push_str(&format!(" · why {}", compact_memory_text(&rationale.text)));
-                    }
-                    line
-                })
-                .collect(),
-            files_changed: memory
-                .files_changed
-                .iter()
-                .take(5)
-                .map(|file| format!("file: {}", file.path.display()))
-                .collect(),
-            checks_run: memory
-                .verification_results
-                .iter()
-                .take(5)
-                .map(|receipt| format!("check: {}", compact_identifier(receipt)))
-                .collect(),
-            unresolved: memory
-                .unresolved_issues
-                .iter()
-                .take(3)
-                .map(|fact| {
-                    format!(
-                        "unresolved: {}{}",
-                        compact_memory_text(&fact.text),
-                        fact_source_marker(fact)
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    pub(crate) fn lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            "[memory]".to_owned(),
-            self.summary.clone(),
-            self.objective.clone(),
-        ];
-        lines.extend(non_empty_or_none(&self.decisions, "decision"));
-        lines.extend(non_empty_or_none(&self.files_changed, "file"));
-        lines.extend(non_empty_or_none(&self.checks_run, "check"));
-        lines.extend(non_empty_or_none(&self.unresolved, "unresolved"));
-        lines
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecoveryPanelViewModel {
     pub title: String,
     pub last_known: String,
@@ -626,43 +549,6 @@ fn recovery_risk_summary(
     } else {
         parts.join(" · ")
     }
-}
-
-fn non_empty_or_none(lines: &[String], label: &str) -> Vec<String> {
-    if lines.is_empty() {
-        vec![format!("{label}: none")]
-    } else {
-        lines.to_vec()
-    }
-}
-
-fn fact_source_marker(fact: &SourcedFact) -> &'static str {
-    if fact.model_generated {
-        " [model summary context]"
-    } else if fact.source_receipt_id.is_some() || fact.source_artifact_id.is_some() {
-        " [memory context]"
-    } else {
-        ""
-    }
-}
-
-fn compact_identifier(value: &str) -> String {
-    compact_string(value, 24)
-}
-
-fn compact_memory_text(value: &str) -> String {
-    compact_string(value, 96)
-}
-
-fn compact_string(value: &str, max_chars: usize) -> String {
-    let value = value.trim();
-    if value.chars().count() <= max_chars {
-        return value.to_owned();
-    }
-    let keep = max_chars.saturating_sub(3);
-    let mut text = value.chars().take(keep).collect::<String>();
-    text.push_str("...");
-    text
 }
 
 // RFC-0006 keeps this adapter available for the provenance surface without adding another default

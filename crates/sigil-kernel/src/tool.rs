@@ -24,7 +24,7 @@ const MODEL_TOOL_CONTENT_HEAD_BYTES: usize = 24 * 1024;
 const MODEL_TOOL_CONTENT_TAIL_BYTES: usize = 8 * 1024;
 
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolSpec {
     pub name: String,
@@ -35,38 +35,6 @@ pub struct ToolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_effect: Option<NetworkEffect>,
     pub preview: ToolPreviewCapability,
-}
-
-impl<'de> Deserialize<'de> for ToolSpec {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        struct ToolSpecWire {
-            name: String,
-            description: String,
-            input_schema: Value,
-            category: ToolCategory,
-            access: ToolAccessWire,
-            #[serde(default)]
-            network_effect: Option<NetworkEffect>,
-            preview: ToolPreviewCapability,
-        }
-
-        let wire = ToolSpecWire::deserialize(deserializer)?;
-        let (access, network_effect) = wire.access.upcast_network_effect(wire.network_effect);
-        Ok(Self {
-            name: wire.name,
-            description: wire.description,
-            input_schema: wire.input_schema,
-            category: wire.category,
-            access,
-            network_effect,
-            preview: wire.preview,
-        })
-    }
 }
 
 /// Role-specific tool visibility and execution scope.
@@ -229,30 +197,6 @@ impl NetworkEffect {
             Self::Read => "read",
             Self::Mutate => "mutate",
             Self::Unknown => "unknown",
-        }
-    }
-}
-
-/// Deserialize-only access wire that recognizes the removed legacy `network` variant.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ToolAccessWire {
-    Read,
-    Write,
-    Execute,
-    Network,
-}
-
-impl ToolAccessWire {
-    pub(crate) fn upcast_network_effect(
-        self,
-        network_effect: Option<NetworkEffect>,
-    ) -> (ToolAccess, Option<NetworkEffect>) {
-        match self {
-            Self::Read => (ToolAccess::Read, network_effect),
-            Self::Write => (ToolAccess::Write, network_effect),
-            Self::Execute => (ToolAccess::Execute, network_effect),
-            Self::Network => (ToolAccess::Read, Some(NetworkEffect::Unknown)),
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::{fs, io::Write};
+use std::{fs, io::Write, path::PathBuf};
 
 use anyhow::Result;
 use fs2::FileExt;
@@ -11,9 +11,9 @@ use crate::{
     AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState, CandidateCheck, ChangeSet,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, ContextBodyRef,
-    ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
-    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ChildVerificationReceiptLinked, CompletionCriteria, ContextBodyRef, ContextInclusionReason,
+    ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel, ConversationInputKind,
+    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
     ConversationInputStatusEntry, ConversationInputTarget, DomainEvent, DomainPayload,
     DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, ExecutionMutationProfile,
@@ -25,8 +25,8 @@ use crate::{
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
     ResponseHandle, RunStatus, RuntimeContextCandidates, SandboxProfileRequirement, SessionRef,
     SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode,
-    SkillSource, SkillTrustState, StoredEvent, TaskId, TaskMemoryV1, TaskPlanEntry, TaskPlanStatus,
-    TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
+    SkillSource, SkillTrustState, StoredEvent, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
     TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
     ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry,
     ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
@@ -41,8 +41,8 @@ use crate::{
 };
 
 use super::{
-    CompactionConfig, ControlEntry, JsonlSessionStore, PrefixSnapshot, Session, SessionLogEntry,
-    session_stats_from_entries,
+    ControlEntry, JsonlSessionStore, PrefixSnapshot, Session, SessionLogEntry,
+    SessionStreamCompatibilityError, session_stats_from_entries,
 };
 
 fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
@@ -755,14 +755,18 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
 }
 
 #[test]
-fn session_entry_from_json_line_decodes_legacy_v2_and_skips_unknown_noncritical() -> Result<()> {
+fn session_entry_from_json_line_rejects_legacy_and_skips_unknown_noncritical() -> Result<()> {
     assert!(JsonlSessionStore::session_entry_from_json_line("  \n  ")?.is_none());
 
     let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
     let legacy_line = serde_json::to_string(&legacy_entry)?;
-    let decoded = JsonlSessionStore::session_entry_from_json_line(&legacy_line)?
-        .expect("legacy line should decode to session entry");
-    assert!(matches!(decoded, SessionLogEntry::User(_)));
+    let error = JsonlSessionStore::session_entry_from_json_line(&legacy_line)
+        .expect_err("legacy line must be rejected");
+    let compatibility = error
+        .downcast_ref::<SessionStreamCompatibilityError>()
+        .expect("legacy line must return a structured compatibility error");
+    assert_eq!(compatibility.path, PathBuf::from("<session JSONL line>"));
+    assert_eq!(compatibility.physical_line, 1);
 
     let v2_entry =
         SessionLogEntry::Assistant(ModelMessage::assistant(Some("v2".to_owned()), Vec::new()));
@@ -1333,7 +1337,7 @@ fn writer_mode_loader_fails_when_session_file_is_locked() -> Result<()> {
 }
 
 #[test]
-fn non_v2_line_after_v2_fails_closed() -> Result<()> {
+fn legacy_line_after_v2_is_rejected_as_an_unsupported_format() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -1354,8 +1358,84 @@ fn non_v2_line_after_v2_fails_closed() -> Result<()> {
     assert!(
         error
             .to_string()
-            .contains("legacy session entry appears after v2")
+            .contains("unsupported legacy SessionLogEntry format")
     );
+    Ok(())
+}
+
+#[test]
+fn legacy_line_before_v2_is_rejected_as_an_unsupported_format() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let legacy = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?;
+    let v2 = stored_session_entry_line(&SessionLogEntry::User(ModelMessage::user("v2")), 2)?;
+    fs::write(&path, format!("{legacy}\n{v2}"))?;
+
+    let error = JsonlSessionStore::read_event_records(&path)
+        .expect_err("legacy entry before v2 should fail closed");
+    let compatibility = error
+        .downcast_ref::<SessionStreamCompatibilityError>()
+        .expect("legacy prefix must return a structured compatibility error");
+    assert_eq!(compatibility.path, path);
+    assert_eq!(compatibility.physical_line, 1);
+    Ok(())
+}
+
+#[test]
+fn legacy_compaction_record_inside_a_v2_envelope_is_rejected_without_recovery_or_append()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let legacy_payload = serde_json::json!({
+        "control": {
+            "compaction_applied": {
+                "summary": "old compact summary",
+                "compacted_message_count": 2,
+                "retained_tail_message_count": 1,
+                "task_memory": null,
+                "external_trust": null,
+                "external_provenance_message_ids": [],
+                "external_source_ids": []
+            }
+        }
+    });
+    let legacy_event = StoredEvent::new(
+        DurableEventType::SessionEntryRecorded,
+        EventClass::NonCritical,
+        "event-1".to_owned(),
+        "session-test".to_owned(),
+        1,
+        serde_json::json!({ "session_log_entry": legacy_payload.clone() }),
+    )?;
+    let content = format!("{}{{unterminated-tail", legacy_event.to_json_line()?);
+    fs::write(&path, &content)?;
+
+    let read_error = JsonlSessionStore::read_event_records(&path)
+        .expect_err("legacy compaction record must not be read from a v2 envelope");
+    let compatibility = read_error
+        .downcast_ref::<SessionStreamCompatibilityError>()
+        .expect("legacy compaction record must return a structured compatibility error");
+    assert_eq!(compatibility.path, path);
+    assert_eq!(compatibility.physical_line, 1);
+    assert_eq!(compatibility.format_name, "legacy CompactionRecord payload");
+    assert_eq!(fs::read_to_string(&path)?, content);
+
+    let store = JsonlSessionStore::new(&path)?;
+    let append_error = store
+        .append_event(
+            DurableEventType::SessionEntryRecorded,
+            EventClass::NonCritical,
+            serde_json::json!({ "session_log_entry": legacy_payload }),
+        )
+        .expect_err("legacy compaction record must not be appended");
+    assert!(
+        append_error
+            .to_string()
+            .contains("legacy CompactionRecord payload is unsupported")
+    );
+    assert_eq!(fs::read_to_string(&path)?, content);
+    assert!(!super::tail_recovery_intent_path(&path).exists());
+    assert!(!temp.path().join(".sigil-recovery").exists());
     Ok(())
 }
 
@@ -1436,6 +1516,49 @@ fn append_event_reconciles_pending_tail_recovery_intent_before_append() -> Resul
         Some(3)
     );
     assert!(!super::tail_recovery_intent_path(&path).exists());
+    Ok(())
+}
+
+#[test]
+fn pending_tail_recovery_intent_does_not_modify_an_unsupported_legacy_stream() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let content = format!(
+        "{}\n",
+        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?
+    );
+    fs::write(&path, &content)?;
+    let quarantine_path = temp.path().join("quarantined-copy");
+    fs::write(&quarantine_path, &content)?;
+    super::write_tail_recovery_intent(
+        &path,
+        &super::TailRecoveryIntent {
+            original_size: content.len() as u64,
+            recovered_size: 0,
+            discarded_bytes: content.len() as u64,
+            quarantine_path,
+            original_hash: stable_event_hash(content.as_bytes()),
+            event_id: "tail-recovery-event".to_owned(),
+            session_id: "legacy-session".to_owned(),
+        },
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+
+    let error = store
+        .append_event(
+            DurableEventType::ToolExecutionStarted,
+            EventClass::Critical,
+            serde_json::json!({"call_id": "must-not-append"}),
+        )
+        .expect_err("legacy stream must not enter tail recovery");
+    assert!(
+        error
+            .downcast_ref::<SessionStreamCompatibilityError>()
+            .is_some()
+    );
+    assert_eq!(fs::read_to_string(&path)?, content);
+    assert!(super::tail_recovery_intent_path(&path).exists());
+    assert!(!temp.path().join(".sigil-recovery").exists());
     Ok(())
 }
 
@@ -1612,9 +1735,7 @@ fn writer_mode_loader_recovers_tail_corruption_without_prior_records() -> Result
     let records = store.read_event_records_writer()?;
 
     assert_eq!(records.len(), 1);
-    let SessionStreamRecord::Stored(event) = &records[0] else {
-        panic!("tail recovery should append a stored event");
-    };
+    let event = records[0].stored_event();
     assert_eq!(
         event.event_type,
         DurableEventType::LogTailRecovered.as_str()
@@ -1724,6 +1845,74 @@ fn v2_stream_checksum_mismatch_fails_with_line_context() -> Result<()> {
     let message = error.to_string();
     assert!(message.contains("failed to parse stored event on line 1"));
     assert!(format!("{error:#}").contains("checksum mismatch"));
+    Ok(())
+}
+
+#[test]
+fn writer_preserves_v2_records_without_optional_occurred_at() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let first = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+    let first_line = first.to_json_line()?;
+    assert!(!first_line.contains("occurred_at"));
+    fs::write(&path, &first_line)?;
+
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_event(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|record| {
+        !matches!(
+            record,
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::LogTailRecovered.as_str()
+        )
+    }));
+    assert!(fs::read_to_string(&path)?.starts_with(&first_line));
+    assert!(!temp.path().join(".sigil-recovery").exists());
+    Ok(())
+}
+
+#[test]
+fn writer_rejects_v2_envelope_missing_checksum_without_recovery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+    let mut incomplete = serde_json::to_value(event)?;
+    incomplete
+        .as_object_mut()
+        .expect("stored event serializes to an object")
+        .remove("record_checksum");
+    let content = format!("{}\n", serde_json::to_string(&incomplete)?);
+    fs::write(&path, &content)?;
+
+    let store = JsonlSessionStore::new(&path)?;
+    let error = store
+        .read_event_records_writer()
+        .expect_err("incomplete V2 envelope must fail closed before recovery");
+    assert!(format!("{error:#}").contains("record_checksum"));
+    assert_eq!(fs::read_to_string(&path)?, content);
+    assert!(!super::tail_recovery_intent_path(&path).exists());
+    assert!(!temp.path().join(".sigil-recovery").exists());
     Ok(())
 }
 
@@ -3841,57 +4030,6 @@ fn build_request_injects_context_v0_dynamic_suffix_from_session_archive() -> Res
 }
 
 #[test]
-fn build_request_injects_context_v0_from_latest_task_memory() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
-        summary: "typed task memory summary".to_owned(),
-        compacted_message_count: 0,
-        retained_tail_message_count: 0,
-        task_memory: Some(TaskMemoryV1 {
-            memory_id: "runtime-memory".to_owned(),
-            branch_id: None,
-            valid_for_snapshot: "snapshot-runtime".to_owned(),
-            supersedes: None,
-            source_event_ids: vec!["event-objective".to_owned()],
-            objective: "Keep context provenance inspectable".to_owned(),
-            constraints: Vec::new(),
-            decisions: Vec::new(),
-            files_changed: Vec::new(),
-            commands_run: Vec::new(),
-            verification_results: Vec::new(),
-            failed_attempts: Vec::new(),
-            risks: Vec::new(),
-            unresolved_issues: Vec::new(),
-        }),
-        external_trust: None,
-        external_provenance_message_ids: Vec::new(),
-        external_source_ids: Vec::new(),
-    }))?;
-    session.append_user_message(ModelMessage::user("What context should I keep in mind?"))?;
-
-    let request = session.build_request(
-        temp.path(),
-        &MemoryConfig { enabled: false },
-        Vec::new(),
-        None,
-        None,
-        None,
-    )?;
-
-    let context_messages = request_context_v0_messages(&request);
-    assert_eq!(context_messages.len(), 1);
-    let context_text = context_messages[0]
-        .content
-        .as_deref()
-        .expect("context content");
-    assert!(context_text.contains("task-memory:runtime-memory:objective"));
-    assert!(context_text.contains("Keep context provenance inspectable"));
-    assert!(context_text.contains("event-objective"));
-    Ok(())
-}
-
-#[test]
 fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
@@ -4357,15 +4495,6 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
             opaque_blob: serde_json::json!({"cursor":"new"}),
         },
     ))?;
-    session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
-        summary: "summary-old".to_owned(),
-        compacted_message_count: 1,
-        retained_tail_message_count: 2,
-        task_memory: None,
-        external_trust: None,
-        external_provenance_message_ids: Vec::new(),
-        external_source_ids: Vec::new(),
-    }))?;
     session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
         provider_name: "deepseek".to_owned(),
         response_id: "response-new".to_owned(),
@@ -4379,15 +4508,6 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         memory_fingerprint: "memory-new".to_owned(),
         tool_schema_fingerprint: "tools-new".to_owned(),
         skill_index_fingerprint: "skills-new".to_owned(),
-    }))?;
-    session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
-        summary: "summary-new".to_owned(),
-        compacted_message_count: 3,
-        retained_tail_message_count: 2,
-        task_memory: None,
-        external_trust: None,
-        external_provenance_message_ids: Vec::new(),
-        external_source_ids: Vec::new(),
     }))?;
 
     assert!(matches!(
@@ -4403,179 +4523,9 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         session.latest_prefix_snapshot(),
         Some(snapshot) if snapshot.sha256 == "new"
     ));
-    assert!(matches!(
-        session.latest_compaction_record(),
-        Some(record) if record.summary == "summary-new"
-    ));
     let states = session.continuation_states("deepseek");
     assert_eq!(states.len(), 1);
     assert_eq!(states[0].opaque_blob, serde_json::json!({"cursor":"new"}));
-    Ok(())
-}
-
-#[test]
-fn compaction_persists_record_and_projects_summary_plus_tail() -> Result<()> {
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    session.append_user_message(ModelMessage::user("step one"))?;
-    session.append_assistant_message(ModelMessage::assistant(
-        Some("step two".to_owned()),
-        Vec::new(),
-    ))?;
-    session.append_user_message(ModelMessage::user("step three"))?;
-    session.append_assistant_message(ModelMessage::assistant(
-        Some("step four".to_owned()),
-        Vec::new(),
-    ))?;
-
-    let record = session.compact_now(&CompactionConfig {
-        enabled: true,
-        soft_threshold_ratio: 0.5,
-        hard_threshold_ratio: 0.8,
-        context_window_tokens: Some(1000),
-        tail_messages: 2,
-    })?;
-
-    assert_eq!(record.compacted_message_count, 2);
-    assert_eq!(record.retained_tail_message_count, 2);
-    assert!(session.entries().iter().any(|entry| {
-        matches!(entry, SessionLogEntry::Control(ControlEntry::CompactionApplied(saved)) if saved == &record)
-    }));
-
-    let projected = session.messages();
-    assert_eq!(projected.len(), 3);
-    assert!(
-        projected[0]
-            .content
-            .as_deref()
-            .is_some_and(|content| content.contains("Compacted 2 earlier messages"))
-    );
-    assert_eq!(projected[1].content.as_deref(), Some("step three"));
-    assert_eq!(projected[2].content.as_deref(), Some("step four"));
-    Ok(())
-}
-
-#[test]
-fn compaction_attaches_task_memory_from_durable_evidence() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
-    session.append_user_message(ModelMessage::user("step one"))?;
-    session.append_assistant_message(ModelMessage::assistant(
-        Some("step two".to_owned()),
-        Vec::new(),
-    ))?;
-    session.append_user_message(ModelMessage::user("step three"))?;
-    session.append_assistant_message(ModelMessage::assistant(
-        Some("step four".to_owned()),
-        Vec::new(),
-    ))?;
-    session.append_durable_event(
-        DurableEventType::MutationCommitted,
-        EventClass::Critical,
-        serde_json::json!({
-            "operation_id": "op-readme",
-            "batch_id": null,
-            "workspace_id": "workspace-1",
-            "observed_after_hash": "sha256:after",
-            "workspace_revision": 3,
-            "workspace_snapshot_id": "snapshot-readme",
-            "committed_subject": {
-                "file": {
-                    "path": "README.md",
-                    "file_type": "file"
-                }
-            }
-        }),
-    )?;
-
-    let record = session.compact_now(&CompactionConfig {
-        enabled: true,
-        soft_threshold_ratio: 0.5,
-        hard_threshold_ratio: 0.8,
-        context_window_tokens: Some(1000),
-        tail_messages: 2,
-    })?;
-
-    let memory = record
-        .task_memory
-        .as_ref()
-        .expect("durable mutation evidence should produce typed task memory");
-    assert_eq!(memory.valid_for_snapshot, "snapshot-readme");
-    assert!(memory.files_changed.iter().any(|file| {
-        file.path == std::path::Path::new("README.md")
-            && file.mutation_receipt_id.as_deref() == Some("op-readme")
-    }));
-    assert!(
-        session
-            .latest_compaction_record()
-            .and_then(|saved| saved.task_memory)
-            .is_some_and(|saved| saved.valid_for_snapshot == "snapshot-readme")
-    );
-    Ok(())
-}
-
-#[test]
-fn can_compact_requires_a_safe_boundary() -> Result<()> {
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    session.append_assistant_message(ModelMessage::assistant(
-        None,
-        vec![crate::ToolCall {
-            id: "tool-1".to_owned(),
-            name: "read_file".to_owned(),
-            args_json: "{\"path\":\"README.md\"}".to_owned(),
-        }],
-    ))?;
-    session.append_tool_message(ModelMessage::tool("tool-1", "ok"))?;
-
-    assert!(!session.can_compact(&CompactionConfig {
-        enabled: true,
-        soft_threshold_ratio: 0.5,
-        hard_threshold_ratio: 0.8,
-        context_window_tokens: Some(1000),
-        tail_messages: 1,
-    }));
-    Ok(())
-}
-
-#[test]
-fn compaction_preview_reports_folded_messages_and_projected_after_state() -> Result<()> {
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    session.append_user_message(ModelMessage::user("alpha"))?;
-    session
-        .append_assistant_message(ModelMessage::assistant(Some("beta".to_owned()), Vec::new()))?;
-    session.append_user_message(ModelMessage::user("gamma"))?;
-    session.append_assistant_message(ModelMessage::assistant(
-        Some("delta".to_owned()),
-        Vec::new(),
-    ))?;
-
-    let preview = session
-        .compaction_preview(&CompactionConfig {
-            enabled: true,
-            soft_threshold_ratio: 0.5,
-            hard_threshold_ratio: 0.8,
-            context_window_tokens: Some(1000),
-            tail_messages: 2,
-        })?
-        .expect("preview should exist");
-
-    assert_eq!(preview.record.compacted_message_count, 2);
-    assert_eq!(preview.folded_messages.len(), 2);
-    assert_eq!(preview.projected_messages.len(), 3);
-    assert!(
-        preview.projected_messages[0]
-            .content
-            .as_deref()
-            .is_some_and(|content| content.contains("Compacted 2 earlier messages"))
-    );
-    assert_eq!(
-        preview.projected_messages[1].content.as_deref(),
-        Some("gamma")
-    );
-    assert_eq!(
-        preview.projected_messages[2].content.as_deref(),
-        Some("delta")
-    );
     Ok(())
 }
 
@@ -4602,24 +4552,15 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
             cache_savings: 0.0,
             system_fingerprint: None,
         })),
-        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
-            summary: "summary".to_owned(),
-            compacted_message_count: 2,
-            retained_tail_message_count: 2,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        })),
     ];
 
     let stats = session_stats_from_entries(&entries);
     let session = Session::from_entries("deepseek", "deepseek-v4-flash", entries);
 
     assert_eq!(stats.prompt_tokens, 168);
-    assert_eq!(stats.last_prompt_tokens, 0);
+    assert_eq!(stats.last_prompt_tokens, 48);
     assert_eq!(session.stats().prompt_tokens, 168);
-    assert_eq!(session.stats().last_prompt_tokens, 0);
+    assert_eq!(session.stats().last_prompt_tokens, 48);
     Ok(())
 }
 
@@ -4651,17 +4592,6 @@ fn usage_stats_projection_replays_durable_stream_records() -> Result<()> {
             system_fingerprint: None,
         },
     )))?;
-    store.append_session_entry_event(&SessionLogEntry::Control(
-        ControlEntry::CompactionApplied(CompactionRecord {
-            summary: "summary".to_owned(),
-            compacted_message_count: 2,
-            retained_tail_message_count: 2,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        }),
-    ))?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
 
     let stats = session
@@ -4675,7 +4605,7 @@ fn usage_stats_projection_replays_durable_stream_records() -> Result<()> {
     assert_eq!(stats.input_cost, 17.0);
     assert_eq!(stats.output_cost, 6.0);
     assert_eq!(stats.cache_savings, 10.0);
-    assert_eq!(stats.last_prompt_tokens, 0);
+    assert_eq!(stats.last_prompt_tokens, 48);
     Ok(())
 }
 
@@ -5012,40 +4942,6 @@ fn ensure_identity_entry_is_idempotent() -> Result<()> {
 }
 
 #[test]
-fn compaction_preview_returns_none_for_insufficient_history() -> Result<()> {
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    session.append_user_message(ModelMessage::user("only one"))?;
-
-    let preview = session.compaction_preview(&CompactionConfig {
-        enabled: true,
-        soft_threshold_ratio: 0.5,
-        hard_threshold_ratio: 0.8,
-        context_window_tokens: Some(1000),
-        tail_messages: 2,
-    })?;
-
-    assert!(preview.is_none());
-    Ok(())
-}
-
-#[test]
-fn compact_now_rejects_disabled_config() {
-    let mut session = Session::new("deepseek", "deepseek-v4-flash");
-
-    let error = session
-        .compact_now(&CompactionConfig {
-            enabled: false,
-            soft_threshold_ratio: 0.5,
-            hard_threshold_ratio: 0.8,
-            context_window_tokens: Some(1000),
-            tail_messages: 2,
-        })
-        .expect_err("disabled compaction should fail");
-
-    assert!(error.to_string().contains("compaction is disabled"));
-}
-
-#[test]
 fn load_from_store_does_not_duplicate_closed_tool_execution() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
@@ -5114,52 +5010,15 @@ fn jsonl_session_store_ignores_blank_lines_and_reports_parse_context() -> Result
 }
 
 #[test]
-fn session_compaction_helpers_cover_disabled_and_insufficient_history_paths() -> Result<()> {
+fn session_store_and_stats_helpers_remain_available() {
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    let disabled = CompactionConfig {
-        enabled: false,
-        ..CompactionConfig::default()
-    };
-    let enabled = CompactionConfig {
-        enabled: true,
-        ..CompactionConfig::default()
-    };
-
-    assert!(!session.can_compact(&disabled));
-    assert!(
-        session
-            .compact_now(&disabled)
-            .expect_err("disabled compaction should fail")
-            .to_string()
-            .contains("disabled")
-    );
-    assert!(
-        session
-            .compaction_preview(&disabled)
-            .expect_err("disabled compaction preview should fail")
-            .to_string()
-            .contains("disabled")
-    );
-    assert!(session.compaction_preview(&enabled)?.is_none());
-
-    session.append_user_message(ModelMessage::user("hello"))?;
-    assert!(
-        session
-            .compact_now(&enabled)
-            .expect_err("single-message history should be insufficient")
-            .to_string()
-            .contains("enough history")
-    );
-    assert!(!session.can_compact(&enabled));
-
     assert_eq!(session.store_path(), None);
     session.stats_mut().last_prompt_tokens = 9;
     assert_eq!(session.stats().last_prompt_tokens, 9);
-    Ok(())
 }
 
 #[test]
-fn session_projection_helpers_repair_orphans_and_ignore_empty_compaction_records() -> Result<()> {
+fn session_projection_repairs_orphan_tool_results() -> Result<()> {
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     session.append_assistant_message(ModelMessage::assistant(
         None,
@@ -5169,91 +5028,10 @@ fn session_projection_helpers_repair_orphans_and_ignore_empty_compaction_records
             args_json: "{}".to_owned(),
         }],
     ))?;
-    session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
-        summary: "   ".to_owned(),
-        compacted_message_count: 1,
-        retained_tail_message_count: 1,
-        task_memory: None,
-        external_trust: None,
-        external_provenance_message_ids: Vec::new(),
-        external_source_ids: Vec::new(),
-    }))?;
-
     let projected = session.messages();
     assert_eq!(projected.len(), 2);
     assert_eq!(projected[1].tool_call_id.as_deref(), Some("call-1"));
-
-    let summary = super::compaction_summary_message(&CompactionRecord {
-        summary: "summary".to_owned(),
-        compacted_message_count: 2,
-        retained_tail_message_count: 1,
-        task_memory: None,
-        external_trust: None,
-        external_provenance_message_ids: Vec::new(),
-        external_source_ids: Vec::new(),
-    });
-    assert_eq!(summary.role, crate::MessageRole::Assistant);
-    assert_eq!(summary.content.as_deref(), Some("summary"));
-    assert!(summary.id.starts_with("compaction:"));
     Ok(())
-}
-
-#[test]
-fn session_boundary_summary_and_identity_helpers_cover_tool_edges() {
-    assert_eq!(super::compaction_boundary(&[], 2), 0);
-
-    let assistant_call = ModelMessage::assistant(
-        None,
-        vec![crate::ToolCall {
-            id: "call-1".to_owned(),
-            name: "read_file".to_owned(),
-            args_json: "{}".to_owned(),
-        }],
-    );
-    let tool_message = ModelMessage::tool("call-1", "result");
-    let user_message = ModelMessage::user("follow up");
-    let boundary =
-        super::compaction_boundary(&[assistant_call.clone(), tool_message, user_message], 1);
-    assert_eq!(boundary, 0);
-
-    let summary = super::summarize_messages(&[
-        ModelMessage::system("system prompt"),
-        ModelMessage::user("hello\nworld"),
-        assistant_call.clone(),
-        ModelMessage::assistant(
-            Some("checking provider shape".to_owned()),
-            vec![crate::ToolCall {
-                id: "call-2".to_owned(),
-                name: "grep".to_owned(),
-                args_json: "{}".to_owned(),
-            }],
-        ),
-        ModelMessage {
-            id: "tool-no-id".to_owned(),
-            role: crate::MessageRole::Tool,
-            content: Some("content".repeat(80)),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            assistant_kind: None,
-        },
-    ]);
-    assert!(summary.contains("01. system system prompt"));
-    assert!(summary.contains("03. assistant tool_calls [read_file]"));
-    assert!(summary.contains("04. assistant checking provider shape tool_calls [grep]"));
-    assert!(summary.contains("05. tool unknown =>"));
-    assert!(summary.contains("..."));
-
-    assert_eq!(super::truncate_stable("a   b", 10), "a b");
-    assert!(super::truncate_stable(&"x".repeat(200), 12).ends_with("..."));
-
-    let identity_entries = vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
-        provider_name: "deepseek".to_owned(),
-        model_name: "deepseek-v4".to_owned(),
-    })];
-    assert_eq!(
-        super::session_identity_from_entries(&identity_entries),
-        Some(("deepseek".to_owned(), "deepseek-v4".to_owned()))
-    );
 }
 
 #[test]

@@ -8,12 +8,18 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ApprovalMode, ChangeSet, ChangeSetResult, CommandPermissionMatch, ControlEntry,
+    ApprovalMode, ChangeSet, ChangeSetResult, CommandPermissionMatch, CompactionAppliedV2,
+    CompactionFailureEntry, CompactionStartedEntry, ControlEntry, ConversationInputPromotedEntry,
     EgressDisclosurePresented, HostedToolAuthorization, HostedToolOutcome, JobIntentEntry,
     McpTransportAuthorization, ModelMessage, MutationCommitted, MutationPrepared, NetworkEffect,
-    PathTrustZone, PermissionConfirmation, PermissionRisk, ProviderContinuationState,
-    QueryEgressOutcome, QueryEgressStarted, SessionLogEntry, StepLeaseEntry,
-    StepLeaseHeartbeatEntry, TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview,
+    PathTrustZone, PermissionConfirmation, PermissionRisk,
+    ProviderContinuationCandidateInvalidatedEntry, ProviderContinuationCandidateRecordedEntry,
+    ProviderContinuationObservedEntry, ProviderContinuationPayloadLifecycleEntry,
+    ProviderContinuationState, ProviderContinuationToolClosureRecordedEntry,
+    ProviderObservedResolutionPlanRecordedEntry, ProviderPhysicalAttemptStartedEntry,
+    ProviderPhysicalAttemptTerminalEntry, QueryEgressOutcome, QueryEgressStarted, SessionLogEntry,
+    StepLeaseEntry, StepLeaseHeartbeatEntry, TaskMemoryInvalidatedEntry, TaskMemoryRecordedV1,
+    TerminalTaskEntry, ToolCall, ToolOperation, ToolOutputProjectionShrinkRecorded, ToolPreview,
     ToolProgressEvent, ToolResult, ToolSpec, ToolSubject, UsageStats, VerificationCheckRunEntry,
     VerificationFailureLocatorRecorded, VerificationReceiptLinkRecorded, VerificationRecordedEntry,
     WebFetchTransportAuthorization, WorkspaceMutationDetected,
@@ -76,44 +82,30 @@ pub struct DurableEventPayloadMetadata {
     pub payload_name: &'static str,
 }
 
-/// Stable deserialize-only view of one legacy `SessionLogEntry` line.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LegacyEvent {
-    pub event_id: EventId,
-    pub session_id: SessionId,
-    pub stream_sequence: u64,
-    pub raw_line_hash: String,
-    pub payload: Value,
-}
-
 macro_rules! durable_event_types {
     ($($variant:ident => ($wire_name:literal, $sync_class:ident, $event_class:ident, $payload_storage:ident, $payload_name:literal),)+) => {
         /// Known durable event type names.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum DurableEventType {
             $($variant,)+
-            Legacy,
         }
 
         /// Strong reducer-facing event.
         #[derive(Debug, Clone, PartialEq)]
         pub enum DurableDomainEvent {
             $($variant(DomainPayload),)+
-            Legacy(LegacyEvent),
         }
 
         impl DurableEventType {
             pub fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $wire_name,)+
-                    Self::Legacy => "legacy",
                 }
             }
 
             pub fn from_event_type(value: &str) -> Option<Self> {
                 Some(match value {
                     $($wire_name => Self::$variant,)+
-                    "legacy" => Self::Legacy,
                     _ => return None,
                 })
             }
@@ -121,14 +113,12 @@ macro_rules! durable_event_types {
             pub fn sync_class(self) -> Option<EventSyncClass> {
                 match self {
                     $(Self::$variant => Some(EventSyncClass::$sync_class),)+
-                    Self::Legacy => None,
                 }
             }
 
             pub fn expected_event_class(self) -> Option<EventClass> {
                 match self {
                     $(Self::$variant => Some(EventClass::$event_class),)+
-                    Self::Legacy => None,
                 }
             }
 
@@ -138,21 +128,12 @@ macro_rules! durable_event_types {
                         storage: DurableEventPayloadStorage::$payload_storage,
                         payload_name: $payload_name,
                     },)+
-                    Self::Legacy => DurableEventPayloadMetadata {
-                        storage: DurableEventPayloadStorage::SessionLogEntry,
-                        payload_name: "legacy_session_entry",
-                    },
                 }
-            }
-
-            pub fn appendable(self) -> bool {
-                self != Self::Legacy
             }
 
             pub fn to_domain_event(self, payload: DomainPayload) -> Result<DurableDomainEvent> {
                 match self {
                     $(Self::$variant => Ok(DurableDomainEvent::$variant(payload)),)+
-                    Self::Legacy => bail!("legacy is deserialize-only and cannot be a v2 event"),
                 }
             }
         }
@@ -161,14 +142,12 @@ macro_rules! durable_event_types {
             pub fn event_type(&self) -> DurableEventType {
                 match self {
                     $(Self::$variant(_) => DurableEventType::$variant,)+
-                    Self::Legacy(_) => DurableEventType::Legacy,
                 }
             }
 
             pub fn payload(&self) -> Option<&DomainPayload> {
                 match self {
                     $(Self::$variant(payload) => Some(payload),)+
-                    Self::Legacy(_) => None,
                 }
             }
         }
@@ -176,7 +155,6 @@ macro_rules! durable_event_types {
         /// Ordered known durable event types.
         pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
             $(DurableEventType::$variant,)+
-            DurableEventType::Legacy,
         ];
     };
 }
@@ -246,6 +224,22 @@ durable_event_types! {
     EgressDisclosurePresented => ("egress_disclosure_presented", RecoveryCritical, Critical, DirectJson, "egress_disclosure_presented"),
     QueryEgressStarted => ("query_egress_started", RecoveryCritical, Critical, DirectJson, "query_egress_started"),
     QueryEgressOutcome => ("query_egress_outcome", RecoveryCritical, Critical, DirectJson, "query_egress_outcome"),
+    ProviderPhysicalAttemptStarted => ("provider_physical_attempt_started", RecoveryCritical, Critical, DirectJson, "provider_physical_attempt_started"),
+    ProviderPhysicalAttemptTerminal => ("provider_physical_attempt_terminal", RecoveryCritical, Critical, DirectJson, "provider_physical_attempt_terminal"),
+    ProviderContinuationObserved => ("provider_continuation_observed", RecoveryCritical, Critical, DirectJson, "provider_continuation_observed"),
+    ProviderContinuationPayloadLifecycleRecorded => ("provider_continuation_payload_lifecycle_recorded", RecoveryCritical, Critical, DirectJson, "provider_continuation_payload_lifecycle_recorded"),
+    ProviderContinuationCandidateRecorded => ("provider_continuation_candidate_recorded", RecoveryCritical, Critical, DirectJson, "provider_continuation_candidate_recorded"),
+    ProviderContinuationCandidateInvalidated => ("provider_continuation_candidate_invalidated", RecoveryCritical, Critical, DirectJson, "provider_continuation_candidate_invalidated"),
+    ProviderContinuationToolClosureRecorded => ("provider_continuation_tool_closure_recorded", RecoveryCritical, Critical, DirectJson, "provider_continuation_tool_closure_recorded"),
+    ProviderObservedResolutionPlanRecorded => ("provider_observed_resolution_plan_recorded", RecoveryCritical, Critical, DirectJson, "provider_observed_resolution_plan_recorded"),
+    CompactionStarted => ("compaction_started", RecoveryCritical, Critical, DirectJson, "compaction_started"),
+    CompactionAppliedV2 => ("compaction_applied_v2", RecoveryCritical, Critical, DirectJson, "compaction_applied_v2"),
+    CompactionFailed => ("compaction_failed", RecoveryCritical, Critical, DirectJson, "compaction_failed"),
+    CompactionSkipped => ("compaction_skipped", NormalEvent, NonCritical, DirectJson, "compaction_skipped"),
+    TaskMemoryRecordedV1 => ("task_memory_recorded_v1", RecoveryCritical, Critical, DirectJson, "task_memory_recorded_v1"),
+    TaskMemoryInvalidated => ("task_memory_invalidated", RecoveryCritical, Critical, DirectJson, "task_memory_invalidated"),
+    ToolOutputProjectionShrinkRecorded => ("tool_output_projection_shrink_recorded", RecoveryCritical, Critical, DirectJson, "tool_output_projection_shrink_recorded"),
+    ConversationInputPromoted => ("conversation_input_promoted", RecoveryCritical, Critical, DirectJson, "conversation_input_promoted"),
     SandboxDecisionRecorded => ("sandbox_decision_recorded", RecoveryCritical, Critical, DirectJson, "sandbox_decision_recorded"),
     LogTailRecovered => ("log_tail_recovered", TailRecovery, Critical, DirectJson, "log_tail_recovered"),
 }
@@ -451,6 +445,21 @@ pub enum TypedStoredEventDecode {
 
 #[derive(Debug, Clone)]
 pub enum TypedDomainEvent {
+    ProviderPhysicalAttemptStarted(ProviderPhysicalAttemptStartedEntry),
+    ProviderPhysicalAttemptTerminal(ProviderPhysicalAttemptTerminalEntry),
+    ProviderContinuationObserved(ProviderContinuationObservedEntry),
+    ProviderContinuationPayloadLifecycleRecorded(ProviderContinuationPayloadLifecycleEntry),
+    ProviderContinuationCandidateRecorded(ProviderContinuationCandidateRecordedEntry),
+    ProviderContinuationCandidateInvalidated(ProviderContinuationCandidateInvalidatedEntry),
+    ProviderContinuationToolClosureRecorded(ProviderContinuationToolClosureRecordedEntry),
+    ProviderObservedResolutionPlanRecorded(Box<ProviderObservedResolutionPlanRecordedEntry>),
+    CompactionStarted(CompactionStartedEntry),
+    CompactionAppliedV2(Box<CompactionAppliedV2>),
+    CompactionFailed(CompactionFailureEntry),
+    ConversationInputPromoted(ConversationInputPromotedEntry),
+    TaskMemoryRecordedV1(TaskMemoryRecordedV1),
+    TaskMemoryInvalidated(TaskMemoryInvalidatedEntry),
+    ToolOutputProjectionShrinkRecorded(ToolOutputProjectionShrinkRecorded),
     MutationPrepared(MutationPrepared),
     MutationCommitted(MutationCommitted),
     CheckpointRestoreConflict(crate::CheckpointRestoreConflict),
@@ -506,6 +515,82 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         };
     };
     let typed = match event_type {
+        DurableEventType::ProviderPhysicalAttemptStarted => {
+            let entry: ProviderPhysicalAttemptStartedEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ProviderPhysicalAttemptStarted(entry)
+        }
+        DurableEventType::ProviderPhysicalAttemptTerminal => {
+            let entry: ProviderPhysicalAttemptTerminalEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ProviderPhysicalAttemptTerminal(entry)
+        }
+        DurableEventType::ProviderContinuationObserved => {
+            let entry: ProviderContinuationObservedEntry = decode_event_payload(&event)?;
+            entry.validate_for_session(&event.session_id)?;
+            TypedDomainEvent::ProviderContinuationObserved(entry)
+        }
+        DurableEventType::ProviderContinuationPayloadLifecycleRecorded => {
+            let entry: ProviderContinuationPayloadLifecycleEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ProviderContinuationPayloadLifecycleRecorded(entry)
+        }
+        DurableEventType::ProviderContinuationCandidateRecorded => {
+            let entry: ProviderContinuationCandidateRecordedEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ProviderContinuationCandidateRecorded(entry)
+        }
+        DurableEventType::ProviderContinuationCandidateInvalidated => {
+            let entry: ProviderContinuationCandidateInvalidatedEntry =
+                decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ProviderContinuationCandidateInvalidated(entry)
+        }
+        DurableEventType::ProviderContinuationToolClosureRecorded => {
+            let entry: ProviderContinuationToolClosureRecordedEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ProviderContinuationToolClosureRecorded(entry)
+        }
+        DurableEventType::ProviderObservedResolutionPlanRecorded => {
+            let entry: ProviderObservedResolutionPlanRecordedEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ProviderObservedResolutionPlanRecorded(Box::new(entry))
+        }
+        DurableEventType::CompactionStarted => {
+            let entry: CompactionStartedEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::CompactionStarted(entry)
+        }
+        DurableEventType::CompactionAppliedV2 => {
+            let entry: CompactionAppliedV2 = decode_event_payload(&event)?;
+            entry.validate_shape(&event.session_id, event.stream_sequence)?;
+            TypedDomainEvent::CompactionAppliedV2(Box::new(entry))
+        }
+        DurableEventType::CompactionFailed => {
+            let entry: CompactionFailureEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::CompactionFailed(entry)
+        }
+        DurableEventType::ConversationInputPromoted => {
+            let entry: ConversationInputPromotedEntry = decode_event_payload(&event)?;
+            entry.validate_for_session(&event.session_id)?;
+            TypedDomainEvent::ConversationInputPromoted(entry)
+        }
+        DurableEventType::TaskMemoryRecordedV1 => {
+            let entry: TaskMemoryRecordedV1 = decode_event_payload(&event)?;
+            entry.validate_shape(&event.session_id, event.stream_sequence)?;
+            TypedDomainEvent::TaskMemoryRecordedV1(entry)
+        }
+        DurableEventType::TaskMemoryInvalidated => {
+            let entry: TaskMemoryInvalidatedEntry = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::TaskMemoryInvalidated(entry)
+        }
+        DurableEventType::ToolOutputProjectionShrinkRecorded => {
+            let entry: ToolOutputProjectionShrinkRecorded = decode_event_payload(&event)?;
+            entry.validate_shape()?;
+            TypedDomainEvent::ToolOutputProjectionShrinkRecorded(entry)
+        }
         DurableEventType::MutationPrepared => {
             TypedDomainEvent::MutationPrepared(decode_event_payload(&event)?)
         }
@@ -861,13 +946,6 @@ pub fn is_transient_run_event(event: &RunEvent) -> bool {
     )
 }
 
-pub fn is_v2_stored_event_value(value: &Value) -> bool {
-    value.get("schema_version").is_some()
-        && value.get("event_type").is_some()
-        && value.get("stream_sequence").is_some()
-        && value.get("record_checksum").is_some()
-}
-
 pub fn stable_event_hash(value: impl AsRef<[u8]>) -> String {
     let digest = Sha256::digest(value.as_ref());
     format!("sha256:{digest:x}")
@@ -894,9 +972,14 @@ fn payload_depth(value: &Value) -> usize {
     }
 }
 
-fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>> {
+pub(crate) fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>> {
     let canonical = canonicalize_value(value)?;
     serde_json::to_vec(&canonical).context("failed to serialize canonical json")
+}
+
+pub(crate) fn canonical_json_content_hash(value: &Value) -> Result<String> {
+    let digest = Sha256::digest(canonical_json_bytes(value)?);
+    Ok(format!("{RECORD_CHECKSUM_PREFIX}{digest:x}"))
 }
 
 fn canonicalize_value(value: &Value) -> Result<Value> {
@@ -1242,7 +1325,6 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ChangeSetProposed(_) => "change_set_proposed",
         ControlEntry::ChangeSetApplied(_) => "change_set_applied",
         ControlEntry::TerminalTask(_) => "terminal_task",
-        ControlEntry::CompactionApplied(_) => "compaction_applied",
         ControlEntry::PlanApproved(_) => "plan_approved",
         ControlEntry::PlanDraftCreated(_) => "plan_draft_created",
         ControlEntry::PlanDecisionRecorded(_) => "plan_decision_recorded",
@@ -1299,6 +1381,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ConversationInputEdited(_) => "conversation_input_edited",
         ControlEntry::ConversationInputReordered(_) => "conversation_input_reordered",
         ControlEntry::ConversationInputStatusChanged(_) => "conversation_input_status_changed",
+        ControlEntry::ConversationInputPromoted(_) => "conversation_input_promoted",
         ControlEntry::Note { .. } => "note",
     }
 }

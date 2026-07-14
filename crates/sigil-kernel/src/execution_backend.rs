@@ -417,80 +417,68 @@ impl ExecutionTerminationCause {
 }
 
 /// Provider-neutral evidence for bounded stdout/stderr collection.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ExecutionOutputReceipt {
-    /// Schema version for this evidence. Zero identifies a legacy receipt without evidence.
-    #[serde(default)]
+    /// Schema version for this evidence.
     pub schema_version: u8,
     /// Stdout collection evidence.
-    #[serde(default)]
     pub stdout: ExecutionStreamCapture,
     /// Stderr collection evidence.
-    #[serde(default)]
     pub stderr: ExecutionStreamCapture,
     /// Total bytes observed across stdout and stderr.
-    #[serde(default)]
     pub combined_total_bytes: u64,
     /// Combined hard ceiling applied across stdout and stderr.
-    #[serde(default)]
     pub combined_hard_limit_bytes: u64,
     /// Single terminal cause selected by the process supervisor.
-    #[serde(default)]
     pub termination: ExecutionTerminationCause,
 }
 
-impl ExecutionOutputReceipt {
-    /// Returns whether this receipt contains structured bounded-output evidence.
-    ///
-    /// Schema zero is the only legacy representation. Unknown non-zero versions retain the
-    /// fields understood by this binary instead of being silently reconstructed from raw bytes.
-    #[must_use]
-    pub fn is_recorded(&self) -> bool {
-        self.schema_version != 0
-    }
-
-    /// Returns whether this receipt uses the schema version emitted by this binary.
-    #[must_use]
-    pub fn uses_current_schema(&self) -> bool {
-        self.schema_version == EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION
-    }
-
-    /// Builds normalized evidence for a legacy receipt that only stored raw output vectors.
-    #[must_use]
-    pub fn legacy(stdout: &[u8], stderr: &[u8], timed_out: bool) -> Self {
-        let stdout_bytes = stdout.len() as u64;
-        let stderr_bytes = stderr.len() as u64;
+impl Default for ExecutionOutputReceipt {
+    fn default() -> Self {
         Self {
             schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
-            stdout: ExecutionStreamCapture {
-                total_bytes: stdout_bytes,
-                returned_bytes: stdout_bytes,
-                retained_head_bytes: stdout_bytes,
-                total_lines: byte_line_count(stdout),
-                ..ExecutionStreamCapture::default()
-            },
-            stderr: ExecutionStreamCapture {
-                total_bytes: stderr_bytes,
-                returned_bytes: stderr_bytes,
-                retained_head_bytes: stderr_bytes,
-                total_lines: byte_line_count(stderr),
-                ..ExecutionStreamCapture::default()
-            },
-            combined_total_bytes: stdout_bytes.saturating_add(stderr_bytes),
+            stdout: ExecutionStreamCapture::default(),
+            stderr: ExecutionStreamCapture::default(),
+            combined_total_bytes: 0,
             combined_hard_limit_bytes: 0,
-            termination: if timed_out {
-                ExecutionTerminationCause::TimedOut
-            } else {
-                ExecutionTerminationCause::Exited
-            },
+            termination: ExecutionTerminationCause::Exited,
         }
     }
 }
 
-fn byte_line_count(bytes: &[u8]) -> u64 {
-    let newline_count = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
-    newline_count.saturating_add(u64::from(!bytes.is_empty() && !bytes.ends_with(b"\n")))
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ExecutionOutputReceiptWire {
+    schema_version: u8,
+    stdout: ExecutionStreamCapture,
+    stderr: ExecutionStreamCapture,
+    combined_total_bytes: u64,
+    combined_hard_limit_bytes: u64,
+    termination: ExecutionTerminationCause,
+}
+
+impl<'de> Deserialize<'de> for ExecutionOutputReceipt {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ExecutionOutputReceiptWire::deserialize(deserializer)?;
+        if wire.schema_version != EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION {
+            return Err(<D::Error as serde::de::Error>::custom(format!(
+                "unsupported execution output receipt schema version {}",
+                wire.schema_version
+            )));
+        }
+        Ok(Self {
+            schema_version: wire.schema_version,
+            stdout: wire.stdout,
+            stderr: wire.stderr,
+            combined_total_bytes: wire.combined_total_bytes,
+            combined_hard_limit_bytes: wire.combined_hard_limit_bytes,
+            termination: wire.termination,
+        })
+    }
 }
 
 /// User-configurable execution policy.
@@ -1359,36 +1347,23 @@ impl ExecutionRequest {
 pub struct ExecutionReceipt {
     pub backend: ExecutionBackendKind,
     pub capabilities: ExecutionBackendCapabilities,
-    #[serde(default)]
     pub network: ExecutionNetworkReceipt,
-    #[serde(default)]
     pub resources: ExecutionResourceReceipt,
-    #[serde(default)]
     pub environment_policy: ProcessEnvironmentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
-    #[serde(default)]
     pub stdout: Vec<u8>,
-    #[serde(default)]
     pub stderr: Vec<u8>,
     /// Bounded collection statistics and the single supervisor-selected terminal cause.
-    #[serde(default)]
     pub output: ExecutionOutputReceipt,
     pub timed_out: bool,
 }
 
 impl ExecutionReceipt {
-    /// Returns structured output evidence, deriving accurate totals only for schema-zero receipts.
-    ///
-    /// Unknown non-zero schema versions preserve every field understood by this binary, including
-    /// their terminal cause and byte totals.
+    /// Returns the captured structured output evidence.
     #[must_use]
     pub fn effective_output(&self) -> ExecutionOutputReceipt {
-        if self.output.is_recorded() {
-            self.output.clone()
-        } else {
-            ExecutionOutputReceipt::legacy(&self.stdout, &self.stderr, self.timed_out)
-        }
+        self.output.clone()
     }
 }
 

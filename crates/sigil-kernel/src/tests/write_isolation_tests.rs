@@ -7,10 +7,10 @@ use crate::{
     IsolatedChangeSetProduced, IsolatedWorkspaceBackend, IsolatedWorkspaceCreated,
     JsonlSessionStore, MergeDecision, MergeReviewId, MergeReviewParentMutationRequest,
     MergeReviewRequested, MergeReviewResolved, MutationBatchStatus, MutationSubject, Session,
-    SessionLogEntry, SessionStreamRecord, StoredEvent, TypedDomainEvent, TypedStoredEventDecode,
-    WriteIsolationMode, WriteIsolationProjection, WriteLeaseAcquired, WriteLeaseId,
-    WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope, bytes_hash,
-    decode_typed_stored_event, resolve_merge_review_parent_mutation,
+    SessionLogEntry, StoredEvent, TypedDomainEvent, TypedStoredEventDecode, WriteIsolationMode,
+    WriteIsolationProjection, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus,
+    WriteLeaseReleased, WriteLeaseScope, bytes_hash, decode_typed_stored_event,
+    resolve_merge_review_parent_mutation,
 };
 
 fn lease_id() -> WriteLeaseId {
@@ -54,9 +54,7 @@ fn note_diff() -> String {
 fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
     let mut event_types = Vec::new();
     for record in JsonlSessionStore::read_event_records(store.path())? {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let event = record.into_stored_event();
         event_types.push(event.event_type);
     }
     Ok(event_types)

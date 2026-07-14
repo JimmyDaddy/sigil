@@ -28,7 +28,7 @@
 
 实现进度：
 
-- E14.1 已实现写隔离事实层：`WriteIsolationMode`、write lease / isolated workspace / merge review records、durable event taxonomy、typed decode 和 mixed-stream projection skeleton。
+- E14.1 已实现写隔离事实层：`WriteIsolationMode`、write lease / isolated workspace / merge review records、durable event taxonomy、typed decode 和 V2 stream projection skeleton。
 - E14.2 已实现 shared workspace 写租约 enforcement：task 写步骤会获取/释放 durable write lease，ready queue 可在 active lease 下阻断候选步骤，并提供 stale lease release hook。
 - E14.3 已实现 changeset-only child write output：`SubagentWrite + ChangesetOnly` 不获取 parent shared-write lease，child 只能看到按真实 `ToolSpec` 过滤后的只读/代码检索工具，最终回答必须解码为结构化 changeset proposal 且包含 reviewable artifact content/ref；parent snapshot 若被 child 修改则该 step 失败；成功时追加 `ChangeSetProposed`、`IsolatedChangeSetProduced` 和 `MergeReviewRequested`，task step 进入 ready-for-review 的 `Paused` / `Blocked` 状态。
 - E14.5 已实现 merge review parent mutation handoff：accepted review 使用 review-time unified diff artifact 通过 RFC-0002 mutation batch 应用 parent workspace，记录 `MergeReviewResolved`、`ChangeSetApplied`、per-file mutation evidence、batch finished status 和 `ChildChangesetMerged`；rejected/conflict/cancelled review 不产生 parent mutation；partial apply 记录 explicit `PartiallyApplied` result。

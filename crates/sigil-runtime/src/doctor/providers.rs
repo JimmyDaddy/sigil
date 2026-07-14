@@ -4,13 +4,14 @@ pub(super) fn check_provider(report: &mut DoctorReport, root_config: &RootConfig
     match provider_config_key(&root_config.agent.provider) {
         "deepseek" => check_deepseek_provider(report, root_config),
         "openai_compat" => check_openai_compat_provider(report, root_config),
+        "openai_responses" => check_openai_responses_provider(report, root_config),
         "anthropic" => check_anthropic_provider(report, root_config),
         "gemini" => check_gemini_provider(report, root_config),
         other => report.push_with_remediation(
             DoctorStatus::Error,
             "provider",
             format!("unsupported provider {other}"),
-            Some("set [agent].provider to \"deepseek\", \"openai_compat\", \"anthropic\", or \"gemini\""),
+            Some("set [agent].provider to \"deepseek\", \"openai_compat\", \"openai_responses\", \"anthropic\", or \"gemini\""),
         ),
     }
 }
@@ -142,6 +143,35 @@ fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootCon
         "[providers.openai_compat].api_key",
     );
     push_provider_capability_checks(report, "openai_compat");
+}
+
+fn check_openai_responses_provider(report: &mut DoctorReport, root_config: &RootConfig) {
+    let config =
+        match load_openai_responses_config(root_config).and_then(|config| config.resolved()) {
+            Ok(config) => config,
+            Err(error) => {
+                report.push_with_remediation(
+                    DoctorStatus::Error,
+                    "provider:openai_responses",
+                    error.to_string(),
+                    Some("add a valid [providers.openai_responses] block"),
+                );
+                return;
+            }
+        };
+    report.push(
+        DoctorStatus::Ok,
+        "provider:openai_responses",
+        format!("model={} base_url={}", config.model, config.base_url),
+    );
+
+    push_provider_auth_check(
+        report,
+        resolve_openai_responses_api_key(&config),
+        OPENAI_RESPONSES_API_KEY_ENV,
+        "[providers.openai_responses].api_key",
+    );
+    push_provider_capability_checks(report, "openai_responses");
 }
 
 fn check_anthropic_provider(report: &mut DoctorReport, root_config: &RootConfig) {

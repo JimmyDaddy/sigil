@@ -3,12 +3,12 @@ use sigil_kernel::{AgentConfig, ModelRequestConfig, RootConfig};
 
 use super::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DeepSeekProviderConfigFields,
-    GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY, ProviderConfigFields, ProviderStrictToolsMode,
-    deepseek_provider_config_fields, default_provider_config_fields, next_provider_name,
-    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
-    provider_balance_status_config, provider_config_fields, provider_model_status_config,
-    provider_model_status_config_from_fields, provider_status_config_from_fields,
-    set_provider_config_fields,
+    GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
+    ProviderConfigFields, ProviderStrictToolsMode, deepseek_provider_config_fields,
+    default_provider_config_fields, next_provider_name, normalize_provider_model_alias,
+    normalize_provider_name, provider_api_key_env_name, provider_balance_status_config,
+    provider_config_fields, provider_model_status_config, provider_model_status_config_from_fields,
+    provider_status_config_from_fields, set_provider_config_fields,
 };
 
 fn test_root_config() -> RootConfig {
@@ -46,6 +46,10 @@ fn provider_helpers_use_only_canonical_names_and_env_labels() {
         normalize_provider_name("openai_compat"),
         OPENAI_COMPAT_PROVIDER_KEY
     );
+    assert_eq!(
+        normalize_provider_name("openai_responses"),
+        OPENAI_RESPONSES_PROVIDER_KEY
+    );
     assert_eq!(normalize_provider_name("anthropic"), ANTHROPIC_PROVIDER_KEY);
     assert_eq!(normalize_provider_name("gemini"), GEMINI_PROVIDER_KEY);
     assert_eq!(normalize_provider_name("unknown"), "unknown");
@@ -58,6 +62,10 @@ fn provider_helpers_use_only_canonical_names_and_env_labels() {
     assert_eq!(
         provider_api_key_env_name("openai_compat"),
         Some("SIGIL_OPENAI_COMPATIBLE_API_KEY")
+    );
+    assert_eq!(
+        provider_api_key_env_name("openai_responses"),
+        Some("SIGIL_OPENAI_RESPONSES_API_KEY")
     );
     assert_eq!(
         provider_api_key_env_name("anthropic"),
@@ -90,7 +98,8 @@ fn provider_model_alias_normalization_is_provider_aware() {
 #[test]
 fn provider_cycling_is_runtime_owned() {
     assert_eq!(next_provider_name("deepseek"), "openai_compat");
-    assert_eq!(next_provider_name("openai_compat"), "anthropic");
+    assert_eq!(next_provider_name("openai_compat"), "openai_responses");
+    assert_eq!(next_provider_name("openai_responses"), "anthropic");
     assert_eq!(next_provider_name("anthropic"), "gemini");
     assert_eq!(next_provider_name("gemini"), "deepseek");
     assert_eq!(next_provider_name("unknown"), "deepseek");
@@ -149,8 +158,32 @@ fn set_provider_config_fields_rejects_unknown_provider_names() {
         .expect_err("provider aliases should not be accepted");
 
     assert!(error.to_string().contains(
-        "unsupported provider claude; expected one of deepseek, openai_compat, anthropic, or gemini"
+        "unsupported provider claude; expected one of deepseek, openai_compat, openai_responses, anthropic, or gemini"
     ));
+}
+
+#[test]
+fn responses_provider_config_fields_round_trip_through_runtime_setup() -> anyhow::Result<()> {
+    let mut config = test_root_config();
+    let fields = ProviderConfigFields {
+        model: "gpt-5-test".to_owned(),
+        api_key: "responses-key".to_owned(),
+        base_url: "https://responses.example.test/v1".to_owned(),
+    };
+
+    set_provider_config_fields(&mut config, OPENAI_RESPONSES_PROVIDER_KEY, &fields, None)?;
+
+    assert_eq!(config.agent.provider, OPENAI_RESPONSES_PROVIDER_KEY);
+    assert_eq!(config.agent.model, "gpt-5-test");
+    assert_eq!(
+        config.providers[OPENAI_RESPONSES_PROVIDER_KEY]["base_url"],
+        "https://responses.example.test/v1"
+    );
+    assert_eq!(
+        provider_config_fields(&config, OPENAI_RESPONSES_PROVIDER_KEY, "fallback").api_key,
+        "responses-key"
+    );
+    Ok(())
 }
 
 #[test]

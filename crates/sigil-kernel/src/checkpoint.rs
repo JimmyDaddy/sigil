@@ -124,14 +124,14 @@ impl ControlledCheckpoint {
     }
 }
 
-/// Rebuildable checkpoint view over one session's mixed durable stream.
+/// Rebuildable checkpoint view over one session's v2 durable stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ControlledCheckpointProjection {
     pub checkpoints: Vec<ControlledCheckpoint>,
 }
 
 impl ControlledCheckpointProjection {
-    /// Replays a mixed durable stream into user-turn controlled checkpoints.
+    /// Replays a v2 durable stream into user-turn controlled checkpoints.
     ///
     /// # Errors
     ///
@@ -446,7 +446,6 @@ fn restored_operation_ids(records: &[SessionStreamRecord]) -> Result<BTreeSet<St
 
 fn session_entry(record: &SessionStreamRecord) -> Result<Option<SessionLogEntry>> {
     match record {
-        SessionStreamRecord::Legacy { entry, .. } => Ok(Some((**entry).clone())),
         SessionStreamRecord::Stored(event) => event
             .payload
             .get("session_log_entry")

@@ -136,7 +136,10 @@ impl AppState {
             AppAction::MessageAgent { thread_id, prompt } => {
                 WorkerCommand::MessageAgent { thread_id, prompt }
             }
-            AppAction::CompactNow => WorkerCommand::CompactNow,
+            AppAction::PreviewV2Compaction => WorkerCommand::PreviewV2Compaction,
+            AppAction::ApplyV2Compaction { request_id } => {
+                WorkerCommand::ApplyV2Compaction { request_id }
+            }
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
             AppAction::CleanMutationArtifacts { target } => {
                 WorkerCommand::CleanMutationArtifacts { target }

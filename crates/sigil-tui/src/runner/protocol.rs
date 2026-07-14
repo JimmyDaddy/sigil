@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use sigil_kernel::{
-    AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionRecord,
+    AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry,
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
     ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
     DisclosurePresentationError, DisclosurePresentationReceipt, MutationArtifactCleanupTarget,
     PlanApprovalPermission, PlanApprovedEntry, PlanDecisionRecordedEntry, PlanTaskStartMode,
     PreEgressDisclosure, ReasoningEffort, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
-    TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry,
+    TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
 };
 use sigil_runtime::{
     BalanceSnapshot, McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
@@ -20,6 +20,36 @@ pub(crate) type EgressDisclosureReceiptTx =
     oneshot::Sender<Result<DisclosurePresentationReceipt, DisclosurePresentationError>>;
 
 pub(crate) const WORKER_COMMAND_PROTOCOL_VERSION: u16 = 1;
+
+/// Local admission state for a reviewed V2 portable compaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V2CompactionAdmission {
+    Ready {
+        input_tokens: u64,
+        context_window_tokens: u64,
+        output_tokens: u64,
+        safety_buffer_tokens: u64,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+/// User-visible source of an activated portable V2 compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2CompactionApplySource {
+    ManualConfirmation,
+    IdleAutomatic,
+    OverflowRecovery,
+}
+
+/// A read-only fold plan paired with the result of local target-request admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2CompactionReview {
+    pub(crate) request_id: u64,
+    pub(crate) preview: V2CompactionPreview,
+    pub(crate) admission: V2CompactionAdmission,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerCommandEnvelope<T> {
@@ -167,7 +197,10 @@ pub enum WorkerCommand {
         thread_id: AgentThreadId,
         prompt: String,
     },
-    CompactNow,
+    PreviewV2Compaction,
+    ApplyV2Compaction {
+        request_id: u64,
+    },
     CheckChangedFilesDiagnostics,
     CleanMutationArtifacts {
         target: MutationArtifactCleanupTarget,
@@ -333,13 +366,19 @@ pub enum WorkerMessage {
         model_name: String,
         entries: Vec<SessionLogEntry>,
     },
-    SessionCompacted {
-        session_log_path: PathBuf,
-        provider_name: String,
-        model_name: String,
-        record: Box<CompactionRecord>,
-        trigger: CompactionTrigger,
+    V2CompactionPreviewed {
+        review: Option<Box<V2CompactionReview>>,
+    },
+    V2CompactionApplied {
+        request_id: u64,
+        source: V2CompactionApplySource,
+        compaction_id: String,
+        folded_event_count: usize,
         entries: Vec<SessionLogEntry>,
+    },
+    V2CompactionApplyFailed {
+        request_id: u64,
+        error: String,
     },
     CheckpointRestorePreviewed {
         request_id: u64,
@@ -391,12 +430,6 @@ pub enum WorkerMessage {
         receipt_tx: EgressDisclosureReceiptTx,
     },
     RunFailed(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactionTrigger {
-    Manual,
-    AutomaticHardThreshold,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

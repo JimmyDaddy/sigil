@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use sigil_kernel::{JsonlSessionStore, SessionLogEntry};
+use sigil_kernel::{JsonlSessionStore, SessionLogEntry, SessionStreamCompatibilityError};
 
 use super::super::{
     AppState, PaneFocus, SESSION_HISTORY_TITLE_SCAN_LIMIT, SessionHistoryEntry,
@@ -44,14 +44,29 @@ pub(in crate::app) fn session_history_display_label(entry: &SessionHistoryEntry)
 pub(super) fn session_history_title_from_log(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
-    for _ in 0..SESSION_HISTORY_TITLE_SCAN_LIMIT {
+    for physical_line in 1..=SESSION_HISTORY_TITLE_SCAN_LIMIT {
         let line = read_bounded_line(&mut reader, SESSION_HISTORY_TITLE_LINE_MAX_BYTES)
             .ok()
             .flatten()?;
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(Some(entry)) = JsonlSessionStore::session_entry_from_json_line(&line) else {
+        let entry = match JsonlSessionStore::session_entry_from_json_line_at_path(
+            &line,
+            path,
+            physical_line,
+        ) {
+            Ok(entry) => entry,
+            Err(error)
+                if error
+                    .downcast_ref::<SessionStreamCompatibilityError>()
+                    .is_some() =>
+            {
+                return Some("legacy session format unsupported".to_owned());
+            }
+            Err(_) => continue,
+        };
+        let Some(entry) = entry else {
             continue;
         };
         if let SessionLogEntry::User(message) = entry

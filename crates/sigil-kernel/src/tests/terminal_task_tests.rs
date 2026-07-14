@@ -64,20 +64,13 @@ fn terminal_task_control_entry_roundtrips_with_snake_case_payload() -> Result<()
 }
 
 #[test]
-fn terminal_task_entry_legacy_payload_defaults_output_evidence() -> Result<()> {
+fn terminal_task_entry_requires_output_total_bytes() -> Result<()> {
     let mut value = serde_json::to_value(sample_entry(TerminalTaskStatus::Running, 110))?;
     let object = value
         .as_object_mut()
         .expect("terminal entry should serialize as an object");
     object.remove("output_total_bytes");
-    object.remove("output_limit_bytes");
-    object.remove("output_termination_reason");
-
-    let restored: TerminalTaskEntry = serde_json::from_value(value)?;
-
-    assert_eq!(restored.output_total_bytes, 0);
-    assert_eq!(restored.output_limit_bytes, None);
-    assert_eq!(restored.output_termination_reason, None);
+    assert!(serde_json::from_value::<TerminalTaskEntry>(value).is_err());
     Ok(())
 }
 

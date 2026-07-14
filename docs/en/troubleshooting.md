@@ -146,7 +146,7 @@ Use `/resume` to select a session. If a planned task is still unfinished, contin
 
 ## Context Usage Is High
 
-The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`; when soft or hard thresholds are reached, Sigil can compact the provider-visible context.
+The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`. Soft and hard thresholds show context pressure. Limited idle automation runs only after a successful chat turn, with no queued input, and only when the locally verified DeepSeek V4 Flash target admission succeeds; it never interrupts streaming work.
 
 Manual compaction:
 
@@ -154,7 +154,7 @@ Manual compaction:
 /compact
 ```
 
-Compaction appends control records and does not rewrite old session history.
+This opens a read-only V2 fold preview. Opening it does not append a compaction record or rewrite session history. When local admission is available, `Enter` appends the V2 checkpoint lifecycle; otherwise the modal explains why apply is unavailable. Automatic admission failures only cool down, while a failed automatic lifecycle is held for unchanged fold material and target policy.
 
 ## MCP Server Is Missing, Failed, Or Deferred
 

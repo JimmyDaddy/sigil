@@ -72,7 +72,7 @@ server_startup = "lazy"
 auto_discover = true
 ```
 
-compaction 管理长对话；默认阈值分别提供早期提醒和更晚的自动限制。代码智能默认关闭。开启后，它可使用已安装的 language server，提供代码导航、诊断和经过审查的编辑建议。开启它不会绕过 workspace trust、文件批准或 diff review。
+compaction 管理长对话。修复正确性问题期间，Context Compaction V2 apply 暂时冻结，因此这项配置目前只控制审查和压力展示；它不会创建自动或手动的 boundary change。代码智能默认关闭。开启后，它可使用已安装的 language server，提供代码导航、诊断和经过审查的编辑建议。开启它不会绕过 workspace trust、文件批准或 diff review。
 
 在 TUI 中用 `Alt-D` 查看 changed source files 的 diagnostics。即使缺少 language server，普通 chat 和文件工具仍可使用。
 

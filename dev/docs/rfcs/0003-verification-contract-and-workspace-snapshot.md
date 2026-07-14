@@ -545,10 +545,10 @@ Required deterministic tests:
 - 已覆盖 MCP server lifecycle 的最小 unknown-dirty readiness 输入：TUI lazy activation、TUI MCP refresh 和 `mcp_activate_server` 可追加 `WorkspaceMutationDetected(tool_call_id=None)`，foreground chat 和 `/task` readiness 会将该 evidence 视为 workspace 污染。
 - 已覆盖 TUI eager MCP startup 的最小 unknown-dirty readiness 输入：worker 启动期间 eager MCP server 成功启动后会追加 `WorkspaceMutationDetected(tool_call_id=None)`，后续 foreground chat 和 `/task` readiness 不会把该 session 误判为 clean。
 - 已覆盖 MCP server 启动失败/初始化崩溃的 readiness 输入：activation/refresh 尝试启动 MCP server 时会先追加 unknown-dirty mutation evidence，即使 initialize 或 tools/list 失败，旧 verification 也会被污染。
-- 已补充 terminal task durable projection：active/exited terminal state 可从 mixed-format event stream 重建，readiness 与恢复路径不再只依赖 in-memory entries-based projection。
-- 已补充 changeset durable projection：`ChangeSetProposed` / `ChangeSetApplied` 可从 mixed-format event stream 重建，为后续 child/worktree merge review 与 parent re-check trace 提供 durable projection 基础。
-- 已补充 plan/skill/plugin durable projection：plan approval、skill load 和 plugin trust/context 状态可从 mixed-format event stream 重建，减少 workspace trust 与 extension context 对运行时临时状态的依赖。
-- 已补充 agent profile trust/policy、agent result continuation 和 conversation queue durable projection：profile trust/policy、child result continuation 和 queued input state 可从 mixed-format event stream 重建，进一步降低 resume 后 verification / trust / child-result UI 对 entries-only projection 的依赖。
+- 已补充 terminal task durable projection：active/exited terminal state 可从 V2 durable event stream 重建，readiness 与恢复路径不再只依赖 in-memory entries-based projection。
+- 已补充 changeset durable projection：`ChangeSetProposed` / `ChangeSetApplied` 可从 V2 durable event stream 重建，为后续 child/worktree merge review 与 parent re-check trace 提供 durable projection 基础。
+- 已补充 plan/skill/plugin durable projection：plan approval、skill load 和 plugin trust/context 状态可从 V2 durable event stream 重建，减少 workspace trust 与 extension context 对运行时临时状态的依赖。
+- 已补充 agent profile trust/policy、agent result continuation 和 conversation queue durable projection：profile trust/policy、child result continuation 和 queued input state 可从 V2 durable event stream 重建，进一步降低 resume 后 verification / trust / child-result UI 对 entries-only projection 的依赖。
 - 已将 child/agent merge 类 durable event 接入 `/task` readiness 的 mutation replay：`ChildChangesetMerged` / `AgentMergeApplied` 会使 parent workspace verification stale 或 unknown-dirty，child worktree 的 passed receipt 不会在 merge 后直接转移为 parent passed。
 - 已将 foreground chat final answer 接入 readiness：普通 chat run 结束时会追加系统计算的 `ReadinessEvaluated`；无 workspace mutation 时为 `NotApplicable`，存在 mutation 且缺少适用 receipt 时为 `Missing` / `CompletedUnverified`，不会把 final text 视为 verified。
 - 已将 `/task` step completion 接入 readiness：final text 不能直接证明 verified，missing check 会阻断/降级，RunCheck action 可执行 trusted check 后重算 readiness。
@@ -575,7 +575,7 @@ Required deterministic tests:
 - 已补充 verification scope profile MVP：`auto` / `rust` / `node` / `python` / `docs` 预设可生成对应 `VerificationScope`，`[verification.scope]` 可通过 `profile`、`extra_excludes` 和 `generated_roots` 做低频 override；`/config` Permissions 只读展示当前 profile、关键 excludes、generated roots 与 advanced override 数量，不新增普通用户操作面。
 - 已完成 child verification / worktree merge 的最小产品链路展示：task sidebar / strip 会在 child merge 导致 parent verification stale 时显示 child task/status 和 `run parent check` 引导；session audit 中 child receipt link 会显示 linked/merged 状态和 parent re-check requirement，避免把 snapshot id / merge event id 当成普通用户动作。
 - E03.4 已完成：E14.7 的 merge review product surface 展示 pending/accepted/conflict/rejected/cancelled states，kernel `verification_child` reducer test 证明 child worktree `Passed` receipt 不会继承为 parent `Passed`，parent merge 后仍需 parent workspace evidence。
-- 已补齐新增 projected state 的 Session 级 durable replay adoption：session-list、agent-graph 和 dispatch-trace projection 可通过 `Session` 的 durable mixed-stream replay adapter 重建；dispatch trace projection 继续保持 egress payload redaction，腐败 stream/sequence gap 由读取层 fail closed。
+- 已补齐新增 projected state 的 Session 级 durable replay adoption：session-list、agent-graph 和 dispatch-trace projection 可通过 `Session` 的 V2 durable replay adapter 重建；dispatch trace projection 继续保持 egress payload redaction，腐败 stream/sequence gap 由读取层 fail closed。
 - 已完成 plugin verification hook receipt binding：可信 hook command 的 started/finished evidence 与 bounded output envelope 一致时，系统可生成绑定 workspace snapshot、check spec hash、execution backend/capabilities、network receipt 和 sandbox profile hash 的 `VerificationReceipt`；hook stdout/stderr 只作为 output provenance，不能决定系统 verdict；mutating hook result 映射为 `Inconclusive`，不能满足 final passed evidence。plugin-declared MCP/server 长生命周期进程仍未自动进入 active startup/refresh path。
 
 Productization remains：
@@ -586,7 +586,7 @@ Productization remains：
 - 扩展 verification scope profile 的后续工作只剩真实项目校准：默认/profile presets、配置文件 override 和 TUI 只读摘要已落地；更多语言专用生成目录或依赖缓存应按项目证据追加，避免把普通用户操作面做复杂。
 - 完成 workspace trust UX：首次进入 workspace gate、基础 audit provenance、`/config` trust/long-term policy 摘要、repo-local instruction 降级展示、task sidebar/strip 与 session audit 的 trust/approval 解释已落地。
 - child verification / worktree merge 产品链路的默认 TUI 展示已完成：child receipt link、merge 后 parent re-check 引导和 session audit trace 已落地；后续如通过 RFC-0014 引入真正 worktree merge review UI，应继续复用该 trace，不得让 child `Passed` 直接继承为 parent `Passed`。
-- 继续把后续新增 historical/projected state 接入 RFC-0001 durable replay；现有核心 task、verification、agent thread/agent graph、session list、dispatch trace、terminal、changeset、plan、skill、plugin、profile trust/policy、continuation 和 queue projection 已具备 mixed-format stream replay 入口。
+- 继续把后续新增 historical/projected state 接入 RFC-0001 durable replay；现有核心 task、verification、agent thread/agent graph、session list、dispatch trace、terminal、changeset、plan、skill、plugin、profile trust/policy、continuation 和 queue projection 已具备 V2 stream replay 入口。
 
 ## 16. Open Questions
 

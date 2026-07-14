@@ -32,7 +32,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         canonical: "/compact",
         aliases: &[],
-        description: "compact context",
+        description: "preview V2 context compaction",
         completes_with_space: false,
     },
     SlashCommandSpec {

@@ -29,6 +29,7 @@ use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
 use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
+use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV;
 
 use super::{
     ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher, SecretSource,
@@ -38,13 +39,14 @@ use super::{
     build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust, launch_planned_mcp_process,
     load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
-    provider_capabilities_for_name, provider_capability_view,
+    load_openai_responses_config, provider_capabilities_for_name, provider_capability_view,
     refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
     register_lazy_mcp_activation_tool, resolve_anthropic_api_key, resolve_deepseek_api_key,
     resolve_deepseek_api_key_with_session, resolve_gemini_api_key,
     resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
-    resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
+    resolve_openai_compat_api_key_with_session, resolve_openai_responses_api_key,
+    resolve_openai_responses_api_key_with_session, secret_redactor_for_root_config,
     shutdown_registered_tools,
 };
 
@@ -65,7 +67,7 @@ static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn test_root_config(provider: &str) -> RootConfig {
     let model = match provider {
-        "openai_compat" => "gpt-test",
+        "openai_compat" | "openai_responses" => "gpt-test",
         "anthropic" => "claude-test",
         "gemini" => "gemini-test",
         _ => "deepseek-v4-flash",
@@ -114,6 +116,13 @@ fn test_root_config(provider: &str) -> RootConfig {
                     "api_key": "openai-config-key",
                     "organization": "org-test",
                     "project": "project-test"
+                }),
+            ),
+            (
+                "openai_responses".to_owned(),
+                json!({
+                    "base_url": "https://responses.example.com/v1",
+                    "api_key": "responses-config-key"
                 }),
             ),
             (
@@ -348,6 +357,16 @@ fn load_openai_compat_config_reads_provider_block() -> Result<()> {
 }
 
 #[test]
+fn load_openai_responses_config_reads_provider_block() -> Result<()> {
+    let config = load_openai_responses_config(&test_root_config("openai_responses"))?;
+
+    assert_eq!(config.base_url, "https://responses.example.com/v1");
+    assert_eq!(config.api_key.as_deref(), Some("responses-config-key"));
+    assert_eq!(config.model, "gpt-test");
+    Ok(())
+}
+
+#[test]
 fn load_anthropic_and_gemini_config_read_provider_blocks() -> Result<()> {
     let anthropic = load_anthropic_config(&test_root_config("anthropic"))?;
     assert_eq!(anthropic.base_url, "https://anthropic.example.com");
@@ -441,6 +460,32 @@ fn resolve_openai_compat_api_key_prefers_env_session_then_config() -> Result<()>
         .expect("expected config fallback");
     assert_eq!(resolved.value, "openai-config-key");
     assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
+    Ok(())
+}
+
+#[test]
+fn resolve_openai_responses_api_key_prefers_env_session_then_config() -> Result<()> {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let config = load_openai_responses_config(&test_root_config("openai_responses"))?;
+
+    {
+        let _scope = EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "responses-env-key")]);
+        let resolved =
+            resolve_openai_responses_api_key(&config).expect("expected OpenAI Responses api key");
+        assert_eq!(resolved.value, "responses-env-key");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(OPENAI_RESPONSES_API_KEY_ENV)
+        );
+    }
+
+    let resolved = resolve_openai_responses_api_key_with_session(&config, Some(" session-key "))
+        .expect("expected session api key");
+    assert_eq!(resolved.value, "session-key");
+    assert_eq!(resolved.source, SecretSource::Session);
     Ok(())
 }
 
@@ -539,6 +584,22 @@ fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
 }
 
 #[test]
+fn secret_redactor_for_root_config_redacts_openai_responses_api_key() {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let _scope = EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "responses-env-secret")]);
+
+    let redactor = secret_redactor_for_root_config(&test_root_config("openai_responses"));
+
+    assert_eq!(
+        redactor.redact_text("authorization: Bearer responses-env-secret"),
+        "authorization: [redacted] [redacted]"
+    );
+}
+
+#[test]
 fn secret_redactor_for_root_config_redacts_anthropic_and_gemini_api_keys() {
     let _guard = ENV_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -595,6 +656,23 @@ fn build_provider_supports_openai_compat_and_missing_config_errors() -> Result<(
         error
             .to_string()
             .contains("missing [providers.openai_compat]")
+    );
+    Ok(())
+}
+
+#[test]
+fn build_provider_supports_openai_responses_and_missing_config_errors() -> Result<()> {
+    let provider = build_provider(&test_root_config("openai_responses"))?;
+    assert_eq!(provider.name(), "openai_responses");
+
+    let mut missing = test_root_config("openai_responses");
+    missing.providers.remove("openai_responses");
+    let error = load_openai_responses_config(&missing)
+        .expect_err("missing OpenAI Responses provider config should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("missing [providers.openai_responses]")
     );
     Ok(())
 }

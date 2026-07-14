@@ -1422,7 +1422,7 @@ fn queue_control_commands_persist_and_update_projection() -> Result<()> {
 }
 
 #[test]
-fn failed_queued_run_pauses_queue() -> Result<()> {
+fn uncertain_failed_queued_run_becomes_stale_without_replay() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -1450,25 +1450,25 @@ fn failed_queued_run_pauses_queue() -> Result<()> {
         )
     })?;
 
-    let paused_update = worker.recv_until(|message| {
+    let stale_update = worker.recv_until(|message| {
         matches!(
             message,
-            WorkerMessage::ConversationQueueUpdated { entries, paused: true, .. }
+            WorkerMessage::ConversationQueueUpdated { entries, paused: false, .. }
                 if entries.iter().any(|entry| matches!(
                     entry,
                     SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
-                        if status.status == ConversationInputStatus::Rejected
+                        if status.status == ConversationInputStatus::Stale
                 ))
         )
     })?;
     assert!(matches!(
-        paused_update,
-        WorkerMessage::ConversationQueueUpdated { ref entries, paused: true, .. }
+        stale_update,
+        WorkerMessage::ConversationQueueUpdated { ref entries, paused: false, .. }
             if entries.iter().any(|entry| matches!(
                 entry,
                 SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
                     if status.queue_id.as_str() == "queue_1"
-                        && status.status == ConversationInputStatus::Rejected
+                        && status.status == ConversationInputStatus::Stale
             ))
     ));
     let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
@@ -1477,9 +1477,14 @@ fn failed_queued_run_pauses_queue() -> Result<()> {
     let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
         entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+            if status.queue_id.as_str() == "queue_1"
+                && status.status == ConversationInputStatus::Stale
+    )));
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
         SessionLogEntry::Control(ControlEntry::ConversationInputQueueControl(control))
             if control.action == sigil_kernel::ConversationInputQueueControlAction::Pause
-                && control.reason.as_deref() == Some("queued run failed")
     )));
 
     worker.shutdown()?;
@@ -1569,9 +1574,8 @@ fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() ->
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
-            if status.queue_id.as_str() == "queue_1"
-                && status.status == ConversationInputStatus::Dispatching
+        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted))
+            if promoted.queue_id.as_str() == "queue_1"
     )));
 
     let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {

@@ -34,7 +34,6 @@ pub(crate) fn verification_receipt_link_from_records(
                 crate::SessionStreamRecord::Stored(event) => {
                     receipt_event_identity(event, &receipt.receipt.receipt_id)
                 }
-                crate::SessionStreamRecord::Legacy { .. } => None,
             })
         });
     if (appended_receipt_event.is_some() || !records.is_empty()) && receipt_event.is_none() {
@@ -101,8 +100,7 @@ pub(crate) fn verification_failure_locator_from_records(
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned)
                 }
-                crate::SessionStreamRecord::Legacy { .. }
-                | crate::SessionStreamRecord::Stored(_) => None,
+                crate::SessionStreamRecord::Stored(_) => None,
             })
         })
     });
@@ -153,7 +151,7 @@ fn proven_changeset_apply_event_id(
         {
             Some(event.stream_sequence)
         }
-        crate::SessionStreamRecord::Legacy { .. } | crate::SessionStreamRecord::Stored(_) => None,
+        crate::SessionStreamRecord::Stored(_) => None,
     })?;
 
     records.iter().rev().find_map(|record| match record {
@@ -166,7 +164,7 @@ fn proven_changeset_apply_event_id(
                 && result.status == crate::ChangeSetResultStatus::Applied)
                 .then(|| event.event_id.clone())
         }
-        crate::SessionStreamRecord::Legacy { .. } | crate::SessionStreamRecord::Stored(_) => None,
+        crate::SessionStreamRecord::Stored(_) => None,
     })
 }
 

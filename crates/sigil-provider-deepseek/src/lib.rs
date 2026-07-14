@@ -1,5 +1,6 @@
 mod capabilities;
 mod client;
+mod compaction_token_profile;
 mod config;
 mod endpoint;
 mod errors;
@@ -17,6 +18,17 @@ mod stream;
 mod tools;
 
 pub use capabilities::deepseek_capabilities;
+pub use compaction_token_profile::{
+    DEFAULT_DEEPSEEK_V4_FLASH_ENCODER_SHA256, DEFAULT_DEEPSEEK_V4_FLASH_HOSTED_SYSTEM_FINGERPRINT,
+    DEFAULT_DEEPSEEK_V4_FLASH_MODEL, DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS,
+    DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_SAFETY_BUFFER_TOKENS,
+    DEFAULT_DEEPSEEK_V4_FLASH_REVISION, DEFAULT_DEEPSEEK_V4_FLASH_TOKENIZER_SHA256,
+    DeepSeekV4FlashPortableTargetAdmission, DeepSeekV4FlashTokenCounter,
+    default_deepseek_v4_flash_portable_target_budget,
+    default_deepseek_v4_flash_portable_target_output_tokens,
+    default_deepseek_v4_flash_token_binding, default_deepseek_v4_flash_tokenizer_cache_path,
+    default_deepseek_v4_flash_tokenizer_url, download_default_deepseek_v4_flash_tokenizer,
+};
 pub use config::{
     DeepSeekProviderConfig, DeepSeekProviderProfile, DeepSeekProviderQuirkProfile,
     SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV,

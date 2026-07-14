@@ -118,28 +118,19 @@ fn tool_spec_json(access: &str, network_effect: Option<&str>) -> Value {
 }
 
 #[test]
-fn tool_access_is_strict_while_legacy_tool_spec_upcasts_contextually() -> Result<()> {
+fn tool_spec_rejects_removed_network_access() -> Result<()> {
     assert!(serde_json::from_value::<ToolAccess>(json!("network")).is_err());
-
-    let legacy: ToolSpec = serde_json::from_value(tool_spec_json("network", None))?;
-    assert_eq!(legacy.access, ToolAccess::Read);
-    assert_eq!(legacy.network_effect, Some(NetworkEffect::Unknown));
-    let serialized = serde_json::to_value(&legacy)?;
-    assert_eq!(serialized["access"], "read");
-    assert_eq!(serialized["network_effect"], "unknown");
-    assert_ne!(serialized["access"], "network");
+    assert!(serde_json::from_value::<ToolSpec>(tool_spec_json("network", None)).is_err());
     Ok(())
 }
 
 #[test]
-fn tool_spec_v2_and_mixed_legacy_wire_are_conservative() -> Result<()> {
+fn tool_spec_v2_wire_roundtrips_without_access_reclassification() -> Result<()> {
     let current: ToolSpec = serde_json::from_value(tool_spec_json("read", Some("read")))?;
     assert_eq!(current.access, ToolAccess::Read);
     assert_eq!(current.network_effect, Some(NetworkEffect::Read));
+    assert_eq!(serde_json::to_value(&current)?["access"], "read");
 
-    let mixed: ToolSpec = serde_json::from_value(tool_spec_json("network", Some("read")))?;
-    assert_eq!(mixed.access, ToolAccess::Read);
-    assert_eq!(mixed.network_effect, Some(NetworkEffect::Unknown));
-    assert_eq!(serde_json::to_value(mixed)?["access"], "read");
+    assert!(serde_json::from_value::<ToolSpec>(tool_spec_json("network", Some("read"))).is_err());
     Ok(())
 }

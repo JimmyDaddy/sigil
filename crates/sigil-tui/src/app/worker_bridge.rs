@@ -26,7 +26,7 @@ use super::{
     AppState, RunPhase, TimelineRole,
     formatting::{format_terminal_task_block_redacted, summarize_error},
 };
-use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
+use crate::runner::{WorkerCommand, WorkerMessage};
 use message_labels::{
     plan_approval_permission_label, queued_prompt_summary_noun, summarize_queued_prompt,
     task_run_finish_notice, task_run_status_label,
@@ -473,52 +473,28 @@ impl AppState {
                 );
                 self.schedule_balance_refresh();
             }
-            WorkerMessage::SessionCompacted {
-                session_log_path,
-                provider_name,
-                model_name,
-                record,
-                trigger,
+            WorkerMessage::V2CompactionPreviewed { review } => {
+                self.apply_v2_compaction_preview(review.map(|review| *review));
+            }
+            WorkerMessage::V2CompactionApplied {
+                request_id: _,
+                source,
+                compaction_id,
+                folded_event_count,
                 entries,
             } => {
-                self.clear_worker_run_state();
-                self.discard_worker_streaming_assistant_and_finish_reasoning();
-                match trigger {
-                    CompactionTrigger::Manual => {
-                        self.restore_session_view(
-                            session_log_path,
-                            provider_name,
-                            model_name,
-                            entries,
-                            "Session compacted.",
-                        );
-                    }
-                    CompactionTrigger::AutomaticHardThreshold => {
-                        self.session_log_path = session_log_path;
-                        self.runtime.provider_name = provider_name;
-                        self.runtime.model_name = model_name;
-                        self.sync_current_session_state(entries);
-                        self.latest_compaction_record = Some((*record).clone());
-                        self.recompute_compaction_status(false);
-                        self.last_notice = Some("auto compacted".to_owned());
-                        self.refresh_session_history();
-                        self.push_timeline(
-                            TimelineRole::Notice,
-                            format!(
-                                "Auto-compacted: summary={} tail={}.",
-                                record.compacted_message_count, record.retained_tail_message_count
-                            ),
-                        );
-                        self.push_event(
-                            "compaction",
-                            format!(
-                                "auto hard compacted={} tail={}",
-                                record.compacted_message_count, record.retained_tail_message_count
-                            ),
-                        );
-                        self.schedule_balance_refresh();
-                    }
-                }
+                self.apply_v2_compaction_applied(
+                    source,
+                    compaction_id,
+                    folded_event_count,
+                    entries,
+                );
+            }
+            WorkerMessage::V2CompactionApplyFailed {
+                request_id: _,
+                error,
+            } => {
+                self.apply_v2_compaction_failed(error);
             }
             WorkerMessage::CheckpointRestorePreviewed {
                 request_id,

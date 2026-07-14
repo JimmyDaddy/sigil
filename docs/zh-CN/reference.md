@@ -52,7 +52,7 @@
 | `/task continue` | 不带额外 guidance 继续最新 planned task |
 | `/model <flash|pro|id>` | 切换下一轮 run 的 model，并开始新 session |
 | `/effort <low|medium|high|max>` | 切换下一轮 run 的 reasoning effort |
-| `/compact` | 手动 compact 当前 session 的 provider-visible context |
+| `/compact` | 审查 V2 折叠计划；仅本地验证过的 DeepSeek V4 Flash portable checkpoint 可按 Enter 应用 |
 | `/quit` | 退出 TUI |
 
 Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。

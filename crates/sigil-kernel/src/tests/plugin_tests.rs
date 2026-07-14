@@ -257,8 +257,8 @@ fn plugin_projection_preserves_extension_execute_and_unknown_network_policy() ->
 }
 
 #[test]
-fn legacy_plugin_network_carrier_upcasts_to_extension_execute_only() -> Result<()> {
-    let legacy = serde_json::json!({
+fn plugin_policy_rejects_removed_network_access() -> Result<()> {
+    let removed_access = serde_json::json!({
         "tool_category": "mcp",
         "tool_access": "network",
         "approval_default": "ask",
@@ -267,14 +267,7 @@ fn legacy_plugin_network_carrier_upcasts_to_extension_execute_only() -> Result<(
         "allow_secrets": false,
         "mutation_effect": "unknown"
     });
-    let policy: crate::PluginCapabilityPolicy = serde_json::from_value(legacy)?;
-    assert_eq!(policy.tool_access, Some(crate::ToolAccess::Execute));
-    assert_eq!(policy.network_effect, Some(crate::NetworkEffect::Unknown));
-
-    let serialized = serde_json::to_value(policy)?;
-    assert_eq!(serialized["tool_access"], "execute");
-    assert_eq!(serialized["network_effect"], "unknown");
-    assert_ne!(serialized["tool_access"], "network");
+    assert!(serde_json::from_value::<crate::PluginCapabilityPolicy>(removed_access).is_err());
     Ok(())
 }
 

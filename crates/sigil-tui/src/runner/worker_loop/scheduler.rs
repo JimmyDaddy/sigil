@@ -49,11 +49,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let mut processed_worker_command_ids = BTreeSet::<String>::new();
     let mut provider_status_tasks = ProviderStatusTaskManager::new();
     let mut next_run_id = 1_u64;
+    let mut next_v2_compaction_request_id = 1_u64;
+    let mut pending_v2_compaction: Option<PendingV2Compaction> = None;
+    let mut idle_auto_compaction = IdleAutoCompactionState::default();
     let mut discarded_run_ids = BTreeSet::new();
     let mut pending_mcp_refreshes = BTreeSet::new();
     let mut next_mcp_refresh_retry_at = Instant::now();
     let mut pending_agent_result_continuations =
         pending_agent_result_continuations_from_session(current_session.as_ref());
+    let mut last_queued_pre_turn_block: Option<(ConversationInputQueueId, String)> = None;
     let mut next_terminal_task_refresh_at = Instant::now();
     let session_entries = current_session
         .as_ref()
@@ -141,37 +145,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     Some(task_result.session)
                 }
             };
-            let auto_compaction = match current_session.as_mut() {
-                Some(session) => {
-                    let effective_config = effective_compaction_config(
-                        session.provider_name(),
-                        session.model_name(),
-                        &options.compaction_config,
-                    );
-                    match auto_compact_session(session, &effective_config) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                "automatic compaction skipped: {error}",
-                            )));
-                            None
-                        }
-                    }
-                }
-                None => None,
-            };
             match task_result.payload {
                 RunTaskPayload::Chat {
                     result: Ok(run_result),
                     plan_mode,
                     queue_id,
                     agent_result_continuation_thread_ids,
+                    ..
                 } => {
-                    if let Some(queue_id) = queue_id {
+                    if let Some(queue_id) = queue_id.as_ref() {
                         append_queue_status_and_notify(
                             &mut current_session,
                             &message_tx,
-                            queue_id,
+                            queue_id.clone(),
                             ConversationInputStatus::Delivered,
                             None,
                         );
@@ -214,6 +200,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         }
                     };
                     let _ = message_tx.send(message);
+                    idle_auto_compaction.request_after_successful_chat_run();
                 }
                 RunTaskPayload::Agent {
                     profile_id,
@@ -231,18 +218,62 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 RunTaskPayload::Chat {
                     result: Err(error),
+                    plan_mode,
                     queue_id,
+                    provider_logical_run_id,
                     agent_result_continuation_thread_ids,
-                    ..
                 } => {
-                    if let Some(queue_id) = queue_id {
-                        append_queue_failure_and_pause_and_notify(
-                            &current_session_log_path,
-                            &mut current_session,
-                            &message_tx,
-                            queue_id,
-                            error.clone(),
-                        );
+                    if let Some(queue_id) = queue_id.as_ref() {
+                        let classification = current_session
+                            .as_ref()
+                            .ok_or_else(|| {
+                                "conversation queue recovery requires a loaded session".to_owned()
+                            })
+                            .and_then(|session| {
+                                let attempts = session
+                                    .provider_physical_attempt_projection()
+                                    .map_err(|attempt_error| {
+                                        format!(
+                                            "provider attempt evidence is unavailable: {attempt_error:#}"
+                                        )
+                                    })?;
+                                classify_promoted_queued_conversation(session, &attempts, queue_id)
+                            });
+                        match classification {
+                            Ok(QueuedConversationTerminalClassification::Delivered { reason }) => {
+                                append_queue_status_and_notify(
+                                    &mut current_session,
+                                    &message_tx,
+                                    queue_id.clone(),
+                                    ConversationInputStatus::Delivered,
+                                    reason.or_else(|| {
+                                        Some(
+                                            "queued provider attempt reached a terminal after output or side effects"
+                                                .to_owned(),
+                                        )
+                                    }),
+                                );
+                            }
+                            Ok(QueuedConversationTerminalClassification::Rejected { reason }) => {
+                                append_queue_failure_and_pause_and_notify(
+                                    &current_session_log_path,
+                                    &mut current_session,
+                                    &message_tx,
+                                    queue_id.clone(),
+                                    format!("{reason}: {error}"),
+                                );
+                            }
+                            Ok(QueuedConversationTerminalClassification::Stale { reason })
+                            | Err(reason) => {
+                                append_queue_status_and_notify(
+                                    &mut current_session,
+                                    &message_tx,
+                                    queue_id.clone(),
+                                    ConversationInputStatus::Stale,
+                                    Some(format!("{reason}: {error}")),
+                                );
+                            }
+                        }
                     }
                     if !agent_result_continuation_thread_ids.is_empty() {
                         append_agent_result_continuation_status_and_notify(
@@ -252,6 +283,146 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             AgentResultContinuationStatus::Failed,
                             Some(error.as_str()),
                         );
+                    }
+
+                    if queue_id.is_none()
+                        && !plan_mode
+                        && agent_result_continuation_thread_ids.is_empty()
+                        && let Some(logical_run_id) = provider_logical_run_id.as_deref()
+                    {
+                        let source_physical_attempt_id = match current_session.as_ref() {
+                            Some(session) => {
+                                match exact_context_window_rejection_source(session, logical_run_id)
+                                {
+                                    Ok(source_physical_attempt_id) => source_physical_attempt_id,
+                                    Err(source_error) => {
+                                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                        "overflow recovery evidence is unavailable: {source_error:#}"
+                                    )));
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
+                        if let Some(source_physical_attempt_id) = source_physical_attempt_id {
+                            let prepared = match current_session.as_ref() {
+                                Some(session) => {
+                                    runtime.block_on(prepare_overflow_recovery_compaction(
+                                        task_result.run_id,
+                                        &root_config,
+                                        &workspace_root,
+                                        &current_session_log_path,
+                                        session,
+                                        &options,
+                                        agent.tool_registry().specs(),
+                                        source_physical_attempt_id.clone(),
+                                        agent.provider(),
+                                    ))
+                                }
+                                None => {
+                                    let _ = message_tx.send(WorkerMessage::Notice(
+                                        "overflow recovery requires a loaded session".to_owned(),
+                                    ));
+                                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                    continue;
+                                }
+                            };
+                            match prepared {
+                                Ok(pending) => {
+                                    let compaction_request_id = pending.request_id();
+                                    let folded_event_count = pending.folded_event_count();
+                                    let frozen_request = pending.frozen_target_request();
+                                    let applied = current_session.as_ref().map(|session| {
+                                        pending.apply(session, &current_session_log_path)
+                                    });
+                                    match applied {
+                                        Some(Ok(outcome)) => {
+                                            let reloaded = match current_session.as_ref() {
+                                                Some(session) => {
+                                                    load_session_with_url_capability_attachment(
+                                                        session.provider_name(),
+                                                        session.model_name(),
+                                                        &current_session_log_path,
+                                                        Some(session),
+                                                    )
+                                                }
+                                                None => {
+                                                    let _ = message_tx.send(WorkerMessage::Notice(
+                                                        "overflow recovery applied without a loaded session"
+                                                            .to_owned(),
+                                                    ));
+                                                    let _ = message_tx
+                                                        .send(WorkerMessage::RunFailed(error));
+                                                    continue;
+                                                }
+                                            };
+                                            match reloaded {
+                                                Ok(reloaded) => {
+                                                    let entries = reloaded.entries().to_vec();
+                                                    current_session = Some(reloaded);
+                                                    let _ = message_tx.send(
+                                                        WorkerMessage::V2CompactionApplied {
+                                                            request_id: compaction_request_id,
+                                                            source: V2CompactionApplySource::OverflowRecovery,
+                                                            compaction_id: outcome.compaction_id,
+                                                            folded_event_count,
+                                                            entries,
+                                                        },
+                                                    );
+                                                    match start_portable_overflow_recovery_run(
+                                                        &runtime,
+                                                        Arc::clone(&agent),
+                                                        &agent_supervisor,
+                                                        &root_config,
+                                                        agent.tool_registry(),
+                                                        &options,
+                                                        &background_agent_runs,
+                                                        &mut current_session,
+                                                        &task_result_tx,
+                                                        &message_tx,
+                                                        Arc::clone(&elicitation_handler),
+                                                        &mut next_run_id,
+                                                        frozen_request,
+                                                        format!(
+                                                            "overflow-recovery-{source_physical_attempt_id}"
+                                                        ),
+                                                    ) {
+                                                        Ok(recovery_run) => {
+                                                            active_run = Some(recovery_run);
+                                                            continue;
+                                                        }
+                                                        Err(start_error) => {
+                                                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                                                "overflow recovery was applied but its one-shot retry could not start: {start_error:#}"
+                                                            )));
+                                                        }
+                                                    }
+                                                }
+                                                Err(reload_error) => {
+                                                    let _ = message_tx.send(WorkerMessage::Notice(
+                                                        format!(
+                                                            "failed to reload applied overflow recovery: {reload_error:#}"
+                                                        ),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        Some(Err(apply_error)) => {
+                                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                                "overflow recovery compaction was not applied: {apply_error:#}"
+                                            )));
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                Err(preparation_error) => {
+                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                        "overflow recovery is unavailable: {preparation_error:#}"
+                                    )));
+                                }
+                            }
+                        }
                     }
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 }
@@ -281,13 +452,133 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 }
             }
-            if let (Some(session), Some(record)) = (current_session.as_ref(), auto_compaction) {
-                let _ = message_tx.send(session_compacted_message(
-                    &current_session_log_path,
-                    session,
-                    record,
-                    CompactionTrigger::AutomaticHardThreshold,
-                ));
+        }
+
+        let conversation_queue_is_idle = current_session.as_ref().is_some_and(|session| {
+            session
+                .conversation_queue_projection()
+                .items
+                .iter()
+                .all(|item| item.status.is_terminal())
+        });
+        if active_run.is_none()
+            && conversation_queue_is_idle
+            && pending_agent_result_continuations.is_empty()
+            && pending_v2_compaction.is_none()
+            && let Some(session) = current_session.as_ref()
+        {
+            match prepare_idle_auto_compaction(
+                &mut idle_auto_compaction,
+                &root_config,
+                &workspace_root,
+                &current_session_log_path,
+                session,
+                &options,
+                agent.tool_registry().specs(),
+            ) {
+                Ok(IdleAutoCompactionPreparation::Ready(pending)) => {
+                    let provider_name = session.provider_name().to_owned();
+                    let model_name = session.model_name().to_owned();
+                    let folded_event_count = pending.folded_event_count();
+                    let idle_auto_scope_fingerprint =
+                        pending.idle_auto_scope_fingerprint().map(str::to_owned);
+                    match (*pending).apply(session, &current_session_log_path) {
+                        Ok(outcome) => {
+                            match load_session_with_url_capability_attachment(
+                                &provider_name,
+                                &model_name,
+                                &current_session_log_path,
+                                current_session.as_ref(),
+                            ) {
+                                Ok(session) => {
+                                    let entries = session.entries().to_vec();
+                                    current_session = Some(session);
+                                    let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                                        request_id: 0,
+                                        source: V2CompactionApplySource::IdleAutomatic,
+                                        compaction_id: outcome.compaction_id,
+                                        folded_event_count,
+                                        entries,
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                        "automatic compaction applied, but session reload was deferred: {error:#}"
+                                    )));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            match load_session_with_url_capability_attachment(
+                                &provider_name,
+                                &model_name,
+                                &current_session_log_path,
+                                current_session.as_ref(),
+                            ) {
+                                Ok(session) => current_session = Some(session),
+                                Err(reload_error) => {
+                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                        "automatic compaction failed and session reload was deferred: {reload_error:#}"
+                                    )));
+                                }
+                            }
+                            let latch_status = idle_auto_scope_fingerprint.as_deref().map_or_else(
+                                || Ok(false),
+                                |scope_fingerprint| {
+                                    has_failed_idle_automatic_scope(
+                                        &current_session_log_path,
+                                        scope_fingerprint,
+                                    )
+                                },
+                            );
+                            let notice = match latch_status {
+                                Ok(true) => format!(
+                                    "automatic compaction was not applied; unchanged history is now held by its durable failure latch: {error:#}"
+                                ),
+                                Ok(false) => format!(
+                                    "automatic compaction was not applied before a durable failure latch could be confirmed: {error:#}"
+                                ),
+                                Err(latch_error) => format!(
+                                    "automatic compaction was not applied; durable failure latch status could not be confirmed ({latch_error:#}): {error:#}"
+                                ),
+                            };
+                            let _ = message_tx.send(WorkerMessage::Notice(notice));
+                        }
+                    }
+                }
+                Ok(IdleAutoCompactionPreparation::NoFoldableHistory) => {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "automatic compaction skipped: no newly foldable history".to_owned(),
+                    ));
+                }
+                Ok(IdleAutoCompactionPreparation::FailureLatched) => {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "automatic compaction is held after a previous failed attempt; new fold material or target policy is required"
+                            .to_owned(),
+                    ));
+                }
+                Ok(IdleAutoCompactionPreparation::CoolingDown {
+                    retry_after_unix_ms,
+                }) => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "automatic compaction admission is cooling down until {retry_after_unix_ms}"
+                    )));
+                }
+                Ok(IdleAutoCompactionPreparation::AdmissionUnavailable { reason }) => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "automatic compaction was not applied: local target admission is unavailable ({reason})"
+                    )));
+                }
+                Ok(
+                    IdleAutoCompactionPreparation::NotRequested
+                    | IdleAutoCompactionPreparation::NotHardThreshold,
+                ) => {}
+                Err(error) => {
+                    idle_auto_compaction.cancel_requested_run();
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "automatic compaction preflight was not applied: {error:#}"
+                    )));
+                }
             }
         }
 
@@ -409,28 +700,193 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
         }
 
-        if active_run.is_none()
-            && let Some(queued) = mark_next_conversation_queue_item_dispatching(
-                &mut current_session,
-                &mut exact_conversation_prompts,
-                &message_tx,
-            )
-        {
-            active_run = start_queued_conversation_run(
-                &runtime,
-                Arc::clone(&agent),
-                &agent_supervisor,
-                &root_config,
-                agent.tool_registry(),
-                &options,
-                &background_agent_runs,
-                &mut current_session,
-                &task_result_tx,
-                &message_tx,
-                Arc::clone(&elicitation_handler),
-                &mut next_run_id,
-                queued,
-            );
+        if active_run.is_none() {
+            let admission = current_session.as_ref().map(|session| {
+                prepare_next_queued_conversation_pre_turn_admission(
+                    &root_config,
+                    &workspace_root,
+                    &current_session_log_path,
+                    session,
+                    &exact_conversation_prompts,
+                    &options.memory_config,
+                    agent.tool_registry().specs(),
+                    options.reasoning_effort.clone(),
+                    options.traffic_partition_key.clone(),
+                )
+            });
+            let candidate = match admission {
+                None | Some(Ok(QueuedConversationPreTurnAdmission::NoQueuedInput)) => {
+                    last_queued_pre_turn_block = None;
+                    None
+                }
+                Some(Ok(QueuedConversationPreTurnAdmission::Blocked { queue_id, reason })) => {
+                    let fallback = current_session.as_ref().map(|session| {
+                        prepare_next_queued_conversation_candidate(
+                            session,
+                            &exact_conversation_prompts,
+                            &workspace_root,
+                            &options.memory_config,
+                            agent.tool_registry().specs(),
+                            options.reasoning_effort.clone(),
+                            options.traffic_partition_key.clone(),
+                        )
+                    });
+                    match fallback {
+                        Some(Ok(QueuedConversationCandidatePreparation::Prepared(candidate))) => {
+                            let notice = format!(
+                                "queued pre-turn compaction is unavailable ({reason}); dispatching the unchanged frozen request"
+                            );
+                            let block = (queue_id, notice.clone());
+                            if last_queued_pre_turn_block.as_ref() != Some(&block) {
+                                let _ = message_tx.send(WorkerMessage::Notice(notice));
+                            }
+                            last_queued_pre_turn_block = Some(block);
+                            Some(*candidate)
+                        }
+                        Some(Ok(QueuedConversationCandidatePreparation::NoQueuedInput)) => {
+                            last_queued_pre_turn_block = None;
+                            None
+                        }
+                        Some(Ok(QueuedConversationCandidatePreparation::Blocked {
+                            queue_id,
+                            reason,
+                        })) => {
+                            let block = (queue_id, reason);
+                            if last_queued_pre_turn_block.as_ref() != Some(&block) {
+                                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                    "queued follow-up is waiting for a local pre-turn admission: {}",
+                                    block.1
+                                )));
+                            }
+                            last_queued_pre_turn_block = Some(block);
+                            None
+                        }
+                        Some(Err(error)) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "queued fallback request could not be frozen; queued input was not sent: {error}"
+                            )));
+                            None
+                        }
+                        None => None,
+                    }
+                }
+                Some(Ok(QueuedConversationPreTurnAdmission::ExactFit(admitted))) => {
+                    last_queued_pre_turn_block = None;
+                    Some(admitted.candidate)
+                }
+                Some(Ok(QueuedConversationPreTurnAdmission::PortablePreflightReady(pending))) => {
+                    let Some(session) = current_session.as_ref() else {
+                        continue;
+                    };
+                    match pending.apply_compaction(session, &current_session_log_path) {
+                        Ok(candidate) => {
+                            match load_session_with_url_capability_attachment(
+                                session.provider_name(),
+                                session.model_name(),
+                                &current_session_log_path,
+                                current_session.as_ref(),
+                            ) {
+                                Ok(reloaded) => {
+                                    current_session = Some(reloaded);
+                                    last_queued_pre_turn_block = None;
+                                    Some(candidate)
+                                }
+                                Err(error) => {
+                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                        "queued pre-turn compaction completed but session reload failed; queued input was not sent: {error:#}"
+                                    )));
+                                    None
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "queued pre-turn compaction was not applied; queued input was not sent: {error:#}"
+                            )));
+                            None
+                        }
+                    }
+                }
+                Some(Err(error)) => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "queued pre-turn admission was not evaluated; queued input was not sent: {error:#}"
+                    )));
+                    None
+                }
+            };
+            if let Some(candidate) = candidate {
+                let queue_id = candidate.promotion.queue_id.clone();
+                let committed = match current_session.as_mut() {
+                    Some(session) => commit_prepared_queued_conversation_candidate(
+                        &current_session_log_path,
+                        session,
+                        candidate,
+                    ),
+                    None => Err("session state is unavailable for queued promotion".to_owned()),
+                };
+                match committed {
+                    Ok(candidate) => {
+                        let provider_name = current_session
+                            .as_ref()
+                            .map(|session| session.provider_name().to_owned());
+                        let model_name = current_session
+                            .as_ref()
+                            .map(|session| session.model_name().to_owned());
+                        match (provider_name, model_name) {
+                            (Some(provider_name), Some(model_name)) => {
+                                match load_session_with_url_capability_attachment(
+                                    &provider_name,
+                                    &model_name,
+                                    &current_session_log_path,
+                                    current_session.as_ref(),
+                                ) {
+                                    Ok(reloaded) => {
+                                        current_session = Some(reloaded);
+                                        exact_conversation_prompts.remove(&queue_id);
+                                        if let Some(session) = current_session.as_ref() {
+                                            send_conversation_queue_update(
+                                                &message_tx,
+                                                session.entries(),
+                                            );
+                                        }
+                                        active_run = start_queued_conversation_run(
+                                            &runtime,
+                                            Arc::clone(&agent),
+                                            &agent_supervisor,
+                                            &root_config,
+                                            agent.tool_registry(),
+                                            &options,
+                                            &background_agent_runs,
+                                            &mut current_session,
+                                            &task_result_tx,
+                                            &message_tx,
+                                            Arc::clone(&elicitation_handler),
+                                            &mut next_run_id,
+                                            candidate,
+                                        );
+                                    }
+                                    Err(error) => {
+                                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                            "queued promotion committed but session reload failed; provider dispatch was refused: {error:#}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                let _ = message_tx.send(WorkerMessage::Notice(
+                                    "queued promotion committed but session state was unavailable; provider dispatch was refused"
+                                        .to_owned(),
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "queued promotion was not dispatched: {error}"
+                        )));
+                    }
+                }
+            }
             if active_run.is_some() {
                 continue;
             }
@@ -636,6 +1092,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
                 next_run_id += 1;
+                let provider_logical_run_id = format!("foreground-run-{run_id}");
                 let workspace_root = options.workspace_root.clone();
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
@@ -665,6 +1122,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             plan_mode,
                             Vec::new(),
                         )
+                        .with_logical_run_id(provider_logical_run_id.clone())
                         .with_cancellation(cancellation_handle);
                         if let Some(tools) = plan_tools {
                             agent
@@ -707,6 +1165,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             result,
                             plan_mode,
                             queue_id: None,
+                            provider_logical_run_id: Some(provider_logical_run_id),
                             agent_result_continuation_thread_ids: Vec::new(),
                         },
                     });
@@ -971,6 +1430,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             result,
                             plan_mode: false,
                             queue_id: None,
+                            provider_logical_run_id: None,
                             agent_result_continuation_thread_ids: Vec::new(),
                         },
                     });
@@ -1717,14 +2177,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 }
             }
-            Ok(WorkerCommand::CompactNow) => {
+            Ok(WorkerCommand::PreviewV2Compaction) => {
+                pending_v2_compaction = None;
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot compact while the agent is running".to_owned(),
+                        "cannot preview compaction while the agent is running".to_owned(),
                     ));
                     continue;
                 }
-                let Some(mut session) = current_session.take() else {
+                let Some(session) = current_session.as_ref() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -1735,21 +2196,125 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     session.model_name(),
                     &options.compaction_config,
                 );
-                match session.compact_now(&effective_config) {
-                    Ok(record) => {
-                        current_session = Some(session);
-                        if let Some(session) = current_session.as_ref() {
-                            let _ = message_tx.send(session_compacted_message(
-                                &current_session_log_path,
-                                session,
-                                record,
-                                CompactionTrigger::Manual,
-                            ));
+                if !effective_config.enabled {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "compaction is disabled".to_owned(),
+                    ));
+                    continue;
+                }
+                match session.v2_compaction_preview(effective_config.tail_messages) {
+                    Ok(Some(preview)) => {
+                        let request_id = next_v2_compaction_request_id;
+                        next_v2_compaction_request_id =
+                            next_v2_compaction_request_id.saturating_add(1);
+                        match prepare_v2_compaction_review(
+                            request_id,
+                            &root_config,
+                            &workspace_root,
+                            &current_session_log_path,
+                            session,
+                            &options,
+                            agent.tool_registry().specs(),
+                            preview,
+                        ) {
+                            Ok((review, pending)) => {
+                                pending_v2_compaction = pending;
+                                let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
+                                    review: Some(Box::new(review)),
+                                });
+                            }
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                    "V2 compaction review failed: {error:#}"
+                                )));
+                            }
                         }
                     }
+                    Ok(None) => {
+                        let _ =
+                            message_tx.send(WorkerMessage::V2CompactionPreviewed { review: None });
+                    }
                     Err(error) => {
-                        current_session = Some(session);
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "V2 compaction preview failed: {error:#}"
+                        )));
+                    }
+                }
+            }
+            Ok(WorkerCommand::ApplyV2Compaction { request_id }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "cannot apply compaction while the agent is running".to_owned(),
+                    });
+                    continue;
+                }
+                let Some(pending) = pending_v2_compaction.take() else {
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "no admitted V2 compaction review is pending".to_owned(),
+                    });
+                    continue;
+                };
+                if pending.request_id() != request_id {
+                    let reviewed_request_id = pending.request_id();
+                    pending_v2_compaction = Some(pending);
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: format!(
+                            "stale V2 compaction confirmation (review request is {reviewed_request_id})"
+                        ),
+                    });
+                    continue;
+                }
+                let Some(session) = current_session.as_ref() else {
+                    let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                        request_id,
+                        error: "session state is unavailable".to_owned(),
+                    });
+                    continue;
+                };
+                let provider_name = session.provider_name().to_owned();
+                let model_name = session.model_name().to_owned();
+                let folded_event_count = pending.folded_event_count();
+                let applied = pending.apply(session, &current_session_log_path);
+                match applied {
+                    Ok(outcome) => {
+                        let reloaded = load_session_with_url_capability_attachment(
+                            &provider_name,
+                            &model_name,
+                            &current_session_log_path,
+                            current_session.as_ref(),
+                        );
+                        let entries = match reloaded {
+                            Ok(session) => {
+                                let entries = session.entries().to_vec();
+                                current_session = Some(session);
+                                entries
+                            }
+                            Err(error) => {
+                                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                    "compaction applied, but session reload was deferred: {error:#}"
+                                )));
+                                current_session
+                                    .as_ref()
+                                    .map(|current| current.entries().to_vec())
+                                    .unwrap_or_default()
+                            }
+                        };
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                            request_id,
+                            source: V2CompactionApplySource::ManualConfirmation,
+                            compaction_id: outcome.compaction_id,
+                            folded_event_count,
+                            entries,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
+                            request_id,
+                            error: format!("{error:#}"),
+                        });
                     }
                 }
             }

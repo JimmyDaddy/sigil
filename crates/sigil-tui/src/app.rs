@@ -9,6 +9,7 @@ mod agent_flow;
 mod approval_flow;
 mod checkpoint_flow;
 mod command_dispatch;
+mod compaction_flow;
 mod config_flow;
 mod conversation_queue_flow;
 mod diagnostics_flow;
@@ -46,10 +47,9 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
-    AgentThreadId, AgentThreadStateProjection, CompactionConfig, CompactionRecord,
-    CompactionThresholdStatus, ControlledCheckpointRestorePreview,
-    ControlledCheckpointRestoreRequest, ConversationInputKind, ConversationInputQueueId,
-    ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
+    AgentThreadId, AgentThreadStateProjection, CompactionConfig, CompactionThresholdStatus,
+    ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
+    ConversationInputQueueId, ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
     MutationArtifactInventoryItem, MutationArtifactRetentionReport, PermissionMode,
     PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig, SecretRedactor,
     SessionConfig, SessionStats, StorageConfig, TaskStateProjection, ToolPreviewSnapshot,
@@ -297,7 +297,6 @@ pub struct AppState {
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
     tool_preview_snapshots: HashMap<String, ToolPreviewSnapshot>,
-    latest_compaction_record: Option<CompactionRecord>,
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
     thinking_block_mode: ThinkingBlockMode,
@@ -432,7 +431,10 @@ pub enum AppAction {
     CopyToClipboard {
         text: String,
     },
-    CompactNow,
+    PreviewV2Compaction,
+    ApplyV2Compaction {
+        request_id: u64,
+    },
     CheckChangedFilesDiagnostics,
     CleanMutationArtifacts {
         target: MutationArtifactCleanupTarget,
@@ -568,7 +570,6 @@ impl AppState {
             config_state: None,
             modal_state: None,
             tool_preview_snapshots: HashMap::new(),
-            latest_compaction_record: None,
             compaction_config: root_config.compaction.clone(),
             memory_config: root_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
@@ -694,7 +695,6 @@ impl AppState {
             config_state: None,
             modal_state: None,
             tool_preview_snapshots: HashMap::new(),
-            latest_compaction_record: None,
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
@@ -889,7 +889,6 @@ impl AppState {
         self.session_browser.current_entries.clear();
         self.mark_current_session_entries_changed();
         self.tool_preview_snapshots.clear();
-        self.latest_compaction_record = None;
         self.runtime.run_phase = RunPhase::Idle;
         self.runtime.last_phase_marker = None;
         self.streaming_assistant_index = None;
@@ -976,7 +975,15 @@ impl AppState {
             } else {
                 self.handle_modal_key_event(key)
             };
-            self.apply_modal_outcome(outcome);
+            match outcome {
+                modal_flow::ModalOutcome::V2CompactionConfirmed { request_id } => {
+                    self.apply_modal_outcome(modal_flow::ModalOutcome::V2CompactionConfirmed {
+                        request_id,
+                    });
+                    return Ok(Some(AppAction::ApplyV2Compaction { request_id }));
+                }
+                outcome => self.apply_modal_outcome(outcome),
+            }
             return Ok(None);
         }
 

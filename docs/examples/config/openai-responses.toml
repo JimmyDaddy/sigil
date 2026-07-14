@@ -1,0 +1,15 @@
+[workspace]
+root = "."
+
+[agent]
+provider = "openai_responses"
+model = "gpt-4.1"
+tool_timeout_secs = 30
+
+[permission]
+mode = "manual"
+
+[providers.openai_responses]
+base_url = "https://api.openai.com/v1"
+# Prefer SIGIL_OPENAI_RESPONSES_API_KEY.
+# api_key = "sk-..."

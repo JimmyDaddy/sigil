@@ -756,7 +756,6 @@ fn conflict_reason_label(reason: CheckpointRestoreConflictReason) -> &'static st
 
 fn checkpoint_session_entry(record: &SessionStreamRecord) -> Option<SessionLogEntry> {
     match record {
-        SessionStreamRecord::Legacy { entry, .. } => Some((**entry).clone()),
         SessionStreamRecord::Stored(event) => event
             .payload
             .get("session_log_entry")

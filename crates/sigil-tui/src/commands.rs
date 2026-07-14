@@ -13,7 +13,7 @@ pub(crate) enum UiCommand {
     OpenConfig,
     OpenDoctor,
     StartNewSession,
-    CompactNow,
+    PreviewV2Compaction,
     CycleAgentView,
     CycleAgentViewPrevious,
     CheckChangedFilesDiagnostics,
@@ -115,11 +115,11 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
-        command: UiCommand::CompactNow,
+        command: UiCommand::PreviewV2Compaction,
         keys: &[],
         slash: Some("/compact"),
-        label: "Compact",
-        help: "Request context compaction when idle.",
+        label: "Preview compact",
+        help: "Review the V2 fold plan without mutating the session.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
@@ -326,7 +326,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         UiCommand::SubmitPrompt,
         UiCommand::CancelOrQuit,
         UiCommand::StartNewSession,
-        UiCommand::CompactNow,
+        UiCommand::PreviewV2Compaction,
     ]));
     lines.extend([
         "Ctrl-J: Insert a newline in the composer.".to_owned(),

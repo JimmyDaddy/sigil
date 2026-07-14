@@ -10,8 +10,8 @@ use crate::{
 };
 
 #[test]
-fn legacy_execution_receipt_derives_accurate_output_evidence() {
-    let mut legacy = serde_json::to_value(ExecutionReceipt {
+fn execution_receipt_requires_structured_output_evidence() {
+    let mut incomplete = serde_json::to_value(ExecutionReceipt {
         backend: ExecutionBackendKind::Local,
         capabilities: ExecutionBackendCapabilities::default(),
         network: Default::default(),
@@ -24,22 +24,11 @@ fn legacy_execution_receipt_derives_accurate_output_evidence() {
         timed_out: true,
     })
     .expect("execution receipt should serialize");
-    legacy
+    incomplete
         .as_object_mut()
         .expect("execution receipt should serialize as an object")
         .remove("output");
-    let receipt = serde_json::from_value::<ExecutionReceipt>(legacy)
-        .expect("legacy execution receipt should deserialize");
-
-    assert!(!receipt.output.is_recorded());
-    let output = receipt.effective_output();
-    assert!(output.is_recorded());
-    assert_eq!(output.stdout.total_bytes, 4);
-    assert_eq!(output.stdout.total_lines, 2);
-    assert_eq!(output.stderr.total_bytes, 3);
-    assert_eq!(output.stderr.total_lines, 1);
-    assert_eq!(output.combined_total_bytes, 7);
-    assert_eq!(output.termination, ExecutionTerminationCause::TimedOut);
+    assert!(serde_json::from_value::<ExecutionReceipt>(incomplete).is_err());
 }
 
 #[test]
@@ -204,7 +193,7 @@ fn bounded_execution_output_evidence_roundtrips() {
 }
 
 #[test]
-fn future_execution_output_schema_preserves_known_terminal_evidence() {
+fn execution_output_receipt_rejects_noncurrent_schema() {
     let output = ExecutionOutputReceipt {
         schema_version: EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
         stdout: ExecutionStreamCapture {
@@ -229,34 +218,5 @@ fn future_execution_output_schema_preserves_known_terminal_evidence() {
     let mut encoded = serde_json::to_value(output).expect("output evidence should serialize");
     encoded["schema_version"] = serde_json::json!(2);
     encoded["future_evidence"] = serde_json::json!({ "new_counter": 9 });
-    let decoded = serde_json::from_value::<ExecutionOutputReceipt>(encoded)
-        .expect("future additive output evidence should deserialize");
-
-    assert!(decoded.is_recorded());
-    assert!(!decoded.uses_current_schema());
-    let receipt = ExecutionReceipt {
-        backend: ExecutionBackendKind::Local,
-        capabilities: ExecutionBackendCapabilities::default(),
-        network: Default::default(),
-        resources: Default::default(),
-        environment_policy: ProcessEnvironmentPolicy::InheritParent,
-        exit_code: None,
-        stdout: b"legacy bytes must not replace future evidence".to_vec(),
-        stderr: Vec::new(),
-        output: decoded.clone(),
-        timed_out: false,
-    };
-
-    let effective = receipt.effective_output();
-    assert_eq!(effective, decoded);
-    assert_eq!(effective.schema_version, 2);
-    assert_eq!(effective.stdout.total_bytes, 42);
-    assert_eq!(effective.combined_total_bytes, 42);
-    assert_eq!(
-        effective.termination,
-        ExecutionTerminationCause::ReaderFailed {
-            stream: ExecutionOutputStream::Stdout,
-            reason: "future reader evidence".to_owned(),
-        }
-    );
+    assert!(serde_json::from_value::<ExecutionOutputReceipt>(encoded).is_err());
 }

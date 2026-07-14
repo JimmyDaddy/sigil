@@ -7,12 +7,11 @@ use sigil_kernel::{
     AgentConfig, AgentMailboxMessageEntry, AgentMailboxStatus, AgentRole, AgentRouteId,
     AgentThreadId, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, ContextBodyRef,
     ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
-    ControlEntry, EventHandler, FileChangeRef, JobIntentEntry, MemoryConfig, PackedContext,
-    PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef,
-    SourcedDecision, SourcedFact, StepLeaseEntry, StepLeaseStatus, TaskId, TaskMemoryV1,
-    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall, ToolCategory, ToolEffect,
-    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ControlEntry, EventHandler, JobIntentEntry, MemoryConfig, PackedContext, PermissionConfig,
+    RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef, StepLeaseEntry,
+    StepLeaseStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall, ToolCategory,
+    ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::*;
@@ -70,90 +69,6 @@ fn context_item(
         inclusion_reason,
         body_ref: ContextBodyRef::inline("context"),
     }
-}
-
-#[test]
-fn task_memory_inspect_view_model_summarizes_without_tool_output_replay() {
-    let memory = TaskMemoryV1 {
-        memory_id: "memory-1234567890abcdef".to_owned(),
-        branch_id: None,
-        valid_for_snapshot: "snapshot-1234567890abcdef".to_owned(),
-        supersedes: None,
-        source_event_ids: vec!["event-1".to_owned()],
-        objective: "Fix the README typo without changing package commands".to_owned(),
-        constraints: Vec::new(),
-        decisions: vec![SourcedDecision {
-            decision: SourcedFact::model_inferred("Use a targeted edit", "event-1"),
-            rationale: Some(SourcedFact::system_derived(
-                "Only README.md changed",
-                "event-2",
-            )),
-        }],
-        files_changed: vec![FileChangeRef::new("README.md")],
-        commands_run: Vec::new(),
-        verification_results: vec!["check-readme".to_owned()],
-        failed_attempts: Vec::new(),
-        risks: Vec::new(),
-        unresolved_issues: vec![SourcedFact::model_inferred(
-            "Run docs link check later",
-            "event-3",
-        )],
-    };
-
-    let lines = TaskMemoryInspectViewModel::from_task_memory(&memory).lines();
-
-    assert!(lines.iter().any(|line| line == "[memory]"));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("objective: Fix the README typo"))
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("decision: Use a targeted edit [model summary context]"))
-    );
-    assert!(lines.iter().any(|line| line == "file: README.md"));
-    assert!(lines.iter().any(|line| line == "check: check-readme"));
-    assert!(lines.iter().any(|line| {
-        line.contains("unresolved: Run docs link check later [model summary context]")
-    }));
-    assert!(lines.iter().all(|line| !line.contains("[verified]")));
-}
-
-#[test]
-fn task_memory_inspect_view_model_labels_receipt_backed_facts_as_memory_context() {
-    let mut receipt_fact = SourcedFact::system_derived("Use verification receipt", "event-1");
-    receipt_fact.verified = true;
-    receipt_fact.source_receipt_id = Some("receipt-1".to_owned());
-    let memory = TaskMemoryV1 {
-        memory_id: "memory-receipt".to_owned(),
-        branch_id: None,
-        valid_for_snapshot: "snapshot-receipt".to_owned(),
-        supersedes: None,
-        source_event_ids: vec!["event-1".to_owned()],
-        objective: "Keep memory distinct from verification evidence".to_owned(),
-        constraints: Vec::new(),
-        decisions: vec![SourcedDecision {
-            decision: receipt_fact,
-            rationale: None,
-        }],
-        files_changed: Vec::new(),
-        commands_run: Vec::new(),
-        verification_results: Vec::new(),
-        failed_attempts: Vec::new(),
-        risks: Vec::new(),
-        unresolved_issues: Vec::new(),
-    };
-
-    let lines = TaskMemoryInspectViewModel::from_task_memory(&memory).lines();
-
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("decision: Use verification receipt [memory context]"))
-    );
-    assert!(lines.iter().all(|line| !line.contains("[verified]")));
 }
 
 #[test]

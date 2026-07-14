@@ -82,12 +82,12 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [Terminal Compatib
 | `/task continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |
-| `/compact` | Manually compact the provider-visible context for the current session |
+| `/compact` | Review the V2 fold plan; apply is temporarily frozen while correctness fixes are in progress |
 | `/quit` | Quit the TUI |
 
 `/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` and `/agent cancel` also show child-agent candidates before the argument is completed.
 
-When Sigil is already running, ordinary chat input becomes a visible Follow-ups item instead of being dropped or added immediately to the timeline or provider-visible history. Follow-up dispatch is FIFO after the active turn finishes; the normal user message is added when the item dispatches. `next` moves an item to the front for the next turn; `interrupt` stops the current run before dispatching the selected item. Agent mentions are not silently converted into main-thread follow-ups while the session is busy; wait for the current turn or use the dedicated agent messaging surface.
+When Sigil is already running, ordinary chat input becomes a visible Follow-ups item instead of being dropped or added immediately to the timeline or provider-visible history. Follow-up dispatch is FIFO after the active turn finishes; the normal user message is added when the item dispatches. Before it sends, Sigil checks local context pressure for reporting. While V2 apply is frozen, it sends the prepared request unchanged rather than changing the active context boundary. If a restart or transport failure leaves it unclear whether a follow-up reached the model, Sigil marks it stale and never resends it automatically. `next` moves an item to the front for the next turn; `interrupt` stops the current run before dispatching the selected item. Agent mentions are not silently converted into main-thread follow-ups while the session is busy; wait for the current turn or use the dedicated agent messaging surface.
 
 `/plan` creates a Plan ready card only when the planner returns a structured plan with at least one executable step. Plain review text or unstructured summaries remain ordinary assistant output and do not create a task approval surface. Press `Enter` on Plan ready to create and run the durable task, or `Esc` to discard it.
 
@@ -145,6 +145,7 @@ By default, session logs are written under Sigil's per-user state directory:
 Sigil stores session and control state as append-only JSONL. For users, this means:
 
 - Restarting the TUI restores the latest session by default.
+- Current builds restore V2 session JSONL only. If Sigil finds the older raw session format, it reports the file as unsupported and leaves it unchanged; archive that file and start a new session. Sigil does not migrate the older format.
 - Exiting the TUI prints the current session id and `sigil resume <session-id>` for command-line restore.
 - Cancelling a run first closes admission for new provider, tool, process, socket, retry, redirect, and child-work effects, then waits up to a bounded cleanup deadline. The UI shows `Cancelling` while active work is converging; `Cancelled` means cleanup was confirmed, while `Interrupted` means the deadline expired or cleanup could not be proven.
 - Cancelling a run does not discard messages and tool results already written to the log. `/queue interrupt` dispatches its follow-up only after the prior run reaches a durable cancellation terminal state.
@@ -186,11 +187,15 @@ workspace—both sessions still refer to the same files.
 The info rail shows the latest provider-reported prompt usage against the model context window. The `ctx` line labels whether the window came from provider metadata or `fallback_context_window_tokens`, and Sigil calculates soft and hard thresholds from that same window:
 
 - Soft threshold: context pressure is getting high.
-- Hard threshold: automatic compaction runs after the current run returns to idle.
-- `/compact`: manually compact the current session's provider-visible context.
+- Hard threshold: context pressure is critical. Automatic compaction apply is temporarily frozen while correctness fixes are in progress.
+- `/compact`: opens a read-only V2 fold review with fold, keep, and protection details. Apply is temporarily unavailable while correctness fixes are in progress.
 - If the window is unknown, configure `fallback_context_window_tokens` so the TUI can show percentages and threshold hints.
 
-Compaction appends control records. It does not rewrite old history.
+Opening the review never rewrites history or appends a compaction record. It does not download the tokenizer or contact a provider. While apply is frozen, `Enter` only closes the review.
+
+Idle automation never preempts streaming work, queued input, model switching, or overflow recovery. While apply is frozen, it does not create a lifecycle record or alter the session context.
+
+The guarded overflow apply path is also frozen. It does not count, compact, or retry a request while correctness fixes are in progress.
 
 ## Code Intelligence
 

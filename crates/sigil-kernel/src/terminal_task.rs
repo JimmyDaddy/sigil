@@ -198,12 +198,10 @@ pub struct TerminalTaskEntry {
     pub output_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_hash: Option<String>,
-    #[serde(default)]
     pub output_truncated: bool,
     /// Bytes observed by the streaming collectors before EOF or a terminal capture failure.
     ///
     /// This can exceed the retained artifact size when a hard limit terminates the process tree.
-    #[serde(default)]
     pub output_total_bytes: u64,
     /// Hard artifact limit that caused termination, if output collection crossed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

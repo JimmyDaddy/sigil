@@ -6,14 +6,15 @@ use std::{
 
 use futures::StreamExt;
 use sigil_kernel::{
-    CompletionRequest, HostedEvidence, HostedToolKind, HostedToolLimits, HostedToolRequest,
-    ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+    CompactionCursor, CompletionRequest, DurableEventType, FrozenProviderRequestMaterial,
+    HostedEvidence, HostedToolKind, HostedToolLimits, HostedToolRequest, JsonlSessionStore,
+    ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk, Session, SessionLogEntry,
 };
 
 use super::*;
 use crate::{
-    SIGIL_ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_ANTHROPIC_MAX_TOKENS_ENV,
-    SIGIL_ANTHROPIC_VERSION_ENV,
+    AnthropicNativeCompactionOptions, SIGIL_ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV,
+    SIGIL_ANTHROPIC_MAX_TOKENS_ENV, SIGIL_ANTHROPIC_VERSION_ENV,
 };
 
 struct EnvScope {
@@ -149,6 +150,117 @@ async fn provider_stream_surfaces_sse_events_and_headers() -> anyhow::Result<()>
     assert!(request.contains("anthropic-version: 2023-06-01"));
     assert!(request.contains("anthropic-beta: tools-2024,cache-2024"));
     assert!(request.contains("\"model\":\"claude-test\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_native_compact_uses_paused_beta_wire_and_preserves_raw_content()
+-> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n\
+         {\"id\":\"msg_compact_1\",\"stop_reason\":\"compaction\",\"content\":[{\"type\":\"compaction\",\"content\":\"opaque-summary\",\"extension\":{\"retain\":true}}]}",
+    )
+    .await?;
+    let provider = anthropic_hosted_test_provider(AnthropicProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        beta_headers: vec!["compact-2026-01-12".to_owned()],
+        ..AnthropicProviderConfig::default()
+    })?;
+    let mut request = test_request();
+    request.model_name = "claude-sonnet-4-6".to_owned();
+
+    let compacted = provider
+        .compact(
+            &request,
+            &AnthropicNativeCompactionOptions {
+                trigger_input_tokens: 50_000,
+                instructions: None,
+            },
+        )
+        .await?;
+
+    assert_eq!(compacted.response_id, "msg_compact_1");
+    assert_eq!(
+        compacted.canonical_compacted_content_json(),
+        Some(r#"[{"type":"compaction","content":"opaque-summary","extension":{"retain":true}}]"#)
+    );
+    let wire = server.request_text().to_ascii_lowercase();
+    assert!(wire.contains("anthropic-beta: compact-2026-01-12"));
+    assert_eq!(wire.matches("compact-2026-01-12").count(), 1);
+    assert!(wire.contains("\"stream\":false"));
+    assert!(wire.contains("\"context_management\":{\"edits\":[{\"pause_after_compaction\":true"));
+    assert!(wire.contains("\"type\":\"compact_20260112\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_native_compact_records_a_completed_durable_attempt_when_the_threshold_is_not_met()
+-> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n\
+         {\"id\":\"msg_normal_1\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"normal\"}]}",
+    )
+    .await?;
+    let provider = anthropic_hosted_test_provider(AnthropicProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..AnthropicProviderConfig::default()
+    })?;
+    let mut request = test_request();
+    request.model_name = "claude-sonnet-4-6".to_owned();
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("anthropic", "claude-sonnet-4-6").with_store(store.clone());
+    let covered = store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user(
+        "durable native compaction seed",
+    )))?;
+    let frozen = FrozenProviderRequestMaterial::freeze(session.session_scope_id(), request)?;
+
+    let materialized = provider
+        .compact_and_materialize_durable(
+            &session,
+            "native-compaction-run-1",
+            frozen,
+            CompactionCursor {
+                session_id: session.session_scope_id().to_owned(),
+                through_stream_sequence: covered.stream_sequence,
+                through_event_id: covered.event_id,
+            },
+            AnthropicNativeCompactionOptions {
+                trigger_input_tokens: 50_000,
+                instructions: None,
+            },
+        )
+        .await?;
+
+    assert!(materialized.is_none());
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_type
+                    == DurableEventType::ProviderPhysicalAttemptStarted.as_str()
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_type
+                    == DurableEventType::ProviderPhysicalAttemptTerminal.as_str()
+            })
+            .count(),
+        1
+    );
+    assert!(!records.iter().any(|record| {
+        record.stored_event().event_type == DurableEventType::ProviderContinuationObserved.as_str()
+            || record.stored_event().event_type
+                == DurableEventType::ProviderContinuationCandidateRecorded.as_str()
+    }));
     Ok(())
 }
 

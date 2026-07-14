@@ -6,22 +6,27 @@ use sigil_provider_anthropic::{AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_
 use sigil_provider_deepseek::{DeepSeekProviderConfig, SIGIL_API_KEY_ENV, StrictToolsMode};
 use sigil_provider_gemini::{GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV};
 use sigil_provider_openai_compat::{OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProviderConfig};
+use sigil_provider_openai_responses::{
+    OPENAI_RESPONSES_API_KEY_ENV, OpenAiResponsesProviderConfig,
+};
 
 use crate::{
     load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
-    provider_config_key,
+    load_openai_responses_config, provider_config_key,
 };
 
 pub const DEEPSEEK_PROVIDER_KEY: &str = "deepseek";
 pub const OPENAI_COMPAT_PROVIDER_KEY: &str = "openai_compat";
+pub const OPENAI_RESPONSES_PROVIDER_KEY: &str = "openai_responses";
 pub const ANTHROPIC_PROVIDER_KEY: &str = "anthropic";
 pub const GEMINI_PROVIDER_KEY: &str = "gemini";
 
 pub const DEFAULT_SETUP_PROVIDER_KEY: &str = DEEPSEEK_PROVIDER_KEY;
 pub const DEFAULT_SETUP_API_KEY_ENV: &str = SIGIL_API_KEY_ENV;
-pub const PROVIDER_KEYS: [&str; 4] = [
+pub const PROVIDER_KEYS: [&str; 5] = [
     DEEPSEEK_PROVIDER_KEY,
     OPENAI_COMPAT_PROVIDER_KEY,
+    OPENAI_RESPONSES_PROVIDER_KEY,
     ANTHROPIC_PROVIDER_KEY,
     GEMINI_PROVIDER_KEY,
 ];
@@ -104,10 +109,11 @@ pub fn supported_provider_name(provider: &str) -> Result<&str> {
     match provider {
         DEEPSEEK_PROVIDER_KEY
         | OPENAI_COMPAT_PROVIDER_KEY
+        | OPENAI_RESPONSES_PROVIDER_KEY
         | ANTHROPIC_PROVIDER_KEY
         | GEMINI_PROVIDER_KEY => Ok(provider),
         other => bail!(
-            "unsupported provider {other}; expected one of deepseek, openai_compat, anthropic, or gemini"
+            "unsupported provider {other}; expected one of deepseek, openai_compat, openai_responses, anthropic, or gemini"
         ),
     }
 }
@@ -116,7 +122,8 @@ pub fn supported_provider_name(provider: &str) -> Result<&str> {
 pub fn next_provider_name(provider: &str) -> &'static str {
     match normalize_provider_name(provider) {
         DEEPSEEK_PROVIDER_KEY => OPENAI_COMPAT_PROVIDER_KEY,
-        OPENAI_COMPAT_PROVIDER_KEY => ANTHROPIC_PROVIDER_KEY,
+        OPENAI_COMPAT_PROVIDER_KEY => OPENAI_RESPONSES_PROVIDER_KEY,
+        OPENAI_RESPONSES_PROVIDER_KEY => ANTHROPIC_PROVIDER_KEY,
         ANTHROPIC_PROVIDER_KEY => GEMINI_PROVIDER_KEY,
         _ => DEEPSEEK_PROVIDER_KEY,
     }
@@ -127,6 +134,7 @@ pub fn provider_api_key_env_name(provider: &str) -> Option<&'static str> {
     match normalize_provider_name(provider) {
         DEEPSEEK_PROVIDER_KEY => Some(SIGIL_API_KEY_ENV),
         OPENAI_COMPAT_PROVIDER_KEY => Some(OPENAI_COMPATIBLE_API_KEY_ENV),
+        OPENAI_RESPONSES_PROVIDER_KEY => Some(OPENAI_RESPONSES_API_KEY_ENV),
         ANTHROPIC_PROVIDER_KEY => Some(SIGIL_ANTHROPIC_API_KEY_ENV),
         GEMINI_PROVIDER_KEY => Some(SIGIL_GEMINI_API_KEY_ENV),
         _ => None,
@@ -166,6 +174,9 @@ pub fn provider_config_fields(
         OPENAI_COMPAT_PROVIDER_KEY => load_openai_compat_config(root_config)
             .map(provider_config_fields_from_openai_compat)
             .unwrap_or_else(|_| default_provider_config_fields(provider_name, fallback_model)),
+        OPENAI_RESPONSES_PROVIDER_KEY => load_openai_responses_config(root_config)
+            .map(provider_config_fields_from_openai_responses)
+            .unwrap_or_else(|_| default_provider_config_fields(provider_name, fallback_model)),
         ANTHROPIC_PROVIDER_KEY => load_anthropic_config(root_config)
             .map(provider_config_fields_from_anthropic)
             .unwrap_or_else(|_| default_provider_config_fields(provider_name, fallback_model)),
@@ -188,6 +199,9 @@ pub fn default_provider_config_fields(provider_name: &str, model: &str) -> Provi
     match normalize_provider_name(provider_name) {
         OPENAI_COMPAT_PROVIDER_KEY => provider_config_fields_from_openai_compat(
             OpenAiCompatibleProviderConfig::default_for_model(model),
+        ),
+        OPENAI_RESPONSES_PROVIDER_KEY => provider_config_fields_from_openai_responses(
+            OpenAiResponsesProviderConfig::default_for_model(model),
         ),
         ANTHROPIC_PROVIDER_KEY => {
             provider_config_fields_from_anthropic(AnthropicProviderConfig::default_for_model(model))
@@ -252,6 +266,17 @@ pub fn set_provider_config_fields(
             root_config.providers.insert(
                 OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
                 serialize_provider_config("openai_compat", &config)?,
+            );
+        }
+        OPENAI_RESPONSES_PROVIDER_KEY => {
+            let mut config = load_openai_responses_config(root_config)
+                .unwrap_or_else(|_| OpenAiResponsesProviderConfig::default_for_model(model));
+            config.model = model.to_owned();
+            config.api_key = api_key;
+            config.base_url = base_url.to_owned();
+            root_config.providers.insert(
+                OPENAI_RESPONSES_PROVIDER_KEY.to_owned(),
+                serialize_provider_config("openai_responses", &config)?,
             );
         }
         ANTHROPIC_PROVIDER_KEY => {
@@ -409,6 +434,14 @@ pub fn provider_model_status_config(
             );
             provider_status_config_from_fields(&fields, &root_config.model_request).map(Some)
         }
+        OPENAI_RESPONSES_PROVIDER_KEY => {
+            let fields = provider_config_fields(
+                root_config,
+                OPENAI_RESPONSES_PROVIDER_KEY,
+                &root_config.agent.model,
+            );
+            provider_status_config_from_fields(&fields, &root_config.model_request).map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -419,7 +452,7 @@ pub fn provider_model_status_config_from_fields(
     model_request: &ModelRequestConfig,
 ) -> Result<Option<ProviderStatusConfig>> {
     match normalize_provider_name(provider_name) {
-        DEEPSEEK_PROVIDER_KEY | OPENAI_COMPAT_PROVIDER_KEY => {
+        DEEPSEEK_PROVIDER_KEY | OPENAI_COMPAT_PROVIDER_KEY | OPENAI_RESPONSES_PROVIDER_KEY => {
             provider_status_config_from_fields(fields, model_request).map(Some)
         }
         _ => Ok(None),
@@ -436,6 +469,16 @@ fn provider_config_fields_from_deepseek(config: DeepSeekProviderConfig) -> Provi
 
 fn provider_config_fields_from_openai_compat(
     config: OpenAiCompatibleProviderConfig,
+) -> ProviderConfigFields {
+    ProviderConfigFields {
+        model: config.model,
+        api_key: config.api_key.unwrap_or_default(),
+        base_url: config.base_url,
+    }
+}
+
+fn provider_config_fields_from_openai_responses(
+    config: OpenAiResponsesProviderConfig,
 ) -> ProviderConfigFields {
     ProviderConfigFields {
         model: config.model,

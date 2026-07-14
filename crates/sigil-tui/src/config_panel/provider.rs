@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use sigil_kernel::RootConfig;
 use sigil_runtime::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY,
-    ProviderConfigFields, default_provider_config_fields, next_provider_name,
-    normalize_provider_name, provider_config_fields,
+    OPENAI_RESPONSES_PROVIDER_KEY, ProviderConfigFields, default_provider_config_fields,
+    next_provider_name, normalize_provider_name, provider_config_fields,
 };
 
 use super::ConfigDraft;
@@ -24,6 +24,14 @@ pub(super) fn provider_drafts_from_root_config(
         provider_config_fields(
             root_config,
             OPENAI_COMPAT_PROVIDER_KEY,
+            &root_config.agent.model,
+        ),
+    );
+    provider_drafts.insert(
+        OPENAI_RESPONSES_PROVIDER_KEY.to_owned(),
+        provider_config_fields(
+            root_config,
+            OPENAI_RESPONSES_PROVIDER_KEY,
             &root_config.agent.model,
         ),
     );

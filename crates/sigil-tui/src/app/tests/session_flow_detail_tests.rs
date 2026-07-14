@@ -7,12 +7,11 @@ use serde_json::json;
 use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfilePolicyEntry, AgentProfileSnapshot,
     AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
-    ApprovalMode, CitationSupport, CompactionConfig, CompactionRecord, ControlEntry,
-    DurableEventType, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCoverageLabel,
-    ExecutionNetworkReceipt, ExecutionSandboxProfile, ExternalEvidenceLevel,
-    ExternalProvenanceEntry, ExternalSourceRecord, ExternalTrust, JsonlSessionStore,
-    McpElicitationDecision, McpElicitationEntry, MemoryConfig, PlanApprovalExpiry,
-    PlanApprovalPermission, PluginCapability, PluginHookExecutionFinishedEntry,
+    ApprovalMode, CitationSupport, ControlEntry, DurableEventType, ExecutionBackendCapabilities,
+    ExecutionBackendKind, ExecutionCoverageLabel, ExecutionNetworkReceipt, ExecutionSandboxProfile,
+    ExternalEvidenceLevel, ExternalProvenanceEntry, ExternalSourceRecord, ExternalTrust,
+    JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
+    PlanApprovalExpiry, PlanApprovalPermission, PluginCapability, PluginHookExecutionFinishedEntry,
     PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
     PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SessionStreamRecord,
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
@@ -46,6 +45,22 @@ fn session_labels_and_identifiers_truncate_as_expected() {
         bytes: 0,
     };
     assert!(session_history_display_label(&titled).starts_with("A very long title"));
+}
+
+#[test]
+fn session_history_marks_legacy_raw_logs_as_unsupported() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session-legacy.jsonl");
+    fs::write(
+        &path,
+        serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?,
+    )?;
+
+    assert_eq!(
+        session_history_title_from_log(&path).as_deref(),
+        Some("legacy session format unsupported")
+    );
+    Ok(())
 }
 
 #[test]
@@ -1448,34 +1463,6 @@ fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
         tool_execution_status_label(ToolExecutionStatus::Cancelled),
         "cancelled"
     );
-
-    let preview_lines = render_compaction_preview_lines(&CompactionPreview {
-        record: CompactionRecord {
-            summary: "summary".to_owned(),
-            compacted_message_count: 2,
-            retained_tail_message_count: 1,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        },
-        folded_messages: vec![ModelMessage::user("before")],
-        projected_messages: vec![ModelMessage::assistant(
-            Some("after".to_owned()),
-            Vec::new(),
-        )],
-    });
-    assert_eq!(preview_lines[0], "/compact preview: fold 2");
-    assert!(
-        preview_lines
-            .iter()
-            .any(|line: &String| line.contains("[user] before"))
-    );
-    assert!(
-        preview_lines
-            .iter()
-            .any(|line: &String| line.contains("[assistant] after"))
-    );
 }
 
 #[test]
@@ -1699,14 +1686,8 @@ fn session_restore_and_projection_helpers_cover_empty_and_invalid_paths() -> Res
 }
 
 #[test]
-fn provider_projection_covers_compaction_preview_states() {
+fn provider_projection_invites_read_only_v2_compaction() {
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
-    app.compaction_config = CompactionConfig {
-        enabled: true,
-        tail_messages: 1,
-        context_window_tokens: Some(10_000),
-        ..CompactionConfig::default()
-    };
     app.sync_current_session_state(vec![
         SessionLogEntry::User(ModelMessage::user("first")),
         SessionLogEntry::Assistant(ModelMessage::assistant(
@@ -1720,24 +1701,13 @@ fn provider_projection_covers_compaction_preview_states() {
         )),
     ]);
     let preview = app.provider_projection_lines().join("\n");
-    assert!(preview.contains("/compact preview: fold"));
-    assert!(preview.contains("Before:"));
-    assert!(preview.contains("After:"));
+    assert!(preview.contains("/compact: inspect the V2 durable fold plan"));
+    assert!(!preview.contains("Before:"));
+    assert!(!preview.contains("After:"));
 
     app.sync_current_session_state(vec![SessionLogEntry::User(ModelMessage::user("only"))]);
-    let nothing = app.provider_projection_lines().join("\n");
-    assert!(nothing.contains("/compact preview: nothing to fold"));
-
-    app.compaction_config.enabled = false;
-    app.sync_current_session_state(vec![
-        SessionLogEntry::User(ModelMessage::user("first")),
-        SessionLogEntry::Assistant(ModelMessage::assistant(
-            Some("second".to_owned()),
-            Vec::new(),
-        )),
-    ]);
-    let unavailable = app.provider_projection_lines().join("\n");
-    assert!(unavailable.contains("/compact preview unavailable"));
+    let no_foldable_history = app.provider_projection_lines().join("\n");
+    assert!(no_foldable_history.contains("/compact: inspect the V2 durable fold plan"));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::{V2CompactionAdmission, V2CompactionReview};
 use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
 fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
@@ -520,7 +521,7 @@ fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
 }
 
 #[test]
-fn automatic_compaction_message_resets_status_and_emits_notice() -> Result<()> {
+fn empty_v2_compaction_preview_keeps_usage_status_and_reports_no_foldable_history() -> Result<()> {
     let mut config = test_config();
     config.agent.provider = "planned".to_owned();
     config.agent.model = "planned-model".to_owned();
@@ -528,8 +529,6 @@ fn automatic_compaction_message_resets_status_and_emits_notice() -> Result<()> {
     config.compaction.soft_threshold_ratio = 0.5;
     config.compaction.hard_threshold_ratio = 0.8;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    let session_log_path = app.session_log_path.clone();
-
     app.handle(RunEvent::Usage(UsageStats {
         prompt_tokens: 90,
         completion_tokens: 0,
@@ -542,27 +541,13 @@ fn automatic_compaction_message_resets_status_and_emits_notice() -> Result<()> {
     }))?;
     assert_eq!(app.runtime.compaction_status, "hard");
 
-    app.handle_worker_message(WorkerMessage::SessionCompacted {
-        session_log_path,
-        provider_name: app.runtime.provider_name.clone(),
-        model_name: app.runtime.model_name.clone(),
-        record: Box::new(CompactionRecord {
-            summary: "summary".to_owned(),
-            compacted_message_count: 3,
-            retained_tail_message_count: 2,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        }),
-        trigger: CompactionTrigger::AutomaticHardThreshold,
-        entries: Vec::new(),
-    })?;
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed { review: None })?;
 
-    assert_eq!(app.runtime.compaction_status, "ready");
-    assert_eq!(app.runtime.stats.last_prompt_tokens, 0);
+    assert_eq!(app.runtime.compaction_status, "hard");
+    assert_eq!(app.runtime.stats.last_prompt_tokens, 90);
     assert!(app.timeline.iter().any(|entry| {
-        entry.role == TimelineRole::Notice && entry.text.contains("Auto-compacted")
+        entry.role == TimelineRole::Notice
+            && entry.text == "no newly foldable history for V2 compaction"
     }));
     Ok(())
 }
@@ -1037,33 +1022,6 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             .any(|event| event.label == "mcp" && event.detail == "deferred")
     );
 
-    let temp = tempdir()?;
-    let session_log_path = temp.path().join("session-restored.jsonl");
-    let entries = restored_entries("restored-provider", "restored-model");
-    app.handle_worker_message(WorkerMessage::SessionCompacted {
-        session_log_path: session_log_path.clone(),
-        provider_name: "restored-provider".to_owned(),
-        model_name: "restored-model".to_owned(),
-        record: Box::new(CompactionRecord {
-            summary: "summary".to_owned(),
-            compacted_message_count: 2,
-            retained_tail_message_count: 1,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        }),
-        trigger: CompactionTrigger::Manual,
-        entries,
-    })?;
-
-    assert_eq!(app.session_log_path, session_log_path);
-    assert_eq!(app.last_notice(), Some("Session compacted."));
-    assert!(
-        app.timeline
-            .iter()
-            .any(|entry| entry.text.contains("Session compacted."))
-    );
     Ok(())
 }
 
@@ -2500,8 +2458,12 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
             if thread_id.as_str() == "thread-1" && prompt == "keep going"
     ));
     assert!(matches!(
-        app.into_worker_command(AppAction::CompactNow),
-        WorkerCommand::CompactNow
+        app.into_worker_command(AppAction::PreviewV2Compaction),
+        WorkerCommand::PreviewV2Compaction
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::ApplyV2Compaction { request_id: 7 }),
+        WorkerCommand::ApplyV2Compaction { request_id: 7 }
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::CheckChangedFilesDiagnostics),
@@ -2822,48 +2784,156 @@ fn new_session_started_restores_empty_session_view() -> Result<()> {
 }
 
 #[test]
-fn manual_compaction_restores_session_view_and_notice() -> Result<()> {
+fn v2_compaction_review_requires_admission_before_it_can_apply() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.composer.input = "compact this".to_owned();
-    assert!(matches!(
-        app.submit_input()?,
-        Some(AppAction::SubmitPrompt(prompt)) if prompt == "compact this"
-    ));
-    assert!(app.runtime.is_busy);
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("preview.jsonl"))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("old request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("old response".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
+    let preview = store
+        .v2_compaction_preview(1, None)?
+        .expect("fixture should have foldable history");
 
-    let session_log_path = app.session_log_path.clone();
-    let entries = restored_entries("compacted-provider", "compacted-model");
-    app.handle_worker_message(WorkerMessage::SessionCompacted {
-        session_log_path: session_log_path.clone(),
-        provider_name: "compacted-provider".to_owned(),
-        model_name: "compacted-model".to_owned(),
-        record: Box::new(CompactionRecord {
-            summary: "summary".to_owned(),
-            compacted_message_count: 2,
-            retained_tail_message_count: 1,
-            task_memory: None,
-            external_trust: None,
-            external_provenance_message_ids: Vec::new(),
-            external_source_ids: Vec::new(),
-        }),
-        trigger: CompactionTrigger::Manual,
-        entries: entries.clone(),
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        review: Some(Box::new(V2CompactionReview {
+            request_id: 41,
+            preview,
+            admission: V2CompactionAdmission::Unavailable {
+                reason: "verified tokenizer is not installed".to_owned(),
+            },
+        })),
     })?;
 
-    assert!(!app.runtime.is_busy);
-    assert_eq!(app.runtime.provider_name, "compacted-provider");
-    assert_eq!(app.runtime.model_name, "compacted-model");
-    assert_eq!(app.session_log_path, session_log_path);
-    assert_eq!(app.last_notice(), Some("Session compacted."));
-    assert!(
+    assert_eq!(app.modal_title(), Some("Context Compaction"));
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("Review"));
+    assert!(lines.contains("fold: 2 message(s)"));
+    assert!(lines.contains("apply: unavailable"));
+    assert_eq!(
+        app.last_notice(),
+        Some("review V2 compaction; local target request admission is unavailable")
+    );
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert_eq!(app.last_notice(), Some("closed V2 compaction preview"));
+    Ok(())
+}
+
+#[test]
+fn admitted_v2_compaction_review_confirms_an_apply_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("admitted-preview.jsonl"))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("old request")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("old response".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("latest request")))?;
+    let preview = store
+        .v2_compaction_preview(1, None)?
+        .expect("fixture should have foldable history");
+
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        review: Some(Box::new(V2CompactionReview {
+            request_id: 42,
+            preview,
+            admission: V2CompactionAdmission::Ready {
+                input_tokens: 120,
+                context_window_tokens: 1_000_000,
+                output_tokens: 32_768,
+                safety_buffer_tokens: 8_192,
+            },
+        })),
+    })?;
+
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("target request: verified locally"));
+    assert!(lines.contains("Enter apply"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::ApplyV2Compaction { request_id: 42 })
+    ));
+    assert!(!app.has_modal());
+    assert_eq!(app.last_notice(), Some("applying V2 compaction"));
+    Ok(())
+}
+
+#[test]
+fn v2_compaction_apply_renders_one_lifecycle_notice_without_an_assistant_reply() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let assistant_count = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Assistant)
+        .count();
+    let timeline_count = app.timeline.len();
+
+    app.handle_worker_message(WorkerMessage::V2CompactionApplied {
+        request_id: 42,
+        source: crate::runner::V2CompactionApplySource::ManualConfirmation,
+        compaction_id: "portable-test-activation".to_owned(),
+        folded_event_count: 3,
+        entries: vec![SessionLogEntry::User(ModelMessage::user(
+            "retained request",
+        ))],
+    })?;
+
+    assert_eq!(app.timeline.len(), timeline_count + 1);
+    assert_eq!(
         app.timeline
             .iter()
-            .any(|entry| entry.text.contains("Session compacted."))
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        assistant_count
     );
-    assert!(
-        app.events.iter().any(|event| event.label == "restore"
-            && event.detail == format!("entries={}", entries.len()))
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry
+                .text
+                .contains("Context compacted: 3 message(s) folded")
+    }));
+    Ok(())
+}
+
+#[test]
+fn idle_auto_compaction_renders_an_automatic_notice_without_an_assistant_reply() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let assistant_count = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Assistant)
+        .count();
+
+    app.handle_worker_message(WorkerMessage::V2CompactionApplied {
+        request_id: 43,
+        source: crate::runner::V2CompactionApplySource::IdleAutomatic,
+        compaction_id: "portable-idle-auto-activation".to_owned(),
+        folded_event_count: 2,
+        entries: vec![SessionLogEntry::User(ModelMessage::user(
+            "retained request",
+        ))],
+    })?;
+
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        assistant_count
     );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry
+                .text
+                .contains("Context compacted automatically: 2 message(s) folded")
+    }));
     Ok(())
 }
 

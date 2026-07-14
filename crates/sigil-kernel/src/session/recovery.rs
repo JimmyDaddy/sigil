@@ -38,6 +38,9 @@ pub(super) fn recover_tail_if_needed_locked(
                 validate_pending_tail_recovery_prefix(file, path, &intent, &records)?;
             }
             Err(read_error) => {
+                if is_unsupported_legacy_session_error(&read_error) {
+                    return Err(read_error);
+                }
                 recover_from_pending_tail_intent(file, path, &intent)
                     .with_context(|| read_error.to_string())?;
                 let records = read_stream_records_from_file(file, path)?;
@@ -230,15 +233,7 @@ pub(super) fn record_line_is_valid_or_fail_closed(
     line: &str,
     path: &Path,
 ) -> Result<bool> {
-    if serde_json::from_str::<SessionLogEntry>(line).is_ok() {
-        return Ok(true);
-    }
-    if line_is_v2_stored_event(line)? {
-        StoredEvent::from_json_str(line)
-            .with_context(|| stream_line_context("stored event", physical_line, path))?;
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(classify_session_stream_line(line, path, physical_line)?.is_some())
 }
 
 pub(super) fn append_tail_recovery_event_locked(

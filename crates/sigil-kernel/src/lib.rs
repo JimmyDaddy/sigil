@@ -4,6 +4,7 @@ pub mod approval;
 pub mod cancellation;
 pub mod changeset;
 pub mod checkpoint;
+pub mod compaction_token_proof;
 pub mod config;
 pub mod context_engine;
 pub mod conversation_fork;
@@ -24,6 +25,7 @@ pub mod process_environment;
 pub mod projection;
 pub mod provider;
 pub mod provider_error;
+pub mod provider_request_material;
 pub mod provider_timeout;
 pub mod resume;
 pub mod secret;
@@ -82,6 +84,10 @@ pub use checkpoint::{
     ControlledCheckpointRestoreOutput, ControlledCheckpointRestorePreview,
     ControlledCheckpointRestorePreviewFile, ControlledCheckpointRestoreRequest,
 };
+pub use compaction_token_proof::{
+    COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, EffectiveTokenBudget, InputTokenEvidence,
+    RequestFitProof, TokenMeasurementBinding, TokenMeasurementScope, VersionedProfileIdentity,
+};
 pub use config::{
     AgentConfig, AppearanceConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
     CompactionThresholdStatus, DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS,
@@ -120,10 +126,14 @@ pub use conversation_fork::{
     fork_conversation_at_checkpoint,
 };
 pub use conversation_queue::{
-    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
+    CONVERSATION_QUEUE_DURABLE_PROJECTION_SCHEMA_VERSION, ConversationInputEditedEntry,
+    ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueControlAction,
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, ConversationQueueItemProjection, ConversationQueueProjection,
+    ConversationInputTarget, ConversationQueueDurableProjection, ConversationQueueItemProjection,
+    ConversationQueueProjection, ConversationQueueRevision,
+    MAX_CONVERSATION_PROMOTION_CAPABILITY_DESCRIPTORS, conversation_promotion_capability_digest,
+    project_conversation_prompt_for_persistence,
 };
 pub use egress::{
     DisclosurePresentationError, DisclosurePresentationReceipt, EgressAuditError,
@@ -146,8 +156,8 @@ pub use eval::{
 pub use event::{
     ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent,
     DurableEventPayloadMetadata, DurableEventPayloadStorage, DurableEventType, EventClass,
-    EventHandler, EventId, EventSyncClass, LegacyEvent, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
-    NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision, ProjectionCursor,
+    EventHandler, EventId, EventSyncClass, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, NoopEventHandler,
+    PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision, ProjectionCursor,
     PublicAssistantMessage, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
     RECORD_CHECKSUM_PREFIX, ReducerDisposition, RunEvent, STORED_EVENT_SCHEMA_VERSION, SessionId,
     StoredEvent, StoredEventDecode, TypedDomainEvent, TypedStoredEventDecode, decode_stored_event,
@@ -271,12 +281,15 @@ pub use projection::{
 pub use provider::{
     AssistantMessageKind, BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest,
     MessageRole, ModelMessage, PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
-    ResponseHandle, SessionStats, ToolCall, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator,
-    UsageStats,
+    ProviderContinuationState, ProviderRequestRejection, ReasoningArtifact, ReasoningEffort,
+    ReasoningStreamSupport, ResponseHandle, SessionStats, ToolCall, ToolCallCompletionIdPolicy,
+    ToolCallStreamAccumulator, UsageStats,
 };
 pub use provider_error::{
     PROVIDER_ERROR_BODY_LIMIT_BYTES, ProviderErrorBody, read_provider_error_body,
+};
+pub use provider_request_material::{
+    FrozenProviderRequestMaterial, PROVIDER_REQUEST_MATERIAL_SCHEMA_VERSION,
 };
 pub use provider_timeout::{
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
@@ -288,15 +301,93 @@ pub use resume::{
 };
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
-    CompactionPreview, CompactionRecord, ContextAssemblySkippedEntry, ControlEntry,
-    DomainEventRecord, DurableAppendExpectation, DurableAppendPermit, DurableAppendReceipt,
+    COMPACTION_FOLD_PLAN_SCHEMA_VERSION, COMPACTION_LIFECYCLE_PROJECTION_SCHEMA_VERSION,
+    COMPACTION_SIDECAR_PROJECTION_SCHEMA_VERSION, CONTINUATION_CHECKPOINT_V1_SCHEMA_VERSION,
+    CompactionAppliedV2, CompactionAttemptId, CompactionAttemptState, CompactionAttemptTerminal,
+    CompactionCursor, CompactionEventRef, CompactionFailureEntry, CompactionFailureReason,
+    CompactionFallbackParent, CompactionFoldPlan, CompactionFoldProtectionReason, CompactionId,
+    CompactionInitiation, CompactionLifecycleProjection, CompactionSidecarProjection,
+    CompactionStartedEntry, ContextAssemblySkippedEntry, ContextTrustProjection,
+    ContinuationCheckpointKind, ContinuationCheckpointV1, ContinuationEvidenceStatus,
+    ContinuationItemAuthority, ContinuationItemOrigin, ContinuationItemPriority,
+    ContinuationItemV1, ContinuationModelOutputItemV1, ContinuationModelOutputV1,
+    ContinuationRedaction, ContinuationSnapshotScope, ContinuationSourceCatalog,
+    ContinuationSourceRef, ContinuationTargetRequestFitV1, ControlEntry, DomainEventRecord,
+    DurableAppendExpectation, DurableAppendPermit, DurableAppendReceipt,
     DurableAppendRecordExpectation, DurableAppendRecordReceipt, DurableAuditBatch,
-    DurableAuditError, DurableAuditRecord, DurableAuditWriter, JsonlSessionStore,
-    McpElicitationDecision, McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry,
-    SessionStreamRecord, ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalEntry,
+    DurableAuditError, DurableAuditRecord, DurableAuditWriter, DurableEventReconciliation,
+    DurableEventReconciliationExpectation, JsonlSessionStore,
+    MAX_CONTINUATION_CHECKPOINT_ITEM_BYTES, MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS,
+    MAX_PROVIDER_CONTINUATION_PAYLOAD_BYTES, MAX_PROVIDER_CONTINUATION_RESOLUTION_PROTECTED_REFS,
+    MAX_PROVIDER_CONTINUATION_RESOLUTION_REFERENCE_BYTES,
+    MAX_PROVIDER_CONTINUATION_RESOLUTION_RETAINED_REFS,
+    MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_LEASE_MS,
+    MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_REFERENCE_BYTES,
+    MAX_PROVIDER_CONTINUATION_TOOL_CLOSURE_REFS, MAX_PROVIDER_PHYSICAL_ATTEMPT_OUTPUT_REFS,
+    MAX_PROVIDER_PHYSICAL_ATTEMPT_REFERENCE_BYTES, MAX_PROVIDER_PHYSICAL_ATTEMPT_SIDE_EFFECT_REFS,
+    MAX_TOOL_OUTPUT_PROJECTION_SHRINKS, McpElicitationDecision, McpElicitationEntry,
+    MemorySnapshot, NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
+    NativeProviderCompactionMetadata, NativeProviderCompactionRequest,
+    PROVIDER_CONTINUATION_PROJECTION_SCHEMA_VERSION, PROVIDER_CONTINUATION_SCHEMA_VERSION,
+    PROVIDER_CONTINUATION_SESSION_KEY_SLOT_ID, PROVIDER_PHYSICAL_ATTEMPT_PROJECTION_SCHEMA_VERSION,
+    PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, PortableSemanticCompactionOutcome,
+    PortableSemanticCompactionPreflight, PortableSemanticCompactionRequest,
+    PortableTargetRequestMaterial, ProjectedToolOutput, ProtectedCompactionEventRef,
+    ProviderArtifactComposition, ProviderCompactionArtifactRef,
+    ProviderContinuationActivationEvaluator, ProviderContinuationActivationGate,
+    ProviderContinuationActivationState, ProviderContinuationAfterInputTokenCount,
+    ProviderContinuationArtifactId, ProviderContinuationBeforeInputTokenCount,
+    ProviderContinuationCandidate, ProviderContinuationCandidateId,
+    ProviderContinuationCandidateInvalidatedEntry, ProviderContinuationCandidateInvalidationBasis,
+    ProviderContinuationCandidateInvalidationCoordinator,
+    ProviderContinuationCandidateInvalidationPersistence,
+    ProviderContinuationCandidateInvalidationReason,
+    ProviderContinuationCandidateInvalidationState, ProviderContinuationCandidateRecordedEntry,
+    ProviderContinuationCandidateState, ProviderContinuationEffectiveCompactionBudget,
+    ProviderContinuationHandleRef, ProviderContinuationObservationId,
+    ProviderContinuationObservationState, ProviderContinuationObservedEntry,
+    ProviderContinuationPayloadCommitResult, ProviderContinuationPayloadCoordinator,
+    ProviderContinuationPayloadFinalizeResult, ProviderContinuationPayloadId,
+    ProviderContinuationPayloadIdentity, ProviderContinuationPayloadIntegrity,
+    ProviderContinuationPayloadKind, ProviderContinuationPayloadLifecycleEntry,
+    ProviderContinuationPayloadLifecycleState, ProviderContinuationPayloadRecoveryReport,
+    ProviderContinuationPayloadRetentionResult, ProviderContinuationPayloadSource,
+    ProviderContinuationPayloadStageResult, ProviderContinuationPayloadState,
+    ProviderContinuationPayloadStorageRef, ProviderContinuationProjection,
+    ProviderContinuationResolutionMode, ProviderContinuationRetentionPin,
+    ProviderContinuationRetentionPinKind, ProviderContinuationSemanticCompressorIdentity,
+    ProviderContinuationSemanticCompressorRequestFit, ProviderContinuationStateId,
+    ProviderContinuationTargetExecutionIdentity, ProviderContinuationTargetTokenEvidence,
+    ProviderContinuationToolClosureRecordedEntry, ProviderContinuationToolClosureState,
+    ProviderNonGeneratingAttempt, ProviderNonGeneratingAttemptReceipt,
+    ProviderObservedResolutionAdmission, ProviderObservedResolutionAdmissionEvaluator,
+    ProviderObservedResolutionAdmissionRejection, ProviderObservedResolutionPlanCoordinator,
+    ProviderObservedResolutionPlanId, ProviderObservedResolutionPlanLineage,
+    ProviderObservedResolutionPlanPersistence, ProviderObservedResolutionPlanRecordedEntry,
+    ProviderObservedResolutionPlanState, ProviderPhysicalAttemptId, ProviderPhysicalAttemptOutcome,
+    ProviderPhysicalAttemptProjection, ProviderPhysicalAttemptPurpose,
+    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptState,
+    ProviderPhysicalAttemptTerminalEntry, ProviderToolCallClosureRef, ResolvedCompactionSidecar,
+    SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, Session, SessionContextProjection, SessionLogEntry,
+    SessionProjectionEntry, SessionStreamCompatibilityError, SessionStreamRecord,
+    TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TOOL_OUTPUT_PROJECTION_SHRINK_SCHEMA_VERSION,
+    TOOL_OUTPUT_PROJECTION_SIDECAR_PROJECTION_SCHEMA_VERSION,
+    TOOL_OUTPUT_PROJECTION_SIDECAR_SCHEMA_VERSION, TaskMemoryInvalidatedEntry,
+    TaskMemoryInvalidationReason, TaskMemoryRecordedV1, TaskMemorySnapshotRelation,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalEntry,
     ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalUserDecision,
-    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
-    TypedDomainEventRecord, latest_compaction_record, session_stats_from_entries,
+    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolOutputProjection,
+    ToolOutputProjectionPolicy, ToolOutputProjectionShrink, ToolOutputProjectionShrinkRecorded,
+    ToolOutputProjectionSidecarProjection, ToolOutputProjectionSourceRef, ToolSubjectAudit,
+    TypedDomainEventRecord, V2CompactionPreview, provider_continuation_candidate_id_from_initiated,
+    provider_continuation_candidate_id_from_observation,
+    provider_continuation_candidate_invalidated_event_id,
+    provider_continuation_candidate_recorded_event_id, provider_continuation_observation_id,
+    provider_continuation_observed_event_id, provider_continuation_observed_payload_integrity_tag,
+    provider_continuation_payload_id, provider_continuation_payload_lifecycle_event_id,
+    provider_continuation_route_fingerprint, provider_continuation_tool_closure_recorded_event_id,
+    provider_observed_resolution_plan_id, provider_observed_resolution_plan_recorded_event_id,
+    session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,

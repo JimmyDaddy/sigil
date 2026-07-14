@@ -43,19 +43,19 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, ApprovalMode, AssistantMessageKind, CompactionConfig, CompactionRecord,
-    ControlEntry, EventHandler, JsonlSessionStore, McpServerStartup, MemoryConfig, ModelMessage,
-    PermissionConfig, ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
-    ToolAccess, ToolCall, ToolCategory, ToolEgressEntry, ToolError, ToolErrorKind,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
-    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit,
-    ToolSubjectKind, ToolSubjectScope, UsageStats, WorkspaceConfig,
+    AgentConfig, ApprovalMode, AssistantMessageKind, CompactionConfig, ControlEntry, EventHandler,
+    JsonlSessionStore, McpServerStartup, MemoryConfig, ModelMessage, PermissionConfig,
+    ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry, ToolAccess, ToolCall,
+    ToolCategory, ToolEgressEntry, ToolError, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewSnapshot, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope,
+    UsageStats, WorkspaceConfig,
 };
 use sigil_runtime::{McpElicitationAction, McpElicitationRequest};
 use tempfile::tempdir;
 
 use crate::config_panel::{ConfigField, ConfigFooterAction, ConfigSection};
-use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
+use crate::runner::{McpActivationStatus, WorkerCommand, WorkerMessage};
 use crate::slash::SLASH_COMMANDS;
 
 use super::modal_flow::ModelPickerTarget;

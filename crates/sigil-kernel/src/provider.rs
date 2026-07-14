@@ -729,6 +729,38 @@ pub trait Provider: Send + Sync {
         crate::HostedWebSearchCapability::default()
     }
 
+    /// Classifies a provider-declared request rejection that is proven to have happened before
+    /// any model generation or side effect.
+    ///
+    /// Providers must return `None` for generic HTTP statuses, free-form error messages, and
+    /// compatible endpoints. A non-`None` value permits later recovery logic to reason about the
+    /// durable physical-attempt terminal without parsing an error string.
+    fn classify_pre_generation_rejection(
+        &self,
+        _error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        None
+    }
+
+    /// Proves that one frozen portable-compaction target fits the provider/model request budget.
+    ///
+    /// Implementations may use a provider-owned exact measurement endpoint, but must return an
+    /// error unless the resulting material is bound to the supplied frozen request, an explicit
+    /// versioned profile, and a complete output/safety budget. Callers must record a durable
+    /// non-generating physical-attempt lifecycle before invoking a remote implementation and may
+    /// use it only after a durable pre-generation context-window rejection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider has no exact target-proof capability, the frozen
+    /// request is outside an admitted profile, or exact measurement cannot be established.
+    async fn prove_portable_compaction_target(
+        &self,
+        _frozen_request: crate::FrozenProviderRequestMaterial,
+    ) -> Result<crate::PortableTargetRequestMaterial> {
+        anyhow::bail!("provider does not support exact portable-compaction target proof")
+    }
+
     /// Starts a streaming completion request.
     ///
     /// # Errors
@@ -758,12 +790,36 @@ where
         (**self).hosted_web_search_capability(model_name)
     }
 
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        (**self).classify_pre_generation_rejection(error)
+    }
+
+    async fn prove_portable_compaction_target(
+        &self,
+        frozen_request: crate::FrozenProviderRequestMaterial,
+    ) -> Result<crate::PortableTargetRequestMaterial> {
+        (**self)
+            .prove_portable_compaction_target(frozen_request)
+            .await
+    }
+
     async fn stream(
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         (**self).stream(request).await
     }
+}
+
+/// A provider-specific rejection fact expressed without leaking provider error types into the
+/// kernel. Every variant denotes a request the provider proved was rejected before generation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderRequestRejection {
+    ContextWindowExceeded,
 }
 
 impl ModelMessage {

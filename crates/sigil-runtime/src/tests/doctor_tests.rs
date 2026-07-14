@@ -11,8 +11,8 @@ use std::{
 use anyhow::Result;
 use sigil_kernel::{
     DurableEventType, EventClass, ExecutionBackendKind, ExecutionConfig, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, JsonlSessionStore,
-    PluginTrustDecision, PluginTrustEntry, WebSearchFailureClass,
+    ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, JsonlSessionStore, ModelMessage,
+    PluginTrustDecision, PluginTrustEntry, SessionLogEntry, WebSearchFailureClass,
 };
 use tempfile::tempdir;
 
@@ -660,10 +660,9 @@ fn doctor_session_stream_check_summarizes_valid_streams() -> Result<()> {
     assert!(report.checks.iter().any(|check| {
         check.name == "session:stream"
             && check.status == DoctorStatus::Ok
-            && check.message.contains("1 streams checked")
+            && check.message.contains("1 V2 streams checked")
             && check.message.contains("2 records")
             && check.message.contains("last_sequence=2")
-            && check.message.contains("stored=2")
             && check.message.contains("tail_recovered=1")
     }));
     Ok(())
@@ -703,7 +702,7 @@ fn doctor_session_stream_check_handles_empty_non_directory_and_scan_limit() -> R
     assert!(limited_report.checks.iter().any(|check| {
         check.name == "session:stream"
             && check.status == DoctorStatus::Ok
-            && check.message.contains("20 streams checked")
+            && check.message.contains("20 V2 streams checked")
             && check.message.contains("skipped 1 older streams")
     }));
     Ok(())
@@ -732,7 +731,7 @@ fn doctor_session_stream_check_skips_oversized_streams() -> Result<()> {
     assert!(report.checks.iter().any(|check| {
         check.name == "session:stream"
             && check.status == DoctorStatus::Warn
-            && check.message.contains("1 streams checked")
+            && check.message.contains("1 V2 streams checked")
             && check.message.contains("skipped 1 oversized streams")
     }));
     Ok(())
@@ -767,6 +766,39 @@ fn doctor_session_stream_check_reports_checksum_failure() -> Result<()> {
                 .as_deref()
                 .is_some_and(|remediation| remediation.contains("checksum/sequence"))
     }));
+    Ok(())
+}
+
+#[test]
+fn doctor_session_stream_check_reports_legacy_format_without_rewriting_it() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let session_path = session_dir.join("legacy.jsonl");
+    let content = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("legacy")))?;
+    fs::write(&session_path, &content)?;
+    let mut report = DoctorReport::default();
+
+    check_session_streams(&mut report, &session_dir);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:stream"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("unsupported legacy session format")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("archive the old log"))
+    }));
+    assert_eq!(
+        report
+            .checks
+            .iter()
+            .filter(|check| check.name == "session:stream")
+            .count(),
+        1
+    );
+    assert_eq!(fs::read_to_string(&session_path)?, content);
     Ok(())
 }
 
@@ -998,6 +1030,40 @@ model = "gemini-test"
                     .is_some_and(|value| value.contains("[providers.gemini]"))
         }),
         "{gemini_report:#?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_openai_responses_provider_config_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("openai-responses.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "openai_responses"
+model = "gpt-test"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+    assert!(
+        report.checks.iter().any(|check| {
+            check.name == "provider:openai_responses"
+                && check.status == DoctorStatus::Error
+                && check
+                    .message
+                    .contains("missing [providers.openai_responses]")
+                && check
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|value| value.contains("[providers.openai_responses]"))
+        }),
+        "{report:#?}"
     );
     Ok(())
 }

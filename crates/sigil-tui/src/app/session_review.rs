@@ -89,9 +89,7 @@ fn checkpoint_verification_order_from_records(
     let mut latest_restore = None;
     let mut readiness_by_scope = BTreeMap::new();
     for record in records {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let event = record.stored_event();
         match event.event_kind() {
             Some(sigil_kernel::DurableEventType::CheckpointRestored) => {
                 latest_restore = Some(event.stream_sequence);
@@ -257,7 +255,6 @@ fn apply_readiness(readiness: &ReadinessEvaluatedEntry, current: &mut ReviewTurn
 
 fn session_entry_from_stream_record(record: &SessionStreamRecord) -> Option<SessionLogEntry> {
     match record {
-        SessionStreamRecord::Legacy { entry, .. } => Some((**entry).clone()),
         SessionStreamRecord::Stored(event) => event
             .payload
             .get("session_log_entry")

@@ -90,6 +90,7 @@ pub(crate) fn build_messages_request_with_continuations(
             tool_choice: tools.as_ref().map(|_| json!({"type": "auto"})),
             tools,
             temperature: request.temperature,
+            context_management: None,
         },
         prior_hosted_invocations,
     })

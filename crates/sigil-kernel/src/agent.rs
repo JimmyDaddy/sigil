@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    RuntimeContextCandidates,
+    FrozenProviderRequestMaterial, RuntimeContextCandidates,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
     cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
     config::{CompactionConfig, MemoryConfig},
@@ -150,6 +150,7 @@ pub struct AgentRunInput {
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
+    logical_run_id: Option<String>,
     cancellation: Option<RunCancellationHandle>,
     cancellation_terminal_authority: bool,
     source_capability_nonce: Option<String>,
@@ -158,6 +159,7 @@ pub struct AgentRunInput {
     hosted_tools: Vec<crate::HostedToolRequest>,
     hosted_evidence_processor: Option<Arc<dyn crate::HostedEvidenceProcessor>>,
     hosted_turn_preparer: Option<Arc<dyn AgentHostedTurnPreparer>>,
+    initial_frozen_provider_request: Option<FrozenProviderRequestMaterial>,
     suppressed_tool_names: Vec<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
 }
@@ -175,6 +177,7 @@ impl fmt::Debug for AgentRunInput {
             .field("runtime_context", &self.runtime_context)
             .field("task_plan_update", &self.task_plan_update)
             .field("agent_delegation", &self.agent_delegation)
+            .field("logical_run_id", &self.logical_run_id)
             .field("cancellation", &self.cancellation)
             .field(
                 "user_url_capability_registrar",
@@ -187,6 +190,13 @@ impl fmt::Debug for AgentRunInput {
             .field(
                 "hosted_turn_preparer",
                 &self.hosted_turn_preparer.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "initial_frozen_provider_request",
+                &self
+                    .initial_frozen_provider_request
+                    .as_ref()
+                    .map(|request| request.fingerprint()),
             )
             .field("suppressed_tool_names", &self.suppressed_tool_names)
             .field(
@@ -214,6 +224,7 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
@@ -222,6 +233,7 @@ impl AgentRunInput {
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
+            initial_frozen_provider_request: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
         }
@@ -236,6 +248,7 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: Some(uuid::Uuid::new_v4().to_string()),
@@ -244,6 +257,7 @@ impl AgentRunInput {
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
+            initial_frozen_provider_request: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
         }
@@ -257,6 +271,7 @@ impl AgentRunInput {
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
             agent_delegation: None,
+            logical_run_id: None,
             cancellation: None,
             cancellation_terminal_authority: true,
             source_capability_nonce: None,
@@ -265,6 +280,7 @@ impl AgentRunInput {
             hosted_tools: Vec::new(),
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
+            initial_frozen_provider_request: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
         }
@@ -324,6 +340,20 @@ impl AgentRunInput {
         self
     }
 
+    /// Uses this already-frozen request for exactly the first provider turn of the run.
+    ///
+    /// This is intentionally narrow: the normal run-input preparer is skipped, the material is
+    /// session/provider/model-bound before dispatch, and later turns use ordinary assembly.
+    /// It lets a durable pre-send barrier hand off one proven request without rebuilding it.
+    #[must_use]
+    pub fn with_initial_frozen_provider_request(
+        mut self,
+        request: FrozenProviderRequestMaterial,
+    ) -> Self {
+        self.initial_frozen_provider_request = Some(request);
+        self
+    }
+
     /// Binds every Web effect in this run to the root-owned task-tree budget handle.
     #[must_use]
     pub fn with_web_task_tree_budget(mut self, budget: Arc<crate::WebTaskTreeBudget>) -> Self {
@@ -347,6 +377,16 @@ impl AgentRunInput {
         requirement: AgentDelegationRequirement,
     ) -> Self {
         self.agent_delegation = Some(requirement);
+        self
+    }
+
+    /// Binds this run to a caller-provided durable correlation id.
+    ///
+    /// Queued promotion uses this to bind its queue CAS to the first provider physical attempt.
+    /// An empty identifier is rejected before the run can dispatch a provider request.
+    #[must_use]
+    pub fn with_logical_run_id(mut self, logical_run_id: impl Into<String>) -> Self {
+        self.logical_run_id = Some(logical_run_id.into());
         self
     }
 
@@ -384,6 +424,29 @@ fn begin_run_effect(
         .map(|handle| handle.begin_effect(RunEffectClass::Forward, kind))
         .transpose()
         .map_err(Into::into)
+}
+
+fn validate_initial_frozen_request(
+    session: &Session,
+    frozen_request: &FrozenProviderRequestMaterial,
+) -> Result<()> {
+    if frozen_request.session_scope_id() != session.session_scope_id() {
+        return Err(anyhow!(
+            "initial frozen provider request belongs to a different session scope"
+        ));
+    }
+    let request = frozen_request.request();
+    if request.provider_name != session.provider_name() {
+        return Err(anyhow!(
+            "initial frozen provider request provider does not match the session"
+        ));
+    }
+    if request.model_name != session.model_name() {
+        return Err(anyhow!(
+            "initial frozen provider request model does not match the session"
+        ));
+    }
+    Ok(())
 }
 
 fn claim_natural_run_terminal(
@@ -562,6 +625,16 @@ where
     /// Returns the registered tool surface used by this agent.
     pub fn tool_registry(&self) -> &ToolRegistry {
         &self.tools
+    }
+
+    /// Returns the provider implementation backing this agent.
+    ///
+    /// Callers must preserve the normal agent-run boundary for conversation generation. This
+    /// accessor exists for adjacent provider-neutral admission capabilities that have their own
+    /// durable lifecycle, such as a pre-send portable-compaction target proof.
+    #[must_use]
+    pub fn provider(&self) -> &P {
+        &self.provider
     }
 
     /// Returns the provider capability flags for this agent.
@@ -780,9 +853,13 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        let input = match tools.run_input_preparer() {
-            Some(preparer) => preparer.prepare(&self.provider, session, input).await?,
-            None => input,
+        let input = if input.initial_frozen_provider_request.is_some() {
+            input
+        } else {
+            match tools.run_input_preparer() {
+                Some(preparer) => preparer.prepare(&self.provider, session, input).await?,
+                None => input,
+            }
         };
         let AgentRunInput {
             persisted_user_message,
@@ -791,6 +868,7 @@ where
             runtime_context,
             task_plan_update,
             agent_delegation,
+            logical_run_id,
             cancellation,
             cancellation_terminal_authority,
             source_capability_nonce,
@@ -799,6 +877,7 @@ where
             hosted_tools,
             hosted_evidence_processor,
             hosted_turn_preparer,
+            mut initial_frozen_provider_request,
             suppressed_tool_names,
             web_task_tree_budget,
         } = input;
@@ -910,6 +989,12 @@ where
             &options.permission_config,
             &options.permission_context,
         );
+        let logical_run_id =
+            logical_run_id.unwrap_or_else(|| format!("agent-run-{}", uuid::Uuid::new_v4()));
+        if logical_run_id.trim().is_empty() {
+            return Err(anyhow!("agent logical run id is empty"));
+        }
+        let has_initial_frozen_provider_request = initial_frozen_provider_request.is_some();
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
         let mut outcome = AgentRunOutcome::default();
@@ -962,43 +1047,89 @@ where
             if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
             }
-            let mut request = session.build_request_with_transient_messages_context_and_overlays(
-                &options.workspace_root,
-                &options.memory_config,
-                tool_specs,
-                options.reasoning_effort.clone(),
-                previous_response_handle.clone(),
-                options.traffic_partition_key.clone(),
-                &transient_context,
-                runtime_context.clone(),
-                &current_run_overlays,
-            )?;
-            let prepared_hosted_turn = match hosted_turn_preparer.as_ref() {
-                Some(preparer) => Some(preparer.prepare_turn().await?),
-                None => None,
+            let initial_frozen_request = initial_frozen_provider_request.take();
+            let provider_logical_run_id = if initial_frozen_request.is_some() {
+                logical_run_id.clone()
+            } else if has_initial_frozen_provider_request {
+                // The caller-provided id is the durable handoff for the frozen first request
+                // only. A later tool-follow-up turn is a distinct provider request and must not
+                // create a second physical-attempt match for that queue promotion.
+                format!(
+                    "agent-run-{}:continuation:{model_turns}",
+                    uuid::Uuid::new_v4()
+                )
+            } else {
+                logical_run_id.clone()
             };
-            let current_hosted_tools = prepared_hosted_turn
-                .as_ref()
-                .map_or(hosted_tools.as_slice(), |turn| turn.hosted_tools.as_slice());
-            request.hosted_tools = current_hosted_tools.to_vec();
-            let current_hosted_processor = prepared_hosted_turn
-                .as_ref()
-                .map(|turn| &turn.evidence_processor)
-                .or(hosted_evidence_processor.as_ref());
+            let (request, current_hosted_processor) = match initial_frozen_request.as_ref() {
+                Some(frozen_request) => {
+                    validate_initial_frozen_request(session, frozen_request)?;
+                    (
+                        frozen_request.request().clone(),
+                        hosted_evidence_processor.clone(),
+                    )
+                }
+                None => {
+                    let mut request = session
+                        .build_request_with_transient_messages_context_and_overlays(
+                            &options.workspace_root,
+                            &options.memory_config,
+                            tool_specs,
+                            options.reasoning_effort.clone(),
+                            previous_response_handle.clone(),
+                            options.traffic_partition_key.clone(),
+                            &transient_context,
+                            runtime_context.clone(),
+                            &current_run_overlays,
+                        )?;
+                    let prepared_hosted_turn = match hosted_turn_preparer.as_ref() {
+                        Some(preparer) => Some(preparer.prepare_turn().await?),
+                        None => None,
+                    };
+                    let current_hosted_tools = prepared_hosted_turn
+                        .as_ref()
+                        .map_or(hosted_tools.as_slice(), |turn| turn.hosted_tools.as_slice());
+                    request.hosted_tools = current_hosted_tools.to_vec();
+                    let current_hosted_processor = prepared_hosted_turn
+                        .as_ref()
+                        .map(|turn| Arc::clone(&turn.evidence_processor))
+                        .or_else(|| hosted_evidence_processor.clone());
+                    (request, current_hosted_processor)
+                }
+            };
 
             let provider_effect =
                 begin_run_effect(cancellation.as_ref(), RunEffectKind::ProviderRequest)?;
-            let provider_turn_result = collect_provider_turn(
-                &self.provider,
-                session,
-                request,
-                &mut previous_response_handle,
-                total_tool_calls,
-                handler,
-                cancellation.as_ref(),
-                current_hosted_processor,
-            )
-            .await;
+            let provider_turn_result = match initial_frozen_request {
+                Some(frozen_request) => {
+                    provider_stream::collect_frozen_provider_turn(
+                        &self.provider,
+                        session,
+                        frozen_request,
+                        &provider_logical_run_id,
+                        &mut previous_response_handle,
+                        total_tool_calls,
+                        handler,
+                        cancellation.as_ref(),
+                        current_hosted_processor.as_ref(),
+                    )
+                    .await
+                }
+                None => {
+                    collect_provider_turn(
+                        &self.provider,
+                        session,
+                        request,
+                        &provider_logical_run_id,
+                        &mut previous_response_handle,
+                        total_tool_calls,
+                        handler,
+                        cancellation.as_ref(),
+                        current_hosted_processor.as_ref(),
+                    )
+                    .await
+                }
+            };
             drop(provider_effect);
             let provider_turn = match provider_turn_result {
                 Ok(provider_turn) => provider_turn,

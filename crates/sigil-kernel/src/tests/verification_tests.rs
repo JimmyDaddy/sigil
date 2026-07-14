@@ -12,7 +12,8 @@ use crate::{
     ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType, EvidenceReceipt,
     EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
     ExecutionCoverageLabel, ExecutionFuture, ExecutionNetworkPolicy, ExecutionNetworkReceipt,
-    ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile, FileMetadataPlatform, FileType,
+    ExecutionOutputReceipt, ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile,
+    ExecutionStreamCapture, ExecutionTerminationCause, FileMetadataPlatform, FileType,
     JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, PluginHookExecutionFinishedEntry,
     PluginHookExecutionStartedEntry, PluginHookExecutionStatus, PluginHookKind,
     PluginHookOutputArtifactRef, PluginHookOutputEnvelope, PluginHookOutputStream,
@@ -30,6 +31,28 @@ use crate::{
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
     record_plugin_verification_hook_receipt, run_verification_check, session::ControlEntry,
 };
+
+fn captured_test_output(
+    stdout: &[u8],
+    stderr: &[u8],
+    termination: ExecutionTerminationCause,
+) -> ExecutionOutputReceipt {
+    let capture = |bytes: &[u8]| ExecutionStreamCapture {
+        total_bytes: bytes.len() as u64,
+        returned_bytes: bytes.len() as u64,
+        retained_head_bytes: bytes.len() as u64,
+        total_lines: bytes.iter().filter(|byte| **byte == b'\n').count() as u64,
+        ..ExecutionStreamCapture::default()
+    };
+    ExecutionOutputReceipt {
+        schema_version: crate::EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
+        stdout: capture(stdout),
+        stderr: capture(stderr),
+        combined_total_bytes: stdout.len().saturating_add(stderr.len()) as u64,
+        combined_hard_limit_bytes: 0,
+        termination,
+    }
+}
 
 #[test]
 fn receipt_link_requires_applied_changeset_and_matching_snapshot_lineage() -> Result<()> {
@@ -164,6 +187,12 @@ impl ExecutionBackend for FakeVerificationBackend {
             let joined_args = request.args.join(" ");
             let timed_out = request.timeout_ms == Some(1) && joined_args.contains("sleep");
             let failed = joined_args.contains("--definitely-not-a-real-rustc-flag");
+            let stdout = format!("fake backend executed {}\n", request.program).into_bytes();
+            let stderr = if failed {
+                b"fake verification failure\n".to_vec()
+            } else {
+                Vec::new()
+            };
             Ok(ExecutionReceipt {
                 backend: ExecutionBackendKind::Local,
                 capabilities: ExecutionBackendCapabilities::default(),
@@ -179,13 +208,17 @@ impl ExecutionBackend for FakeVerificationBackend {
                 } else {
                     Some(0)
                 },
-                stdout: format!("fake backend executed {}\n", request.program).into_bytes(),
-                stderr: if failed {
-                    b"fake verification failure\n".to_vec()
-                } else {
-                    Vec::new()
-                },
-                output: Default::default(),
+                output: captured_test_output(
+                    &stdout,
+                    &stderr,
+                    if timed_out {
+                        ExecutionTerminationCause::TimedOut
+                    } else {
+                        ExecutionTerminationCause::Exited
+                    },
+                ),
+                stdout,
+                stderr,
                 timed_out,
             })
         })
@@ -214,6 +247,8 @@ impl ExecutionBackend for FakeSandboxVerificationBackend {
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
         let capabilities = self.capabilities();
         Box::pin(async move {
+            let stdout = format!("fake sandbox executed {}\n", request.program).into_bytes();
+            let stderr = Vec::new();
             Ok(ExecutionReceipt {
                 backend: ExecutionBackendKind::MacosSeatbelt,
                 capabilities,
@@ -221,9 +256,9 @@ impl ExecutionBackend for FakeSandboxVerificationBackend {
                 resources: Default::default(),
                 environment_policy: request.environment_policy,
                 exit_code: Some(0),
-                stdout: format!("fake sandbox executed {}\n", request.program).into_bytes(),
-                stderr: Vec::new(),
-                output: Default::default(),
+                output: captured_test_output(&stdout, &stderr, ExecutionTerminationCause::Exited),
+                stdout,
+                stderr,
                 timed_out: false,
             })
         })
@@ -848,10 +883,7 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
 
     let stored_events = JsonlSessionStore::read_event_records(&store_path)?
         .into_iter()
-        .filter_map(|record| match record {
-            SessionStreamRecord::Legacy { .. } => None,
-            SessionStreamRecord::Stored(event) => Some(event),
-        })
+        .map(SessionStreamRecord::into_stored_event)
         .collect::<Vec<_>>();
     let event_types = stored_events
         .iter()

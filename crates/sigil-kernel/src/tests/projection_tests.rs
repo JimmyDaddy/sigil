@@ -511,7 +511,7 @@ fn file_projection_store_rebuilds_session_list_projection() -> Result<()> {
 }
 
 #[test]
-fn agent_graph_projection_rebuilds_mixed_stream_and_store() -> Result<()> {
+fn agent_graph_projection_rebuilds_v2_stream_and_store() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let session_path = temp.path().join("session.jsonl");
     let raw_profile = SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
@@ -519,11 +519,8 @@ fn agent_graph_projection_rebuilds_mixed_stream_and_store() -> Result<()> {
             snapshot: sample_agent_profile_snapshot()?,
         },
     ));
-    std::fs::write(
-        &session_path,
-        format!("{}\n", serde_json::to_string(&raw_profile)?),
-    )?;
     let session_store = JsonlSessionStore::new(&session_path)?;
+    session_store.append_session_entry_event(&raw_profile)?;
     session_store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::AgentThreadStarted(sample_agent_started_entry()?),
     ))?;

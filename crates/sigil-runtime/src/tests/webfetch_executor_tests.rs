@@ -418,7 +418,6 @@ impl Fixture {
             .into_iter()
             .filter_map(|record| match record {
                 SessionStreamRecord::Stored(event) => event.event_kind(),
-                SessionStreamRecord::Legacy { .. } => None,
             })
             .collect()
     }

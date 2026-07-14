@@ -1,28 +1,28 @@
 use std::path::PathBuf;
 
 use super::*;
-use sigil_kernel::DurableEventType;
+use sigil_kernel::{DurableEventType, EventClass, StoredEvent};
 
 #[test]
-fn session_review_projects_legacy_stream_entries() {
-    let records = vec![sigil_kernel::SessionStreamRecord::Legacy {
-        event: sigil_kernel::LegacyEvent {
-            event_id: "legacy-review-1".to_owned(),
-            session_id: "legacy-session".to_owned(),
-            stream_sequence: 1,
-            raw_line_hash: "sha256:legacy-review".to_owned(),
-            payload: serde_json::Value::Null,
-        },
-        entry: Box::new(SessionLogEntry::User(ModelMessage::user(
-            "Review legacy session",
-        ))),
-    }];
+fn session_review_projects_v2_stream_entries() {
+    let entry = SessionLogEntry::User(ModelMessage::user("Review v2 session"));
+    let records = vec![sigil_kernel::SessionStreamRecord::Stored(
+        StoredEvent::new(
+            DurableEventType::UserMessageRecorded,
+            EventClass::Critical,
+            "review-v2-1".to_owned(),
+            "session-review".to_owned(),
+            1,
+            serde_json::json!({ "session_log_entry": entry }),
+        )
+        .expect("v2 record should build"),
+    )];
 
     let review =
         super::super::session_review::session_review_sidebar_lines_from_records(&records, &[])
             .join("\n");
     assert!(review.contains("review: turn 1/1"));
-    assert!(review.contains("Review legacy session"));
+    assert!(review.contains("Review v2 session"));
 }
 
 #[test]

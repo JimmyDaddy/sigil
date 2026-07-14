@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -26,7 +26,9 @@ pub struct DurableAuditRecord {
     pub(super) event_type: DurableEventType,
     pub(super) payload: Value,
     pub(super) record_id: String,
+    pub(super) event_id: Option<String>,
     pub(super) correlation_id: Option<String>,
+    pub(super) causation_id: Option<String>,
     pub(super) authorization_id: Option<String>,
 }
 
@@ -67,9 +69,88 @@ impl DurableAuditRecord {
             event_type,
             payload,
             record_id,
+            event_id: None,
             correlation_id,
+            causation_id: None,
             authorization_id: None,
         })
+    }
+
+    /// Uses a caller-preallocated durable event identity.
+    ///
+    /// Preallocation lets a recovery coordinator use the event as a correlation root before the
+    /// append begins and later reconcile an ambiguous append acknowledgement by exact identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableAuditError::InvalidRequest`] when the identity is malformed or would make
+    /// the event causally depend on itself.
+    pub fn with_event_id(
+        mut self,
+        event_id: impl Into<String>,
+    ) -> std::result::Result<Self, DurableAuditError> {
+        let event_id = validate_identity("event_id", event_id.into())?;
+        if self.causation_id.as_deref() == Some(event_id.as_str()) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id must not equal event_id".to_owned(),
+            });
+        }
+        self.event_id = Some(event_id);
+        Ok(self)
+    }
+
+    /// Binds the direct durable predecessor of this event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableAuditError::InvalidRequest`] when the identity is malformed, no
+    /// correlation root is present, or the event would causally depend on itself.
+    pub fn with_causation_id(
+        mut self,
+        causation_id: impl Into<String>,
+    ) -> std::result::Result<Self, DurableAuditError> {
+        if self.event_id.is_none() {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id requires a preallocated event_id".to_owned(),
+            });
+        }
+        if self.correlation_id.is_none() {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id requires correlation_id".to_owned(),
+            });
+        }
+        let causation_id = validate_identity("causation_id", causation_id.into())?;
+        if self.event_id.as_deref() == Some(causation_id.as_str()) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id must not equal event_id".to_owned(),
+            });
+        }
+        self.causation_id = Some(causation_id);
+        Ok(self)
+    }
+
+    /// Builds the exact lookup used after an append acknowledgement becomes ambiguous.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableAuditError::InvalidRequest`] unless this record has a preallocated event
+    /// identity and still satisfies the strict durable payload contract.
+    pub fn reconciliation_expectation(
+        &self,
+        session_id: impl Into<String>,
+    ) -> std::result::Result<DurableEventReconciliationExpectation, DurableAuditError> {
+        DurableEventReconciliationExpectation::new(
+            session_id,
+            self.event_type,
+            self.event_id
+                .clone()
+                .ok_or_else(|| DurableAuditError::InvalidRequest {
+                    reason: "reconciliation requires a preallocated event_id".to_owned(),
+                })?,
+            self.payload.clone(),
+            self.correlation_id.clone(),
+            self.causation_id.clone(),
+        )
     }
 
     /// Binds an optional authorization identity to the live append receipt.
@@ -127,6 +208,17 @@ impl DurableAuditBatch {
                 reason: "durable audit batch contains duplicate record_id values".to_owned(),
             });
         }
+        let mut event_ids = std::collections::BTreeSet::new();
+        if records.iter().any(|record| {
+            record
+                .event_id
+                .as_ref()
+                .is_some_and(|event_id| !event_ids.insert(event_id.as_str()))
+        }) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "durable audit batch contains duplicate event_id values".to_owned(),
+            });
+        }
         Ok(Self { batch_id, records })
     }
 }
@@ -149,10 +241,12 @@ pub enum DurableAuditError {
 pub struct DurableAppendRecordReceipt {
     event_type: DurableEventType,
     event_id: String,
+    event_id_preallocated: bool,
     stream_sequence: u64,
     record_checksum: String,
     record_id: String,
     correlation_id: Option<String>,
+    causation_id: Option<String>,
     authorization_id: Option<String>,
     start_offset: u64,
     end_offset: u64,
@@ -181,6 +275,10 @@ impl DurableAppendRecordReceipt {
 
     pub fn correlation_id(&self) -> Option<&str> {
         self.correlation_id.as_deref()
+    }
+
+    pub fn causation_id(&self) -> Option<&str> {
+        self.causation_id.as_deref()
     }
 
     pub fn authorization_id(&self) -> Option<&str> {
@@ -274,7 +372,9 @@ impl DurableAppendExpectation {
 pub struct DurableAppendRecordExpectation {
     event_type: DurableEventType,
     record_id: String,
+    event_id: Option<String>,
     correlation_id: Option<String>,
+    causation_id: Option<String>,
     authorization_id: Option<String>,
 }
 
@@ -301,11 +401,63 @@ impl DurableAppendRecordExpectation {
         Ok(Self {
             event_type,
             record_id: validate_identity("record_id", record_id.into())?,
+            event_id: None,
             correlation_id: correlation_id
                 .map(|value| validate_identity("correlation_id", value))
                 .transpose()?,
+            causation_id: None,
             authorization_id: None,
         })
+    }
+
+    /// Requires the receipt to carry a specific preallocated event identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableAuditError::InvalidRequest`] when the identity is malformed or conflicts
+    /// with the expected causal predecessor.
+    pub fn with_event_id(
+        mut self,
+        event_id: impl Into<String>,
+    ) -> std::result::Result<Self, DurableAuditError> {
+        let event_id = validate_identity("event_id", event_id.into())?;
+        if self.causation_id.as_deref() == Some(event_id.as_str()) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id must not equal event_id".to_owned(),
+            });
+        }
+        self.event_id = Some(event_id);
+        Ok(self)
+    }
+
+    /// Requires the receipt to carry the exact direct predecessor identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableAuditError::InvalidRequest`] when the identity is malformed, no
+    /// correlation root is expected, or the event would causally depend on itself.
+    pub fn with_causation_id(
+        mut self,
+        causation_id: impl Into<String>,
+    ) -> std::result::Result<Self, DurableAuditError> {
+        if self.event_id.is_none() {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id requires an expected event_id".to_owned(),
+            });
+        }
+        if self.correlation_id.is_none() {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id requires correlation_id".to_owned(),
+            });
+        }
+        let causation_id = validate_identity("causation_id", causation_id.into())?;
+        if self.event_id.as_deref() == Some(causation_id.as_str()) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id must not equal event_id".to_owned(),
+            });
+        }
+        self.causation_id = Some(causation_id);
+        Ok(self)
     }
 
     /// Adds the expected authorization identity.
@@ -323,6 +475,179 @@ impl DurableAppendRecordExpectation {
         )?);
         Ok(self)
     }
+}
+
+/// Exact event identity and payload used to reconcile an ambiguous append acknowledgement.
+#[derive(Debug, Clone)]
+pub struct DurableEventReconciliationExpectation {
+    session_id: String,
+    event_type: DurableEventType,
+    event_id: String,
+    payload: Value,
+    correlation_id: Option<String>,
+    causation_id: Option<String>,
+}
+
+impl DurableEventReconciliationExpectation {
+    /// Creates one strict recovery-critical lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableAuditError::InvalidRequest`] when identities or payload schema are invalid.
+    pub fn new(
+        session_id: impl Into<String>,
+        event_type: DurableEventType,
+        event_id: impl Into<String>,
+        payload: Value,
+        correlation_id: Option<String>,
+        causation_id: Option<String>,
+    ) -> std::result::Result<Self, DurableAuditError> {
+        if event_type.sync_class() != Some(EventSyncClass::RecoveryCritical) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: format!(
+                    "{} is not a recovery-critical durable event",
+                    event_type.as_str()
+                ),
+            });
+        }
+        let event_id = validate_identity("event_id", event_id.into())?;
+        let correlation_id = correlation_id
+            .map(|value| validate_identity("correlation_id", value))
+            .transpose()?;
+        let causation_id = causation_id
+            .map(|value| validate_identity("causation_id", value))
+            .transpose()?;
+        if causation_id.is_some() && correlation_id.is_none() {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id requires correlation_id".to_owned(),
+            });
+        }
+        if causation_id.as_deref() == Some(event_id.as_str()) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id must not equal event_id".to_owned(),
+            });
+        }
+        validate_strict_audit_payload(event_type, &payload)?;
+        Ok(Self {
+            session_id: validate_identity("session_id", session_id.into())?,
+            event_type,
+            event_id,
+            payload,
+            correlation_id,
+            causation_id,
+        })
+    }
+
+    /// Creates one strict reconciliation lookup for a direct payload whose validation is bound
+    /// to the actual durable session id.
+    ///
+    /// Some direct payload contracts derive identities from the owning session. Validating those
+    /// payloads through the ordinary schema probe would substitute a synthetic session id and
+    /// incorrectly reject valid records. This constructor validates the exact same payload with
+    /// the caller's real session scope before it can be appended or reconciled.
+    pub(super) fn new_session_bound_direct(
+        session_id: impl Into<String>,
+        event_type: DurableEventType,
+        event_id: impl Into<String>,
+        payload: Value,
+        correlation_id: Option<String>,
+        causation_id: Option<String>,
+    ) -> std::result::Result<Self, DurableAuditError> {
+        let session_id = validate_identity("session_id", session_id.into())?;
+        let event_id = validate_identity("event_id", event_id.into())?;
+        if event_type.sync_class() != Some(EventSyncClass::RecoveryCritical) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: format!(
+                    "{} is not a recovery-critical durable event",
+                    event_type.as_str()
+                ),
+            });
+        }
+        let correlation_id = correlation_id
+            .map(|value| validate_identity("correlation_id", value))
+            .transpose()?;
+        let causation_id = causation_id
+            .map(|value| validate_identity("causation_id", value))
+            .transpose()?;
+        if causation_id.is_some() && correlation_id.is_none() {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id requires correlation_id".to_owned(),
+            });
+        }
+        if causation_id.as_deref() == Some(event_id.as_str()) {
+            return Err(DurableAuditError::InvalidRequest {
+                reason: "causation_id must not equal event_id".to_owned(),
+            });
+        }
+        let mut probe = StoredEvent::new(
+            event_type,
+            event_type
+                .expected_event_class()
+                .ok_or_else(|| DurableAuditError::InvalidRequest {
+                    reason: format!("{} is not appendable", event_type.as_str()),
+                })?,
+            event_id.clone(),
+            session_id.clone(),
+            1,
+            payload.clone(),
+        )
+        .map_err(|error| DurableAuditError::InvalidRequest {
+            reason: format!("{} payload is invalid: {error}", event_type.as_str()),
+        })?;
+        probe.correlation_id = correlation_id.clone();
+        probe.causation_id = causation_id.clone();
+        probe.record_checksum =
+            probe
+                .compute_record_checksum()
+                .map_err(|error| DurableAuditError::InvalidRequest {
+                    reason: format!("{} payload is invalid: {error}", event_type.as_str()),
+                })?;
+        match decode_typed_stored_event(probe).map_err(|error| {
+            DurableAuditError::InvalidRequest {
+                reason: format!("{} payload is invalid: {error}", event_type.as_str()),
+            }
+        })? {
+            TypedStoredEventDecode::Known(event)
+                if !matches!(*event, TypedDomainEvent::Other(_)) => {}
+            TypedStoredEventDecode::Known(_) | TypedStoredEventDecode::UnknownNonCritical(_) => {
+                return Err(DurableAuditError::InvalidRequest {
+                    reason: format!(
+                        "{} has no strict typed audit payload schema",
+                        event_type.as_str()
+                    ),
+                });
+            }
+        }
+        Ok(Self {
+            session_id,
+            event_type,
+            event_id,
+            payload,
+            correlation_id,
+            causation_id,
+        })
+    }
+
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+/// Result of explicitly re-reading the durable stream after an append acknowledgement failure.
+#[derive(Debug)]
+pub enum DurableEventReconciliation {
+    /// Exactly one matching domain event identity, typed JSON payload and link set is durable.
+    ExactPresent(Box<StoredEvent>),
+    /// The stream was read under the writer lease and the event identity is absent.
+    ConfirmedAbsent,
+    /// The identity exists but its type, payload, links, or multiplicity conflicts.
+    Conflict { reason: String },
+    /// Durable presence could not be established because the stream was not safely readable.
+    Indeterminate { reason: String },
 }
 
 /// One-shot proof returned after exact receipt validation.
@@ -383,12 +708,18 @@ pub trait DurableAuditWriter: sealed::Sealed + Send + Sync {
     /// # Errors
     ///
     /// Returns [`DurableAuditError::ReceiptMismatch`] when any writer, session, batch, record,
-    /// correlation, authorization, sequence, offset, event, or checksum binding differs.
+    /// correlation, causation, authorization, sequence, offset, event, or checksum binding differs.
     fn validate_and_consume(
         &self,
         receipt: DurableAppendReceipt,
         expectation: DurableAppendExpectation,
     ) -> std::result::Result<DurableAppendPermit, DurableAuditError>;
+
+    /// Re-reads the durable stream after an append acknowledgement becomes ambiguous.
+    fn reconcile_event(
+        &self,
+        expectation: &DurableEventReconciliationExpectation,
+    ) -> DurableEventReconciliation;
 }
 
 impl sealed::Sealed for JsonlSessionStore {}
@@ -421,6 +752,13 @@ impl DurableAuditWriter for JsonlSessionStore {
     ) -> std::result::Result<DurableAppendPermit, DurableAuditError> {
         self.validate_audit_receipt(receipt, expectation)
             .map_err(|_| DurableAuditError::ReceiptMismatch)
+    }
+
+    fn reconcile_event(
+        &self,
+        expectation: &DurableEventReconciliationExpectation,
+    ) -> DurableEventReconciliation {
+        self.reconcile_durable_event(expectation)
     }
 }
 
@@ -460,6 +798,7 @@ pub(super) struct LinearSessionWriter {
     lease_file: Option<File>,
     parent_dir_synced: bool,
     tail: Option<SessionWriterTail>,
+    event_links: Option<DurableEventLinkIndex>,
     requires_reload: bool,
     #[cfg(test)]
     full_scan_count: u64,
@@ -473,6 +812,7 @@ pub(super) struct LinearSessionWriter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionWriterFault {
     ParentDirectorySync,
+    BeforeWrite,
     PartialFirstRecord,
     BeforeSync,
 }
@@ -482,7 +822,116 @@ pub(super) struct PendingStoredEvent {
     pub(super) event_type: DurableEventType,
     pub(super) event_class: EventClass,
     pub(super) payload: Value,
+    pub(super) event_id: Option<String>,
     pub(super) correlation_id: Option<String>,
+    pub(super) causation_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct DurableEventLinkIndex {
+    correlations: HashMap<String, Option<String>>,
+    duplicate_event_ids: HashSet<String>,
+}
+
+impl DurableEventLinkIndex {
+    fn from_records(records: &[SessionStreamRecord]) -> Self {
+        let mut index = Self::default();
+        for record in records {
+            let SessionStreamRecord::Stored(event) = record;
+            index.insert(record.event_id().to_owned(), event.correlation_id.clone());
+        }
+        index
+    }
+
+    fn insert(&mut self, event_id: String, correlation_id: Option<String>) {
+        if self
+            .correlations
+            .insert(event_id.clone(), correlation_id)
+            .is_some()
+        {
+            self.duplicate_event_ids.insert(event_id);
+        }
+    }
+
+    fn validate_pending(&self, pending: &[PendingStoredEvent]) -> Result<()> {
+        let mut pending_correlations = HashMap::<&str, Option<&str>>::new();
+        for event in pending {
+            if event.causation_id.is_some() && event.event_id.is_none() {
+                bail!("causation_id requires a preallocated event_id");
+            }
+            if event.causation_id.is_some() && event.correlation_id.is_none() {
+                bail!("causation_id requires correlation_id");
+            }
+            if let Some(event_id) = event.event_id.as_deref()
+                && (self.correlations.contains_key(event_id)
+                    || pending_correlations.contains_key(event_id))
+            {
+                bail!("preallocated event_id {event_id} already exists in the durable stream");
+            }
+
+            if let Some(correlation_id) = event.correlation_id.as_deref() {
+                let self_root = event.event_id.as_deref() == Some(correlation_id);
+                let known_root = self.correlations.contains_key(correlation_id)
+                    || pending_correlations.contains_key(correlation_id);
+                if !self_root && !known_root {
+                    bail!(
+                        "correlation_id {correlation_id} must be this event_id or an earlier durable event"
+                    );
+                }
+                if !self_root && self.duplicate_event_ids.contains(correlation_id) {
+                    bail!("correlation_id {correlation_id} resolves to multiple durable events");
+                }
+            }
+
+            if let Some(causation_id) = event.causation_id.as_deref() {
+                if self.duplicate_event_ids.contains(causation_id) {
+                    bail!("causation_id {causation_id} resolves to multiple durable events");
+                }
+                let predecessor_correlation = pending_correlations
+                    .get(causation_id)
+                    .copied()
+                    .or_else(|| {
+                        self.correlations
+                            .get(causation_id)
+                            .map(Option::as_deref)
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "causation_id {causation_id} does not reference an earlier durable event"
+                        )
+                    })?;
+                if predecessor_correlation != event.correlation_id.as_deref() {
+                    bail!("causation_id {causation_id} belongs to a different correlation chain");
+                }
+            }
+
+            if let Some(event_id) = event.event_id.as_deref() {
+                pending_correlations.insert(event_id, event.correlation_id.as_deref());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_generated_events(&self, events: &[StoredEvent]) -> Result<()> {
+        let mut event_ids = HashSet::with_capacity(events.len());
+        for event in events {
+            if self.correlations.contains_key(&event.event_id)
+                || !event_ids.insert(event.event_id.as_str())
+            {
+                bail!(
+                    "generated event_id {} already exists in the durable stream",
+                    event.event_id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn extend(&mut self, events: &[StoredEvent]) {
+        for event in events {
+            self.insert(event.event_id.clone(), event.correlation_id.clone());
+        }
+    }
 }
 
 type StoredEventAppendResult = (Vec<StoredEvent>, Vec<(u64, u64)>);
@@ -495,6 +944,7 @@ impl LinearSessionWriter {
             lease_file: None,
             parent_dir_synced: false,
             tail: None,
+            event_links: None,
             requires_reload: false,
             #[cfg(test)]
             full_scan_count: 0,
@@ -550,19 +1000,31 @@ impl LinearSessionWriter {
         Ok(file)
     }
 
-    fn ensure_current_tail(&mut self, file: &mut File) -> Result<()> {
-        let needs_reload = self.requires_reload
+    fn tail_needs_reload(&self, file: &mut File) -> bool {
+        self.requires_reload
             || self
                 .tail
                 .as_ref()
-                .is_none_or(|tail| !tail_matches_file(file, &self.path, tail).unwrap_or(false));
-        if needs_reload {
+                .is_none_or(|tail| !tail_matches_file(file, &self.path, tail).unwrap_or(false))
+    }
+
+    fn ensure_current_tail(&mut self, file: &mut File) -> Result<()> {
+        if self.tail_needs_reload(file) {
             self.reload_from_file(file)?;
         }
         Ok(())
     }
 
+    fn ensure_event_link_index(&mut self, file: &mut File) -> Result<()> {
+        if self.event_links.is_none() || self.tail_needs_reload(file) {
+            let records = self.reload_from_file(file)?;
+            self.event_links = Some(DurableEventLinkIndex::from_records(&records));
+        }
+        Ok(())
+    }
+
     fn reload_from_file(&mut self, file: &mut File) -> Result<Vec<SessionStreamRecord>> {
+        self.event_links = None;
         let previous_tail = self.tail.clone();
         let recovered = recover_tail_if_needed_locked(file, &self.path)?;
         #[cfg(test)]
@@ -590,41 +1052,57 @@ impl LinearSessionWriter {
         if pending.is_empty() {
             bail!("session writer append batch must not be empty");
         }
+        for event in &pending {
+            validate_pending_session_entry_payload(event)?;
+        }
         self.ensure_writer_lease()?;
         let mut file = self.open_locked_data_file()?;
-        self.ensure_current_tail(&mut file)?;
-        let tail = self
-            .tail
-            .as_ref()
-            .context("session writer tail is unavailable after reload")?;
-        let mut next_sequence = tail.next_sequence;
+        let validates_event_links = pending
+            .iter()
+            .any(|event| event.event_id.is_some() || event.causation_id.is_some());
+        if validates_event_links {
+            self.ensure_event_link_index(&mut file)?;
+            self.event_links
+                .as_ref()
+                .expect("event link index is present after initialization")
+                .validate_pending(&pending)?;
+        } else {
+            self.ensure_current_tail(&mut file)?;
+        }
+        let (session_id, mut next_sequence, mut prefix_hasher) = {
+            let tail = self
+                .tail
+                .as_ref()
+                .context("session writer tail is unavailable after reload")?;
+            (
+                tail.session_id.clone(),
+                tail.next_sequence,
+                tail.prefix_hasher.clone(),
+            )
+        };
         let mut events = Vec::with_capacity(pending.len());
         let mut lines = Vec::with_capacity(pending.len());
-        let mut prefix_hasher = tail.prefix_hasher.clone();
         let mut any_recovery_critical = force_sync;
         for pending in pending {
-            if !pending.event_type.appendable() {
-                bail!(
-                    "{} cannot be appended as a v2 event",
-                    pending.event_type.as_str()
+            let event_id = pending.event_id.unwrap_or_else(|| {
+                let event_id_seed = event_id_seed(
+                    &session_id,
+                    next_sequence,
+                    pending.event_type,
+                    &pending.payload,
                 );
-            }
-            let event_id_seed = event_id_seed(
-                &tail.session_id,
-                next_sequence,
-                pending.event_type,
-                &pending.payload,
-            );
-            let event_id = stable_event_uuid("sigil-event", &event_id_seed);
+                stable_event_uuid("sigil-event", &event_id_seed)
+            });
             let mut event = StoredEvent::new(
                 pending.event_type,
                 pending.event_class,
                 event_id,
-                tail.session_id.clone(),
+                session_id.clone(),
                 next_sequence,
                 pending.payload,
             )?;
             event.correlation_id = pending.correlation_id;
+            event.causation_id = pending.causation_id;
             event.record_checksum = event.compute_record_checksum()?;
             any_recovery_critical |= event.sync_class()? != EventSyncClass::NormalEvent;
             lines.push(event.to_json_line()?.into_bytes());
@@ -632,6 +1110,9 @@ impl LinearSessionWriter {
             next_sequence = next_sequence
                 .checked_add(1)
                 .context("session stream sequence overflow")?;
+        }
+        if let Some(event_links) = self.event_links.as_ref() {
+            event_links.validate_generated_events(&events)?;
         }
 
         file.seek(SeekFrom::End(0))
@@ -642,6 +1123,10 @@ impl LinearSessionWriter {
         #[cfg(test)]
         let injected_fault = self.next_fault.take();
         let write_result = (|| -> Result<()> {
+            #[cfg(test)]
+            if injected_fault == Some(SessionWriterFault::BeforeWrite) {
+                bail!("injected stored event pre-write failure");
+            }
             #[cfg(test)]
             if injected_fault == Some(SessionWriterFault::PartialFirstRecord) {
                 let line = &lines[0];
@@ -694,7 +1179,7 @@ impl LinearSessionWriter {
             .last()
             .expect("non-empty pending events produce at least one line");
         self.tail = Some(SessionWriterTail {
-            session_id: tail.session_id.clone(),
+            session_id,
             next_sequence,
             durable_offset: cursor,
             last_sequence: Some(last.stream_sequence),
@@ -706,6 +1191,9 @@ impl LinearSessionWriter {
             tail_suffix_hash: stable_event_hash(last_line),
             file_fingerprint: file_fingerprint(&file, &self.path)?,
         });
+        if let Some(event_links) = self.event_links.as_mut() {
+            event_links.extend(&events);
+        }
         self.requires_reload = false;
         Ok((events, offsets))
     }
@@ -721,7 +1209,9 @@ impl LinearSessionWriter {
                 (
                     record.event_type,
                     record.record_id.clone(),
+                    record.event_id.clone(),
                     record.correlation_id.clone(),
+                    record.causation_id.clone(),
                     record.authorization_id.clone(),
                 )
             })
@@ -735,7 +1225,9 @@ impl LinearSessionWriter {
                     .expected_event_class()
                     .expect("appendable durable audit event has an expected class"),
                 payload: record.payload,
+                event_id: record.event_id,
                 correlation_id: record.correlation_id,
+                causation_id: record.causation_id,
             })
             .collect::<Vec<_>>();
         let (events, offsets) = self.append_events(pending, true)?;
@@ -750,17 +1242,31 @@ impl LinearSessionWriter {
             .map(
                 |(
                     (event, (start_offset, end_offset)),
-                    (_, record_id, correlation_id, authorization_id),
+                    (
+                        _,
+                        record_id,
+                        expected_event_id,
+                        correlation_id,
+                        causation_id,
+                        authorization_id,
+                    ),
                 )| {
+                    debug_assert!(
+                        expected_event_id
+                            .as_deref()
+                            .is_none_or(|expected| expected == event.event_id)
+                    );
                     DurableAppendRecordReceipt {
                         event_type: event
                             .event_kind()
                             .expect("durable audit append uses a known event type"),
                         event_id: event.event_id,
+                        event_id_preallocated: expected_event_id.is_some(),
                         stream_sequence: event.stream_sequence,
                         record_checksum: event.record_checksum,
                         record_id,
                         correlation_id,
+                        causation_id,
                         authorization_id,
                         start_offset,
                         end_offset,
@@ -798,7 +1304,16 @@ impl LinearSessionWriter {
                 .all(|(actual, expected)| {
                     actual.event_type == expected.event_type
                         && actual.record_id == expected.record_id
+                        && if actual.event_id_preallocated {
+                            expected.event_id.as_deref() == Some(actual.event_id.as_str())
+                        } else {
+                            expected
+                                .event_id
+                                .as_deref()
+                                .is_none_or(|event_id| actual.event_id == event_id)
+                        }
                         && actual.correlation_id == expected.correlation_id
+                        && actual.causation_id == expected.causation_id
                         && actual.authorization_id == expected.authorization_id
                 });
         if receipt.writer_generation != self.generation
@@ -837,6 +1352,90 @@ impl LinearSessionWriter {
         self.reload_from_file(&mut file)
     }
 
+    pub(super) fn cache_event_links_for_audit_batch(
+        &mut self,
+        batch: &DurableAuditBatch,
+        records: &[SessionStreamRecord],
+    ) {
+        if batch
+            .records
+            .iter()
+            .any(|record| record.event_id.is_some() || record.causation_id.is_some())
+        {
+            self.event_links = Some(DurableEventLinkIndex::from_records(records));
+        }
+    }
+
+    pub(super) fn reconcile_event(
+        &mut self,
+        expectation: &DurableEventReconciliationExpectation,
+    ) -> DurableEventReconciliation {
+        let (session_id, records) = match (|| -> Result<(String, Vec<SessionStreamRecord>)> {
+            self.ensure_writer_lease()?;
+            let mut file = self.open_locked_data_file()?;
+            let records = self.reload_from_file(&mut file)?;
+            file.sync_all()
+                .context("failed to sync session stream during reconciliation")?;
+            let session_id = self
+                .tail
+                .as_ref()
+                .context("session writer tail is unavailable during reconciliation")?
+                .session_id
+                .clone();
+            Ok((session_id, records))
+        })() {
+            Ok(result) => result,
+            Err(error) => {
+                return DurableEventReconciliation::Indeterminate {
+                    reason: format!("failed to read durable stream: {error:#}"),
+                };
+            }
+        };
+        if session_id != expectation.session_id {
+            return DurableEventReconciliation::Conflict {
+                reason: format!(
+                    "reconciliation expected session {}, found {session_id}",
+                    expectation.session_id
+                ),
+            };
+        }
+        let matching_identity = records
+            .iter()
+            .filter(|record| record.event_id() == expectation.event_id)
+            .collect::<Vec<_>>();
+        if matching_identity.is_empty() {
+            return DurableEventReconciliation::ConfirmedAbsent;
+        }
+        if matching_identity.len() != 1 {
+            return DurableEventReconciliation::Conflict {
+                reason: format!(
+                    "event_id {} appears {} times",
+                    expectation.event_id,
+                    matching_identity.len()
+                ),
+            };
+        }
+        let SessionStreamRecord::Stored(event) = matching_identity[0];
+        if event.event_kind() != Some(expectation.event_type)
+            || event.event_class
+                != expectation
+                    .event_type
+                    .expected_event_class()
+                    .expect("reconciliation only accepts appendable event types")
+            || event.payload != expectation.payload
+            || event.correlation_id != expectation.correlation_id
+            || event.causation_id != expectation.causation_id
+        {
+            return DurableEventReconciliation::Conflict {
+                reason: format!(
+                    "event_id {} exists with conflicting durable content",
+                    expectation.event_id
+                ),
+            };
+        }
+        DurableEventReconciliation::ExactPresent(Box::new(event.clone()))
+    }
+
     pub(super) fn next_sequence(&mut self) -> Result<u64> {
         self.ensure_writer_lease()?;
         let mut file = self.open_locked_data_file()?;
@@ -862,6 +1461,23 @@ impl LinearSessionWriter {
     pub(super) fn inject_fault(&mut self, fault: SessionWriterFault) {
         self.next_fault = Some(fault);
     }
+}
+
+fn validate_pending_session_entry_payload(event: &PendingStoredEvent) -> Result<()> {
+    if event.event_type.payload_metadata().storage != DurableEventPayloadStorage::SessionLogEntry {
+        return Ok(());
+    }
+    let Some(entry) = event.payload.get("session_log_entry").cloned() else {
+        return Ok(());
+    };
+    if entry
+        .get("control")
+        .and_then(|control| control.get("compaction_applied"))
+        .is_some()
+    {
+        bail!("legacy CompactionRecord payload is unsupported in this pre-release build");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1041,6 +1657,7 @@ fn receipt_records_match_file(
             || event.stream_sequence != receipt.stream_sequence
             || event.record_checksum != receipt.record_checksum
             || event.correlation_id != receipt.correlation_id
+            || event.causation_id != receipt.causation_id
             || !json_contains_identity(&event.payload, &receipt.record_id)
             || receipt
                 .authorization_id

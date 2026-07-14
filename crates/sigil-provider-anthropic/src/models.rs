@@ -15,6 +15,8 @@ pub struct AnthropicMessagesRequest {
     pub tool_choice: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

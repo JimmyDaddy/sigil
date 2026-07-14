@@ -1,6 +1,6 @@
 # Sigil Provider Guide
 
-[Docs home](README.md) · [Configuration](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [简体中文](../zh-CN/providers.md)
+[Docs home](README.md) · [Configuration](configuration.md) · [DeepSeek](provider-deepseek.md) · [OpenAI-compatible](provider-openai-compatible.md) · [OpenAI Responses](provider-openai-responses.md) · [Anthropic](provider-anthropic.md) · [Gemini](provider-gemini.md) · [简体中文](../zh-CN/providers.md)
 
 Sigil separates provider choice from the rest of the user workflow. This guide and the linked provider pages are the source of truth for provider selection, authentication variables, model endpoints, and provider-specific options. Shared workspace, permission, task, terminal, and tool settings remain in [Configuration](configuration.md).
 
@@ -10,6 +10,7 @@ Sigil separates provider choice from the rest of the user workflow. This guide a
 | --- | --- | --- | --- |
 | DeepSeek | Default Quick Setup path, DeepSeek chat, FIM, and DeepSeek-specific endpoint options. | `deepseek` | [DeepSeek provider](provider-deepseek.md) |
 | OpenAI-compatible | OpenAI or a compatible Chat Completions `/v1` gateway. | `openai_compat` | [OpenAI-compatible provider](provider-openai-compatible.md) |
+| OpenAI Responses | OpenAI Responses `/v1/responses` models and event stream. | `openai_responses` | [OpenAI Responses provider](provider-openai-responses.md) |
 | Anthropic | Claude models through Anthropic Messages streaming. | `anthropic` | [Anthropic provider](provider-anthropic.md) |
 | Gemini | Gemini models through `streamGenerateContent` and function calling. | `gemini` | [Gemini provider](provider-gemini.md) |
 
@@ -39,6 +40,7 @@ Prefer environment variables for credentials. Plaintext `api_key` fields are sup
 | --- | --- | --- |
 | DeepSeek | `SIGIL_API_KEY` | `[providers.deepseek].api_key` |
 | OpenAI-compatible | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | `[providers.openai_compat].api_key` |
+| OpenAI Responses | `SIGIL_OPENAI_RESPONSES_API_KEY` | `[providers.openai_responses].api_key` |
 | Anthropic | `SIGIL_ANTHROPIC_API_KEY` | `[providers.anthropic].api_key` |
 | Gemini | `SIGIL_GEMINI_API_KEY` | `[providers.gemini].api_key` |
 
@@ -56,6 +58,7 @@ Config templates live in [docs/examples/config](../examples/config):
 
 - [deepseek-basic.toml](../examples/config/deepseek-basic.toml)
 - [openai-compatible.toml](../examples/config/openai-compatible.toml)
+- [openai-responses.toml](../examples/config/openai-responses.toml)
 - [anthropic.toml](../examples/config/anthropic.toml)
 - [gemini.toml](../examples/config/gemini.toml)
 

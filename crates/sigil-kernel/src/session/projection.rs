@@ -260,6 +260,7 @@ pub(super) fn apply_agent_result_continuation_projection_record(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn apply_conversation_queue_projection_record(
     projection: &mut ConversationQueueProjection,
     cursor: &mut Option<ProjectionCursor>,

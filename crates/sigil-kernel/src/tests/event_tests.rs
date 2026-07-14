@@ -14,13 +14,13 @@ use crate::{
     AgentThreadTerminalStatus, AgentTrustState, ApprovalMode, BackgroundTaskHandle, CandidateCheck,
     ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, ControlEntry,
-    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
-    ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
-    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, DurableDomainEvent, DurableEventPayloadStorage, DurableEventType,
-    EventClass, EventSyncClass, EvidenceReceipt, EvidenceScope, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
-    McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
+    ChildVerificationReceiptLinked, CompletionCriteria, ControlEntry, ConversationInputEditedEntry,
+    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
+    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
+    DurableDomainEvent, DurableEventPayloadStorage, DurableEventType, EventClass, EventSyncClass,
+    EvidenceReceipt, EvidenceScope, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH, McpElicitationDecision,
+    McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
     PlanApprovedEntry, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
     PluginTrustEntry, PrefixSnapshot, ProjectionApplyDecision, ProjectionCursor,
@@ -150,6 +150,49 @@ fn durable_event_sync_class_identifies_normal_events() {
             .sync_class()
             .expect("context source is appendable"),
         EventSyncClass::NormalEvent
+    );
+    assert_eq!(
+        DurableEventType::CompactionSkipped
+            .sync_class()
+            .expect("compaction skip is appendable"),
+        EventSyncClass::NormalEvent
+    );
+}
+
+#[test]
+fn compaction_v2_taxonomy_is_explicit_and_recovery_critical() {
+    let recovery_critical = [
+        DurableEventType::CompactionStarted,
+        DurableEventType::CompactionAppliedV2,
+        DurableEventType::CompactionFailed,
+        DurableEventType::TaskMemoryRecordedV1,
+        DurableEventType::TaskMemoryInvalidated,
+    ];
+
+    for event_type in recovery_critical {
+        assert_eq!(
+            event_type.expected_event_class(),
+            Some(EventClass::Critical)
+        );
+        assert_eq!(
+            event_type.sync_class(),
+            Some(EventSyncClass::RecoveryCritical)
+        );
+        assert_eq!(
+            event_type.payload_metadata().storage,
+            DurableEventPayloadStorage::DirectJson
+        );
+    }
+
+    assert_eq!(
+        DurableEventType::CompactionSkipped.expected_event_class(),
+        Some(EventClass::NonCritical)
+    );
+    assert_eq!(
+        DurableEventType::CompactionSkipped
+            .payload_metadata()
+            .storage,
+        DurableEventPayloadStorage::DirectJson
     );
 }
 
@@ -694,9 +737,6 @@ fn typed_event_decode_covers_other_event_fallbacks() {
 #[test]
 fn stored_event_decode_covers_every_known_domain_variant() {
     for event_type in ALL_DURABLE_EVENT_TYPES.iter().copied() {
-        if !event_type.appendable() {
-            continue;
-        }
         let event_class = event_type
             .expected_event_class()
             .expect("known durable event type should have expected class");
@@ -837,12 +877,8 @@ fn stored_event_rejects_oversized_payload() {
 }
 
 #[test]
-fn durable_event_sync_mapping_covers_all_appendable_events() {
+fn durable_event_sync_mapping_covers_all_known_events() {
     for event_type in ALL_DURABLE_EVENT_TYPES {
-        if !event_type.appendable() {
-            assert!(event_type.sync_class().is_none());
-            continue;
-        }
         assert!(
             event_type.sync_class().is_some(),
             "{} should have a sync class",
@@ -869,12 +905,8 @@ fn durable_event_sync_mapping_covers_all_appendable_events() {
 }
 
 #[test]
-fn durable_event_type_expected_class_covers_all_appendable_types() {
+fn durable_event_type_expected_class_covers_all_known_types() {
     for event_type in ALL_DURABLE_EVENT_TYPES {
-        if !event_type.appendable() {
-            assert!(event_type.expected_event_class().is_none());
-            continue;
-        }
         assert!(
             event_type.expected_event_class().is_some(),
             "{} should have an expected event class",
@@ -1557,18 +1589,6 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 updated_at_ms: 120,
             }),
             "terminal_task",
-        ),
-        (
-            ControlEntry::CompactionApplied(CompactionRecord {
-                summary: "summary".to_owned(),
-                compacted_message_count: 2,
-                retained_tail_message_count: 1,
-                task_memory: None,
-                external_trust: None,
-                external_provenance_message_ids: Vec::new(),
-                external_source_ids: Vec::new(),
-            }),
-            "compaction_applied",
         ),
         (
             ControlEntry::PlanApproved(PlanApprovedEntry {

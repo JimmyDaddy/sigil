@@ -1,44 +1,9 @@
 use super::*;
 
 pub(super) fn apply_usage_control_entry(stats: &mut SessionStats, control: &ControlEntry) {
-    match control {
-        ControlEntry::UsageSnapshot(usage) => stats.apply_usage(usage),
-        ControlEntry::CompactionApplied(_) => stats.last_prompt_tokens = 0,
-        _ => {}
+    if let ControlEntry::UsageSnapshot(usage) = control {
+        stats.apply_usage(usage);
     }
-}
-
-pub(super) fn compaction_summary_message(record: &CompactionRecord) -> ModelMessage {
-    let digest = Sha256::digest(
-        format!(
-            "{}\n{}\n{}",
-            record.summary, record.compacted_message_count, record.retained_tail_message_count
-        )
-        .as_bytes(),
-    );
-    ModelMessage {
-        id: format!("compaction:{digest:x}"),
-        role: crate::MessageRole::Assistant,
-        content: Some(record.summary.clone()),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        assistant_kind: Some(crate::AssistantMessageKind::Progress),
-    }
-}
-
-pub(super) fn projected_messages_with_record(
-    raw_messages: &[ModelMessage],
-    record: &CompactionRecord,
-) -> Vec<ModelMessage> {
-    let mut projected = vec![compaction_summary_message(record)];
-    if record.compacted_message_count < raw_messages.len() {
-        projected.extend(
-            raw_messages[record.compacted_message_count..]
-                .iter()
-                .cloned(),
-        );
-    }
-    projected
 }
 
 pub(super) fn repair_orphan_tool_results(messages: &[ModelMessage]) -> Vec<ModelMessage> {
@@ -155,48 +120,6 @@ pub(super) fn interrupted_tool_execution_profiles(
         .collect()
 }
 
-pub fn latest_compaction_record(entries: &[SessionLogEntry]) -> Option<CompactionRecord> {
-    entries.iter().rev().find_map(|entry| match entry {
-        SessionLogEntry::Control(ControlEntry::CompactionApplied(record)) => Some(record.clone()),
-        _ => None,
-    })
-}
-
-pub(super) fn latest_task_memory_workspace_snapshot_id(
-    records: &[SessionStreamRecord],
-) -> Result<Option<crate::WorkspaceSnapshotId>> {
-    for record in records.iter().rev() {
-        match record {
-            SessionStreamRecord::Legacy { entry, .. } => {
-                if let SessionLogEntry::Control(ControlEntry::VerificationRecorded(verification)) =
-                    entry.as_ref()
-                {
-                    return Ok(Some(
-                        verification.receipt.binding.workspace_snapshot_id.clone(),
-                    ));
-                }
-            }
-            SessionStreamRecord::Stored(event)
-                if event.event_kind() == Some(DurableEventType::MutationCommitted) =>
-            {
-                let committed: crate::MutationCommitted =
-                    serde_json::from_value(event.payload.clone())
-                        .context("failed to decode mutation commit for compaction task memory")?;
-                return Ok(Some(committed.workspace_snapshot_id));
-            }
-            SessionStreamRecord::Stored(event) => {
-                if let Some(SessionLogEntry::Control(ControlEntry::VerificationRecorded(
-                    verification,
-                ))) = session_entry_from_stored_event(event)?
-                {
-                    return Ok(Some(verification.receipt.binding.workspace_snapshot_id));
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
 pub fn session_stats_from_entries(entries: &[SessionLogEntry]) -> SessionStats {
     let mut stats = SessionStats::default();
     for entry in entries {
@@ -208,100 +131,6 @@ pub fn session_stats_from_entries(entries: &[SessionLogEntry]) -> SessionStats {
         }
     }
     stats
-}
-
-pub(super) fn compaction_boundary(
-    messages: &[ModelMessage],
-    requested_tail_messages: usize,
-) -> usize {
-    if messages.is_empty() {
-        return 0;
-    }
-
-    let tail_messages = requested_tail_messages.max(1);
-    let mut boundary = messages.len().saturating_sub(tail_messages);
-    while boundary > 0
-        && (matches!(messages[boundary].role, crate::MessageRole::Tool)
-            || !messages[boundary - 1].tool_calls.is_empty()
-            || matches!(messages[boundary - 1].role, crate::MessageRole::Tool))
-    {
-        if !messages[boundary - 1].tool_calls.is_empty() {
-            boundary -= 1;
-            break;
-        }
-        boundary -= 1;
-    }
-    boundary
-}
-
-pub(super) fn summarize_messages(messages: &[ModelMessage]) -> String {
-    let mut lines = vec![format!(
-        "Compacted {} earlier messages into a stable local summary.",
-        messages.len()
-    )];
-
-    for (index, message) in messages.iter().enumerate() {
-        let label = match message.role {
-            crate::MessageRole::System => "system",
-            crate::MessageRole::User => "user",
-            crate::MessageRole::Assistant => "assistant",
-            crate::MessageRole::Tool => "tool",
-        };
-        if !message.tool_calls.is_empty() {
-            let names = message
-                .tool_calls
-                .iter()
-                .map(|call| call.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let content = message.content.as_deref().unwrap_or_default();
-            let truncated = truncate_stable(content, 160);
-            if !truncated.is_empty() {
-                lines.push(format!(
-                    "{:02}. {} {} tool_calls [{}]",
-                    index + 1,
-                    label,
-                    truncated,
-                    names
-                ));
-                continue;
-            }
-            lines.push(format!(
-                "{:02}. {} tool_calls [{}]",
-                index + 1,
-                label,
-                names
-            ));
-            continue;
-        }
-
-        let content = message.content.clone().unwrap_or_default();
-        let truncated = truncate_stable(&content, 160);
-        if matches!(message.role, crate::MessageRole::Tool) {
-            let tool_call_id = message.tool_call_id.as_deref().unwrap_or("unknown");
-            lines.push(format!(
-                "{:02}. {} {} => {}",
-                index + 1,
-                label,
-                tool_call_id,
-                truncated
-            ));
-        } else {
-            lines.push(format!("{:02}. {} {}", index + 1, label, truncated));
-        }
-    }
-
-    lines.join("\n")
-}
-
-pub(super) fn truncate_stable(content: &str, max_chars: usize) -> String {
-    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    let char_count = normalized.chars().count();
-    if char_count <= max_chars {
-        return normalized;
-    }
-    let truncated = normalized.chars().take(max_chars).collect::<String>();
-    format!("{truncated}...")
 }
 
 pub(super) fn stable_json_hash(value: &serde_json::Value) -> String {

@@ -2,7 +2,118 @@
 use super::writer::SessionWriterFault;
 use super::writer::{LinearSessionWriter, PendingStoredEvent, shared_session_writer};
 use super::*;
-use crate::LegacyEvent;
+use crate::EventId;
+use thiserror::Error;
+
+/// A session stream uses a durable format this pre-release build intentionally no longer reads.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[error(
+    "session log uses unsupported {format_name} format on line {physical_line} in {path}; the file was not modified"
+)]
+pub struct SessionStreamCompatibilityError {
+    /// Source session log that was left untouched.
+    pub path: PathBuf,
+    /// One-based physical line containing the unsupported record.
+    pub physical_line: usize,
+    /// Stable name of the unsupported pre-release payload shape.
+    pub format_name: &'static str,
+}
+
+pub(super) fn unsupported_legacy_session_log_entry(
+    path: &Path,
+    physical_line: usize,
+) -> anyhow::Error {
+    SessionStreamCompatibilityError {
+        path: path.to_path_buf(),
+        physical_line,
+        format_name: "legacy SessionLogEntry",
+    }
+    .into()
+}
+
+pub(super) fn unsupported_legacy_compaction_record(
+    path: &Path,
+    physical_line: usize,
+) -> anyhow::Error {
+    SessionStreamCompatibilityError {
+        path: path.to_path_buf(),
+        physical_line,
+        format_name: "legacy CompactionRecord payload",
+    }
+    .into()
+}
+
+pub(super) fn is_unsupported_legacy_session_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<SessionStreamCompatibilityError>()
+        .is_some()
+}
+
+pub(super) fn stored_event_from_stream_line(
+    line: &str,
+    path: &Path,
+    physical_line: usize,
+) -> Result<StoredEvent> {
+    match classify_session_stream_line(line, path, physical_line)? {
+        Some(event) => Ok(event),
+        None => StoredEvent::from_json_str(line)
+            .with_context(|| stream_line_context("stored event", physical_line, path)),
+    }
+}
+
+/// Classifies a physical JSONL line without treating ordinary malformed tail bytes as a v2 event.
+///
+/// A line with the v2 envelope shape must deserialize and validate as a [`StoredEvent`]; a raw
+/// `SessionLogEntry` is the explicitly unsupported pre-release format. Other bytes can be
+/// considered recoverable tail corruption by the writer recovery path.
+pub(super) fn classify_session_stream_line(
+    line: &str,
+    path: &Path,
+    physical_line: usize,
+) -> Result<Option<StoredEvent>> {
+    if serde_json::from_str::<SessionLogEntry>(line).is_ok() {
+        return Err(unsupported_legacy_session_log_entry(path, physical_line));
+    }
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Ok(None);
+    };
+    let looks_like_stored_event = ["schema_version", "event_type"]
+        .into_iter()
+        .all(|field| value.get(field).is_some());
+    if !looks_like_stored_event {
+        return Ok(None);
+    }
+
+    let event = StoredEvent::from_json_str(line)
+        .with_context(|| stream_line_context("stored event", physical_line, path))?;
+    reject_legacy_compaction_record_payload(&event, path, physical_line)?;
+    Ok(Some(event))
+}
+
+fn reject_legacy_compaction_record_payload(
+    event: &StoredEvent,
+    path: &Path,
+    physical_line: usize,
+) -> Result<()> {
+    let Some(event_type) = event.event_kind() else {
+        return Ok(());
+    };
+    if event_type.payload_metadata().storage != DurableEventPayloadStorage::SessionLogEntry {
+        return Ok(());
+    }
+    let Some(entry) = event.payload.get("session_log_entry").cloned() else {
+        return Ok(());
+    };
+    if entry
+        .get("control")
+        .and_then(|control| control.get("compaction_applied"))
+        .is_some()
+    {
+        return Err(unsupported_legacy_compaction_record(path, physical_line));
+    }
+    Ok(())
+}
 
 /// Append-only JSONL store for session and control-plane history.
 #[derive(Debug, Clone)]
@@ -39,7 +150,9 @@ impl JsonlSessionStore {
                 event_type,
                 event_class,
                 payload,
+                event_id: None,
                 correlation_id: None,
+                causation_id: None,
             }],
             false,
         )?;
@@ -71,15 +184,90 @@ impl JsonlSessionStore {
                 event_type,
                 event_class,
                 payload,
+                event_id: None,
                 correlation_id: None,
+                causation_id: None,
             }],
             false,
         )?;
         Ok(true)
     }
 
+    pub(super) fn append_event_if_with_identity<F>(
+        &self,
+        event_type: DurableEventType,
+        payload: serde_json::Value,
+        event_id: EventId,
+        correlation_id: Option<EventId>,
+        causation_id: Option<EventId>,
+        should_append: F,
+    ) -> Result<Option<StoredEvent>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let event_class = event_type
+            .expected_event_class()
+            .context("identified durable event type has no event class")?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let records = writer.read_records_writer()?;
+        if !should_append(&records)? {
+            return Ok(None);
+        }
+        let (mut events, _) = writer.append_events(
+            vec![PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                event_id: Some(event_id),
+                correlation_id,
+                causation_id,
+            }],
+            true,
+        )?;
+        events
+            .pop()
+            .map(Some)
+            .context("session writer returned no event for a conditional append")
+    }
+
+    /// Appends one ordered set of preallocated durable events while holding the single-writer
+    /// lease across both the compare predicate and the append. This is intentionally lower-level
+    /// than the strict audit receipt API because typed payload validation can depend on the real
+    /// stream sequence assigned to each member of the batch.
+    pub(super) fn append_events_if_with_identities<F>(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        if pending.is_empty() {
+            bail!("conditional durable append batch must not be empty");
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let records = writer.read_records_writer()?;
+        if !should_append(&records)? {
+            return Ok(None);
+        }
+        let (events, _) = writer.append_events(pending, true)?;
+        Ok(Some(events))
+    }
+
     /// Appends a provider-visible or control session entry as a v2 stored event.
     pub fn append_session_entry_event(&self, entry: &SessionLogEntry) -> Result<StoredEvent> {
+        if matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
+        ) {
+            bail!("conversation input promotion must use the critical direct promotion append API");
+        }
         let event_type = session_entry_event_type(entry);
         let event_class = session_entry_event_class(event_type);
         let payload = serde_json::json!({ "session_log_entry": entry });
@@ -90,7 +278,7 @@ impl JsonlSessionStore {
         &self.path
     }
 
-    /// Reads all durable records from `path`, including a deserialize-only legacy prefix.
+    /// Reads all current V2 durable records from `path`.
     pub fn read_event_records(path: impl AsRef<Path>) -> Result<Vec<SessionStreamRecord>> {
         let path = path.as_ref();
         if !path.exists() {
@@ -125,6 +313,7 @@ impl JsonlSessionStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
         let records = writer.read_records_writer()?;
+        ConversationQueueDurableProjection::from_records(&records)?;
         let mut entries = session_entries_from_records(&records)?;
         let (provider_name, model_name) = session_identity_from_entries(&entries)
             .unwrap_or((fallback_provider_name, fallback_model_name));
@@ -174,7 +363,9 @@ impl JsonlSessionStore {
                         event_type,
                         event_class: session_entry_event_class(event_type),
                         payload: serde_json::json!({ "session_log_entry": entry }),
+                        event_id: None,
                         correlation_id: None,
+                        causation_id: None,
                     }
                 })
                 .collect();
@@ -188,6 +379,7 @@ impl JsonlSessionStore {
     pub fn read_entries(path: impl AsRef<Path>) -> Result<Vec<SessionLogEntry>> {
         let path = path.as_ref();
         let records = Self::read_event_records(path)?;
+        ConversationQueueDurableProjection::from_records(&records)?;
         session_entries_from_records(&records)
     }
 
@@ -198,17 +390,23 @@ impl JsonlSessionStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the line is neither a legacy entry nor a valid stored event, or when
-    /// a stored event's embedded session entry payload is malformed.
+    /// Returns an error when the line is a legacy entry, not a valid stored event, or when a
+    /// stored event's embedded session entry payload is malformed.
     pub fn session_entry_from_json_line(line: &str) -> Result<Option<SessionLogEntry>> {
+        Self::session_entry_from_json_line_at_path(line, Path::new("<session JSONL line>"), 1)
+    }
+
+    /// Decodes one session entry with its source location for an actionable compatibility error.
+    pub fn session_entry_from_json_line_at_path(
+        line: &str,
+        path: &Path,
+        physical_line: usize,
+    ) -> Result<Option<SessionLogEntry>> {
         let line = line.trim();
         if line.is_empty() {
             return Ok(None);
         }
-        if let Ok(entry) = serde_json::from_str::<SessionLogEntry>(line) {
-            return Ok(Some(entry));
-        }
-        let event = StoredEvent::from_json_str(line)
+        let event = stored_event_from_stream_line(line, path, physical_line)
             .context("failed to decode stored event from session JSONL line")?;
         session_entry_from_stored_event(&event)
     }
@@ -240,6 +438,7 @@ impl JsonlSessionStore {
         if !should_append(&records)? {
             return Ok(None);
         }
+        writer.cache_event_links_for_audit_batch(&batch, &records);
         writer.append_audit_batch(batch).map(Some)
     }
 
@@ -253,6 +452,26 @@ impl JsonlSessionStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
         writer.validate_audit_receipt(receipt, expectation)
+    }
+
+    /// Re-reads and synchronizes the stream under the single-writer lease after an append
+    /// acknowledgement error.
+    ///
+    /// This operation is intentionally explicit and may perform a full scan or tail recovery. It
+    /// is not part of ordinary session loading or the hot append path.
+    pub fn reconcile_durable_event(
+        &self,
+        expectation: &DurableEventReconciliationExpectation,
+    ) -> DurableEventReconciliation {
+        let mut writer = match self.writer.lock() {
+            Ok(writer) => writer,
+            Err(_) => {
+                return DurableEventReconciliation::Indeterminate {
+                    reason: "session writer lock poisoned".to_owned(),
+                };
+            }
+        };
+        writer.reconcile_event(expectation)
     }
 
     pub fn next_stream_sequence(&self) -> Result<u64> {
@@ -379,81 +598,19 @@ pub(super) fn read_stream_records_from_str(
         return Ok(Vec::new());
     }
 
-    let first_v2 = raw_records
-        .iter()
-        .position(|(_, line)| line_is_v2_stored_event(line).unwrap_or(false));
-    let legacy_prefix_lines = match first_v2 {
-        Some(index) => &raw_records[..index],
-        None => raw_records.as_slice(),
-    };
-    let legacy_session_id = (!legacy_prefix_lines.is_empty()).then(|| {
-        let mut prefix = String::new();
-        for (_, line) in legacy_prefix_lines {
-            prefix.push_str(line);
-            prefix.push('\n');
-        }
-        stable_event_uuid(
-            "sigil-legacy-session",
-            &stable_event_hash(prefix.as_bytes()),
-        )
-    });
-
     let mut records = Vec::with_capacity(raw_records.len());
     let mut expected_session_id = None;
     for (record_ordinal, (physical_line, line)) in raw_records.iter().enumerate() {
         let stream_sequence = record_ordinal as u64 + 1;
-        if line_is_v2_stored_event(line)? {
-            let event = StoredEvent::from_json_str(line)
-                .with_context(|| stream_line_context("stored event", *physical_line, path))?;
-            validate_stream_record_identity(
-                *physical_line,
-                stream_sequence,
-                &event.session_id,
-                event.stream_sequence,
-                &mut expected_session_id,
-            )?;
-            records.push(SessionStreamRecord::Stored(event));
-            continue;
-        }
-
-        if first_v2.is_some_and(|index| record_ordinal >= index) {
-            if serde_json::from_str::<SessionLogEntry>(line).is_ok() {
-                bail!(
-                    "legacy session entry appears after v2 stored event in {}",
-                    path.display()
-                );
-            }
-            StoredEvent::from_json_str(line)
-                .with_context(|| stream_line_context("stored event", *physical_line, path))?;
-            unreachable!("a non-v2 line cannot decode as a stored event");
-        }
-
-        let session_id = legacy_session_id
-            .as_ref()
-            .expect("legacy session id is derived when legacy records are present");
-        let entry: SessionLogEntry = serde_json::from_str(line)
-            .with_context(|| stream_line_context("session entry", *physical_line, path))?;
+        let event = stored_event_from_stream_line(line, path, *physical_line)?;
         validate_stream_record_identity(
             *physical_line,
             stream_sequence,
-            session_id,
-            stream_sequence,
+            &event.session_id,
+            event.stream_sequence,
             &mut expected_session_id,
         )?;
-        let raw_line_hash = stable_event_hash(line.as_bytes());
-        let event_id = stable_event_uuid(session_id, &format!("{stream_sequence}:{raw_line_hash}"));
-        let payload = serde_json::to_value(&entry).context("failed to serialize legacy entry")?;
-        let event = LegacyEvent {
-            event_id,
-            session_id: session_id.clone(),
-            stream_sequence,
-            raw_line_hash,
-            payload,
-        };
-        records.push(SessionStreamRecord::Legacy {
-            event,
-            entry: Box::new(entry),
-        });
+        records.push(SessionStreamRecord::Stored(event));
     }
     Ok(records)
 }
@@ -502,13 +659,6 @@ pub(super) fn stream_session_mismatch_message(
 pub(super) fn stream_line_context(kind: &str, physical_line: usize, path: &Path) -> String {
     let path = path.display();
     format!("failed to parse {kind} on line {physical_line} from {path}")
-}
-
-pub(super) fn line_is_v2_stored_event(line: &str) -> Result<bool> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return Ok(false);
-    };
-    Ok(is_v2_stored_event_value(&value))
 }
 
 pub(super) fn append_stored_event_to_locked_file(
@@ -646,6 +796,15 @@ pub(super) fn session_entry_from_stored_event(
     if event.event_kind().is_none() {
         return Ok(None);
     }
+    if event.event_kind() == Some(DurableEventType::ConversationInputPromoted) {
+        let entry: ConversationInputPromotedEntry =
+            serde_json::from_value(event.payload.clone())
+                .context("failed to decode conversation input promoted event payload")?;
+        entry.validate_for_session(&event.session_id)?;
+        return Ok(Some(SessionLogEntry::Control(
+            ControlEntry::ConversationInputPromoted(entry),
+        )));
+    }
     let Some(value) = event.payload.get("session_log_entry") else {
         return Ok(None);
     };
@@ -657,14 +816,17 @@ pub(super) fn session_entry_from_stored_event(
 pub(crate) fn session_entry_from_domain_event(
     event: &DomainEvent,
 ) -> Result<Option<SessionLogEntry>> {
-    if let DomainEvent::Legacy(event) = event {
-        return serde_json::from_value(event.payload.clone())
-            .context("failed to decode legacy session entry")
-            .map(Some);
+    if let DomainEvent::ConversationInputPromoted(payload) = event {
+        let entry: ConversationInputPromotedEntry = serde_json::from_value(payload.payload.clone())
+            .context("failed to decode conversation input promoted domain payload")?;
+        entry.validate_shape()?;
+        return Ok(Some(SessionLogEntry::Control(
+            ControlEntry::ConversationInputPromoted(entry),
+        )));
     }
     let payload = event
         .payload()
-        .unwrap_or_else(|| unreachable!("domain event must carry payload"));
+        .expect("v2 durable domain event must carry a payload");
     let Some(value) = payload.payload.get("session_log_entry") else {
         return Ok(None);
     };

@@ -19,7 +19,7 @@ Use [Configuration](configuration.md#storage-and-session-paths) for path choices
 
 | Section / field | Default | Purpose |
 | --- | --- | --- |
-| `[agent].provider` | setup choice | `deepseek`, `openai_compat`, `anthropic`, or `gemini`. |
+| `[agent].provider` | setup choice | `deepseek`, `openai_compat`, `openai_responses`, `anthropic`, or `gemini`. |
 | `[agent].model` | provider setup choice | Default chat model. |
 | `[agent].tool_timeout_secs` | `30` | Tool timeout in seconds. |
 | `[agent].max_turns` | disabled | Optional limit for an unfinished tool loop. |
@@ -105,7 +105,7 @@ See [Permissions and sandbox](permissions-and-sandbox.md) for the effective safe
 | `[skills].enabled` / `.user_skills` / `.user_agents` | `true` | Enables discovered reusable resources. |
 | `[skills].compatibility_sources` | `[]` | Optional `claude` or `reasonix` imports. |
 | `[compaction].enabled` | `true` | Enables conversation compaction. |
-| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | Warning and automatic thresholds. |
+| `[compaction].soft_threshold_ratio` / `.hard_threshold_ratio` | `0.5` / `0.8` | Warning and limited idle-auto threshold; automatic apply still requires local target admission. |
 | `[compaction].fallback_context_window_tokens` | unset | Fallback model-window value. |
 | `[compaction].tail_messages` | `6` | Recent messages retained verbatim. |
 

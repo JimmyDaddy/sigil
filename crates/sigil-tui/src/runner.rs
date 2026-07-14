@@ -9,12 +9,13 @@ mod session_flow;
 mod spawn;
 mod worker_loop;
 
-pub use protocol::{
-    CompactionTrigger, McpActivationStatus, QueueMoveDirection, WorkerCommand, WorkerMessage,
-};
 pub(crate) use protocol::{
     EgressDisclosureReceiptTx, McpElicitationResponseTx, WorkerApprovalCommand,
     WorkerCommandEnvelope,
+};
+pub use protocol::{
+    McpActivationStatus, QueueMoveDirection, V2CompactionAdmission, V2CompactionApplySource,
+    V2CompactionReview, WorkerCommand, WorkerMessage,
 };
 pub use spawn::spawn_agent_worker;
 

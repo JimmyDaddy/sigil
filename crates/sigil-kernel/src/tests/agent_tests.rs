@@ -17,12 +17,14 @@ use serde_json::{Value, json};
 use crate::{
     ApprovalHandler, ApprovalMode, AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle,
     BackgroundTaskStatus, CompactionConfig, CompletionRequest, ControlEntry, DurableEventType,
-    EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
-    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
-    PermissionConfig, PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission,
-    PlanApprovalScope, PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry,
-    PreparedToolExecution, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
+    EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, FrozenProviderRequestMaterial,
+    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
+    MutationEventRecorder, PermissionConfig, PermissionDecision, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanId,
+    PlanPermissionGrantedEntry, PreparedToolExecution, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
+    ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
+    ProviderRequestRejection, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
     ResponseHandle, RunEvent, Session, SessionLogEntry, SessionStreamRecord,
     TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext, TaskRunEntry,
     TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource,
@@ -2614,10 +2616,7 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
     let records = JsonlSessionStore::read_event_records(&path)?;
     let event_types = records
         .iter()
-        .filter_map(|record| match record {
-            SessionStreamRecord::Legacy { .. } => None,
-            SessionStreamRecord::Stored(event) => Some(event.event_type.as_str()),
-        })
+        .map(|record| record.stored_event().event_type.as_str())
         .collect::<Vec<_>>();
     assert!(event_types.contains(&DurableEventType::RunStatusChanged.as_str()));
     assert!(event_types.contains(&DurableEventType::RunFinalized.as_str()));
@@ -2654,6 +2653,272 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
         serde_json::to_value(&projected_entries)?,
         serde_json::to_value(session.entries())?
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_initial_frozen_request_is_dispatched_without_rebuilding_or_duplicate_user()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model").with_store(store.clone());
+    let mut safe_user = ModelMessage::user("inspect https://example.com/[redacted]");
+    safe_user.id = "promoted-user".to_owned();
+    session.append_user_message(safe_user)?;
+    let mut exact_user = ModelMessage::user("inspect https://example.com/?signature=exact-secret");
+    exact_user.id = "promoted-user".to_owned();
+    let frozen = FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        CompletionRequest {
+            provider_name: "mock-capturing".to_owned(),
+            model_name: "mock-model".to_owned(),
+            messages: vec![exact_user],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(32_768),
+            reasoning_effort: Some(ReasoningEffort::High),
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: false,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let fingerprint = frozen.fingerprint().to_owned();
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_initial_frozen_provider_request(frozen)
+                .with_logical_run_id("queued-dispatch-test"),
+            AgentRunOptions {
+                workspace_root: workspace,
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let requests = captured.lock().expect("captured requests should lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].messages[0].content.as_deref(),
+        Some("inspect https://example.com/?signature=exact-secret")
+    );
+    drop(requests);
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::User(message) if message.id == "promoted-user"
+            ))
+            .count(),
+        1
+    );
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let started: ProviderPhysicalAttemptStartedEntry = records
+        .iter()
+        .find_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ProviderPhysicalAttemptStarted.as_str() =>
+            {
+                serde_json::from_value(event.payload.clone()).ok()
+            }
+            _ => None,
+        })
+        .expect("frozen dispatch should append its physical-attempt Started barrier");
+    assert_eq!(started.request_material_fingerprint, fingerprint);
+    assert_eq!(started.logical_run_id, "queued-dispatch-test");
+    let durable_json = std::fs::read_to_string(path)?;
+    assert!(!durable_json.contains("exact-secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_initial_frozen_request_binds_only_its_first_physical_attempt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(MockProvider, registry);
+    let mut session = Session::new("mock", "mock-model").with_store(store);
+    let frozen = FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        CompletionRequest {
+            provider_name: "mock".to_owned(),
+            model_name: "mock-model".to_owned(),
+            messages: vec![ModelMessage::user("run the queued request")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: false,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_initial_frozen_provider_request(frozen)
+                .with_logical_run_id("queued-dispatch-test"),
+            AgentRunOptions {
+                workspace_root: workspace,
+                max_turns: Some(3),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let started = JsonlSessionStore::read_event_records(&path)?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ProviderPhysicalAttemptStarted.as_str() =>
+            {
+                serde_json::from_value::<ProviderPhysicalAttemptStartedEntry>(event.payload).ok()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(started.len(), 2);
+    assert_eq!(started[0].logical_run_id, "queued-dispatch-test");
+    assert_ne!(started[1].logical_run_id, "queued-dispatch-test");
+    assert!(started[1].logical_run_id.starts_with("agent-run-"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_provider_turn_records_synced_physical_attempt_lifecycle() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("durable provider attempt"),
+            AgentRunOptions {
+                workspace_root: workspace,
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: Some("partition-secret".to_owned()),
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let started = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ProviderPhysicalAttemptStarted.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let terminals = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::ProviderPhysicalAttemptTerminal.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(started.len(), 1);
+    assert_eq!(terminals.len(), 1);
+    let started_entry: ProviderPhysicalAttemptStartedEntry =
+        serde_json::from_value(started[0].payload.clone())?;
+    let terminal_entry: ProviderPhysicalAttemptTerminalEntry =
+        serde_json::from_value(terminals[0].payload.clone())?;
+    assert!(started_entry.logical_run_id.starts_with("agent-run-"));
+    assert_eq!(
+        started[0].correlation_id.as_deref(),
+        Some(started[0].event_id.as_str())
+    );
+    assert_eq!(terminals[0].correlation_id, started[0].correlation_id);
+    assert_eq!(
+        terminals[0].causation_id.as_deref(),
+        Some(started[0].event_id.as_str())
+    );
+    assert_eq!(
+        terminal_entry.request_material_fingerprint,
+        started_entry.request_material_fingerprint
+    );
+    assert_eq!(
+        terminal_entry.outcome,
+        ProviderPhysicalAttemptOutcome::Completed
+    );
+    assert!(!std::fs::read_to_string(&path)?.contains("partition-secret"));
     Ok(())
 }
 
@@ -6057,6 +6322,13 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
 
 struct StreamErrorProvider;
 
+#[derive(Debug, thiserror::Error)]
+#[error("provider rejected the request before generation")]
+struct ContextWindowRejectedBeforeGeneration;
+
+struct ContextWindowErrorProvider;
+struct ContextWindowErrorAfterOutputProvider;
+
 #[async_trait]
 impl Provider for StreamErrorProvider {
     fn name(&self) -> &str {
@@ -6092,6 +6364,62 @@ impl Provider for StreamErrorProvider {
         Ok(Box::pin(stream::iter(vec![Err(anyhow::anyhow!(
             "socket closed"
         ))])))
+    }
+}
+
+#[async_trait]
+impl Provider for ContextWindowErrorProvider {
+    fn name(&self) -> &str {
+        "mock-context-window"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        error
+            .downcast_ref::<ContextWindowRejectedBeforeGeneration>()
+            .is_some()
+            .then_some(ProviderRequestRejection::ContextWindowExceeded)
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Err(ContextWindowRejectedBeforeGeneration.into())
+    }
+}
+
+#[async_trait]
+impl Provider for ContextWindowErrorAfterOutputProvider {
+    fn name(&self) -> &str {
+        "mock-context-window-after-output"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        StreamErrorProvider.capabilities()
+    }
+
+    fn classify_pre_generation_rejection(
+        &self,
+        error: &anyhow::Error,
+    ) -> Option<ProviderRequestRejection> {
+        ContextWindowErrorProvider.classify_pre_generation_rejection(error)
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::Usage(UsageStats::default())),
+            Err(ContextWindowRejectedBeforeGeneration.into()),
+        ])))
     }
 }
 
@@ -6447,6 +6775,128 @@ async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
             .is_some_and(|error| error == "provider turn failed before a safe terminal result")
     );
     assert!(!finalized.payload.to_string().contains("socket closed"));
+    let physical_terminal = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::ProviderPhysicalAttemptTerminal.as_str() =>
+        {
+            serde_json::from_value::<ProviderPhysicalAttemptTerminalEntry>(event.payload.clone())
+                .ok()
+        }
+        _ => None,
+    });
+    assert!(matches!(
+        physical_terminal,
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_persists_exact_pre_generation_context_rejection() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let agent = Agent::new(ContextWindowErrorProvider, ToolRegistry::new());
+    let mut session = Session::new("mock-context-window", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("context rejection should fail the current run without recovery");
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let terminal = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::ProviderPhysicalAttemptTerminal.as_str() =>
+        {
+            serde_json::from_value::<ProviderPhysicalAttemptTerminalEntry>(event.payload.clone())
+                .ok()
+        }
+        _ => None,
+    });
+    assert!(matches!(
+        terminal,
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption,
+            rejection: Some(ProviderRequestRejection::ContextWindowExceeded),
+            durable_output_event_ids,
+            durable_side_effect_event_ids,
+            ..
+        }) if durable_output_event_ids.is_empty() && durable_side_effect_event_ids.is_empty()
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_never_marks_a_rejection_after_durable_output_as_pre_generation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let agent = Agent::new(ContextWindowErrorAfterOutputProvider, ToolRegistry::new());
+    let mut session =
+        Session::new("mock-context-window-after-output", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("a stream error after durable output should fail the current run");
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let terminal = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::ProviderPhysicalAttemptTerminal.as_str() =>
+        {
+            serde_json::from_value::<ProviderPhysicalAttemptTerminalEntry>(event.payload.clone())
+                .ok()
+        }
+        _ => None,
+    });
+    assert!(matches!(
+        terminal,
+        Some(ProviderPhysicalAttemptTerminalEntry {
+            outcome: ProviderPhysicalAttemptOutcome::FailedAfterOutputOrSideEffect,
+            rejection: None,
+            durable_output_event_ids,
+            ..
+        }) if !durable_output_event_ids.is_empty()
+    ));
     Ok(())
 }
 

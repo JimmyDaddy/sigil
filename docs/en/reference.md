@@ -52,7 +52,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/task continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |
-| `/compact` | Manually compact the provider-visible context for the current session |
+| `/compact` | Review the V2 fold plan; Enter applies only a locally verified DeepSeek V4 Flash portable checkpoint |
 | `/quit` | Quit the TUI |
 
 Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.

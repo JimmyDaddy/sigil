@@ -21,7 +21,7 @@ use crate::{
     },
     permission::ApprovalMode,
     session::{ControlEntry, SessionLogEntry},
-    tool::{NetworkEffect, ToolAccess, ToolAccessWire, ToolCategory},
+    tool::{NetworkEffect, ToolAccess, ToolCategory},
     verification::{ArtifactId, RedactionState, ToolEffect},
 };
 
@@ -485,7 +485,7 @@ impl PluginCapability {
 
 /// Static review summary showing how one plugin capability maps back to Sigil's normal tool
 /// permission, execution, egress, secret and mutation audit path.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct PluginCapabilityPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -500,52 +500,6 @@ pub struct PluginCapabilityPolicy {
     pub egress_logging: bool,
     pub allow_secrets: bool,
     pub mutation_effect: ToolEffect,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct PluginCapabilityPolicyWire {
-    #[serde(default)]
-    tool_category: Option<ToolCategory>,
-    #[serde(default)]
-    tool_access: Option<ToolAccessWire>,
-    #[serde(default)]
-    network_effect: Option<NetworkEffect>,
-    #[serde(default)]
-    approval_default: Option<ApprovalMode>,
-    execution_backend_required: bool,
-    egress_logging: bool,
-    allow_secrets: bool,
-    mutation_effect: ToolEffect,
-}
-
-impl<'de> Deserialize<'de> for PluginCapabilityPolicy {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = PluginCapabilityPolicyWire::deserialize(deserializer)?;
-        let (tool_access, network_effect) = match wire.tool_access {
-            Some(ToolAccessWire::Network) => {
-                (Some(ToolAccess::Execute), Some(NetworkEffect::Unknown))
-            }
-            Some(access) => {
-                let (access, network_effect) = access.upcast_network_effect(wire.network_effect);
-                (Some(access), network_effect)
-            }
-            None => (None, wire.network_effect),
-        };
-        Ok(Self {
-            tool_category: wire.tool_category,
-            tool_access,
-            network_effect,
-            approval_default: wire.approval_default,
-            execution_backend_required: wire.execution_backend_required,
-            egress_logging: wire.egress_logging,
-            allow_secrets: wire.allow_secrets,
-            mutation_effect: wire.mutation_effect,
-        })
-    }
 }
 
 /// Durable evidence that one trusted plugin hook command was handed to an execution backend.

@@ -6,6 +6,10 @@ pub struct DeepSeekChatCompletionRequest {
     pub messages: Vec<serde_json::Value>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<DeepSeekStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
@@ -13,6 +17,12 @@ pub struct DeepSeekChatCompletionRequest {
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+}
+
+/// Stream controls required to receive terminal request usage from DeepSeek Chat Completions.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeepSeekStreamOptions {
+    pub include_usage: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -144,7 +144,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         messages: vec![assistant, tool],
         tools: Vec::new(),
         temperature: None,
-        max_tokens: None,
+        max_tokens: Some(512),
         reasoning_effort: Some(ReasoningEffort::High),
         previous_response_handle: None,
         continuation_states: Vec::new(),
@@ -172,6 +172,11 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
     assert_eq!(prepared.body.messages[1]["tool_call_id"], "call-1");
     assert_eq!(prepared.body.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(prepared.body.user_id.as_deref(), Some("workspace-123"));
+    assert_eq!(prepared.body.max_tokens, Some(512));
+    assert_eq!(
+        serde_json::to_value(&prepared.body)?["stream_options"]["include_usage"],
+        Value::Bool(true)
+    );
     assert!(prepared.body.tools.is_none());
     Ok(())
 }

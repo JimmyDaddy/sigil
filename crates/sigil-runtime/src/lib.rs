@@ -35,6 +35,10 @@ use sigil_provider_openai_compat::{
     OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig,
     openai_compatible_capabilities,
 };
+use sigil_provider_openai_responses::{
+    OPENAI_RESPONSES_API_KEY_ENV, OpenAiResponsesProvider, OpenAiResponsesProviderConfig,
+    openai_responses_capabilities,
+};
 use tokio::process::Command;
 
 #[cfg(test)]
@@ -61,6 +65,7 @@ mod hosted_web_search;
 pub mod mcp_declaration;
 pub mod paths;
 pub mod plugins;
+pub mod portable_compaction;
 pub mod product_view;
 pub mod provider_config;
 pub mod provider_debug;
@@ -129,6 +134,12 @@ pub use plugins::{
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
     discover_workspace_plugins, merge_mcp_server_declarations, merge_plugin_skill_descriptors,
 };
+pub use portable_compaction::{
+    DeepSeekV4FlashPortableTargetPressure, deepseek_v4_flash_portable_target_material,
+    deepseek_v4_flash_portable_target_output_tokens, deepseek_v4_flash_portable_target_pressure,
+    deepseek_v4_flash_portable_target_proof, is_deepseek_v4_flash_portable_target_profile,
+    is_openai_responses_portable_target_profile, portable_compaction_target_output_tokens,
+};
 pub use product_view::{
     AgentGraphProductSummary, agent_graph_product_summary_from_entries,
     agent_graph_product_summary_from_session_log,
@@ -136,15 +147,16 @@ pub use product_view::{
 pub use provider_config::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DEFAULT_SETUP_API_KEY_ENV,
     DEFAULT_SETUP_PROVIDER_KEY, DeepSeekProviderConfigFields, GEMINI_PROVIDER_KEY,
-    ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, PROVIDER_KEYS, ProviderConfigFields,
-    ProviderStatusConfig, ProviderStrictToolsMode, deepseek_provider_config_fields,
-    deepseek_provider_status_config, deepseek_provider_value_for_setup,
-    default_provider_config_fields, default_setup_provider_model, model_request_config_fields,
-    next_provider_name, normalize_provider_model_alias, normalize_provider_name,
-    provider_api_key_env_name, provider_balance_status_config, provider_config_fields,
-    provider_model_status_config, provider_model_status_config_from_fields,
-    provider_status_config_from_fields, set_active_provider_model, set_model_request_config_fields,
-    set_provider_config_fields, supported_provider_name,
+    ModelRequestConfigFields, OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY,
+    PROVIDER_KEYS, ProviderConfigFields, ProviderStatusConfig, ProviderStrictToolsMode,
+    deepseek_provider_config_fields, deepseek_provider_status_config,
+    deepseek_provider_value_for_setup, default_provider_config_fields,
+    default_setup_provider_model, model_request_config_fields, next_provider_name,
+    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
+    provider_balance_status_config, provider_config_fields, provider_model_status_config,
+    provider_model_status_config_from_fields, provider_status_config_from_fields,
+    set_active_provider_model, set_model_request_config_fields, set_provider_config_fields,
+    supported_provider_name,
 };
 pub use provider_debug::{
     DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest, ProviderDebugStream,
@@ -214,12 +226,14 @@ pub use mcp_registry::{
 pub use provider_factory::{
     ProviderCapabilityRow, ProviderCapabilityStatus, ProviderCapabilityView, SecretResolution,
     SecretSource, build_provider, build_role_provider, load_anthropic_config, load_deepseek_config,
-    load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
-    provider_capability_view, provider_config_key, resolve_anthropic_api_key,
-    resolve_anthropic_api_key_with_session, resolve_anthropic_config, resolve_deepseek_api_key,
-    resolve_deepseek_api_key_with_session, resolve_deepseek_config, resolve_gemini_api_key,
-    resolve_gemini_api_key_with_session, resolve_gemini_config, resolve_openai_compat_api_key,
-    resolve_openai_compat_api_key_with_session, resolve_openai_compat_config,
+    load_gemini_config, load_openai_compat_config, load_openai_responses_config,
+    provider_capabilities_for_name, provider_capability_view, provider_config_key,
+    resolve_anthropic_api_key, resolve_anthropic_api_key_with_session, resolve_anthropic_config,
+    resolve_deepseek_api_key, resolve_deepseek_api_key_with_session, resolve_deepseek_config,
+    resolve_gemini_api_key, resolve_gemini_api_key_with_session, resolve_gemini_config,
+    resolve_openai_compat_api_key, resolve_openai_compat_api_key_with_session,
+    resolve_openai_compat_config, resolve_openai_responses_api_key,
+    resolve_openai_responses_api_key_with_session, resolve_openai_responses_config,
     secret_redactor_for_root_config,
 };
 pub use run_options::{

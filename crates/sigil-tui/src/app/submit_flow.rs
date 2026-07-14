@@ -141,11 +141,11 @@ impl AppState {
         match command.canonical.as_str() {
             "/compact" => {
                 if self.runtime.is_busy {
-                    self.push_timeline(TimelineRole::Notice, "busy; compact later");
+                    self.push_timeline(TimelineRole::Notice, "busy; preview compact later");
                     Ok(None)
                 } else {
-                    self.last_notice = Some("compact requested".to_owned());
-                    Ok(Some(AppAction::CompactNow))
+                    self.last_notice = Some("V2 compact preview requested".to_owned());
+                    Ok(Some(AppAction::PreviewV2Compaction))
                 }
             }
             "/config" => {

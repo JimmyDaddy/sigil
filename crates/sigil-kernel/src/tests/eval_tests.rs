@@ -1624,9 +1624,7 @@ fn attach_session_evidence(
     result.session_log_path = Some(session_log_path.to_path_buf());
     let mut last_event = None;
     for record in JsonlSessionStore::read_event_records(session_log_path)? {
-        let SessionStreamRecord::Stored(event) = record else {
-            continue;
-        };
+        let event = record.into_stored_event();
         if include(&event) {
             result.evidence.push(EvalEvidenceRef::durable_event(
                 event.event_type.clone(),
