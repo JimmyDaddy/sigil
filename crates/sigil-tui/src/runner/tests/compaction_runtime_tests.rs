@@ -18,11 +18,11 @@ use super::*;
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=pre-turn-secret exactly";
 
 #[test]
-fn only_manual_compaction_is_unfrozen_before_automatic_slices() -> Result<()> {
+fn manual_and_idle_compaction_are_unfrozen_before_pre_turn_and_overflow() -> Result<()> {
     assert!(!v2_compaction_apply_is_frozen(
         &CompactionInitiation::Manual
     ));
-    assert!(v2_compaction_apply_is_frozen(
+    assert!(!v2_compaction_apply_is_frozen(
         &CompactionInitiation::IdleAutomatic {
             scope_fingerprint: "scope-a".to_owned(),
         }

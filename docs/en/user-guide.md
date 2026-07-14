@@ -187,7 +187,7 @@ workspace—both sessions still refer to the same files.
 The info rail shows the latest provider-reported prompt usage against the model context window. The `ctx` line labels whether the window came from provider metadata or `fallback_context_window_tokens`, and Sigil calculates soft and hard thresholds from that same window:
 
 - Soft threshold: context pressure is getting high.
-- Hard threshold: context pressure is critical. Automatic compaction apply is temporarily frozen while correctness fixes are in progress.
+- Hard threshold: context pressure is critical. After a successful chat turn becomes fully idle, Sigil may prepare and apply one locally verified portable compaction in the background.
 - `/compact`: opens a V2 fold review with fold, keep, and protection details. When the selected profile has an installed checksum-pinned tokenizer and exact local target-fit proof, `Enter` confirms one manual apply.
 - If the window is unknown, configure `fallback_context_window_tokens` so the TUI can show percentages and threshold hints.
 
@@ -195,7 +195,7 @@ Opening the review is read-only: it never rewrites history or appends a compacti
 
 To prepare a verified local DeepSeek V4 Flash tokenizer without changing any session state, run `sigil tokenizer install deepseek-v4-flash`. The command discloses its public network download before it starts. Installation enables local admission but does not itself alter a session.
 
-Idle automation never preempts streaming work, queued input, model switching, or overflow recovery. While apply is frozen, it does not create a lifecycle record or alter the session context.
+Idle automation never preempts streaming work, queued input, an agent continuation, a manual review, model switching, or overflow recovery. Preparation is request/session-owned and its result is discarded if that idle frontier changes. Only an exact local admission may append the lifecycle and activate the boundary; unavailable admission leaves the session unchanged and enters a short process-local cooldown.
 
 The guarded overflow apply path is also frozen. It does not count, compact, or retry a request while correctness fixes are in progress.
 

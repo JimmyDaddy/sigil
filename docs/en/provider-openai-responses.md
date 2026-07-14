@@ -56,7 +56,7 @@ The provider streams text, supported reasoning deltas, tool calls, and usage fro
 
 Normal requests use the full local session context and do not use remote response-handle continuation. Background requests and provider-hosted tools are not enabled on this provider. The native compact endpoint is not a user action.
 
-The guarded overflow-recovery implementation is currently frozen together with Context Compaction V2 apply. It does not count, compact, or retry a request while correctness fixes are in progress. When it is re-enabled, it will remain limited to the official `https://api.openai.com/v1` endpoint and exact `gpt-4.1-2025-04-14` snapshot after a provider-confirmed context-window rejection before output or side effects; aliases, compatible endpoints, ordinary errors, count failures, and restored sessions will remain excluded.
+The guarded overflow-recovery implementation is currently frozen while its owned preparation path is completed. It does not count, compact, or retry a request in the meantime. When it is re-enabled, it will remain limited to the official `https://api.openai.com/v1` endpoint and exact `gpt-4.1-2025-04-14` snapshot after a provider-confirmed context-window rejection before output or side effects; aliases, compatible endpoints, ordinary errors, count failures, and restored sessions will remain excluded.
 
 ## Verify
 

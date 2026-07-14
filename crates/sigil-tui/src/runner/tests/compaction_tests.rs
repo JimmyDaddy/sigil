@@ -24,6 +24,7 @@ use super::{
 };
 use crate::runner::worker_loop::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult,
+    IdleAutoCompactionPreparation, IdleAutoCompactionState, IdleV2CompactionPreparation,
     ManualV2CompactionPreparation,
 };
 
@@ -67,6 +68,43 @@ fn replacement_compaction_preparation_cancels_and_discards_the_old_result() -> R
 
     let _ = release_tx.send(());
     assert!(result_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    Ok(())
+}
+
+#[test]
+fn idle_compaction_preparation_has_one_owned_background_result() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let mut tasks = CompactionPreparationTaskManager::new();
+
+    tasks.start_idle(&runtime, 43, "session-idle".to_owned(), result_tx, || {
+        Ok(IdleV2CompactionPreparation {
+            state: IdleAutoCompactionState::default(),
+            preparation: IdleAutoCompactionPreparation::NotRequested,
+        })
+    });
+    assert!(tasks.has_active());
+    let result = result_rx.recv_timeout(Duration::from_secs(1))?;
+    let CompactionPreparationTaskResult::Idle {
+        request_id,
+        session_scope_id,
+        result,
+    } = result
+    else {
+        panic!("expected idle preparation result");
+    };
+    assert_eq!(request_id, 43);
+    assert_eq!(session_scope_id, "session-idle");
+    let prepared = result.map_err(anyhow::Error::msg)?;
+    assert!(matches!(
+        prepared.preparation,
+        IdleAutoCompactionPreparation::NotRequested
+    ));
+    assert!(tasks.accept_result(43, "session-idle"));
+    assert!(!tasks.has_active());
     Ok(())
 }
 
@@ -575,6 +613,94 @@ fn manual_compaction_applies_reloads_and_repeats_with_installed_tokenizer() -> R
             })
             .count(),
         3
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the explicitly installed checksum-pinned DeepSeek V4 Flash tokenizer"]
+fn hard_threshold_idle_compaction_applies_after_owned_preparation() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-idle-compact-live.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+    }))?;
+    for turn in 0..4 {
+        store.append(&SessionLogEntry::User(ModelMessage::user(format!(
+            "preserve the idle compaction objective at turn {turn}"
+        ))))?;
+        store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!(
+                "durable idle compaction evidence for turn {turn}: {}",
+                "verified-idle-state ".repeat(400)
+            )),
+            Vec::new(),
+        )))?;
+    }
+
+    let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+    root_config.providers.insert(
+        "deepseek".to_owned(),
+        serde_json::json!({
+            "api_key": std::env::var("SIGIL_API_KEY")?
+        }),
+    );
+    root_config.compaction.context_window_tokens = Some(100);
+    root_config.compaction.soft_threshold_ratio = 0.5;
+    root_config.compaction.hard_threshold_ratio = 0.8;
+    root_config.compaction.tail_messages = 2;
+
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::Usage(UsageStats {
+            prompt_tokens: 900_000,
+            completion_tokens: 12,
+            cache_hit_tokens: 0,
+            cache_miss_tokens: 900_000,
+            input_cost: 0.0,
+            output_cost: 0.0,
+            cache_savings: 0.0,
+            system_fingerprint: None,
+        }),
+        ProviderChunk::TextDelta("finished the threshold turn".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "finish this turn and compact while idle".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+    let applied = worker
+        .recv_until(|message| matches!(message, WorkerMessage::V2CompactionApplied { .. }))?;
+    assert!(matches!(
+        applied,
+        WorkerMessage::V2CompactionApplied {
+            request_id: 0,
+            source: super::super::V2CompactionApplySource::IdleAutomatic,
+            ..
+        }
+    ));
+    worker.shutdown()?;
+
+    assert_eq!(
+        JsonlSessionStore::read_event_records(&session_log_path)?
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_type == DurableEventType::CompactionAppliedV2.as_str()
+            })
+            .count(),
+        1
     );
     Ok(())
 }

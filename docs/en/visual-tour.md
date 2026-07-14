@@ -50,4 +50,4 @@ Press `Ctrl-R` while idle to rebuild the latest controlled checkpoint from durab
 
 ![Sigil context compaction preview](../../site/assets/screenshots/compaction-preview.svg)
 
-Use `/compact` to review which older messages would fold and why the target request is or is not admissible. Opening the review is read-only; when exact local admission is ready, `Enter` confirms one manual V2 apply. Automatic apply remains temporarily frozen.
+Use `/compact` to review which older messages would fold and why the target request is or is not admissible. Opening the review is read-only; when exact local admission is ready, `Enter` confirms one manual V2 apply. A completed hard-threshold chat turn may use the same verified path after the session becomes fully idle.

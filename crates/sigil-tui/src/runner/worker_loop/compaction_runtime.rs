@@ -26,7 +26,10 @@ pub(in crate::runner) const V2_COMPACTION_APPLY_FREEZE_REASON: &str =
     "V2 context compaction apply is temporarily frozen while correctness fixes are in progress";
 
 fn v2_compaction_apply_is_frozen(initiation: &CompactionInitiation) -> bool {
-    !matches!(initiation, CompactionInitiation::Manual)
+    !matches!(
+        initiation,
+        CompactionInitiation::Manual | CompactionInitiation::IdleAutomatic { .. }
+    )
 }
 
 /// Process-local post-run policy state for the deliberately narrow K25.11 automation path.
@@ -34,13 +37,13 @@ fn v2_compaction_apply_is_frozen(initiation: &CompactionInitiation) -> bool {
 /// The only durable suppression is a failed initiated lifecycle keyed by its scope fingerprint.
 /// This short cooldown is intentionally local: no admission means no compaction attempt and no
 /// session mutation. A future successful provider turn may retry after the cooldown expires.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(in crate::runner) struct IdleAutoCompactionState {
     requested_after_run: bool,
     cooldown: Option<IdleAutoCompactionCooldown>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct IdleAutoCompactionCooldown {
     scope_fingerprint: String,
     retry_after_unix_ms: u64,
@@ -55,7 +58,7 @@ impl IdleAutoCompactionState {
         self.requested_after_run = false;
     }
 
-    fn is_requested(&self) -> bool {
+    pub(in crate::runner) fn is_requested(&self) -> bool {
         self.requested_after_run
     }
 

@@ -320,3 +320,4 @@
 - P2-12 已由 K25.18A 关闭：manual snapshot、tokenizer parse 与 tokenization 全部转入 request/session-owned blocking task；replacement、dismiss、session switch 和 shutdown 会取消或使 owner 失效，worker 只接收仍匹配当前 scope 与 preview 的结果。
 - K25.18B 只解除 `CompactionInitiation::Manual`，idle、pre-turn 与 overflow 仍由 initiation policy fail closed。使用已安装的 checksum-pinned DeepSeek V4 Flash tokenizer 与真实 provider credential，三轮 preview → apply → reload → 再 compact 均通过，并产生恰好三条 durable `CompactionAppliedV2`。
 - 自动路径仍必须分别完成 owned preparation、stale frontier revalidation 与真实 smoke，不能从 manual 的验收结果推导为已解除冻结。
+- K25.18C 已单独解除 `IdleAutomatic`：hard-threshold preparation 使用同一个 owner，worker 在结果返回后重新核对 session scope、active run、durable queue、agent continuation 与 manual review，executor 继续以 source CAS 拒绝 history drift。真实 tokenizer worker fixture 在 chat turn 返回后完成一次 idle apply；pre-turn 与 overflow 仍冻结。

@@ -56,7 +56,7 @@ Sigil 按这个顺序解析 Responses 认证：
 
 普通请求使用完整本地 session context，不使用远端 response-handle continuation。此 provider 未启用 background request 与 provider-hosted tool。原生 compact endpoint 不是用户操作。
 
-受控 overflow recovery 与 Context Compaction V2 apply 一同处于冻结状态。修复正确性问题期间，它不会计数、压缩或重试请求。重新启用后，它仍只会限于官方 `https://api.openai.com/v1` endpoint 与精确的 `gpt-4.1-2025-04-14` snapshot：provider 确认 context-window rejection，且尚未产生 output 或 side effect 时才可能进入；alias、兼容 endpoint、普通错误、计数失败与恢复后的 session 仍将被排除。
+受控 overflow recovery 在 owned preparation path 完成前仍处于冻结状态；在此期间，它不会计数、压缩或重试请求。重新启用后，它仍只会限于官方 `https://api.openai.com/v1` endpoint 与精确的 `gpt-4.1-2025-04-14` snapshot：provider 确认 context-window rejection，且尚未产生 output 或 side effect 时才可能进入；alias、兼容 endpoint、普通错误、计数失败与恢复后的 session 仍将被排除。
 
 ## 验证
 

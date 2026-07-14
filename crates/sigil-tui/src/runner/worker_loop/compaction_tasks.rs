@@ -6,7 +6,7 @@ use std::sync::{
 
 use tokio::{runtime::Runtime, task::JoinHandle};
 
-use super::PendingV2Compaction;
+use super::{IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction};
 use crate::runner::V2CompactionReview;
 
 pub(in crate::runner) struct ManualV2CompactionPreparation {
@@ -14,11 +14,21 @@ pub(in crate::runner) struct ManualV2CompactionPreparation {
     pub(in crate::runner) pending: Option<PendingV2Compaction>,
 }
 
+pub(in crate::runner) struct IdleV2CompactionPreparation {
+    pub(in crate::runner) state: IdleAutoCompactionState,
+    pub(in crate::runner) preparation: IdleAutoCompactionPreparation,
+}
+
 pub(in crate::runner) enum CompactionPreparationTaskResult {
     Manual {
         request_id: u64,
         session_scope_id: String,
-        result: Result<ManualV2CompactionPreparation, String>,
+        result: Result<Box<ManualV2CompactionPreparation>, String>,
+    },
+    Idle {
+        request_id: u64,
+        session_scope_id: String,
+        result: Result<Box<IdleV2CompactionPreparation>, String>,
     },
 }
 
@@ -57,7 +67,7 @@ impl CompactionPreparationTaskManager {
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
-            let result = prepare();
+            let result = prepare().map(Box::new);
             if task_cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -73,6 +83,46 @@ impl CompactionPreparationTaskManager {
             cancelled,
             handle,
         });
+    }
+
+    pub(in crate::runner) fn start_idle<F>(
+        &mut self,
+        runtime: &Runtime,
+        request_id: u64,
+        session_scope_id: String,
+        result_tx: mpsc::Sender<CompactionPreparationTaskResult>,
+        prepare: F,
+    ) where
+        F: FnOnce() -> Result<IdleV2CompactionPreparation, String> + Send + 'static,
+    {
+        self.abort_all();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::clone(&cancelled);
+        let result_session_scope_id = session_scope_id.clone();
+        let handle = runtime.spawn_blocking(move || {
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let result = prepare().map(Box::new);
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = result_tx.send(CompactionPreparationTaskResult::Idle {
+                request_id,
+                session_scope_id: result_session_scope_id,
+                result,
+            });
+        });
+        self.active = Some(ActiveCompactionPreparationTask {
+            request_id,
+            session_scope_id,
+            cancelled,
+            handle,
+        });
+    }
+
+    pub(in crate::runner) fn has_active(&self) -> bool {
+        self.active.is_some()
     }
 
     pub(in crate::runner) fn accept_result(

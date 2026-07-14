@@ -146,7 +146,7 @@ Use `/resume` to select a session. If a planned task is still unfinished, contin
 
 ## Context Usage Is High
 
-The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`. Soft and hard thresholds show context pressure. Idle, pre-turn, and overflow compaction apply remain frozen, so automatic paths do not alter session context or start a recovery request.
+The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`. Soft and hard thresholds show context pressure. After a successful turn reaches the hard threshold and becomes fully idle, Sigil may prepare one locally verified compaction in the background. Pre-turn and overflow recovery remain frozen.
 
 Manual compaction:
 
@@ -154,7 +154,7 @@ Manual compaction:
 /compact
 ```
 
-This opens a read-only V2 fold preview. Opening it does not append a compaction record or rewrite session history. If the review says the target is ready, `Enter` confirms one manual apply; otherwise the review explains which local admission prerequisite is missing. Automatic and overflow paths still do not change the active boundary.
+This opens a read-only V2 fold preview. Opening it does not append a compaction record or rewrite session history. If the review says the target is ready, `Enter` confirms one manual apply; otherwise the review explains which local admission prerequisite is missing. The idle path may use the same exact local admission after a completed hard-threshold turn; pre-turn and overflow paths still do not change the active boundary.
 
 You can install the checksum-verified DeepSeek V4 Flash tokenizer required by local manual admission with:
 

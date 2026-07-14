@@ -92,7 +92,7 @@ pub(in crate::runner) use compaction_runtime::{
     prepare_v2_compaction_review,
 };
 pub(in crate::runner) use compaction_tasks::{
-    CompactionPreparationTaskManager, CompactionPreparationTaskResult,
+    CompactionPreparationTaskManager, CompactionPreparationTaskResult, IdleV2CompactionPreparation,
     ManualV2CompactionPreparation,
 };
 pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;

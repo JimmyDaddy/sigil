@@ -178,6 +178,48 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         }
                     }
                 }
+                CompactionPreparationTaskResult::Idle {
+                    request_id,
+                    session_scope_id,
+                    result,
+                } => {
+                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                        continue;
+                    }
+                    let idle_frontier_is_current =
+                        current_session.as_ref().is_some_and(|session| {
+                            session.session_scope_id() == session_scope_id
+                                && session
+                                    .conversation_queue_projection()
+                                    .items
+                                    .iter()
+                                    .all(|item| item.status.is_terminal())
+                        }) && active_run.is_none()
+                            && pending_agent_result_continuations.is_empty()
+                            && pending_v2_compaction.is_none();
+                    if !idle_frontier_is_current {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "discarded stale automatic compaction preparation".to_owned(),
+                        ));
+                        continue;
+                    }
+                    match result {
+                        Ok(prepared) => {
+                            idle_auto_compaction = prepared.state;
+                            finish_idle_auto_compaction(
+                                prepared.preparation,
+                                &mut current_session,
+                                &current_session_log_path,
+                                &message_tx,
+                            );
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "automatic compaction preflight was not applied: {error}"
+                            )));
+                        }
+                    }
+                }
             }
         }
 
@@ -521,121 +563,51 @@ pub(in crate::runner) fn run_worker_loop<P>(
             && conversation_queue_is_idle
             && pending_agent_result_continuations.is_empty()
             && pending_v2_compaction.is_none()
+            && !compaction_preparation_tasks.has_active()
+            && idle_auto_compaction.is_requested()
             && let Some(session) = current_session.as_ref()
         {
-            match prepare_idle_auto_compaction(
-                &mut idle_auto_compaction,
-                &root_config,
-                &workspace_root,
-                &current_session_log_path,
-                session,
-                &options,
-                agent.tool_registry().specs(),
-            ) {
-                Ok(IdleAutoCompactionPreparation::Ready(pending)) => {
-                    let provider_name = session.provider_name().to_owned();
-                    let model_name = session.model_name().to_owned();
-                    let folded_event_count = pending.folded_event_count();
-                    let idle_auto_scope_fingerprint =
-                        pending.idle_auto_scope_fingerprint().map(str::to_owned);
-                    match (*pending).apply(session, &current_session_log_path) {
-                        Ok(outcome) => {
-                            match load_session_with_url_capability_attachment(
-                                &provider_name,
-                                &model_name,
-                                &current_session_log_path,
-                                current_session.as_ref(),
-                            ) {
-                                Ok(session) => {
-                                    let entries = session.entries().to_vec();
-                                    current_session = Some(session);
-                                    let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
-                                        request_id: 0,
-                                        source: V2CompactionApplySource::IdleAutomatic,
-                                        compaction_id: outcome.compaction_id,
-                                        folded_event_count,
-                                        entries,
-                                    });
-                                }
-                                Err(error) => {
-                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                        "automatic compaction applied, but session reload was deferred: {error:#}"
-                                    )));
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            match load_session_with_url_capability_attachment(
-                                &provider_name,
-                                &model_name,
-                                &current_session_log_path,
-                                current_session.as_ref(),
-                            ) {
-                                Ok(session) => current_session = Some(session),
-                                Err(reload_error) => {
-                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                        "automatic compaction failed and session reload was deferred: {reload_error:#}"
-                                    )));
-                                }
-                            }
-                            let latch_status = idle_auto_scope_fingerprint.as_deref().map_or_else(
-                                || Ok(false),
-                                |scope_fingerprint| {
-                                    has_failed_idle_automatic_scope(
-                                        &current_session_log_path,
-                                        scope_fingerprint,
-                                    )
-                                },
-                            );
-                            let notice = match latch_status {
-                                Ok(true) => format!(
-                                    "automatic compaction was not applied; unchanged history is now held by its durable failure latch: {error:#}"
-                                ),
-                                Ok(false) => format!(
-                                    "automatic compaction was not applied before a durable failure latch could be confirmed: {error:#}"
-                                ),
-                                Err(latch_error) => format!(
-                                    "automatic compaction was not applied; durable failure latch status could not be confirmed ({latch_error:#}): {error:#}"
-                                ),
-                            };
-                            let _ = message_tx.send(WorkerMessage::Notice(notice));
-                        }
+            let request_id = next_v2_compaction_request_id;
+            next_v2_compaction_request_id = next_v2_compaction_request_id.saturating_add(1);
+            let expected_session_scope_id = session.session_scope_id().to_owned();
+            let provider_name = session.provider_name().to_owned();
+            let model_name = session.model_name().to_owned();
+            let root_config = root_config.clone();
+            let workspace_root = workspace_root.clone();
+            let session_log_path = current_session_log_path.clone();
+            let options = options.clone();
+            let tools = agent.tool_registry().specs();
+            let mut state = idle_auto_compaction.clone();
+            idle_auto_compaction.cancel_requested_run();
+            compaction_preparation_tasks.start_idle(
+                &runtime,
+                request_id,
+                expected_session_scope_id.clone(),
+                compaction_preparation_tx.clone(),
+                move || {
+                    let store = JsonlSessionStore::new(&session_log_path)
+                        .map_err(|error| format!("{error:#}"))?;
+                    let session = Session::load_from_store(provider_name, model_name, store)
+                        .map_err(|error| format!("{error:#}"))?;
+                    if session.session_scope_id() != expected_session_scope_id {
+                        return Err(
+                            "automatic compaction preparation loaded a different session scope"
+                                .to_owned(),
+                        );
                     }
-                }
-                Ok(IdleAutoCompactionPreparation::NoFoldableHistory) => {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "automatic compaction skipped: no newly foldable history".to_owned(),
-                    ));
-                }
-                Ok(IdleAutoCompactionPreparation::FailureLatched) => {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "automatic compaction is held after a previous failed attempt; new fold material or target policy is required"
-                            .to_owned(),
-                    ));
-                }
-                Ok(IdleAutoCompactionPreparation::CoolingDown {
-                    retry_after_unix_ms,
-                }) => {
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "automatic compaction admission is cooling down until {retry_after_unix_ms}"
-                    )));
-                }
-                Ok(IdleAutoCompactionPreparation::AdmissionUnavailable { reason }) => {
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "automatic compaction was not applied: local target admission is unavailable ({reason})"
-                    )));
-                }
-                Ok(
-                    IdleAutoCompactionPreparation::NotRequested
-                    | IdleAutoCompactionPreparation::NotHardThreshold,
-                ) => {}
-                Err(error) => {
-                    idle_auto_compaction.cancel_requested_run();
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "automatic compaction preflight was not applied: {error:#}"
-                    )));
-                }
-            }
+                    let preparation = prepare_idle_auto_compaction(
+                        &mut state,
+                        &root_config,
+                        &workspace_root,
+                        &session_log_path,
+                        &session,
+                        &options,
+                        tools,
+                    )
+                    .map_err(|error| format!("{error:#}"))?;
+                    Ok(IdleV2CompactionPreparation { state, preparation })
+                },
+            );
         }
 
         if active_run.is_none() {
@@ -3062,4 +3034,110 @@ pub(in crate::runner) fn run_worker_loop<P>(
 
     provider_status_tasks.abort_all();
     compaction_preparation_tasks.abort_all();
+}
+
+fn finish_idle_auto_compaction(
+    preparation: IdleAutoCompactionPreparation,
+    current_session: &mut Option<Session>,
+    current_session_log_path: &Path,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) {
+    match preparation {
+        IdleAutoCompactionPreparation::Ready(pending) => {
+            let Some(session) = current_session.as_ref() else {
+                return;
+            };
+            let provider_name = session.provider_name().to_owned();
+            let model_name = session.model_name().to_owned();
+            let folded_event_count = pending.folded_event_count();
+            let idle_auto_scope_fingerprint =
+                pending.idle_auto_scope_fingerprint().map(str::to_owned);
+            match (*pending).apply(session, current_session_log_path) {
+                Ok(outcome) => match load_session_with_url_capability_attachment(
+                    &provider_name,
+                    &model_name,
+                    current_session_log_path,
+                    current_session.as_ref(),
+                ) {
+                    Ok(session) => {
+                        let entries = session.entries().to_vec();
+                        *current_session = Some(session);
+                        let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                            request_id: 0,
+                            source: V2CompactionApplySource::IdleAutomatic,
+                            compaction_id: outcome.compaction_id,
+                            folded_event_count,
+                            entries,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "automatic compaction applied, but session reload was deferred: {error:#}"
+                        )));
+                    }
+                },
+                Err(error) => {
+                    match load_session_with_url_capability_attachment(
+                        &provider_name,
+                        &model_name,
+                        current_session_log_path,
+                        current_session.as_ref(),
+                    ) {
+                        Ok(session) => *current_session = Some(session),
+                        Err(reload_error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "automatic compaction failed and session reload was deferred: {reload_error:#}"
+                            )));
+                        }
+                    }
+                    let latch_status = idle_auto_scope_fingerprint.as_deref().map_or_else(
+                        || Ok(false),
+                        |scope_fingerprint| {
+                            has_failed_idle_automatic_scope(
+                                current_session_log_path,
+                                scope_fingerprint,
+                            )
+                        },
+                    );
+                    let notice = match latch_status {
+                        Ok(true) => format!(
+                            "automatic compaction was not applied; unchanged history is now held by its durable failure latch: {error:#}"
+                        ),
+                        Ok(false) => format!(
+                            "automatic compaction was not applied before a durable failure latch could be confirmed: {error:#}"
+                        ),
+                        Err(latch_error) => format!(
+                            "automatic compaction was not applied; durable failure latch status could not be confirmed ({latch_error:#}): {error:#}"
+                        ),
+                    };
+                    let _ = message_tx.send(WorkerMessage::Notice(notice));
+                }
+            }
+        }
+        IdleAutoCompactionPreparation::NoFoldableHistory => {
+            let _ = message_tx.send(WorkerMessage::Notice(
+                "automatic compaction skipped: no newly foldable history".to_owned(),
+            ));
+        }
+        IdleAutoCompactionPreparation::FailureLatched => {
+            let _ = message_tx.send(WorkerMessage::Notice(
+                "automatic compaction is held after a previous failed attempt; new fold material or target policy is required"
+                    .to_owned(),
+            ));
+        }
+        IdleAutoCompactionPreparation::CoolingDown {
+            retry_after_unix_ms,
+        } => {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "automatic compaction admission is cooling down until {retry_after_unix_ms}"
+            )));
+        }
+        IdleAutoCompactionPreparation::AdmissionUnavailable { reason } => {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "automatic compaction was not applied: local target admission is unavailable ({reason})"
+            )));
+        }
+        IdleAutoCompactionPreparation::NotRequested
+        | IdleAutoCompactionPreparation::NotHardThreshold => {}
+    }
 }
