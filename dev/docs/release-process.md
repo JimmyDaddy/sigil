@@ -26,16 +26,20 @@ The release workflow is `.github/workflows/release.yml`.
 5. Generate release notes from Conventional Commit subjects.
 6. Render a Homebrew tap formula from the macOS archive URL and checksum.
 7. Generate npm package tarballs from the release archives.
-8. Publish a GitHub release with archives, checksum files, `checksums.txt`,
+8. Publish the platform-specific npm packages through npm trusted publishing,
+   then publish the root `@sigil-ai/sigil` launcher package. Prereleases use the
+   `alpha` dist-tag; reruns skip package versions already present in the registry.
+9. Publish a GitHub release with archives, checksum files, `checksums.txt`,
    `sigil-ai.rb`, npm package tarballs, and generated notes. Tags with a
    prerelease suffix, such as `v0.0.1-alpha.1`, are published as GitHub
    prereleases.
-9. Update the `JimmyDaddy/homebrew-sigil` tap from the generated `sigil-ai.rb`
+10. Update the `JimmyDaddy/homebrew-sigil` tap from the generated `sigil-ai.rb`
    asset and verify the tap points at the same release tag.
 
 GitHub artifact attestations require `id-token: write`, `contents: read`, and
-`attestations: write` permissions on the build job. The publish job only needs
-`contents: write`.
+`attestations: write` permissions on the build job. The publish job requires
+`contents: write` for the GitHub release and `id-token: write` for npm trusted
+publishing. It uses Node `22.22.0`, npm `11.18.0`, and no long-lived npm token.
 
 ## Assets
 
@@ -97,20 +101,34 @@ scripts/prepare-npm-packages.sh \
 ```
 
 The root npm package is `@sigil-ai/sigil`; platform-specific optional packages
-carry the actual binaries. Publish the platform packages first, then publish the
-root package:
+carry the actual binaries. Every published package must configure the same npm
+Trusted Publisher connection:
+
+- provider: GitHub Actions
+- organization or user: `JimmyDaddy`
+- repository: `sigil`
+- workflow filename: `release.yml`
+- environment: unset
+- allowed action: `npm publish`
+
+The workflow calls `scripts/publish-npm-packages.sh`, which publishes platform
+packages first and the root package last. It skips an exact package version that
+already exists so the release job can resume safely after a partial registry
+publish. To inspect the package order locally without registry access:
 
 ```bash
-npm publish dist/npm-packages/sigil-darwin-arm64 --access public --tag alpha
-npm publish dist/npm-packages/sigil-darwin-x64 --access public --tag alpha
-npm publish dist/npm-packages/sigil-linux-x64 --access public --tag alpha
-npm publish dist/npm-packages/sigil-win32-x64 --access public --tag alpha
-npm publish dist/npm-packages/sigil --access public --tag alpha
+scripts/publish-npm-packages.sh \
+  --version 0.0.1-alpha.1 \
+  --packages-dir dist/npm-packages \
+  --tag alpha \
+  --dry-run
 ```
 
-Prefer npm trusted publishing or provenance-capable CI for registry publication.
-If a platform archive is not present, do not list or publish that optional
-package for the release.
+npm trusted publishing automatically creates provenance for public packages
+published from this public repository. If a platform archive is not present, do
+not list or publish that optional package for the release. Keep traditional
+token publishing enabled until the first OIDC release succeeds; then restrict
+publishing access and revoke obsolete automation tokens.
 
 For the first published prerelease of a package, npm can keep `latest` pointing
 at the only available version even when the package is published with

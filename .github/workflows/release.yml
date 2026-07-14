@@ -69,6 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -86,7 +87,13 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "22.22.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Install npm CLI
+        shell: bash
+        run: npm install --global npm@11.18.0
 
       - name: Prepare release assets
         shell: bash
@@ -139,6 +146,19 @@ jobs:
               echo "- \`$(basename "${asset}")\`"
             done
           } >> RELEASE_NOTES.md
+
+      - name: Publish npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_tag="latest"
+          if [[ "${RELEASE_TAG#v}" == *-* ]]; then
+            npm_tag="alpha"
+          fi
+          scripts/publish-npm-packages.sh \
+            --version "${RELEASE_TAG#v}" \
+            --packages-dir release-npm-packages \
+            --tag "${npm_tag}"
 
       - name: Publish GitHub release
         shell: bash
