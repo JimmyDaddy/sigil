@@ -22,6 +22,53 @@ use super::{
     super::{V2CompactionAdmission, V2CompactionPreviewState, WorkerCommand, WorkerMessage},
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
+use crate::runner::worker_loop::{
+    CompactionPreparationTaskManager, CompactionPreparationTaskResult,
+    ManualV2CompactionPreparation,
+};
+
+#[test]
+fn replacement_compaction_preparation_cancels_and_discards_the_old_result() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut tasks = CompactionPreparationTaskManager::new();
+
+    tasks.start_manual(
+        &runtime,
+        41,
+        "session-a".to_owned(),
+        result_tx.clone(),
+        move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            Err::<ManualV2CompactionPreparation, _>("superseded".to_owned())
+        },
+    );
+    started_rx.recv_timeout(Duration::from_secs(1))?;
+
+    tasks.start_manual(&runtime, 42, "session-a".to_owned(), result_tx, || {
+        Err::<ManualV2CompactionPreparation, _>("current".to_owned())
+    });
+    let current = result_rx.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(
+        current,
+        CompactionPreparationTaskResult::Manual {
+            request_id: 42,
+            ref session_scope_id,
+            result: Err(ref error),
+        } if session_scope_id == "session-a" && error == "current"
+    ));
+    assert!(tasks.accept_result(42, "session-a"));
+
+    let _ = release_tx.send(());
+    assert!(result_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    Ok(())
+}
 
 fn has_v2_compaction_lifecycle_event(path: &Path) -> Result<bool> {
     Ok(JsonlSessionStore::read_event_records(path)?

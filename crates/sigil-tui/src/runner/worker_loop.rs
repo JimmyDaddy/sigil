@@ -62,6 +62,7 @@ mod active_run;
 mod agent_runtime;
 mod checkpoint_runtime;
 mod compaction_runtime;
+mod compaction_tasks;
 mod mcp_refresh;
 mod provider_status;
 mod queue_driver;
@@ -89,6 +90,10 @@ pub(in crate::runner) use compaction_runtime::{
     has_failed_idle_automatic_scope, prepare_idle_auto_compaction,
     prepare_next_queued_conversation_pre_turn_admission, prepare_overflow_recovery_compaction,
     prepare_v2_compaction_review,
+};
+pub(in crate::runner) use compaction_tasks::{
+    CompactionPreparationTaskManager, CompactionPreparationTaskResult,
+    ManualV2CompactionPreparation,
 };
 pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;
 pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;

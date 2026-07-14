@@ -46,9 +46,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
 
     let (task_result_tx, task_result_rx) = mpsc::channel::<RunTaskResult>();
     let (provider_status_tx, provider_status_rx) = mpsc::channel::<ProviderStatusTaskResult>();
+    let (compaction_preparation_tx, compaction_preparation_rx) =
+        mpsc::channel::<CompactionPreparationTaskResult>();
     let mut active_run: Option<ActiveRun> = None;
     let mut processed_worker_command_ids = BTreeSet::<String>::new();
     let mut provider_status_tasks = ProviderStatusTaskManager::new();
+    let mut compaction_preparation_tasks = CompactionPreparationTaskManager::new();
     let mut next_run_id = 1_u64;
     let mut next_v2_compaction_request_id = 1_u64;
     let mut pending_v2_compaction: Option<PendingV2Compaction> = None;
@@ -125,6 +128,58 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }
 
         drain_provider_status_results(&provider_status_rx, &mut provider_status_tasks, &message_tx);
+
+        while let Ok(preparation_result) = compaction_preparation_rx.try_recv() {
+            match preparation_result {
+                CompactionPreparationTaskResult::Manual {
+                    request_id,
+                    session_scope_id,
+                    result,
+                } => {
+                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                        continue;
+                    }
+                    let Some(session) = current_session.as_ref() else {
+                        continue;
+                    };
+                    if active_run.is_some() || session.session_scope_id() != session_scope_id {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "discarded stale V2 compaction preparation".to_owned(),
+                        ));
+                        continue;
+                    }
+                    match result {
+                        Ok(prepared) => {
+                            let effective_config = effective_compaction_config(
+                                session.provider_name(),
+                                session.model_name(),
+                                &options.compaction_config,
+                            );
+                            let current_preview = session
+                                .v2_compaction_preview(effective_config.tail_messages)
+                                .ok()
+                                .flatten();
+                            if current_preview.as_ref() != Some(&prepared.review.preview) {
+                                let _ = message_tx.send(WorkerMessage::Notice(
+                                    "discarded stale V2 compaction preparation after session history changed"
+                                        .to_owned(),
+                                ));
+                                continue;
+                            }
+                            pending_v2_compaction = prepared.pending;
+                            let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
+                                state: V2CompactionPreviewState::Review(Box::new(prepared.review)),
+                            });
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                "V2 compaction review failed: {error}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
 
         while let Ok(task_result) = task_result_rx.try_recv() {
             if discarded_run_ids.remove(&task_result.run_id) {
@@ -2189,6 +2244,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             Ok(WorkerCommand::PreviewV2Compaction) => {
                 pending_v2_compaction = None;
+                compaction_preparation_tasks.abort_all();
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot preview compaction while the agent is running".to_owned(),
@@ -2217,28 +2273,45 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         let request_id = next_v2_compaction_request_id;
                         next_v2_compaction_request_id =
                             next_v2_compaction_request_id.saturating_add(1);
-                        match prepare_v2_compaction_review(
+                        let expected_session_scope_id = session.session_scope_id().to_owned();
+                        let provider_name = session.provider_name().to_owned();
+                        let model_name = session.model_name().to_owned();
+                        let root_config = root_config.clone();
+                        let workspace_root = workspace_root.clone();
+                        let session_log_path = current_session_log_path.clone();
+                        let options = options.clone();
+                        let tools = agent.tool_registry().specs();
+                        compaction_preparation_tasks.start_manual(
+                            &runtime,
                             request_id,
-                            &root_config,
-                            &workspace_root,
-                            &current_session_log_path,
-                            session,
-                            &options,
-                            agent.tool_registry().specs(),
-                            preview,
-                        ) {
-                            Ok((review, pending)) => {
-                                pending_v2_compaction = pending;
-                                let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
-                                    state: V2CompactionPreviewState::Review(Box::new(review)),
-                                });
-                            }
-                            Err(error) => {
-                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                    "V2 compaction review failed: {error:#}"
-                                )));
-                            }
-                        }
+                            expected_session_scope_id.clone(),
+                            compaction_preparation_tx.clone(),
+                            move || {
+                                let store = JsonlSessionStore::new(&session_log_path)
+                                    .map_err(|error| format!("{error:#}"))?;
+                                let session =
+                                    Session::load_from_store(provider_name, model_name, store)
+                                        .map_err(|error| format!("{error:#}"))?;
+                                if session.session_scope_id() != expected_session_scope_id {
+                                    return Err(
+                                        "V2 compaction preparation loaded a different session scope"
+                                            .to_owned(),
+                                    );
+                                }
+                                let (review, pending) = prepare_v2_compaction_review(
+                                    request_id,
+                                    &root_config,
+                                    &workspace_root,
+                                    &session_log_path,
+                                    &session,
+                                    &options,
+                                    tools,
+                                    preview,
+                                )
+                                .map_err(|error| format!("{error:#}"))?;
+                                Ok(ManualV2CompactionPreparation { review, pending })
+                            },
+                        );
                     }
                     Ok(None) => {
                         let durable_message_count = session
@@ -2345,6 +2418,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CancelV2CompactionReview { request_id }) => {
+                let preparation_cancelled = compaction_preparation_tasks.cancel(request_id);
                 if pending_v2_compaction
                     .as_ref()
                     .is_some_and(|pending| pending.request_id() == request_id)
@@ -2352,6 +2426,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     pending_v2_compaction = None;
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "discarded pending V2 compaction review".to_owned(),
+                    ));
+                } else if preparation_cancelled {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "cancelled V2 compaction preparation".to_owned(),
                     ));
                 }
             }
@@ -2843,6 +2921,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
 
                 pending_v2_compaction = None;
+                compaction_preparation_tasks.abort_all();
 
                 match load_session_with_url_capability_attachment(
                     &root_config.agent.provider,
@@ -2904,6 +2983,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
 
                 pending_v2_compaction = None;
+                compaction_preparation_tasks.abort_all();
 
                 match load_session_with_url_capability_attachment(
                     &root_config.agent.provider,
@@ -2972,6 +3052,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     );
                 }
                 provider_status_tasks.abort_all();
+                compaction_preparation_tasks.abort_all();
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -2980,4 +3061,5 @@ pub(in crate::runner) fn run_worker_loop<P>(
     }
 
     provider_status_tasks.abort_all();
+    compaction_preparation_tasks.abort_all();
 }
