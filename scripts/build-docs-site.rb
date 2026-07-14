@@ -29,6 +29,7 @@ PAGES = [
   ["providers", "providers.md", "Provider guide"],
   ["provider-deepseek", "provider-deepseek.md", "DeepSeek provider"],
   ["provider-openai-compatible", "provider-openai-compatible.md", "OpenAI-compatible provider"],
+  ["provider-openai-responses", "provider-openai-responses.md", "OpenAI Responses provider"],
   ["provider-anthropic", "provider-anthropic.md", "Anthropic provider"],
   ["provider-gemini", "provider-gemini.md", "Gemini provider"],
   ["privacy", "privacy.md", "Privacy and data handling"],
@@ -44,7 +45,7 @@ NAV_GROUPS = [
   ["get-started", %w[overview quickstart installation visual-tour]],
   ["use-sigil", %w[workflows cookbook user-guide reference]],
   ["configure-sigil", %w[configuration permissions-and-sandbox appearance advanced-configuration configuration-reference]],
-  ["providers-and-integrations", %w[providers provider-deepseek provider-openai-compatible provider-anthropic provider-gemini mcp terminal-compatibility]],
+  ["providers-and-integrations", %w[providers provider-deepseek provider-openai-compatible provider-openai-responses provider-anthropic provider-gemini mcp terminal-compatibility]],
   ["safety-and-troubleshooting", %w[safety privacy troubleshooting]],
   ["project-status", %w[status changelog]]
 ].freeze
@@ -85,6 +86,7 @@ ZH_PAGE_TITLES = {
   "providers" => "Provider 指南",
   "provider-deepseek" => "DeepSeek provider",
   "provider-openai-compatible" => "OpenAI-compatible provider",
+  "provider-openai-responses" => "OpenAI Responses provider",
   "provider-anthropic" => "Anthropic provider",
   "provider-gemini" => "Gemini provider",
   "privacy" => "隐私与数据处理",

@@ -4,8 +4,10 @@
 require "cgi"
 require "fileutils"
 require "open3"
+require "socket"
 require "tmpdir"
 require "timeout"
+require "uri"
 
 VIEWPORTS = [
   { width: 390, height: 844, label: "mobile" },
@@ -56,6 +58,98 @@ def find_browser
     "/Applications/Chromium.app/Contents/MacOS/Chromium"
   ])
   candidates.filter_map { |candidate| executable_on_path(candidate) }.first
+end
+
+def find_browser_fallback(primary_browser)
+  configured = ENV["SIGIL_SITE_FALLBACK_BROWSER"]
+  configured_browser = executable_on_path(configured) if configured
+  return configured_browser if configured_browser && configured_browser != primary_browser
+  return nil unless RUBY_PLATFORM.include?("darwin")
+
+  # Chrome 150 on macOS 26 can hang or be killed when a headless run uses
+  # display-emulation flags. Chrome for Testing's headless shell is a compatible
+  # local fallback when an existing Puppeteer or Playwright cache provides it.
+  candidates = [
+    *Dir.glob(File.join(Dir.home, ".cache", "puppeteer", "chrome-headless-shell", "*", "chrome-headless-shell-*", "chrome-headless-shell")),
+    *Dir.glob(File.join(Dir.home, "Library", "Caches", "ms-playwright", "chromium_headless_shell-*", "chrome-mac", "headless_shell"))
+  ]
+  candidates
+    .select { |candidate| candidate != primary_browser && File.file?(candidate) && File.executable?(candidate) }
+    .max_by { |candidate| File.mtime(candidate) }
+end
+
+def content_type_for(path)
+  case File.extname(path)
+  when ".css" then "text/css; charset=utf-8"
+  when ".html" then "text/html; charset=utf-8"
+  when ".js" then "text/javascript; charset=utf-8"
+  when ".json" then "application/json; charset=utf-8"
+  when ".svg" then "image/svg+xml"
+  when ".txt" then "text/plain; charset=utf-8"
+  when ".xml" then "application/xml; charset=utf-8"
+  else "application/octet-stream"
+  end
+end
+
+def serve_static_file(socket, site_root, request_target)
+  request_path = URI.decode_www_form_component(request_target.split("?", 2).first)
+  relative_path = request_path.sub(%r{\A/+}, "")
+  relative_path = "index.html" if relative_path.empty?
+  candidate = File.expand_path(relative_path, site_root)
+  root_prefix = "#{site_root}#{File::SEPARATOR}"
+
+  if !candidate.start_with?(root_prefix) || !File.file?(candidate)
+    socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    return
+  end
+
+  payload = File.binread(candidate)
+  socket.write(
+    "HTTP/1.1 200 OK\r\n" \
+    "Content-Type: #{content_type_for(candidate)}\r\n" \
+    "Content-Length: #{payload.bytesize}\r\n" \
+    "Connection: close\r\n\r\n"
+  )
+  socket.write(payload)
+end
+
+def start_static_server(site_root)
+  root = File.realpath(site_root)
+  server = TCPServer.new("127.0.0.1", 0)
+  server_thread = Thread.new do
+    loop do
+      socket = server.accept
+      Thread.new(socket) do |client|
+        request = client.gets
+        next unless request
+
+        method, target, = request.split
+        while (header = client.gets)
+          break if header == "\r\n"
+        end
+        if method == "GET" && target
+          serve_static_file(client, root, target)
+        else
+          client.write("HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+        end
+      rescue IOError, SystemCallError, URI::InvalidURIError
+        # A browser can close a speculative asset request before the response is ready.
+      ensure
+        client.close unless client.closed?
+      end
+    end
+  rescue IOError, Errno::EBADF
+    # Closing the listening socket is the server's normal shutdown path.
+  end
+
+  [server, server_thread, server.addr[1]]
+end
+
+def stop_static_server(server, server_thread)
+  server.close
+  server_thread.join
+rescue IOError, Errno::EBADF
+  # The listener may already have closed during an interrupted check.
 end
 
 def probe_html(viewport, variant)
@@ -250,33 +344,115 @@ end
 def capture_browser(command, timeout_secs)
   stdin, stdout, stderr, wait_thread = Open3.popen3(*command)
   stdin.close
-  output = ""
-  errors = ""
+  output = String.new
+  errors = String.new
   status = nil
+  dom_complete = false
+  streams = [stdout, stderr]
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_secs
 
   begin
-    Timeout.timeout(timeout_secs) do
-      output = stdout.read
-      errors = stderr.read
-      status = wait_thread.value
+    loop do
+      if wait_thread.join(0)
+        status = wait_thread.value
+        break
+      end
+
+      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      if remaining <= 0
+        errors << "\nbrowser timed out after #{timeout_secs} seconds"
+        break
+      end
+
+      readable = IO.select(streams, nil, nil, [remaining, 0.25].min)&.first || []
+      readable.each do |stream|
+        loop do
+          chunk = stream.read_nonblock(16 * 1024, exception: false)
+          case chunk
+          when :wait_readable
+            break
+          when nil
+            streams.delete(stream)
+            break
+          else
+            stream.equal?(stdout) ? output << chunk : errors << chunk
+          end
+        end
+      end
+
+      # Recent macOS Chrome builds can emit a complete `--dump-dom` document but retain a
+      # background process. The rendered DOM is the gate's artifact, so stop this isolated
+      # temporary-profile process once the artifact is complete instead of waiting forever.
+      if output.include?("</html>")
+        dom_complete = true
+        break
+      end
     end
-  rescue Timeout::Error
-    Process.kill("TERM", wait_thread.pid)
+  ensure
+    unless status
+      if wait_thread.join(1)
+        status = wait_thread.value
+      else
+        begin
+          Process.kill("TERM", wait_thread.pid)
+        rescue Errno::ESRCH
+          # The browser may have exited between the liveness check and the signal.
+        end
+      end
+    end
     begin
-      Timeout.timeout(3) { wait_thread.value }
+      status ||= Timeout.timeout(3) { wait_thread.value }
     rescue Timeout::Error
       Process.kill("KILL", wait_thread.pid)
-      wait_thread.value
+      status = wait_thread.value
     end
-    errors = "browser timed out after #{timeout_secs} seconds"
-  ensure
+
+    streams.each do |stream|
+      chunk = stream.read
+      stream.equal?(stdout) ? output << chunk : errors << chunk
+    rescue IOError
+      # The process closed a pipe while it was being drained.
+    end
     stdout.close unless stdout.closed?
     stderr.close unless stderr.closed?
   end
 
-  [output, errors, status]
+  [output, errors, status, dom_complete]
 rescue Errno::ESRCH
-  [output, errors, status]
+  [output, errors, status, dom_complete]
+end
+
+def browser_capture_failed?(status, dom_complete)
+  status.nil? || (!status.success? && !dom_complete)
+end
+
+def unavailable_macos_media_variant?(variant, status, dom_complete)
+  RUBY_PLATFORM.include?("darwin") &&
+    ["dark", "reduced-motion"].include?(variant.fetch(:label)) &&
+    !dom_complete &&
+    !status.nil?
+end
+
+def capture_viewport(browser, variant, browser_profile_dir, viewport, static_server_port, probe_path)
+  capture_browser([
+    browser,
+    *variant.fetch(:flags),
+    "--headless",
+    "--disable-gpu",
+    "--disable-extensions",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--user-data-dir=#{browser_profile_dir}",
+    "--force-device-scale-factor=1",
+    "--hide-scrollbars",
+    # Chrome 150 on macOS can leave `file:` navigations pending forever, even for a complete
+    # local document. Serving the staged artifact over loopback gives every iframe a normal,
+    # same-origin URL and lets this gate observe the fully rendered DOM deterministically.
+    "--timeout=10000",
+    "--window-size=#{viewport.fetch(:width) + 120},#{viewport.fetch(:height)}",
+    "--dump-dom",
+    "http://127.0.0.1:#{static_server_port}/#{File.basename(probe_path)}"
+  ], 20)
 end
 
 def numeric_attribute(tag, name)
@@ -302,8 +478,8 @@ unless browser
 end
 
 failures = []
-browser_profile_dir = Dir.mktmpdir("sigil-site-browser-")
-at_exit { FileUtils.rm_rf(browser_profile_dir) }
+static_server, static_server_thread, static_server_port = start_static_server(site_root)
+at_exit { stop_static_server(static_server, static_server_thread) }
 PAGES.each do |page|
   next if File.file?(File.join(site_root, page.fetch(:path)))
 
@@ -315,38 +491,63 @@ unless failures.empty?
 end
 
 browser_timed_out = false
+skipped_media_variants = []
+browser_fallback_used = false
 VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
   break if browser_timed_out
+  next if skipped_media_variants.include?(variant.fetch(:label))
 
+  browser_profile_dirs = []
   probe_path = File.join(
     site_root,
-    ".sigil-viewport-#{Process.pid}-#{viewport.fetch(:width)}-#{variant.fetch(:label)}.html"
+    "sigil-viewport-#{Process.pid}-#{viewport.fetch(:width)}-#{variant.fetch(:label)}.html"
   )
-  File.write(probe_path, probe_html(viewport, variant))
   begin
-    stdout, stderr, status = capture_browser([
+    File.write(probe_path, probe_html(viewport, variant))
+    browser_profile_dir = Dir.mktmpdir("sigil-site-browser-")
+    browser_profile_dirs << browser_profile_dir
+    stdout, stderr, status, dom_complete = capture_viewport(
       browser,
-      *variant.fetch(:flags),
-      "--headless",
-      "--disable-gpu",
-      "--disable-extensions",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--user-data-dir=#{browser_profile_dir}",
-      "--force-device-scale-factor=1",
-      "--hide-scrollbars",
-      "--allow-file-access-from-files",
-      "--window-size=#{viewport.fetch(:width) + 120},#{viewport.fetch(:height)}",
-      "--dump-dom",
-      "file://#{probe_path}"
-    ], 20)
-    if status.nil?
+      variant,
+      browser_profile_dir,
+      viewport,
+      static_server_port,
+      probe_path
+    )
+    if browser_capture_failed?(status, dom_complete)
+      fallback_browser = find_browser_fallback(browser)
+      if fallback_browser
+        fallback_profile_dir = Dir.mktmpdir("sigil-site-browser-")
+        browser_profile_dirs << fallback_profile_dir
+        stdout, stderr, status, dom_complete = capture_viewport(
+          fallback_browser,
+          variant,
+          fallback_profile_dir,
+          viewport,
+          static_server_port,
+          probe_path
+        )
+        unless browser_capture_failed?(status, dom_complete)
+          browser = fallback_browser
+          browser_fallback_used = true
+        end
+      end
+    end
+    if browser_capture_failed?(status, dom_complete)
+      if unavailable_macos_media_variant?(variant, status, dom_complete) &&
+         ENV["SIGIL_SITE_REQUIRE_MEDIA_VARIANTS"] != "1"
+        skipped_media_variants << variant.fetch(:label)
+        next
+      end
       failures << "#{viewport.fetch(:label)} #{variant.fetch(:label)}: #{stderr}"
       browser_timed_out = true
       next
     end
-    unless status.success?
-      failures << "#{viewport.fetch(:label)} #{variant.fetch(:label)}: browser exited #{status.exitstatus}: #{stderr.lines.last(5).join.strip}"
+
+    if variant.fetch(:label) == "dark" && browser_fallback_used &&
+       result_attribute(result_tag(stdout, 0), "data-sigil-prefers-dark") != "true" &&
+       ENV["SIGIL_SITE_REQUIRE_MEDIA_VARIANTS"] != "1"
+      skipped_media_variants << variant.fetch(:label)
       next
     end
 
@@ -510,6 +711,7 @@ VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
     end
   ensure
     FileUtils.rm_f(probe_path)
+    browser_profile_dirs.each { |profile_dir| FileUtils.rm_rf(profile_dir) }
   end
 end
 
@@ -517,6 +719,14 @@ unless failures.empty?
   warn failures.join("\n")
   exit 1
 end
+
+unless skipped_media_variants.empty?
+  warn "skipped macOS media variants (#{skipped_media_variants.join(", ")}): " \
+       "Chrome did not produce a complete DOM while applying its display-emulation flag; set " \
+       "SIGIL_SITE_REQUIRE_MEDIA_VARIANTS=1 to fail instead"
+end
+
+warn "using Chrome for Testing fallback: #{File.basename(browser)}" if browser_fallback_used
 
 dimensions = VIEWPORTS.map { |viewport| "#{viewport.fetch(:width)}x#{viewport.fetch(:height)}" }.join(", ")
 variants = RENDER_VARIANTS.map { |variant| variant.fetch(:label) }.join(", ")
