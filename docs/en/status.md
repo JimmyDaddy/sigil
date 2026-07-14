@@ -4,6 +4,8 @@
 
 This page separates what users can rely on today from what is experimental, limited, or future packaging work. The current alpha line is an early preview, not a stable API or plugin compatibility promise. Release versions and install commands are maintained in [Installation](installation.md) and the [Changelog](changelog.md).
 
+**Version boundary:** this page and the GitHub Pages site track `main`. The packaged alpha remains `v0.0.1-alpha.1` and can lag behind the capabilities below; check [Unreleased](changelog.md#unreleased-main) before relying on a newer feature.
+
 ## Supported Today
 
 | Area | Status |
@@ -15,13 +17,17 @@ This page separates what users can rely on today from what is experimental, limi
 | Chat workflow | Users can work through the composer with visible tool activity. |
 | Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |
 | Session recovery | Session and control records are append-only and restore visible state after restart for current V2 session logs. Older raw session logs are reported as unsupported and left unchanged. |
+| Checkpoint recovery | `Ctrl-R` previews an evidence-bound checkpoint and offers controlled file restore or a conversation fork that leaves files unchanged. |
 | Planning | `/plan` runs read-only planning prompts and can explicitly hand an accepted plan to durable `/task` execution; `/task <task>` creates durable multi-step task state directly, and `/task continue` resumes the latest task. |
+| Task verification | The Verification card exposes readiness, recommended checks, and inspectable snapshot and changeset evidence; `Alt-V` focuses it. |
+| Context controls | Context pressure stays visible, and `/compact` opens a read-only Context Compaction V2 preview. Apply remains temporarily frozen. |
 | DeepSeek provider | DeepSeek is the default Quick Setup path. |
 | OpenAI-compatible provider | Supported through `[providers.openai_compat]` for compatible Chat Completions endpoints. |
 | OpenAI Responses provider | Supported through `[providers.openai_responses]` for Responses streaming endpoints. Context Compaction V2 apply, including guarded overflow recovery, is temporarily frozen while correctness fixes are in progress. |
 | Anthropic provider | Supported through `[providers.anthropic]` for Anthropic Messages streaming. Its native-compaction beta driver records encrypted candidates only; it is not a user action and does not automatically change context. |
 | Gemini provider | Supported through `[providers.gemini]` for Gemini `streamGenerateContent` streaming. |
-| MCP stdio servers | Supported through `[[mcp_servers]]` with trust and approval policy. |
+| Web data tools | Stable `websearch` and capability-backed `webfetch` routes use separate network policy, durable egress disclosure, and external-source provenance. |
+| MCP servers | Local stdio and user-root Streamable HTTP servers are supported through `[[mcp_servers]]` with trust, approval, and secret-egress policy. |
 | Code intelligence | Optional, disabled by default, with LSP discovery and Rust fallback behavior. |
 | Terminal controls | Mouse capture, OSC52 copy, scroll sensitivity, and terminal diagnostics are documented and configurable. |
 
@@ -57,7 +63,7 @@ These are not the current supported path unless a later release says otherwise:
 - stable plugin API compatibility;
 - all-platform equivalent OS sandbox behavior;
 - built-in end-user model quality benchmarking;
-- fully automated terminal screenshot generation for release docs.
+- release-to-release visual regression review for generated terminal screenshots.
 
 ## How To Read The Docs
 

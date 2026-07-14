@@ -4,14 +4,16 @@
 
 Sigil 是一个 TUI-first coding agent。本页只提供精简的用户文档路径地图，不重复 release 版本、安装命令或 provider 凭据。需要当前细节时，请进入对应主题的权威页面。
 
+这些文档跟随 `main`，已打包发布的 alpha 仍是 `v0.0.1-alpha.1`。请通过 [Unreleased](changelog.md#unreleased-main) 确认哪些能力可能仍需要从源码安装。
+
 ## 从这里开始
 
 第一次使用 Sigil 时，建议按顺序阅读：
 
 1. [快速上手](quickstart.md)：使用推荐的 npm alpha 路径，启动 TUI，完成 Quick Setup，并跑完第一次有用的会话。
 2. [安装](installation.md)：选择安装渠道，或查看权威的更新、卸载和 release archive 说明。
-3. [视觉导览](visual-tour.md)：查看主会话、审批界面和配置面板。
-4. [TUI 使用指南](user-guide.md)：学习界面布局、操作方式、会话、审批、计划任务和 code intelligence。
+3. [视觉导览](visual-tour.md)：查看主会话、审批、配置、verification、checkpoint recovery 和 compaction preview 界面。
+4. [TUI 使用指南](user-guide.md)：学习界面布局、操作方式、会话、审批、计划任务、verification、recovery、context controls 和 code intelligence。
 5. [安全与权限](safety.md)：理解什么能运行、什么需要审批，以及如何检查高风险动作。
 6. [排障](troubleshooting.md)：诊断 setup、认证、终端、MCP、code intelligence 和恢复问题。
 

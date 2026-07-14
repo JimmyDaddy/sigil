@@ -4,6 +4,27 @@
 
 这一页只列面向用户的 release notes。当前支持边界和 early-preview 说明见 [当前支持状态与未来工作](status.md)。
 
+## Unreleased - main
+
+以下变更已进入 `main` 和网站文档，但不保证已包含在打包发布的 `v0.0.1-alpha.1` 中。如果需要在下一个 tagged alpha 之前使用，请从源码安装。
+
+### 新增
+
+- 通过 `[providers.openai_responses]` 增加 OpenAI Responses provider。
+- 增加 stable `websearch` 与 capability-backed `webfetch` route，并使用独立 network policy 和来源 provenance。
+- 增加任务 Verification card、`Alt-V` 聚焦、推荐检查，以及可检查的 snapshot 与 changeset 证据。
+- 增加 `Ctrl-R` checkpoint 检查，并提供受控 restore 或 conversation fork 选择。
+- 增加通过 `/compact` 打开的只读 Context Compaction V2 preview。
+
+### 调整
+
+- 本地 MCP 在 stdio server 之外增加用户根 Streamable HTTP server，并沿用同一套 trust、approval 和 secret-egress policy。
+- 围绕 verification、recovery 和 context controls 更新用户文档与网站导航。
+
+### 当前限制
+
+- Context Compaction V2 apply（包括受控 overflow recovery）在修复正确性问题期间仍暂时冻结；`/compact` 仅用于 review preview。
+
 ## v0.0.1-alpha.1 - 2026-07-08
 
 ### 新增

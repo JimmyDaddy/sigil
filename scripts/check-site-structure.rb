@@ -107,7 +107,14 @@ end
 
   decks = tags(html, "div").count { |tag| class_token?(attributes(tag), "terminal-deck") }
   failures << "#{page}: expected one layered terminal deck, found #{decks}" unless decks == 1
-  %w[terminal-window-main terminal-window-approval terminal-window-config].each do |window_class|
+  %w[
+    terminal-window-main
+    terminal-window-approval
+    terminal-window-config
+    terminal-window-verification
+    terminal-window-checkpoint
+    terminal-window-compaction
+  ].each do |window_class|
     count = tags(html, "a").count { |tag| class_token?(attributes(tag), window_class) }
     failures << "#{page}: expected one #{window_class}, found #{count}" unless count == 1
   end

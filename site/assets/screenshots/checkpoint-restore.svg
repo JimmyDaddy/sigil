@@ -1,0 +1,374 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1488" height="738" viewBox="0 0 1488 738" role="img" aria-labelledby="title desc">
+  <title id="title">Sigil checkpoint restore preview</title>
+  <desc id="desc">Generated from the Sigil TUI renderer: controlled checkpoint restore review with reverse diff and restore or fork choices.</desc>
+  <rect width="100%" height="100%" rx="18" fill="#101820"/>
+  <rect x="24" y="24" width="1440" height="690" rx="14" fill="#07080a" stroke="#30414d"/>
+  <rect x="24" y="24" width="1440" height="42" rx="14" fill="#151a20"/>
+  <circle cx="48" cy="45" r="6" fill="#ff6b5f"/>
+  <circle cx="70" cy="45" r="6" fill="#f7c948"/>
+  <circle cx="92" cy="45" r="6" fill="#42d392"/>
+  <text x="116" y="51" fill="#d9f6f3" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14">sigil</text>
+  <clipPath id="terminalClipSigilcheckpointrestorepreview"><rect x="24" y="66" width="1440" height="648"/></clipPath>
+  <g clip-path="url(#terminalClipSigilcheckpointrestorepreview)">
+    <rect x="24" y="66" width="1440" height="648" fill="#07080a"/>
+    <rect x="1320" y="66" width="144" height="18" fill="#1a1c22"/>
+    <rect x="1320" y="84" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="102" width="9" height="18" fill="#1c1a12"/>
+    <rect x="222" y="102" width="180" height="18" fill="#91b6aa"/>
+    <rect x="402" y="102" width="873" height="18" fill="#1c1a12"/>
+    <rect x="1320" y="102" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="120" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="120" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="120" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="138" width="18" height="18" fill="#1c1a12"/>
+    <rect x="231" y="138" width="63" height="18" fill="#91b6aa"/>
+    <rect x="294" y="138" width="981" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="138" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="138" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="156" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="156" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="156" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="174" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="174" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="174" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="192" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="192" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="192" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="210" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="210" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="210" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="228" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="228" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="228" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="246" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="246" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="246" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="264" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="264" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="264" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="282" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="282" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="282" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="300" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="300" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="300" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="318" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="318" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="318" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="336" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="336" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="336" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="354" width="81" height="18" fill="#1c1a12"/>
+    <rect x="294" y="354" width="45" height="18" fill="#102216"/>
+    <rect x="339" y="354" width="936" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="354" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="354" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="372" width="81" height="18" fill="#1c1a12"/>
+    <rect x="294" y="372" width="45" height="18" fill="#281212"/>
+    <rect x="339" y="372" width="936" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="372" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="372" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="390" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="390" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="390" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="408" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="408" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="408" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="426" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="426" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="426" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="444" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="444" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="444" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="462" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="462" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="462" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="480" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="480" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="480" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="498" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="498" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="498" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="516" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="516" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="516" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="534" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="534" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="534" width="144" height="18" fill="#1a1c22"/>
+    <rect x="33" y="552" width="135" height="18" fill="#14161b"/>
+    <rect x="213" y="552" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="552" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="552" width="144" height="18" fill="#1a1c22"/>
+    <rect x="33" y="570" width="135" height="18" fill="#14161b"/>
+    <rect x="213" y="570" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="570" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="570" width="144" height="18" fill="#1a1c22"/>
+    <rect x="213" y="588" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="588" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="588" width="144" height="18" fill="#1a1c22"/>
+    <rect x="24" y="606" width="144" height="18" fill="#1b1e25"/>
+    <rect x="213" y="606" width="18" height="18" fill="#1c1a12"/>
+    <rect x="231" y="606" width="63" height="18" fill="#91b6aa"/>
+    <rect x="294" y="606" width="90" height="18" fill="#1c1a12"/>
+    <rect x="384" y="606" width="27" height="18" fill="#94b2f4"/>
+    <rect x="411" y="606" width="864" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="606" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="606" width="144" height="18" fill="#1a1c22"/>
+    <rect x="24" y="624" width="144" height="18" fill="#1b1e25"/>
+    <rect x="213" y="624" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="624" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="624" width="144" height="18" fill="#1a1c22"/>
+    <rect x="24" y="642" width="144" height="18" fill="#1b1e25"/>
+    <rect x="213" y="642" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="642" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="642" width="144" height="18" fill="#1a1c22"/>
+    <rect x="24" y="660" width="27" height="18" fill="#1b1e25"/>
+    <rect x="51" y="660" width="117" height="18" fill="#0e1015"/>
+    <rect x="213" y="660" width="1062" height="18" fill="#1c1a12"/>
+    <rect x="1275" y="660" width="9" height="18" fill="#0a0805"/>
+    <rect x="1320" y="660" width="144" height="18" fill="#1a1c22"/>
+    <rect x="24" y="678" width="144" height="18" fill="#1b1e25"/>
+    <rect x="222" y="678" width="1062" height="18" fill="#0a0805"/>
+    <rect x="1320" y="678" width="144" height="18" fill="#1a1c22"/>
+    <rect x="1320" y="696" width="144" height="18" fill="#1a1c22"/>
+    <text x="168" y="80" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</text>
+    <text x="168" y="98" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="98" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="98" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">e notes</text>
+    <text x="168" y="116" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="116" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">╭</text>
+    <text x="231" y="116" fill="#000000" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Restore Checkpoint</text>
+    <text x="402" y="116" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">────────────────────────────────────────────────────────────────────────────────────────────────╮</text>
+    <text x="1311" y="116" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="116" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">91dddz6wch...</text>
+    <text x="168" y="134" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="134" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="134" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">┌Restore target────────────────────────────────────────────────────────────────────────────────────────────────────┐</text>
+    <text x="1266" y="134" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="134" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="152" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="152" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="152" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="240" y="152" fill="#000000" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">READY</text>
+    <text x="312" y="152" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Exact preview ready; review the reverse diff before restoring</text>
+    <text x="1257" y="152" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="152" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="152" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="170" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="170" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="170" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="231" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Target: state before turn 1</text>
+    <text x="1257" y="170" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="170" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="170" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="170" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">ash · max</text>
+    <text x="168" y="188" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="188" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="188" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="231" y="188" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Prompt: Update the release notes</text>
+    <text x="1257" y="188" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="188" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="188" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="188" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">62</text>
+    <text x="168" y="206" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="206" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="206" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="231" y="206" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Controlled files: 1 · 1 ready · 0 blocked</text>
+    <text x="1257" y="206" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="206" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="206" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="224" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="224" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="224" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="231" y="224" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Boundary: shell and remote side effects are not restored</text>
+    <text x="1257" y="224" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="224" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="224" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="224" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">e V2 check...</text>
+    <text x="168" y="242" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="242" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="242" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+    <text x="1266" y="242" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="242" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="260" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="260" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="260" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">┌Reverse diff──────────────────────────────────────────────────────────────────────────────────────────────────────┐</text>
+    <text x="1266" y="260" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="260" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="278" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="278" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="278" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="231" y="278" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1 file diff(s) · 6 recorded line(s) · Up/Down or PgUp/PgDn scroll</text>
+    <text x="1257" y="278" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="278" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="278" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="278" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">mode</text>
+    <text x="168" y="296" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="296" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="296" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="276" y="296" fill="#666666" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="294" y="296" fill="#11a8cd" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">--- current/release-notes.md</text>
+    <text x="1257" y="296" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="296" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="296" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="314" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="314" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="314" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="276" y="314" fill="#666666" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="294" y="314" fill="#11a8cd" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">+++ restored/release-notes.md</text>
+    <text x="1257" y="314" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="314" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="314" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="332" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="332" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="332" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="276" y="332" fill="#666666" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="294" y="332" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">@@ -1,2 +1,2 @@</text>
+    <text x="1257" y="332" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="332" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="332" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="332" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">sion</text>
+    <text x="168" y="350" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="350" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="350" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="240" y="350" fill="#666666" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1</text>
+    <text x="267" y="350" fill="#666666" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1│</text>
+    <text x="303" y="350" fill="#e5e5e5" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">alpha</text>
+    <text x="1257" y="350" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="350" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="350" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="368" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="368" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="368" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="267" y="368" fill="#7ed38b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">2</text>
+    <text x="276" y="368" fill="#666666" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="294" y="368" fill="#7ed38b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">+beta</text>
+    <text x="1257" y="368" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="368" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="368" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="386" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="386" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="386" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="240" y="386" fill="#ff9292" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">2</text>
+    <text x="276" y="386" fill="#666666" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="294" y="386" fill="#ff9292" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">-main</text>
+    <text x="1257" y="386" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="386" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="386" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="404" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="404" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="404" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="404" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="404" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="404" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="422" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="422" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="422" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="422" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="422" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="422" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="440" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="440" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="440" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="440" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="440" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="440" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="440" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1.0M provi...</text>
+    <text x="33" y="458" fill="#94b2f4" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">system</text>
+    <text x="168" y="458" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="458" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="458" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="458" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="458" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="458" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="51" y="476" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Resumed fac76</text>
+    <text x="168" y="476" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="476" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="476" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="476" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="476" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="476" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1320" y="476" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">USD 0.0000</text>
+    <text x="168" y="494" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="494" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="494" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="494" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="494" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="494" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="512" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">done</text>
+    <text x="168" y="512" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="512" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="512" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="512" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="512" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="512" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="51" y="530" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">restored chec</text>
+    <text x="168" y="530" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="530" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="530" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="530" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="530" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="530" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="548" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="548" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="548" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="548" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="548" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="548" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="566" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
+    <text x="168" y="566" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="566" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="566" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1257" y="566" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="566" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="566" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="584" fill="#91b6aa" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">▌</text>
+    <text x="60" y="584" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Update the r</text>
+    <text x="168" y="584" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="584" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="584" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+    <text x="1266" y="584" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="584" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="602" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="602" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="602" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">┌Actions───────────────────────────────────────────────────────────────────────────────────────────────────────────┐</text>
+    <text x="1266" y="602" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="602" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="620" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
+    <text x="51" y="620" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">─────────────</text>
+    <text x="168" y="620" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="620" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="620" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="240" y="620" fill="#000000" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Enter</text>
+    <text x="303" y="620" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">restore</text>
+    <text x="393" y="620" fill="#000000" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">F</text>
+    <text x="420" y="620" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">fork (files unchanged)</text>
+    <text x="1257" y="620" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="620" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="620" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="638" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
+    <text x="51" y="638" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Build · agent</text>
+    <text x="168" y="638" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="638" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="638" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="231" y="638" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">Esc close · Ctrl-R refresh</text>
+    <text x="1257" y="638" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1266" y="638" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="638" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="656" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
+    <text x="168" y="656" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="656" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="222" y="656" fill="#3e4856" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+    <text x="1266" y="656" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="656" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="674" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
+    <text x="168" y="674" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="213" y="674" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+    <text x="1311" y="674" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="33" y="692" fill="#7eb4e2" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">▌</text>
+    <text x="168" y="692" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="1311" y="692" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
+    <text x="168" y="710" fill="#e5e510" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+  </g>
+  <metadata>Generated from Sigil TUI renderer by render_docs_screenshot_assets.</metadata>
+</svg>

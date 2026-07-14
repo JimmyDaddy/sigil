@@ -4,6 +4,8 @@
 
 This page is the authoritative source for Sigil install channels, update and uninstall commands, and release-archive handling. Other user guides link here instead of copying those details. If you want a first-run walkthrough, start with [Quickstart](quickstart.md). `v0.0.1-alpha.1` is an early preview, not a stable compatibility promise for config, plugins, advanced sandbox behavior, or automation surfaces.
 
+The package-manager and Cargo tag commands below install the published `v0.0.1-alpha.1` release. The GitHub Pages documentation tracks `main`, so features listed under [Unreleased](changelog.md#unreleased-main) may require a source install until the next alpha is tagged.
+
 ## Requirements
 
 - A modern terminal emulator.

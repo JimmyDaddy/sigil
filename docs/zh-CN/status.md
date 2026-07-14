@@ -4,6 +4,8 @@
 
 这一页把用户今天可以依赖的能力，与 experimental、limited 或 future packaging work 分开说明。当前 alpha 仍是 early preview，不承诺稳定 API 或插件兼容性。Release 版本与安装命令统一由[安装](installation.md)和 [Changelog](changelog.md)维护。
 
+**版本边界：** 本页与 GitHub Pages 网站跟随 `main`。已打包发布的 alpha 仍是 `v0.0.1-alpha.1`，可能晚于下方能力；依赖新功能前请先检查 [Unreleased](changelog.md#unreleased-main)。
+
 ## 当前支持
 
 | 领域 | 状态 |
@@ -15,13 +17,17 @@
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
 | Tool approvals | 文件变更、shell execution、外部路径和外部工具可在执行前 review。 |
 | Session recovery | Session 和 control records 是 append-only；当前 V2 session log 可在重启后恢复可见状态。旧 raw session log 会明确提示为不受支持并保持原样。 |
+| Checkpoint recovery | `Ctrl-R` 预览绑定证据的 checkpoint，并提供受控文件 restore，或保持文件不变的 conversation fork。 |
 | Planning | `/plan` 运行只读 planning prompt，并可在用户显式接受后交接为 durable `/task` 执行；`/task <task>` 直接创建 durable 多步骤任务，`/task continue` 继续最新任务。 |
+| 任务验证 | Verification card 展示 readiness、推荐检查，以及可检查的 snapshot 和 changeset 证据；`Alt-V` 用于聚焦。 |
+| 上下文控制 | 界面持续显示 context pressure；`/compact` 打开只读 Context Compaction V2 preview。Apply 仍暂时冻结。 |
 | DeepSeek provider | DeepSeek 是默认 Quick Setup 路径。 |
 | OpenAI-compatible provider | 通过 `[providers.openai_compat]` 支持兼容 Chat Completions endpoint。 |
 | OpenAI Responses provider | 通过 `[providers.openai_responses]` 支持 Responses streaming endpoint；Context Compaction V2 apply（包括受控 overflow recovery）在修复正确性问题期间暂时冻结。 |
 | Anthropic provider | 通过 `[providers.anthropic]` 支持 Anthropic Messages streaming。其原生 compaction beta driver 仅记录加密候选，不是用户操作，也不会自动改变上下文。 |
 | Gemini provider | 通过 `[providers.gemini]` 支持 Gemini `streamGenerateContent` streaming。 |
-| MCP stdio servers | 通过 `[[mcp_servers]]` 支持，并带 trust 和 approval policy。 |
+| Web data tools | Stable `websearch` 与 capability-backed `webfetch` route 使用独立 network policy、durable egress disclosure 和 external-source provenance。 |
+| MCP server | 通过 `[[mcp_servers]]` 支持本地 stdio 与用户根 Streamable HTTP server，并带 trust、approval 和 secret-egress policy。 |
 | Code intelligence | 可选，默认关闭，支持 LSP discovery 和 Rust fallback 行为。 |
 | Terminal controls | Mouse capture、OSC52 copy、scroll sensitivity 和 terminal diagnostics 已有文档和配置。 |
 
@@ -57,7 +63,7 @@
 - 稳定 plugin API 兼容性；
 - 全平台等价 OS sandbox 行为；
 - 面向最终用户的内置模型质量对比；
-- 用于 release docs 的全自动真实终端截图生成。
+- 对生成的终端截图做跨 release visual regression review。
 
 ## 如何理解文档
 

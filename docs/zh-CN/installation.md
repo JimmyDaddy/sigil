@@ -4,6 +4,8 @@
 
 本页是 Sigil 安装渠道、更新与卸载命令以及 release archive 处理方式的权威来源。其他用户指南只链接到这里，不复制这些细节。如果你想按首次使用流程走一遍，先看 [快速上手](quickstart.md)。`v0.0.1-alpha.1` 是 early preview，不承诺配置、插件、高级 sandbox 行为或自动化入口的稳定兼容。
 
+下方包管理器和 Cargo tag 命令安装的是已发布的 `v0.0.1-alpha.1`。GitHub Pages 文档跟随 `main`，因此 [Unreleased](changelog.md#unreleased-main) 中的能力在下一个 alpha 发布前可能需要从源码安装。
+
 ## 前置条件
 
 - 一个现代终端模拟器。

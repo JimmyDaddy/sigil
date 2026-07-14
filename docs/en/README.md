@@ -4,14 +4,16 @@
 
 Sigil is a TUI-first coding agent. This page is a compact map of the user documentation; it intentionally does not repeat release versions, install commands, or provider credentials. Follow the linked guide that owns each topic for current details.
 
+These docs track `main`, while the packaged alpha remains `v0.0.1-alpha.1`. Check [Unreleased](changelog.md#unreleased-main) for features that may still require a source install.
+
 ## Start Here
 
 If you are new to Sigil, read these guides in order:
 
 1. [Quickstart](quickstart.md): use the recommended npm alpha path, launch the TUI, complete Quick Setup, and run a first useful session.
 2. [Installation](installation.md): choose an install channel or find the authoritative update, uninstall, and release-archive instructions.
-3. [Visual tour](visual-tour.md): see the main session, approval review, and configuration panel.
-4. [TUI user guide](user-guide.md): learn the screen layout, controls, sessions, approvals, planning, and code intelligence.
+3. [Visual tour](visual-tour.md): see the main session, approval review, configuration, verification, checkpoint recovery, and compaction preview surfaces.
+4. [TUI user guide](user-guide.md): learn the screen layout, controls, sessions, approvals, planning, verification, recovery, context controls, and code intelligence.
 5. [Safety and permissions](safety.md): understand what can run, what needs approval, and how to review risky actions.
 6. [Troubleshooting](troubleshooting.md): diagnose setup, authentication, terminal, MCP, code-intelligence, and recovery problems.
 

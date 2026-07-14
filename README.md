@@ -15,6 +15,8 @@ Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, 
 
 Sigil's first alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha.1` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
 
+The website and user docs track `main`, which can be newer than the packaged alpha. Check [Unreleased](docs/en/changelog.md#unreleased-main) before relying on a newer feature; install from source when it has not reached a tagged release yet.
+
 ## Quickstart
 
 Prerequisites:
@@ -70,7 +72,7 @@ sigil doctor
 - Supports `/plan` for read-only planning, then an explicit create-task handoff into durable `/task` work with planner, executor, and optional subagent roles.
 - Honors explicit ordinary-chat requests to delegate to a subagent before accepting a final answer.
 - Lets trusted agent profiles be invoked directly with `@profile <prompt>` or trusted profile slash names.
-- Connects stdio MCP servers under explicit trust, approval, and secret-egress policy.
+- Connects local stdio and user-root Streamable HTTP MCP servers under explicit trust, approval, and secret-egress policy.
 - Provides capability-backed `webfetch` and stable `websearch` routes with independent network policy, durable egress disclosure, and external-source provenance.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 
@@ -85,6 +87,9 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Edit long composer drafts | `Ctrl-A/E`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
 | Plan before editing | `/plan` then type a prompt, or `/plan <prompt>`; accept a structured Plan ready card to create and run a durable task |
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
+| Verify task completion and inspect evidence | Focus the Verification card with `Alt-V`; run the recommended check or inspect its snapshot and changeset evidence |
+| Review a safe recovery point | Press `Ctrl-R` to preview a controlled checkpoint restore or fork before changing files |
+| Preview long-context compaction | Use `/compact` for a read-only Context Compaction V2 preview; apply remains temporarily frozen |
 | Add a follow-up while Sigil is busy | Submit ordinary chat while a run is active; Sigil shows it in Follow-ups and adds the user message when it dispatches at the next safe turn |
 | Review pending follow-ups | `Tab` focuses the follow-up panel; `/queue show`, `/queue next`, `/queue interrupt`, `/queue edit`, and `/queue delete` are advanced controls |
 | Require a child agent from chat | Say so explicitly, for example "use a sub-agent for ..." |
@@ -116,6 +121,7 @@ Sigil treats tool execution as auditable state, not hidden side effects.
 | --- | --- | --- | --- |
 | DeepSeek | `[providers.deepseek]` | Default Quick Setup path and DeepSeek-specific options. | [DeepSeek guide](docs/en/provider-deepseek.md) |
 | OpenAI-compatible | `[providers.openai_compat]` | Chat Completions-compatible `/v1` endpoints. | [OpenAI-compatible guide](docs/en/provider-openai-compatible.md) |
+| OpenAI Responses | `[providers.openai_responses]` | OpenAI Responses streaming endpoints. | [OpenAI Responses guide](docs/en/provider-openai-responses.md) |
 | Anthropic | `[providers.anthropic]` | Claude models through Anthropic Messages streaming. | [Anthropic guide](docs/en/provider-anthropic.md) |
 | Gemini | `[providers.gemini]` | Gemini models through `streamGenerateContent`. | [Gemini guide](docs/en/provider-gemini.md) |
 | Web data tools | `[web]` | Provider-hosted, configured, or bundled search and fetching a selected source. | [Permissions and sandbox](docs/en/permissions-and-sandbox.md#network-and-web-tools) |

@@ -111,7 +111,7 @@
     <text x="1050" y="134" fill="#46565b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">─────────────────────────────────╮</text>
     <text x="132" y="152" fill="#46565b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="141" y="152" fill="#ecf0f6" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">Provider</text>
-    <text x="222" y="152" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1/12</text>
+    <text x="222" y="152" fill="#c4b080" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">1/13</text>
     <text x="276" y="152" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">provider settings</text>
     <text x="951" y="152" fill="#46565b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="978" y="152" fill="#46565b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
@@ -121,10 +121,11 @@
     <text x="132" y="170" fill="#46565b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="150" y="170" fill="#000000" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">provider</text>
     <text x="249" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">permissions</text>
-    <text x="366" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">memory</text>
-    <text x="438" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">compaction</text>
-    <text x="546" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">mcp</text>
-    <text x="591" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">appearance</text>
+    <text x="366" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">web</text>
+    <text x="411" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">memory</text>
+    <text x="483" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">compaction</text>
+    <text x="591" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">mcp</text>
+    <text x="636" y="170" fill="#959ead" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">appearance</text>
     <text x="951" y="170" fill="#46565b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="978" y="170" fill="#46565b" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="400">│</text>
     <text x="987" y="170" fill="#636d7e" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="700">key</text>

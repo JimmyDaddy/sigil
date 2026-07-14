@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/visual-tour.md)
 
-This page walks through the main Sigil surfaces with SVG captures that stay close to the real terminal layout.
+This page walks through the main Sigil surfaces with SVG captures generated from the real TUI renderer.
 
 ## Main TUI Session
 
@@ -33,3 +33,21 @@ If the diff does not match your intent, deny it and ask for a narrower change.
 ![Sigil config panel preview](../../site/assets/screenshots/config-panel.svg)
 
 Use `/config` for common provider, permission, memory, compaction, code intelligence, terminal, Agents, Skills, Plugins trust review, and MCP settings. Lower-frequency provider details remain in `sigil.toml` and environment variables.
+
+## Task Verification
+
+![Sigil task verification preview](../../site/assets/screenshots/verification-card.svg)
+
+When a durable task needs completion evidence, the Verification card keeps the current verdict, recommended check, and evidence together. Press `Alt-V` to focus the card, `I` to inspect snapshot and changeset details, and `Enter` to run the bound check when one is available.
+
+## Checkpoint Restore
+
+![Sigil checkpoint restore preview](../../site/assets/screenshots/checkpoint-restore.svg)
+
+Press `Ctrl-R` while idle to rebuild the latest controlled checkpoint from durable evidence. Review the exact reverse diff before restoring files, or choose the conversation fork when you want earlier context without changing shared workspace files. Shell and remote side effects remain outside this file restore boundary.
+
+## Context Compaction Preview
+
+![Sigil context compaction preview](../../site/assets/screenshots/compaction-preview.svg)
+
+Use `/compact` to review which older messages would fold and why the target request is or is not admissible. This is currently a read-only review surface: Context Compaction V2 apply remains temporarily frozen while correctness fixes are in progress.

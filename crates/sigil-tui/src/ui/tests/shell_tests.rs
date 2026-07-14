@@ -9,13 +9,23 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, EventHandler, MemoryConfig, PermissionConfig, RootConfig,
-    RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    AgentConfig, AgentRole, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
+    CheckSpecRecordedEntry, CompactionConfig, ControlEntry, EventHandler, EvidenceScope,
+    JsonlSessionStore, MemoryConfig, ModelMessage, PermissionConfig, ReadinessEvaluatedEntry,
+    ReadinessEvaluation, RequiredAction, RootConfig, RunEvent, RunStatus, SessionConfig,
+    SessionLogEntry, SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall,
+    ToolCategory, ToolEffect, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationVerdict, VisibleCompletionState, WorkspaceConfig,
 };
+use tempfile::tempdir;
 
 use crate::app::AppState;
 use crate::config_panel::ConfigSection;
+use crate::runner::{
+    V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview, WorkerMessage,
+};
 use crate::timeline::RunPhase;
 
 use super::super::theme::{
@@ -1771,7 +1781,235 @@ fn render_docs_screenshot_assets() -> anyhow::Result<()> {
         &mut config_app,
     )?;
 
+    write_terminal_svg(
+        &screenshot_dir.join("verification-card.svg"),
+        "Sigil task verification preview",
+        "Generated from the Sigil TUI renderer: focused Verification card with recommended check and inspectable snapshot evidence.",
+        &mut docs_verification_app()?,
+    )?;
+
+    write_terminal_svg(
+        &screenshot_dir.join("checkpoint-restore.svg"),
+        "Sigil checkpoint restore preview",
+        "Generated from the Sigil TUI renderer: controlled checkpoint restore review with reverse diff and restore or fork choices.",
+        &mut docs_checkpoint_restore_app()?,
+    )?;
+
+    write_terminal_svg(
+        &screenshot_dir.join("compaction-preview.svg"),
+        "Sigil context compaction preview",
+        "Generated from the Sigil TUI renderer: read-only Context Compaction V2 review with apply unavailable while admission is frozen.",
+        &mut docs_compaction_preview_app()?,
+    )?;
+
     Ok(())
+}
+
+fn docs_verification_app() -> anyhow::Result<AppState> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    app.composer.input = "Verify the documentation refresh".to_owned();
+    let _ = app.submit_input()?;
+    app.handle(RunEvent::ReasoningDelta(
+        "I will run the repository-owned documentation and Pages checks.".to_owned(),
+    ))?;
+    app.handle(RunEvent::TextDelta(
+        "The content update is ready; the required check still needs a recorded receipt."
+            .to_owned(),
+    ))?;
+    app.runtime.is_busy = false;
+    app.session_browser.current_entries = docs_verification_entries()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    Ok(app)
+}
+
+fn docs_verification_entries() -> anyhow::Result<Vec<SessionLogEntry>> {
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    let trusted = TrustedCheckSpec {
+        check_spec: CheckSpec::new(
+            "cargo-test",
+            CheckCommand {
+                command: "cargo".to_owned(),
+                args: vec!["test".to_owned()],
+                cwd: None,
+            },
+            ToolEffect::ReadOnly,
+            "task_step_default",
+        ),
+        source: CheckDiscoverySource::UserExplicitConfig,
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+        promoted_by: CheckPromotion::ExplicitUserConfig {
+            config_event_id: "config-verification".to_owned(),
+        },
+        approval_event_id: None,
+        sandbox_decision_id: None,
+    };
+    Ok(vec![
+        SessionLogEntry::User(ModelMessage::user("Verify the documentation refresh")),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "Verify the documentation refresh".to_owned(),
+            status: TaskRunStatus::Paused,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Run documentation checks".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Blocked,
+            title: Some("Run documentation checks".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(
+            CheckSpecRecordedEntry::new(
+                EvidenceScope::Task(task_id.as_str().to_owned()),
+                trusted,
+                "config-verification",
+            ),
+        )),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(ReadinessEvaluatedEntry {
+            scope: EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step_id.as_str())),
+            evaluation: ReadinessEvaluation {
+                run_status: RunStatus::Completed,
+                verification_verdict: VerificationVerdict::Missing,
+                visible_state: VisibleCompletionState::NeedsUser,
+                reasons: Vec::new(),
+                required_actions: vec![RequiredAction::RunCheck {
+                    check_spec_id: "cargo-test".to_owned(),
+                }],
+            },
+            policy_hash: Some("policy-hash".to_owned()),
+            workspace_snapshot_id: Some("snapshot-docs-1".to_owned()),
+        })),
+    ])
+}
+
+fn docs_checkpoint_restore_app() -> anyhow::Result<AppState> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let note = workspace.join("release-notes.md");
+    fs::write(&note, "alpha\nbeta\n")?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: workspace.display().to_string(),
+        },
+        ..test_config()
+    };
+    let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
+    let session_path = temp.path().join("checkpoint-preview.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "Update the release notes",
+    )))?;
+    let preview = ToolPreview {
+        title: "Update release-notes.md".to_owned(),
+        summary: "Refresh the release boundary".to_owned(),
+        body: "--- current/release-notes.md\n+++ proposed/release-notes.md\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+main"
+            .to_owned(),
+        changed_files: vec!["release-notes.md".to_owned()],
+        file_diffs: vec![ToolPreviewFile {
+            path: "release-notes.md".to_owned(),
+            diff: "--- current/release-notes.md\n+++ proposed/release-notes.md\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+main"
+                .to_owned(),
+        }],
+    };
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::ToolPreviewCaptured(ToolPreviewSnapshot::from_preview(
+            "call-edit",
+            "edit_file",
+            &preview,
+            Default::default(),
+            Some("preview-hash".to_owned()),
+        )),
+    ))?;
+    let recorder = sigil_kernel::MutationEventRecorder::new(store.clone());
+    sigil_kernel::write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "call-edit",
+        "release-notes.md",
+        &note,
+        b"alpha\nmain\n",
+    )?;
+    assert!(app.restore_session_path_from_disk(
+        session_path.clone(),
+        "deepseek",
+        "deepseek-v4-flash",
+        "restored checkpoint preview fixture",
+    ));
+    app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    let action = app
+        .handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))?
+        .ok_or_else(|| anyhow::anyhow!("checkpoint preview action was not created"))?;
+    let crate::app::AppAction::PreviewCheckpointRestore {
+        request_id,
+        request,
+    } = action
+    else {
+        anyhow::bail!("unexpected checkpoint action");
+    };
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let restore_preview = sigil_kernel::preview_controlled_checkpoint_restore(
+        &recorder, &records, &workspace, &request,
+    )?;
+    app.handle_worker_message(WorkerMessage::CheckpointRestorePreviewed {
+        request_id,
+        preview: restore_preview,
+    })?;
+    Ok(app)
+}
+
+fn docs_compaction_preview_app() -> anyhow::Result<AppState> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("compaction-preview.jsonl"))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "Audit the documentation structure",
+    )))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("I reviewed the existing docs and site surfaces.".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "Now synchronize the current main capabilities",
+    )))?;
+    let preview = store
+        .v2_compaction_preview(1, None)?
+        .ok_or_else(|| anyhow::anyhow!("compaction preview fixture was not foldable"))?;
+    app.handle_worker_message(WorkerMessage::V2CompactionPreviewed {
+        state: V2CompactionPreviewState::Review(Box::new(V2CompactionReview {
+            request_id: 41,
+            preview,
+            admission: V2CompactionAdmission::Unavailable {
+                reason: "apply is temporarily frozen while correctness fixes are in progress"
+                    .to_owned(),
+            },
+        })),
+    })?;
+    app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    Ok(app)
 }
 
 fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {

@@ -15,6 +15,8 @@ Sigil 是一个 TUI-first 的 Rust coding agent，用来在真实仓库里协助
 
 Sigil 的首个 alpha release 已通过 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 发布。`v0.0.1-alpha.1` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
 
+网站和用户文档跟随 `main`，可能比已发布 alpha 包更新。依赖新能力前请先查看 [Unreleased](docs/zh-CN/changelog.md#unreleased-main)；如果能力尚未进入 tagged release，请从源码安装。
+
 ## 快速开始
 
 前置要求：
@@ -70,7 +72,7 @@ sigil doctor
 - 用 `/plan` 执行只读规划，并在用户显式接受后交接为 durable `/task` 任务，进入 planner、executor 和可选 subagent 流程。
 - 普通 chat 明确要求子 agent 时，会在最终回答前强制等待有效 agent 结果。
 - 受信任的 agent profile 可通过 `@profile <prompt>` 或受信任的 profile slash name 直接调用。
-- 按显式 trust、approval 和 secret-egress policy 接入 stdio MCP server。
+- 按显式 trust、approval 和 secret-egress policy 接入本地 stdio 与用户根 Streamable HTTP MCP server。
 - 提供 capability-backed `webfetch` 与 stable `websearch` route，并执行独立 network policy、durable egress disclosure 和 external-source provenance。
 - 可选开启 code intelligence，支持符号、引用、诊断、code action 和 rename preview。
 
@@ -85,6 +87,9 @@ sigil doctor
 | 编辑较长 composer 草稿 | `Ctrl-A/E`、`Alt-B/F`、`Ctrl-K/Y`、`Ctrl-Z` |
 | 规划后执行 | `/plan` 后输入 prompt，或 `/plan <prompt>`；接受 plan card 后创建并运行 durable task |
 | 执行 durable 多步骤任务 | `/task <任务>`；未完成任务用 `/task continue` |
+| 验证任务完成情况并查看证据 | 用 `Alt-V` 聚焦 Verification card；运行推荐检查，或查看 snapshot 与 changeset 证据 |
+| 检查安全恢复点 | 按 `Ctrl-R` 预览受控 checkpoint restore 或 fork，再决定是否变更文件 |
+| 预览长上下文压缩 | 用 `/compact` 打开只读 Context Compaction V2 preview；apply 仍暂时冻结 |
 | Sigil 忙碌时追加后续消息 | 在当前 run 进行中提交普通 chat；Sigil 会显示在 Follow-ups，并在下一次安全 turn 派发时追加用户消息 |
 | 查看待处理 follow-ups | `Tab` 聚焦 follow-up panel；`/queue show`、`/queue next`、`/queue interrupt`、`/queue edit` 和 `/queue delete` 是高级控制 |
 | 要求普通 chat 使用子 agent | 明确说明“使用子 agent ...” |
@@ -116,6 +121,7 @@ Sigil 把工具执行视为可审计状态，而不是隐藏副作用。
 | --- | --- | --- | --- |
 | DeepSeek | `[providers.deepseek]` | 默认 Quick Setup 路径和 DeepSeek 专项选项。 | [DeepSeek 指南](docs/zh-CN/provider-deepseek.md) |
 | OpenAI-compatible | `[providers.openai_compat]` | 兼容 Chat Completions 的 `/v1` endpoint。 | [OpenAI-compatible 指南](docs/zh-CN/provider-openai-compatible.md) |
+| OpenAI Responses | `[providers.openai_responses]` | OpenAI Responses streaming endpoint。 | [OpenAI Responses 指南](docs/zh-CN/provider-openai-responses.md) |
 | Anthropic | `[providers.anthropic]` | 通过 Anthropic Messages streaming 使用 Claude 模型。 | [Anthropic 指南](docs/zh-CN/provider-anthropic.md) |
 | Gemini | `[providers.gemini]` | 通过 `streamGenerateContent` 使用 Gemini 模型。 | [Gemini 指南](docs/zh-CN/provider-gemini.md) |
 | Web data tools | `[web]` | Provider-hosted、configured 或 bundled search，以及读取已选择的来源。 | [权限与沙箱](docs/zh-CN/permissions-and-sandbox.md#网络与-web-工具) |

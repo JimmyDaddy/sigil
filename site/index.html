@@ -94,6 +94,7 @@
           <div class="alpha-status" aria-label="Release status">
             <strong>v0.0.1-alpha.1 preview</strong>
             <span>Core TUI workflows are usable today. Config, plugin APIs, advanced sandbox coverage, and automation surfaces may still change.</span>
+            <span>The site tracks <code>main</code>, which can be newer than the package. <a href="docs/changelog/#unreleased-main">Review Unreleased</a>.</span>
           </div>
           <div class="hero-actions" aria-label="Primary actions">
             <a class="button primary" href="#quickstart">Install</a>
@@ -195,6 +196,18 @@ sigil</code></pre>
             <img src="assets/screenshots/config-panel.svg" alt="Sigil configuration panel screenshot" loading="lazy" decoding="async">
             <span>Config panel</span>
           </a>
+          <a class="visual-card terminal-window-verification" href="docs/visual-tour/#task-verification">
+            <img src="assets/screenshots/verification-card.svg" alt="Sigil task verification card screenshot" loading="lazy" decoding="async">
+            <span>Task verification</span>
+          </a>
+          <a class="visual-card terminal-window-checkpoint" href="docs/visual-tour/#checkpoint-restore">
+            <img src="assets/screenshots/checkpoint-restore.svg" alt="Sigil checkpoint restore review screenshot" loading="lazy" decoding="async">
+            <span>Checkpoint restore</span>
+          </a>
+          <a class="visual-card terminal-window-compaction" href="docs/visual-tour/#context-compaction-preview">
+            <img src="assets/screenshots/compaction-preview.svg" alt="Sigil context compaction preview screenshot" loading="lazy" decoding="async">
+            <span>Compaction preview</span>
+          </a>
         </div>
       </section>
 
@@ -214,7 +227,7 @@ sigil</code></pre>
           </article>
           <article>
             <h3>Approval and verification</h3>
-            <p>File edits, shell commands, MCP calls, LSP edits, and configured checks run through structured previews, receipts, and review surfaces.</p>
+            <p>Review structured previews and receipts, then focus the Verification card with <code>Alt-V</code> to run checks or inspect completion evidence.</p>
           </article>
           <article>
             <h3>Web data with boundaries</h3>
@@ -223,6 +236,10 @@ sigil</code></pre>
           <article>
             <h3>Configurable runtime</h3>
             <p>Configure providers, permissions, Web policy, terminal behavior, appearance, code intelligence, MCP, plugins, skills, and agents from one TUI-first workflow.</p>
+          </article>
+          <article>
+            <h3>Recovery and context control</h3>
+            <p>Use <code>Ctrl-R</code> to preview a controlled restore or conversation fork, monitor context pressure, and review a read-only <code>/compact</code> preview.</p>
           </article>
         </div>
       </section>

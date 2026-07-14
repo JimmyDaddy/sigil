@@ -88,6 +88,11 @@
           <p class="lede">
             Sigil 保持 README 作为简洁入口，把操作细节拆到聚焦文档里。本页是用户文档的稳定入口。
           </p>
+          <aside class="docs-version-notice" aria-label="开发版本文档">
+            <strong>开发版本文档</strong>
+            <span>这些页面跟随 main。已打包发布的 alpha 仍是 v0.0.1-alpha.1；较新的能力可能需要从源码安装。</span>
+            <a href="changelog/">查看 Unreleased</a>
+          </aside>
           <div class="docs-search-panel">
             <form class="site-search docs-command-palette" role="search" data-locale="zh-CN" data-index="../../search.json">
               <label for="docs-search-zh-cn">搜索文档</label>
@@ -121,7 +126,7 @@
           <a class="resource-card task-card" id="daily-work" href="user-guide/" data-step="03">
             <span class="resource-kicker">日常工作</span>
             <h3>在 TUI 中工作</h3>
-            <p>在日常仓库工作中使用 composer、命令、计划、session、transcript 控制和剪贴板行为。</p>
+            <p>在日常仓库工作中使用 composer、计划、verification 证据、checkpoint recovery、context controls、session 和 transcript 控制。</p>
           </a>
         </div>
         <h3 class="resource-group-heading">使用 Sigil</h3>
@@ -139,7 +144,7 @@
           <a class="resource-card" id="visual-tour" href="visual-tour/">
             <span class="resource-kicker">预览</span>
             <h3>视觉导览</h3>
-            <p>在开始第一个仓库任务前，先了解主界面、approval review 和 config panel。</p>
+            <p>在第一个仓库任务前，了解主会话、approval、配置、verification、checkpoint recovery 和 compaction preview 界面。</p>
           </a>
           <a class="resource-card" id="safety" href="safety/">
             <span class="resource-kicker">控制权</span>
@@ -159,7 +164,7 @@
           <a class="resource-card" id="mcp" href="mcp/">
             <span class="resource-kicker">集成</span>
             <h3>MCP 接入指南</h3>
-            <p>配置 stdio MCP server，理解 trust level，并用显式策略约束外部数据和 secret。</p>
+            <p>配置本地 stdio 或用户根 Streamable HTTP MCP server，理解 trust level，并用显式策略约束外部数据和 secret。</p>
           </a>
         </div>
         <h3 class="resource-group-heading">参考与支持</h3>

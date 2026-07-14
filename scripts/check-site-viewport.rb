@@ -629,8 +629,8 @@ VIEWPORTS.product(RENDER_VARIANTS).each do |viewport, variant|
         unless result_attribute(tag, "data-sigil-timeline-phases") == "5"
           failures << "#{page_label}: homepage session timeline must render five phases"
         end
-        unless result_attribute(tag, "data-sigil-deck-windows") == "3"
-          failures << "#{page_label}: homepage terminal deck must render three windows"
+        unless result_attribute(tag, "data-sigil-deck-windows") == "6"
+          failures << "#{page_label}: homepage terminal deck must render six windows"
         end
         if [1024, 1440].include?(viewport.fetch(:width)) &&
            result_attribute(tag, "data-sigil-deck-overlap") != "true"

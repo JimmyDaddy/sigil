@@ -94,6 +94,7 @@
           <div class="alpha-status" aria-label="发布状态">
             <strong>v0.0.1-alpha.1 preview</strong>
             <span>核心 TUI 工作流今天已经可用。配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。</span>
+            <span>网站跟随 <code>main</code>，可能比已发布包更新。请先<a href="docs/changelog/#unreleased-main">查看 Unreleased</a>。</span>
           </div>
           <div class="hero-actions" aria-label="主要操作">
             <a class="button primary" href="#quickstart">安装</a>
@@ -195,6 +196,18 @@ sigil</code></pre>
             <img src="../assets/screenshots/config-panel.svg" alt="Sigil 配置面板截图" loading="lazy" decoding="async">
             <span>配置面板</span>
           </a>
+          <a class="visual-card terminal-window-verification" href="docs/visual-tour/#任务验证">
+            <img src="../assets/screenshots/verification-card.svg" alt="Sigil 任务 Verification card 截图" loading="lazy" decoding="async">
+            <span>任务验证</span>
+          </a>
+          <a class="visual-card terminal-window-checkpoint" href="docs/visual-tour/#checkpoint-恢复">
+            <img src="../assets/screenshots/checkpoint-restore.svg" alt="Sigil checkpoint 恢复检查截图" loading="lazy" decoding="async">
+            <span>Checkpoint 恢复</span>
+          </a>
+          <a class="visual-card terminal-window-compaction" href="docs/visual-tour/#上下文压缩预览">
+            <img src="../assets/screenshots/compaction-preview.svg" alt="Sigil 上下文压缩预览截图" loading="lazy" decoding="async">
+            <span>Compaction 预览</span>
+          </a>
         </div>
       </section>
 
@@ -214,7 +227,7 @@ sigil</code></pre>
           </article>
           <article>
             <h3>Approval and verification</h3>
-            <p>文件编辑、命令、MCP 调用、LSP edit 和配置化检查都经过结构化 preview、receipt 和 review surface。</p>
+            <p>先 review 结构化 preview 与 receipt，再用 <code>Alt-V</code> 聚焦 Verification card，运行检查或查看完成证据。</p>
           </article>
           <article>
             <h3>有边界的 Web data</h3>
@@ -223,6 +236,10 @@ sigil</code></pre>
           <article>
             <h3>Configurable runtime</h3>
             <p>Provider、permission、Web policy、terminal、appearance、code intelligence、MCP、plugins、skills 和 agents 都收敛在 TUI-first 工作流里。</p>
+          </article>
+          <article>
+            <h3>Recovery 与 context control</h3>
+            <p>用 <code>Ctrl-R</code> 预览受控 restore 或 conversation fork，观察 context pressure，并 review 只读 <code>/compact</code> preview。</p>
           </article>
         </div>
       </section>

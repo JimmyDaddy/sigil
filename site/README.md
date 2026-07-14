@@ -36,7 +36,7 @@ Local preview:
 scripts/preview-pages.sh
 ```
 
-Regenerate TUI renderer captures after meaningful TUI layout changes:
+Regenerate all six TUI renderer captures after meaningful changes to the main session, approval, configuration, verification, checkpoint recovery, or compaction review surfaces:
 
 ```bash
 scripts/generate-tui-screenshots.sh

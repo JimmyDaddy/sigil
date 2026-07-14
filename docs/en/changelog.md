@@ -4,6 +4,27 @@
 
 This page lists user-facing release notes. For support boundaries and early-preview caveats, see [Supported Today And Future Work](status.md).
 
+## Unreleased - main
+
+These changes are available on `main` and in the website documentation, but are not guaranteed to be present in the packaged `v0.0.1-alpha.1` release. Use a source install when you need them before the next tagged alpha.
+
+### Added
+
+- Added the OpenAI Responses provider through `[providers.openai_responses]`.
+- Added stable `websearch` and capability-backed `webfetch` routes with separate network policy and source provenance.
+- Added a task Verification card, `Alt-V` focus, recommended checks, and inspectable snapshot and changeset evidence.
+- Added `Ctrl-R` checkpoint review with controlled restore or conversation fork choices.
+- Added a read-only Context Compaction V2 preview through `/compact`.
+
+### Changed
+
+- Expanded local MCP support from stdio servers to include user-root Streamable HTTP servers under the same trust, approval, and secret-egress policy.
+- Refreshed the user docs and website navigation around verification, recovery, and context controls.
+
+### Current Limitation
+
+- Context Compaction V2 apply, including guarded overflow recovery, remains temporarily frozen while correctness fixes are in progress; `/compact` is a review-only preview.
+
 ## v0.0.1-alpha.1 - 2026-07-08
 
 ### Added

@@ -126,7 +126,10 @@ LOCALES = {
     home_aria_label: "Sigil home",
     search_label: "Search docs",
     search_results_label: "Search results",
-    search_placeholder: "Search providers, config, approvals..."
+    search_placeholder: "Search providers, config, approvals...",
+    version_notice_label: "Development documentation",
+    version_notice_text: "These pages track main. The packaged alpha remains v0.0.1-alpha.1; newer features may require a source install.",
+    version_notice_link: "Review Unreleased"
   },
   "zh-CN" => {
     source_dir: "docs/zh-CN",
@@ -150,7 +153,10 @@ LOCALES = {
     home_aria_label: "Sigil 首页",
     search_label: "搜索文档",
     search_results_label: "搜索结果",
-    search_placeholder: "搜索 provider、配置、审批..."
+    search_placeholder: "搜索 provider、配置、审批...",
+    version_notice_label: "开发版本文档",
+    version_notice_text: "这些页面跟随 main。已打包发布的 alpha 仍是 v0.0.1-alpha.1；较新的能力可能需要从源码安装。",
+    version_notice_link: "查看 Unreleased"
   }
 }.freeze
 
@@ -731,6 +737,11 @@ def rendered_page(locale, slug, source_file, fallback_title)
             <div class="doc-meta">
               <a href="#{language_href}">#{html_escape(locale_config.fetch(:language_label))}</a>
             </div>
+            <aside class="docs-version-notice" aria-label="#{html_escape(locale_config.fetch(:version_notice_label))}">
+              <strong>#{html_escape(locale_config.fetch(:version_notice_label))}</strong>
+              <span>#{html_escape(locale_config.fetch(:version_notice_text))}</span>
+              <a href="../changelog/">#{html_escape(locale_config.fetch(:version_notice_link))}</a>
+            </aside>
             <details class="doc-toc-mobile">
               <summary>#{html_escape(locale_config.fetch(:toc_label))}</summary>
               <nav aria-label="#{html_escape(locale_config.fetch(:toc_label))}">
