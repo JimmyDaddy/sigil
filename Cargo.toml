@@ -33,7 +33,12 @@ fs2 = "0.4.3"
 globset = "0.4.18"
 hmac = "0.12.1"
 ignore = "0.4.25"
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "3.6.3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "vendored",
+] }
 encoding_rs = "0.8.35"
 libc = "0.2.186"
 nix = { version = "0.28.0", features = ["signal"] }

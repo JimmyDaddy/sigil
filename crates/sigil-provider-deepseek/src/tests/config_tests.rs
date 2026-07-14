@@ -95,11 +95,12 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
 #[test]
 fn resolved_ignores_deepseek_api_key_when_sigil_api_key_is_missing() -> Result<()> {
     let _guard = crate::test_env::lock();
+    let _sigil_api_key_scope = EnvScope::unset_many(&[SIGIL_API_KEY_ENV]);
     let _scope = EnvScope::set_many(&[("DEEPSEEK_API_KEY", "legacy-key")]);
 
     let resolved = file_config().resolved()?;
 
-    assert_eq!(resolved.api_key, None);
+    assert!(resolved.api_key.is_none());
     Ok(())
 }
 
@@ -211,6 +212,16 @@ struct EnvScope {
 }
 
 impl EnvScope {
+    fn unset_many(names: &[&'static str]) -> Self {
+        let mut saved = Vec::with_capacity(names.len());
+        for name in names {
+            saved.push((*name, env::var_os(name)));
+            // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+            unsafe { env::remove_var(name) };
+        }
+        Self { saved }
+    }
+
     fn set_many(values: &[(&'static str, &'static str)]) -> Self {
         let mut saved = Vec::with_capacity(values.len());
         for (name, value) in values {

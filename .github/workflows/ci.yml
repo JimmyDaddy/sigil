@@ -84,7 +84,7 @@ jobs:
           - name: core-runtime-tools
             packages: "sigil-kernel sigil-tools-builtin sigil-mcp sigil-runtime"
           - name: providers
-            packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-anthropic sigil-provider-gemini"
+            packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-openai-responses sigil-provider-anthropic sigil-provider-gemini"
           - name: automation-surfaces
             packages: "sigil-code-intel sigil-http sigil"
           - name: tui

@@ -20,6 +20,13 @@ use super::{
     is_official_openai_base_url, openai_responses_server_count_binding, parse_input_token_count,
 };
 
+fn openai_responses_provider(
+    config: OpenAiResponsesProviderConfig,
+) -> Result<OpenAiResponsesProvider> {
+    let _guard = crate::test_env::lock();
+    OpenAiResponsesProvider::new(config, ModelRequestTimeouts::default())
+}
+
 #[tokio::test]
 async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> {
     let provider = {
@@ -57,13 +64,10 @@ fn only_the_official_openai_endpoint_is_eligible_for_the_proof_contract() {
 
 #[tokio::test]
 async fn server_count_target_proof_rejects_unpinned_models_before_network_io() -> Result<()> {
-    let provider = OpenAiResponsesProvider::new(
-        OpenAiResponsesProviderConfig {
-            api_key: Some("test-key".to_owned()),
-            ..OpenAiResponsesProviderConfig::default()
-        },
-        ModelRequestTimeouts::default(),
-    )?;
+    let provider = openai_responses_provider(OpenAiResponsesProviderConfig {
+        api_key: Some("test-key".to_owned()),
+        ..OpenAiResponsesProviderConfig::default()
+    })?;
     let mut request = test_request();
     request.model_name = "gpt-4.1".to_owned();
     request.max_tokens = Some(OPENAI_RESPONSES_PORTABLE_TARGET_OUTPUT_TOKENS);
@@ -84,14 +88,11 @@ async fn input_token_count_posts_once_to_the_dedicated_endpoint() -> Result<()> 
         "{\"object\":\"response.input_tokens\",\"input_tokens\":42}"
     ))
     .await?;
-    let provider = OpenAiResponsesProvider::new(
-        OpenAiResponsesProviderConfig {
-            base_url: server.base_url(),
-            api_key: Some("test-key".to_owned()),
-            ..OpenAiResponsesProviderConfig::default()
-        },
-        ModelRequestTimeouts::default(),
-    )?;
+    let provider = openai_responses_provider(OpenAiResponsesProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..OpenAiResponsesProviderConfig::default()
+    })?;
 
     assert_eq!(provider.input_token_count(&test_request()).await?, 42);
 
@@ -138,14 +139,11 @@ async fn provider_streams_completed_response_and_keeps_native_output_items() -> 
         "data: {\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}],\"provider_extension\":{\"retain\":true}}]}}\n\n"
     ))
     .await?;
-    let provider = OpenAiResponsesProvider::new(
-        OpenAiResponsesProviderConfig {
-            base_url: server.base_url(),
-            api_key: Some("test-key".to_owned()),
-            ..OpenAiResponsesProviderConfig::default()
-        },
-        ModelRequestTimeouts::default(),
-    )?;
+    let provider = openai_responses_provider(OpenAiResponsesProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..OpenAiResponsesProviderConfig::default()
+    })?;
 
     let chunks = provider
         .stream(test_request())
@@ -186,14 +184,11 @@ async fn provider_fails_when_the_transport_ends_without_completed_terminal() -> 
         "data: {\"delta\":\"partial\"}\n\n"
     ))
     .await?;
-    let provider = OpenAiResponsesProvider::new(
-        OpenAiResponsesProviderConfig {
-            base_url: server.base_url(),
-            api_key: Some("test-key".to_owned()),
-            ..OpenAiResponsesProviderConfig::default()
-        },
-        ModelRequestTimeouts::default(),
-    )?;
+    let provider = openai_responses_provider(OpenAiResponsesProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..OpenAiResponsesProviderConfig::default()
+    })?;
 
     let chunks = provider
         .stream(test_request())
@@ -224,14 +219,11 @@ async fn compact_posts_the_complete_window_once_and_preserves_opaque_output() ->
         "{\"id\":\"cmp_1\",\"type\":\"compaction\",\"encrypted_content\":\"opaque\",\"extension\":{\"keep\":true}}]}"
     ))
     .await?;
-    let provider = OpenAiResponsesProvider::new(
-        OpenAiResponsesProviderConfig {
-            base_url: server.base_url(),
-            api_key: Some("test-key".to_owned()),
-            ..OpenAiResponsesProviderConfig::default()
-        },
-        ModelRequestTimeouts::default(),
-    )?;
+    let provider = openai_responses_provider(OpenAiResponsesProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..OpenAiResponsesProviderConfig::default()
+    })?;
 
     let compacted = provider.compact(&test_request()).await?;
 

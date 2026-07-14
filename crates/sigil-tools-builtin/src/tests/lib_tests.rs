@@ -10,11 +10,11 @@ use serde_json::json;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
-    ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputStream, ExecutionReceipt,
-    ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionTerminationCause,
-    ExecutionTimeoutSource, JsonlSessionStore, MutationEventRecorder, PathTrustZone,
-    PermissionRisk, RunCancellationOwner, TerminalExecutionBackendCapabilities,
+    ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputReceipt, ExecutionOutputStream,
+    ExecutionReceipt, ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
+    ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionStreamCapture,
+    ExecutionTerminationCause, ExecutionTimeoutSource, JsonlSessionStore, MutationEventRecorder,
+    PathTrustZone, PermissionRisk, RunCancellationOwner, TerminalExecutionBackendCapabilities,
     TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
     TerminalTaskStatus, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
     ToolPreviewCapability, ToolProgressEvent, ToolProgressSink, ToolRegistry, ToolResultStatus,
@@ -1912,6 +1912,25 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
     );
     assert_eq!(request.timeout_secs, 9);
 
+    let output_receipt =
+        |stdout_bytes: u64, stderr_bytes: u64, termination: ExecutionTerminationCause| {
+            let capture = |total_bytes: u64| ExecutionStreamCapture {
+                total_bytes,
+                returned_bytes: total_bytes,
+                retained_head_bytes: total_bytes,
+                retained_limit_bytes: total_bytes,
+                total_lines: u64::from(total_bytes > 0),
+                ..ExecutionStreamCapture::default()
+            };
+            ExecutionOutputReceipt {
+                stdout: capture(stdout_bytes),
+                stderr: capture(stderr_bytes),
+                combined_total_bytes: stdout_bytes.saturating_add(stderr_bytes),
+                termination,
+                ..ExecutionOutputReceipt::default()
+            }
+        };
+
     let timeout = super::bash_tool_result_from_execution_receipt(
         "call-timeout".to_owned(),
         "bash".to_owned(),
@@ -1924,7 +1943,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             exit_code: None,
             stdout: Vec::new(),
             stderr: Vec::new(),
-            output: Default::default(),
+            output: output_receipt(0, 0, ExecutionTerminationCause::TimedOut),
             timed_out: true,
         },
     )?;
@@ -1945,7 +1964,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             exit_code: Some(0),
             stdout: b"stdout".to_vec(),
             stderr: b"stderr".to_vec(),
-            output: Default::default(),
+            output: output_receipt(6, 6, ExecutionTerminationCause::Exited),
             timed_out: false,
         },
     )?;
@@ -1967,7 +1986,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
             exit_code: Some(7),
             stdout: Vec::new(),
             stderr: b"bad".to_vec(),
-            output: Default::default(),
+            output: output_receipt(0, 3, ExecutionTerminationCause::Exited),
             timed_out: false,
         },
     )?;

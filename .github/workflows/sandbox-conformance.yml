@@ -46,9 +46,9 @@ jobs:
         id: namespace_preflight
         run: |
           set -euo pipefail
-          echo "### Bubblewrap host preflight" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
           {
+            echo "### Bubblewrap host preflight"
+            echo ""
             echo '```text'
             bwrap --version
             sysctl kernel.unprivileged_userns_clone || true
@@ -76,12 +76,14 @@ jobs:
           fi
 
           echo "supported=false" >> "$GITHUB_OUTPUT"
-          echo "Bubblewrap network namespace preflight is unsupported on this runner." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```text' >> "$GITHUB_STEP_SUMMARY"
-          echo "$preflight_output" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "Conformance remains unproven unless this workflow is rerun on a compatible Linux host or with require_conformance enabled." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Bubblewrap network namespace preflight is unsupported on this runner."
+            echo ""
+            echo '```text'
+            echo "$preflight_output"
+            echo '```'
+            echo "Conformance remains unproven unless this workflow is rerun on a compatible Linux host or with require_conformance enabled."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Linux Bubblewrap conformance
         if: steps.namespace_preflight.outputs.supported == 'true'
