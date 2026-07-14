@@ -119,7 +119,7 @@ jobs:
         run: tar -C target -czf coverage-${{ matrix.name }}.tar.gz llvm-cov-target
 
       - name: Upload coverage profiles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.name }}
           path: coverage-${{ matrix.name }}.tar.gz
@@ -172,7 +172,7 @@ jobs:
 
       - name: Upload Web V1 PTY acceptance artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tui-web-v1-pty-acceptance
           path: .repo-local-dev/tui-smoke/tui-web-pty-acceptance-*
@@ -200,7 +200,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Download coverage profiles
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           path: coverage-artifacts
