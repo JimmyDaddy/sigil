@@ -20,8 +20,8 @@ use crate::{
     application_run::ApplicationRunServices,
     model_eval::{
         ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalRunExecutionStatus,
-        load_model_eval_fixture, materialize_model_eval_fixture, run_model_eval_campaign,
-        verify_model_eval_run, write_isolated_model_eval_config,
+        load_model_eval_fixture, materialize_model_eval_fixture, model_eval_reservation_microusd,
+        run_model_eval_campaign, verify_model_eval_run, write_isolated_model_eval_config,
     },
 };
 
@@ -215,6 +215,20 @@ fn isolated_model_eval_config_requires_noninteractive_write_permission() {
     let error = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
         .expect_err("manual config without exact tool grants must fail");
     assert!(error.to_string().contains("controlled workspace edits"));
+}
+
+#[test]
+fn model_eval_reservation_keeps_non_divisible_budget_admissible() {
+    assert_eq!(
+        model_eval_reservation_microusd(500_000, 15).expect("reserve fifteen runs"),
+        33_333
+    );
+    assert_eq!(
+        model_eval_reservation_microusd(500_000, 15).expect("stable reservation") * 15,
+        499_995
+    );
+    assert!(model_eval_reservation_microusd(14, 15).is_err());
+    assert!(model_eval_reservation_microusd(500_000, 0).is_err());
 }
 
 #[test]

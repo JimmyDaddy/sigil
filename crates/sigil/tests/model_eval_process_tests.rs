@@ -58,7 +58,10 @@ fn hidden_model_eval_process_runs_scripted_production_tool_path() -> Result<()> 
     let manifest: sigil_kernel::ModelEvalReportManifestV3 =
         serde_json::from_slice(&fs::read(output_dir.join("manifest.json"))?)?;
     assert_eq!(manifest.report_schema_version, 3);
+    assert_eq!(manifest.requested_repetitions, 1);
     assert_eq!(manifest.provider_admitted_repetitions, 1);
+    assert_eq!(manifest.completed_repetitions, 1);
+    assert_eq!(manifest.skipped_repetitions, 0);
     assert_eq!(manifest.accepted_repetitions, 1);
     assert_eq!(
         manifest.trend_buckets[0].eligibility,

@@ -343,13 +343,24 @@ async fn model_eval_command(
     );
     println!("wrote {}", manifest_path.display());
     println!("wrote {}", campaign.output_dir.join("summary.md").display());
-    if manifest.accepted_repetitions != manifest.provider_admitted_repetitions
-        || manifest.provider_admitted_repetitions == 0
+    validate_model_eval_manifest(&manifest)?;
+    Ok(())
+}
+
+fn validate_model_eval_manifest(manifest: &sigil_kernel::ModelEvalReportManifestV3) -> Result<()> {
+    if manifest.requested_repetitions == 0
+        || manifest.provider_admitted_repetitions != manifest.requested_repetitions
+        || manifest.completed_repetitions != manifest.requested_repetitions
+        || manifest.skipped_repetitions != 0
+        || manifest.accepted_repetitions != manifest.requested_repetitions
     {
         anyhow::bail!(
-            "model eval acceptance failed: accepted {} of {} provider-admitted repetitions",
+            "model eval acceptance failed: requested {}, provider-admitted {}, completed {}, skipped {}, accepted {}",
+            manifest.requested_repetitions,
+            manifest.provider_admitted_repetitions,
+            manifest.completed_repetitions,
+            manifest.skipped_repetitions,
             manifest.accepted_repetitions,
-            manifest.provider_admitted_repetitions
         );
     }
     Ok(())

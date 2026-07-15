@@ -244,11 +244,8 @@ pub async fn run_model_eval_campaign(
         .len()
         .checked_mul(request.repetitions as usize)
         .context("model eval planned run count overflowed")?;
-    let reservation_microusd_per_run = request
-        .max_cost_microusd
-        .checked_add(planned_runs as u64 - 1)
-        .context("model eval budget reservation overflowed")?
-        / planned_runs as u64;
+    let reservation_microusd_per_run =
+        model_eval_reservation_microusd(request.max_cost_microusd, planned_runs)?;
     let output_dir = create_campaign_output_dir(&request.output_dir)?;
     let campaign_id = format!("model-eval-{}", uuid::Uuid::new_v4());
     let deadline = Instant::now()
@@ -328,6 +325,22 @@ pub async fn run_model_eval_campaign(
     super::write_model_eval_campaign_report(&campaign)?;
     sync_directory(&campaign.output_dir)?;
     Ok(campaign)
+}
+
+pub(crate) fn model_eval_reservation_microusd(
+    max_cost_microusd: u64,
+    planned_runs: usize,
+) -> Result<u64> {
+    let planned_runs = u64::try_from(planned_runs)
+        .context("model eval planned run count does not fit the budget counter")?;
+    if planned_runs == 0 {
+        bail!("model eval campaign must plan at least one run");
+    }
+    let reservation = max_cost_microusd / planned_runs;
+    if reservation == 0 {
+        bail!("model eval budget must reserve at least one microUSD per planned run");
+    }
+    Ok(reservation)
 }
 
 fn preflight_campaign(request: &ModelEvalCampaignRequest) -> Result<Vec<LoadedModelEvalFixture>> {

@@ -105,6 +105,44 @@ fn model_eval_cost_and_case_preflight_are_fail_closed() -> Result<()> {
 }
 
 #[test]
+fn model_eval_manifest_requires_every_requested_repetition() -> Result<()> {
+    let mut manifest = sigil_kernel::ModelEvalReportManifestV3 {
+        report_schema_version: 3,
+        campaign_id: "campaign-test".to_owned(),
+        mode: "model".to_owned(),
+        started_at_unix_ms: 1,
+        ended_at_unix_ms: 2,
+        requested_repetitions: 15,
+        provider_admitted_repetitions: 15,
+        completed_repetitions: 15,
+        skipped_repetitions: 0,
+        accepted_repetitions: 15,
+        charged_microusd: 499_995,
+        results_jsonl_path: PathBuf::from("results.jsonl"),
+        summary_path: PathBuf::from("summary.md"),
+        trend_buckets: Vec::new(),
+    };
+    super::validate_model_eval_manifest(&manifest)?;
+
+    manifest.provider_admitted_repetitions = 14;
+    manifest.completed_repetitions = 14;
+    manifest.skipped_repetitions = 1;
+    manifest.accepted_repetitions = 14;
+    let error = super::validate_model_eval_manifest(&manifest)
+        .expect_err("one skipped repetition must fail campaign acceptance");
+    assert!(error.to_string().contains("requested 15"));
+    assert!(error.to_string().contains("skipped 1"));
+
+    manifest.requested_repetitions = 0;
+    manifest.provider_admitted_repetitions = 0;
+    manifest.completed_repetitions = 0;
+    manifest.skipped_repetitions = 0;
+    manifest.accepted_repetitions = 0;
+    assert!(super::validate_model_eval_manifest(&manifest).is_err());
+    Ok(())
+}
+
+#[test]
 fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
     let config_path = std::env::temp_dir()
         .join("sigil-config-parent")
