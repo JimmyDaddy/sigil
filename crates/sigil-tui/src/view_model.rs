@@ -303,6 +303,12 @@ fn short_session_label(session_id: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ComposerAttachmentViewModel {
+    pub label: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ComposerViewModel {
     pub mode_label: String,
     pub phase: RunPhase,
@@ -311,6 +317,7 @@ pub(crate) struct ComposerViewModel {
     pub reasoning_effort_label: String,
     pub agent_rows: Vec<SidebarAgentRow>,
     pub agent_panel_focused: bool,
+    pub image_attachments: Vec<ComposerAttachmentViewModel>,
     pub input: String,
     pub input_rows: u16,
     pub cursor_position: (u16, u16),
@@ -330,10 +337,37 @@ impl ComposerViewModel {
             reasoning_effort_label: app.reasoning_effort_label().to_owned(),
             agent_rows: app.composer_agent_rows(),
             agent_panel_focused: app.is_composer_agent_panel_focused(),
+            image_attachments: app
+                .composer
+                .image_attachments
+                .iter()
+                .enumerate()
+                .map(|(index, attachment)| ComposerAttachmentViewModel {
+                    label: format!(
+                        "image {} · {} · {}×{} · {}",
+                        index + 1,
+                        attachment.mime_type.extension().to_ascii_uppercase(),
+                        attachment.width,
+                        attachment.height,
+                        format_attachment_bytes(attachment.byte_len)
+                    ),
+                    selected: app.composer.selected_image_attachment == Some(index),
+                })
+                .collect(),
             input: app.composer_display_input(),
             input_rows: app.composer_input_rows(),
             cursor_position: app.input_cursor_visual_position(),
         }
+    }
+}
+
+fn format_attachment_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
     }
 }
 

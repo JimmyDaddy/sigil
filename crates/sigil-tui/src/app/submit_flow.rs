@@ -10,11 +10,24 @@ use crate::slash::ResolvedSlashCommand;
 impl AppState {
     pub fn submit_input(&mut self) -> Result<Option<AppAction>> {
         let prompt = self.composer.input.trim().to_owned();
-        if prompt.is_empty() {
+        let has_attachments = !self.composer.image_attachments.is_empty();
+        if prompt.is_empty() && !has_attachments {
+            return Ok(None);
+        }
+        if has_attachments
+            && (self.composer.queue_edit_target.is_some()
+                || prompt.starts_with('/')
+                || prompt.trim_start().starts_with('@')
+                || self.runtime.is_busy
+                || self.composer.mode == ComposerMode::Plan)
+        {
+            self.reject_non_build_attachment_submission();
             return Ok(None);
         }
         self.discard_cleared_input_draft();
-        self.record_input_history(prompt.clone());
+        if !prompt.is_empty() {
+            self.record_input_history(prompt.clone());
+        }
         self.reset_input_history_navigation();
 
         if self.composer.queue_edit_target.is_some() {
@@ -109,11 +122,23 @@ impl AppState {
         self.composer.input.clear();
         self.composer.input_cursor = 0;
         self.composer.input_paste_spans.clear();
+        let attachments = std::mem::take(&mut self.composer.image_attachments);
+        self.composer.selected_image_attachment = None;
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
-        let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
+        let safe_prompt = image_submission_timeline_text(&prompt, &attachments);
         self.push_timeline(TimelineRole::User, safe_prompt.clone());
-        self.push_event("input", format!("submitted {safe_prompt}"));
+        if attachments.is_empty() {
+            self.push_event("input", format!("submitted {safe_prompt}"));
+        } else {
+            self.push_event(
+                "input",
+                format!(
+                    "submitted prompt with {} image attachment(s)",
+                    attachments.len()
+                ),
+            );
+        }
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
@@ -124,7 +149,14 @@ impl AppState {
         self.streaming_assistant_index = None;
         self.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
-        Ok(Some(AppAction::SubmitPrompt(prompt)))
+        if attachments.is_empty() {
+            Ok(Some(AppAction::SubmitPrompt(prompt)))
+        } else {
+            Ok(Some(AppAction::SubmitPromptWithAttachments {
+                prompt,
+                attachments,
+            }))
+        }
     }
 
     pub(super) fn execute_slash_command(
@@ -452,6 +484,22 @@ impl AppState {
                 }))
             }
         }
+    }
+}
+
+fn image_submission_timeline_text(
+    prompt: &str,
+    attachments: &[sigil_kernel::ImageAttachment],
+) -> String {
+    let placeholder = sigil_kernel::render_image_attachment_placeholders(attachments);
+    if prompt.is_empty() {
+        return placeholder;
+    }
+    let safe_prompt = sigil_kernel::safe_persistence_text(prompt);
+    if placeholder.is_empty() {
+        safe_prompt
+    } else {
+        format!("{safe_prompt}\n{placeholder}")
     }
 }
 

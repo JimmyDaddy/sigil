@@ -4,10 +4,11 @@ use sigil_kernel::{
     AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry,
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
     ConversationInputQueueId, ConversationInputTarget, ConversationQueueItemProjection,
-    DisclosurePresentationError, DisclosurePresentationReceipt, MutationArtifactCleanupTarget,
-    PlanApprovalPermission, PlanApprovedEntry, PlanDecisionRecordedEntry, PlanTaskStartMode,
-    PreEgressDisclosure, ReasoningEffort, RunEvent, SessionLogEntry, TaskCreatedFromPlanEntry,
-    TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
+    DisclosurePresentationError, DisclosurePresentationReceipt, ImageAttachment,
+    MutationArtifactCleanupTarget, PlanApprovalPermission, PlanApprovedEntry,
+    PlanDecisionRecordedEntry, PlanTaskStartMode, PreEgressDisclosure, ReasoningEffort, RunEvent,
+    SessionLogEntry, TaskCreatedFromPlanEntry, TaskRunStatus, TaskVerificationRerunRequest,
+    TerminalTaskEntry, V2CompactionPreview,
 };
 use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
@@ -116,6 +117,11 @@ pub enum QueueMoveDirection {
 pub enum WorkerCommand {
     SubmitPrompt {
         prompt: String,
+        reasoning_effort: ReasoningEffort,
+    },
+    SubmitPromptWithAttachments {
+        prompt: String,
+        attachments: Vec<ImageAttachment>,
         reasoning_effort: ReasoningEffort,
     },
     QueueConversationInput {

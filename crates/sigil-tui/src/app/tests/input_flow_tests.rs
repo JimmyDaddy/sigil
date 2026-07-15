@@ -390,6 +390,92 @@ fn composer_paste_inserts_multiline_text_without_submitting() {
     assert_eq!(app.composer_input_rows(), 3);
 }
 
+fn write_test_png(path: &Path) -> Result<()> {
+    image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255])
+        .expect("valid test image")
+        .save_with_format(path, image::ImageFormat::Png)?;
+    Ok(())
+}
+
+#[test]
+fn pasted_image_path_becomes_a_keyboard_operable_attachment() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let image_path = temp.path().join("sample.png");
+    write_test_png(&image_path)?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sigil_paths.attachments_root = temp.path().join("attachments");
+
+    app.handle_paste_text(&image_path.to_string_lossy());
+
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.composer.image_attachments.len(), 1);
+    assert_eq!(app.composer.selected_image_attachment, Some(0));
+    assert_eq!(app.composer_height(), 6);
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert!(
+        view_model.composer.image_attachments[0]
+            .label
+            .contains("PNG")
+    );
+    assert!(
+        view_model.composer.image_attachments[0]
+            .label
+            .contains("2×1")
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert_eq!(app.composer.selected_image_attachment, None);
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.composer.selected_image_attachment, Some(0));
+    app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
+    assert!(app.composer.image_attachments.is_empty());
+    assert_eq!(app.composer.input, "x");
+    Ok(())
+}
+
+#[test]
+fn attachment_only_submit_uses_the_attachment_action() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let image_path = temp.path().join("sample.png");
+    write_test_png(&image_path)?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sigil_paths.attachments_root = temp.path().join("attachments");
+    app.handle_paste_text(&image_path.to_string_lossy());
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitPromptWithAttachments { prompt, attachments })
+            if prompt.is_empty() && attachments.len() == 1
+    ));
+    assert!(app.composer.image_attachments.is_empty());
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::User && entry.text.contains("[Image attachment 1:")
+    }));
+    Ok(())
+}
+
+#[test]
+fn attachment_submission_rejects_non_build_routes_and_keeps_the_draft() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let image_path = temp.path().join("sample.png");
+    write_test_png(&image_path)?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sigil_paths.attachments_root = temp.path().join("attachments");
+    app.handle_paste_text(&image_path.to_string_lossy());
+    app.set_input_and_cursor("/plan inspect this".to_owned());
+
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.composer.input, "/plan inspect this");
+    assert_eq!(app.composer.image_attachments.len(), 1);
+    assert_eq!(
+        app.last_notice(),
+        Some("images can only be sent directly from an idle Build composer; the draft was kept")
+    );
+    Ok(())
+}
+
 #[test]
 fn large_composer_paste_collapses_display_but_submits_full_text() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());

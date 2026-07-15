@@ -17,6 +17,7 @@ mod egress_disclosure_flow;
 mod feedback_flow;
 mod file_type;
 mod formatting;
+mod image_attachment_flow;
 mod input_flow;
 mod input_history;
 mod key_router;
@@ -51,11 +52,11 @@ use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, AgentThreadStateProjection, CompactionConfig, CompactionThresholdStatus,
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
-    ConversationInputQueueId, ConversationInputTarget, MemoryConfig, MutationArtifactCleanupTarget,
-    MutationArtifactInventoryItem, MutationArtifactRetentionReport, PermissionMode,
-    PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig, SecretRedactor,
-    SessionConfig, SessionStats, StorageConfig, TaskStateProjection, ToolPreviewSnapshot,
-    resolve_workspace_root,
+    ConversationInputQueueId, ConversationInputTarget, ImageAttachment, MemoryConfig,
+    MutationArtifactCleanupTarget, MutationArtifactInventoryItem, MutationArtifactRetentionReport,
+    PermissionMode, PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig,
+    SecretRedactor, SessionConfig, SessionStats, StorageConfig, TaskStateProjection,
+    ToolPreviewSnapshot, resolve_workspace_root,
 };
 use sigil_runtime::{
     BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths,
@@ -344,6 +345,10 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub enum AppAction {
     SubmitPrompt(String),
+    SubmitPromptWithAttachments {
+        prompt: String,
+        attachments: Vec<ImageAttachment>,
+    },
     QueueConversationInput {
         prompt: String,
         kind: ConversationInputKind,

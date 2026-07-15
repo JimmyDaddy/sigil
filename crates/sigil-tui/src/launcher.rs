@@ -21,8 +21,9 @@ use crossterm::{
     cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, KeyEventKind,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, KeyCode, KeyEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
@@ -516,6 +517,24 @@ where
             Ok(false)
         }
         CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
+                && key.modifiers == KeyModifiers::CONTROL
+                && app.can_accept_image_attachment_input()
+            {
+                match crate::clipboard_image::read_clipboard_image_png() {
+                    Ok(Some(encoded_png)) => {
+                        app.handle_clipboard_image(encoded_png);
+                        *needs_render = true;
+                        return Ok(false);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        app.report_clipboard_image_failure();
+                        *needs_render = true;
+                        return Ok(false);
+                    }
+                }
+            }
             let action = app.handle_key_event(key)?;
             *needs_render |= apply_key_action(app, worker, action, spawn_worker)?;
             Ok(false)

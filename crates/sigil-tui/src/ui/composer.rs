@@ -52,7 +52,11 @@ pub(crate) fn render_input_with_theme(
         inner.width,
         COMPOSER_HEADER_HEIGHT.min(inner.height),
     );
-    let input_area = composer_input_area(area, view_model.input_rows);
+    let input_area = composer_input_area(
+        area,
+        view_model.input_rows,
+        view_model.image_attachments.len(),
+    );
 
     let header = Line::from(vec![
         Span::styled(
@@ -81,6 +85,8 @@ pub(crate) fn render_input_with_theme(
             .wrap(Wrap { trim: false }),
         header_area,
     );
+
+    render_image_attachments(frame, area, view_model, theme);
 
     let input_bg = palette.surface_input;
     frame.render_widget(
@@ -149,7 +155,11 @@ pub(crate) fn composer_cursor_origin(
     area: Rect,
     view_model: &ComposerViewModel,
 ) -> Option<(u16, u16)> {
-    let input_area = composer_input_area(area, view_model.input_rows);
+    let input_area = composer_input_area(
+        area,
+        view_model.input_rows,
+        view_model.image_attachments.len(),
+    );
     if input_area.width == 0 || input_area.height == 0 {
         return None;
     }
@@ -163,12 +173,14 @@ pub(crate) fn composer_cursor_origin(
     ))
 }
 
-pub(crate) fn composer_input_area(area: Rect, _input_rows: u16) -> Rect {
+pub(crate) fn composer_input_area(area: Rect, _input_rows: u16, attachment_count: usize) -> Rect {
     let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
     if inner.width == 0 || inner.height == 0 {
         return Rect::default();
     }
-    let header_rows = COMPOSER_HEADER_HEIGHT.saturating_add(COMPOSER_HEADER_INPUT_GAP);
+    let header_rows = COMPOSER_HEADER_HEIGHT
+        .saturating_add(COMPOSER_HEADER_INPUT_GAP)
+        .saturating_add(attachment_count.min(u16::MAX as usize) as u16);
     if inner.height <= header_rows {
         return Rect::default();
     }
@@ -180,6 +192,61 @@ pub(crate) fn composer_input_area(area: Rect, _input_rows: u16) -> Rect {
         inner.width,
         input_height,
     )
+}
+
+fn render_image_attachments(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &ComposerViewModel,
+    theme: &Theme,
+) {
+    if view_model.image_attachments.is_empty() {
+        return;
+    }
+    let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
+    if inner.width == 0 || inner.height <= COMPOSER_HEADER_HEIGHT {
+        return;
+    }
+    let available_rows = inner
+        .height
+        .saturating_sub(COMPOSER_HEADER_HEIGHT)
+        .min(view_model.image_attachments.len() as u16);
+    let width = inner.width as usize;
+    let lines = view_model
+        .image_attachments
+        .iter()
+        .take(available_rows as usize)
+        .map(|attachment| {
+            let marker = if attachment.selected { "◆" } else { "◇" };
+            let hint = if attachment.selected {
+                " · Backspace/Delete remove"
+            } else {
+                ""
+            };
+            let text =
+                truncate_display_width(&format!("{marker} {}{hint}", attachment.label), width);
+            let style = if attachment.selected {
+                Style::default()
+                    .fg(theme.palette.selection_fg)
+                    .bg(theme.palette.selection_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.palette.text_secondary)
+                    .bg(theme.palette.surface_panel)
+            };
+            Line::from(Span::styled(pad_display_width(&text, width), style))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(theme.palette.surface_panel)),
+        Rect::new(
+            inner.x,
+            inner.y.saturating_add(COMPOSER_HEADER_HEIGHT),
+            inner.width,
+            available_rows,
+        ),
+    );
 }
 
 #[cfg(test)]

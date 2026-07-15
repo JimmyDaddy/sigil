@@ -6,9 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arboard.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+image.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

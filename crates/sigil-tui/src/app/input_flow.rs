@@ -26,7 +26,10 @@ impl AppState {
     }
 
     pub fn composer_height(&self) -> u16 {
-        self.composer_input_rows().saturating_add(4).max(5)
+        self.composer_input_rows()
+            .saturating_add(4)
+            .saturating_add(self.composer.image_attachments.len() as u16)
+            .max(5)
     }
 
     pub(super) fn input_char_len(&self) -> usize {
@@ -110,6 +113,10 @@ impl AppState {
             return;
         }
 
+        if self.try_attach_pasted_image_path(&pasted) {
+            return;
+        }
+
         self.active_pane = PaneFocus::Composer;
         self.blur_composer_aux_panels();
         self.insert_paste_text(&pasted);
@@ -136,6 +143,34 @@ impl AppState {
         &mut self,
         key: KeyEvent,
     ) -> anyhow::Result<Option<Option<AppAction>>> {
+        if self.active_pane == PaneFocus::Composer
+            && key.modifiers.is_empty()
+            && self.composer.selected_image_attachment.is_some()
+        {
+            match key.code {
+                KeyCode::Left | KeyCode::Up => {
+                    self.move_selected_image_attachment(false);
+                    return Ok(Some(None));
+                }
+                KeyCode::Right => {
+                    self.move_selected_image_attachment(true);
+                    return Ok(Some(None));
+                }
+                KeyCode::Down | KeyCode::Esc => {
+                    self.clear_selected_image_attachment();
+                    return Ok(Some(None));
+                }
+                KeyCode::Backspace | KeyCode::Delete => {
+                    self.remove_selected_image_attachment();
+                    return Ok(Some(None));
+                }
+                KeyCode::Char(_) => {
+                    self.clear_selected_image_attachment();
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('z') | KeyCode::Char('Z')
                 if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
@@ -245,6 +280,15 @@ impl AppState {
                 if self.active_pane == PaneFocus::Composer && self.has_slash_selector() =>
             {
                 self.move_slash_selector(true)
+            }
+            KeyCode::Up
+                if self.active_pane == PaneFocus::Composer
+                    && self.composer.input_history_index.is_none()
+                    && self.input_cursor_visual_row() == 0
+                    && key.modifiers.is_empty()
+                    && !self.composer.image_attachments.is_empty() =>
+            {
+                self.select_last_image_attachment();
             }
             KeyCode::Up if self.active_pane == PaneFocus::Composer => {
                 if self.input_cursor_visual_row() == 0 {

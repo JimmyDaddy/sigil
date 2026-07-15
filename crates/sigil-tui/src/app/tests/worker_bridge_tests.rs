@@ -2303,6 +2303,25 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         app.into_worker_command(AppAction::SubmitPrompt("draft".to_owned())),
         WorkerCommand::SubmitPrompt { prompt, .. } if prompt == "draft"
     ));
+    let attachment = sigil_kernel::ImageAttachment::from_bytes(
+        "image_1",
+        sigil_kernel::ImageMimeType::Png,
+        1,
+        1,
+        vec![1],
+    )
+    .expect("valid attachment metadata");
+    assert!(matches!(
+        app.into_worker_command(AppAction::SubmitPromptWithAttachments {
+            prompt: "inspect".to_owned(),
+            attachments: vec![attachment],
+        }),
+        WorkerCommand::SubmitPromptWithAttachments {
+            prompt,
+            attachments,
+            ..
+        } if prompt == "inspect" && attachments.len() == 1
+    ));
     assert!(matches!(
         app.into_worker_command(AppAction::QueueConversationInput {
             prompt: "queued draft".to_owned(),

@@ -4,11 +4,11 @@ use anyhow::Result;
 use sigil_kernel::{
     Agent, AgentRole, ControlEntry, ConversationInputKind, ConversationInputQueueId,
     ConversationInputQueuedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, JsonlSessionStore, McpServerConfig, McpServerStartup,
-    PlanApprovalPermission, PlanArtifactProjection, PlanDecision, PlanTaskStartMode, ProviderChunk,
-    ReasoningEffort, RunEvent, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
-    SkillTrustState, TaskRunStatus, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolRegistry,
-    ToolResultStatus,
+    ConversationInputTarget, ImageAttachment, ImageMimeType, JsonlSessionStore, McpServerConfig,
+    McpServerStartup, PlanApprovalPermission, PlanArtifactProjection, PlanDecision,
+    PlanTaskStartMode, ProviderChunk, ReasoningEffort, RunEvent, SessionLogEntry, SkillDescriptor,
+    SkillRunMode, SkillSource, SkillTrustState, TaskRunStatus, ToolCall, ToolErrorKind,
+    ToolExecutionStatus, ToolRegistry, ToolResultStatus,
 };
 use tempfile::tempdir;
 
@@ -83,6 +83,10 @@ fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
 ```
 "#
     )
+}
+
+fn test_image_attachment() -> Result<ImageAttachment> {
+    ImageAttachment::from_bytes("image_1", ImageMimeType::Png, 1, 1, vec![1])
 }
 
 fn write_fake_server_script(path: &std::path::Path) -> Result<()> {
@@ -181,6 +185,69 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
             if result.final_text == "hello from worker"
                 && result.tool_calls == 0
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("hello")))
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn submit_image_attachment_reaches_capability_admission_before_transport() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-image.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPromptWithAttachments {
+        prompt: String::new(),
+        attachments: vec![test_image_attachment()?],
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let started = worker.recv()?;
+    assert!(matches!(
+        started,
+        WorkerMessage::RunStarted { ref prompt } if prompt.contains("[Image attachment 1:")
+    ));
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error) if error.contains("does not support image input")
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn image_attachment_command_is_never_queued_while_a_run_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-image-queue.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "hold".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+
+    worker.send(WorkerCommand::SubmitPromptWithAttachments {
+        prompt: "inspect".to_owned(),
+        attachments: vec![test_image_attachment()?],
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error)
+            if error == "image attachments cannot be queued; wait for the active run"
     ));
 
     worker.shutdown()?;

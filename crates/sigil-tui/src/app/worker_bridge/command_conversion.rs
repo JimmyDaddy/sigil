@@ -14,6 +14,14 @@ impl AppState {
                 prompt,
                 reasoning_effort: self.runtime.reasoning_effort.clone(),
             },
+            AppAction::SubmitPromptWithAttachments {
+                prompt,
+                attachments,
+            } => WorkerCommand::SubmitPromptWithAttachments {
+                prompt,
+                attachments,
+                reasoning_effort: self.runtime.reasoning_effort.clone(),
+            },
             AppAction::QueueConversationInput {
                 prompt,
                 kind,

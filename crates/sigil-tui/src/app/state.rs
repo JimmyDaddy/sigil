@@ -1,8 +1,8 @@
 use std::{cell::RefCell, collections::BTreeMap};
 
 use sigil_kernel::{
-    ConversationInputQueueId, ConversationInputQueuedEntry, ReasoningEffort, SessionLogEntry,
-    SessionStats,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ImageAttachment, ReasoningEffort,
+    SessionLogEntry, SessionStats,
 };
 use sigil_runtime::BalanceSnapshot;
 
@@ -71,6 +71,8 @@ pub(crate) struct ComposerState {
     pub(crate) input_history_draft: Option<String>,
     pub(crate) cleared_input_draft: Option<String>,
     pub(crate) input_kill_buffer: Option<String>,
+    pub(crate) image_attachments: Vec<ImageAttachment>,
+    pub(crate) selected_image_attachment: Option<usize>,
 }
 
 impl Default for ComposerState {
@@ -93,6 +95,8 @@ impl Default for ComposerState {
             input_history_draft: None,
             cleared_input_draft: None,
             input_kill_buffer: None,
+            image_attachments: Vec::new(),
+            selected_image_attachment: None,
         }
     }
 }

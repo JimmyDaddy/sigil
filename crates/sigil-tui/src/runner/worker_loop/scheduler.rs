@@ -1252,20 +1252,33 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             Ok(
                 command @ (WorkerCommand::SubmitPrompt { .. }
+                | WorkerCommand::SubmitPromptWithAttachments { .. }
                 | WorkerCommand::SubmitPlanPrompt { .. }),
             ) => {
-                let (prompt, reasoning_effort, plan_mode) = match command {
+                let (prompt, attachments, reasoning_effort, plan_mode) = match command {
                     WorkerCommand::SubmitPrompt {
                         prompt,
                         reasoning_effort,
-                    } => (prompt, reasoning_effort, false),
+                    } => (prompt, Vec::new(), reasoning_effort, false),
+                    WorkerCommand::SubmitPromptWithAttachments {
+                        prompt,
+                        attachments,
+                        reasoning_effort,
+                    } => (prompt, attachments, reasoning_effort, false),
                     WorkerCommand::SubmitPlanPrompt {
                         prompt,
                         reasoning_effort,
-                    } => (prompt, reasoning_effort, true),
+                    } => (prompt, Vec::new(), reasoning_effort, true),
                     _ => unreachable!("matched submit prompt commands above"),
                 };
                 if active_run.is_some() {
+                    if !attachments.is_empty() {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "image attachments cannot be queued; wait for the active run"
+                                .to_owned(),
+                        ));
+                        continue;
+                    }
                     let kind = if plan_mode {
                         ConversationInputKind::PlanPrompt
                     } else {
@@ -1295,7 +1308,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 };
 
-                let safe_started_prompt = sigil_kernel::safe_persistence_text(&prompt);
+                let safe_started_prompt = if prompt.is_empty() && !attachments.is_empty() {
+                    sigil_kernel::render_image_attachment_placeholders(&attachments)
+                } else {
+                    sigil_kernel::safe_persistence_text(&prompt)
+                };
                 let started = if plan_mode {
                     WorkerMessage::PlanRunStarted {
                         prompt: safe_started_prompt,
@@ -1363,6 +1380,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             Vec::new(),
                         )
                         .await
+                        .with_image_attachments(attachments)
                         .with_logical_run_id(provider_logical_run_id.clone())
                         .with_cancellation(cancellation_handle);
                         if let Some(tools) = plan_tools {

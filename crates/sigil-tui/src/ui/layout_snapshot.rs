@@ -205,7 +205,11 @@ impl LayoutSnapshot {
             egress_disclosure,
             composer: shell.composer,
             agent_panel: shell.agent_panel,
-            composer_input: composer_input_area(shell.composer, app.composer_input_rows()),
+            composer_input: composer_input_area(
+                shell.composer,
+                app.composer_input_rows(),
+                app.composer.image_attachments.len(),
+            ),
             footer: shell.footer,
             info_rail: shell.info_rail,
             verification_card: verification_card_area_for_app(live_content, app),

@@ -17,6 +17,7 @@ fn composer_highlights_known_slash_command_token() -> anyhow::Result<()> {
         reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: "/task fix typo".to_owned(),
         input_rows: 1,
         cursor_position: (14, 0),
@@ -66,6 +67,7 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
         reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: "/resume".to_owned(),
         input_rows: 1,
         cursor_position: (7, 0),
@@ -93,6 +95,45 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
 }
 
 #[test]
+fn composer_renders_selected_attachment_above_the_input() -> anyhow::Result<()> {
+    let view_model = ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "openai".to_owned(),
+        model_name: "gpt-5".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        agent_rows: Vec::new(),
+        agent_panel_focused: false,
+        image_attachments: vec![crate::view_model::ComposerAttachmentViewModel {
+            label: "image 1 · PNG · 640×480 · 12.0 KiB".to_owned(),
+            selected: true,
+        }],
+        input: "describe it".to_owned(),
+        input_rows: 1,
+        cursor_position: (11, 0),
+    };
+    let backend = TestBackend::new(88, 6);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_input(frame, frame.area(), &view_model))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("◆ image 1 · PNG · 640×480 · 12.0 KiB"));
+    assert!(rendered.contains("Backspace/Delete remove"));
+    assert_eq!(
+        composer_cursor_origin(ratatui::layout::Rect::new(0, 0, 88, 6), &view_model),
+        Some((3, 4))
+    );
+    Ok(())
+}
+
+#[test]
 fn agent_panel_line_pads_tail_with_panel_background() {
     let theme = Theme::default();
     let bg = theme.palette.surface_agent_panel;
@@ -116,6 +157,7 @@ fn composer_cursor_origin_scrolls_with_multiline_input() {
         reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: "one\ntwo\nthree\nfour".to_owned(),
         input_rows: 4,
         cursor_position: (2, 3),
@@ -137,6 +179,7 @@ fn composer_cursor_origin_returns_none_when_input_area_disappears() {
         reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
@@ -158,6 +201,7 @@ fn render_input_with_insufficient_height_skips_render_and_keeps_empty_area() -> 
         reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: "hello".to_owned(),
         input_rows: 1,
         cursor_position: (0, 0),
@@ -188,6 +232,7 @@ fn render_input_pads_unused_input_rows_with_input_background() -> anyhow::Result
         reasoning_effort_label: "max".to_owned(),
         agent_rows: Vec::new(),
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: "one".to_owned(),
         input_rows: 1,
         cursor_position: (3, 0),
@@ -226,6 +271,7 @@ fn render_composer_gutter_with_zero_height_does_not_panic() -> anyhow::Result<()
                 reasoning_effort_label: "max".to_owned(),
                 agent_rows: Vec::new(),
                 agent_panel_focused: false,
+                image_attachments: Vec::new(),
                 input: "".to_owned(),
                 input_rows: 1,
                 cursor_position: (0, 0),
@@ -254,6 +300,7 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
             muted: false,
         }],
         agent_panel_focused: true,
+        image_attachments: Vec::new(),
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
@@ -263,7 +310,7 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
     let theme = Theme::default();
 
     assert_eq!(
-        composer_input_area(Rect::new(0, 0, 2, 5), 1),
+        composer_input_area(Rect::new(0, 0, 2, 5), 1, 0),
         Rect::default()
     );
     assert_eq!(panel_separator_area(Rect::new(4, 2, 3, 5)), None);
@@ -329,6 +376,7 @@ fn render_agent_panel_shows_agent_rows() -> anyhow::Result<()> {
             },
         ],
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
@@ -385,6 +433,7 @@ fn render_agent_panel_omits_queue_rows_from_agent_surface() -> anyhow::Result<()
             },
         ],
         agent_panel_focused: false,
+        image_attachments: Vec::new(),
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
@@ -436,6 +485,7 @@ fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
             },
         ],
         agent_panel_focused: true,
+        image_attachments: Vec::new(),
         input: String::new(),
         input_rows: 1,
         cursor_position: (0, 0),
