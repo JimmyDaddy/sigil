@@ -1,7 +1,7 @@
 schema_version = 1
 id = "sandbox-denial"
 prompt_file = "prompt.txt"
-prompt_sha256 = "sha256:694ce35ea15c45eda804159a6e6dad169ed709ac96436502a4f7113f60be9952"
+prompt_sha256 = "sha256:b425614e10c5e7082fa68f01497336452cf798e78258330a332288e078abd746"
 allowed_tools = ["read_file", "write_file"]
 max_turns = 6
 max_output_tokens = 2048

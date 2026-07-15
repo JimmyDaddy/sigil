@@ -314,7 +314,10 @@ fn model_eval_verification_records_pass_then_durable_stale_mutation() {
     runtime.block_on(async {
         let fixture =
             load_model_eval_fixture(fixture_root("stale-after-write")).expect("load fixture");
-        let temp = tempdir().expect("temp dir");
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let ignored_target_root = repository_root.join("target");
+        fs::create_dir_all(&ignored_target_root).expect("create target root");
+        let temp = tempfile::tempdir_in(&ignored_target_root).expect("ignored temp dir");
         let run_root = temp.path().join("run");
         fs::create_dir(&run_root).expect("run root");
         let materialized = materialize_model_eval_fixture(&fixture, run_root.join("workspace"))

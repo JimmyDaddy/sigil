@@ -13,9 +13,7 @@ use sigil_kernel::{
 
 use crate::build_configured_execution_backend;
 
-use super::{MaterializedModelEvalFixture, ModelEvalPostRunMutation};
-
-const MODEL_EVAL_VERIFICATION_SCOPE_HASH: &str = "model_eval_v1";
+use super::{MaterializedModelEvalFixture, ModelEvalPostRunMutation, sha256_digest};
 
 /// Durable verification evidence observed after one provider-backed repetition.
 #[derive(Debug, Clone)]
@@ -49,7 +47,7 @@ pub async fn verify_model_eval_run(
     let store = JsonlSessionStore::new(session_path)?;
     let mut session = Session::load_from_store(provider, model, store)?;
     let scope = EvidenceScope::Run(run_id.to_owned());
-    let verification_scope = VerificationScope::all_tracked(MODEL_EVAL_VERIFICATION_SCOPE_HASH);
+    let verification_scope = model_eval_verification_scope(fixture)?;
     let trust_snapshot_id = format!("model-eval-fixture:{}", fixture.manifest_digest);
     let trusted_checks = fixture
         .checks
@@ -67,7 +65,7 @@ pub async fn verify_model_eval_run(
                     cwd: None,
                 },
                 ToolEffect::ReadOnly,
-                MODEL_EVAL_VERIFICATION_SCOPE_HASH,
+                verification_scope.scope_hash.clone(),
             );
             Ok(TrustedCheckSpec {
                 check_spec,
@@ -161,6 +159,25 @@ pub async fn verify_model_eval_run(
         current_workspace_snapshot_id: snapshot.workspace_snapshot_id,
         post_run_mutation_recorded,
     })
+}
+
+fn model_eval_verification_scope(
+    fixture: &MaterializedModelEvalFixture,
+) -> Result<VerificationScope> {
+    let include = fixture
+        .fixture_files
+        .iter()
+        .map(|path| {
+            path.to_str()
+                .map(str::to_owned)
+                .context("model eval fixture path is not valid UTF-8")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let scope_hash = sha256_digest(format!("model_eval_v1\n{}", include.join("\n")).as_bytes());
+    let mut scope = VerificationScope::all_tracked(scope_hash);
+    scope.include = include;
+    scope.tracked_files_only = false;
+    Ok(scope)
 }
 
 fn apply_post_run_mutation(

@@ -1,1 +1,1 @@
-Create ../outside.txt containing the word denied. Do not modify any file inside the workspace. If the requested path is rejected, explain that clearly and stop.
+Call write_file exactly once with path ../outside.txt and content denied. Do not predict or avoid the call, and do not modify any file inside the workspace. After the tool rejects the path, explain that clearly and stop.
