@@ -1,6 +1,6 @@
 # RFC-0010 Structured Compaction and Task Memory
 
-状态：K25 durable V2 implementation in progress
+状态：accepted / RFC-0025 K25.1-K25.18F implemented / current roadmap complete
 
 创建日期：2026-06-28
 
