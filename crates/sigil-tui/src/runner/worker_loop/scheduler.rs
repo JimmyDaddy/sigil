@@ -599,6 +599,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             let options = options.clone();
                             let tools = agent.tool_registry().specs();
                             let runtime_handle = runtime.handle().clone();
+                            let overflow_context_resolver = context_resolver.clone();
                             let preparation_agent = Arc::clone(&agent);
                             let source_logical_run_id = logical_run_id.to_owned();
                             let original_run_error = error.clone();
@@ -634,6 +635,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                                 tools,
                                                 source_physical_attempt_id.clone(),
                                                 preparation_agent.provider(),
+                                                &overflow_context_resolver,
                                             ))
                                             .map_err(|error| format!("{error:#}"))
                                     })();
@@ -709,6 +711,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
             let session_log_path = current_session_log_path.clone();
             let options = options.clone();
             let tools = agent.tool_registry().specs();
+            let runtime_handle = runtime.handle().clone();
+            let idle_context_resolver = context_resolver.clone();
             let mut state = idle_auto_compaction.clone();
             idle_auto_compaction.cancel_requested_run();
             compaction_preparation_tasks.start_idle(
@@ -735,6 +739,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         &session,
                         &options,
                         tools,
+                        &idle_context_resolver,
+                        &runtime_handle,
                     )
                     .map_err(|error| format!("{error:#}"))?;
                     Ok(IdleV2CompactionPreparation { state, preparation })
@@ -880,6 +886,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let exact_prompts = exact_conversation_prompts.clone();
                 let options = options.clone();
                 let tools = agent.tool_registry().specs();
+                let runtime_handle = runtime.handle().clone();
+                let queue_context_resolver = context_resolver.clone();
                 compaction_preparation_tasks.start_pre_turn(
                     &runtime,
                     request_id,
@@ -907,9 +915,6 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                     .to_owned(),
                             );
                         }
-                        let fallback_tools = tools.clone();
-                        let fallback_reasoning_effort = options.reasoning_effort.clone();
-                        let fallback_traffic_partition_key = options.traffic_partition_key.clone();
                         let admission = prepare_next_queued_conversation_pre_turn_admission(
                             &root_config,
                             &workspace_root,
@@ -920,28 +925,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             tools,
                             options.reasoning_effort.clone(),
                             options.traffic_partition_key.clone(),
+                            &queue_context_resolver,
+                            &runtime_handle,
                         )
                         .map_err(|error| format!("{error:#}"))?;
-                        let fallback = matches!(
-                            admission,
-                            QueuedConversationPreTurnAdmission::Blocked { .. }
-                        )
-                        .then(|| {
-                            prepare_next_queued_conversation_candidate(
-                                &session,
-                                &exact_prompts,
-                                &workspace_root,
-                                &options.memory_config,
-                                fallback_tools,
-                                fallback_reasoning_effort,
-                                fallback_traffic_partition_key,
-                            )
-                            .map(Box::new)
-                        });
                         Ok(PreTurnV2CompactionPreparation {
                             queue_id,
                             admission,
-                            fallback,
                         })
                     },
                 );
@@ -962,21 +952,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     None
                 }
                 Some(PreTurnV2CompactionPreparation {
-                    admission: QueuedConversationPreTurnAdmission::Blocked { queue_id, reason },
-                    fallback,
+                    admission:
+                        QueuedConversationPreTurnAdmission::Blocked {
+                            queue_id,
+                            reason,
+                            candidate,
+                        },
                     ..
-                }) => match fallback {
-                    Some(Ok(preparation))
-                        if matches!(
-                            preparation.as_ref(),
-                            QueuedConversationCandidatePreparation::Prepared(_)
-                        ) =>
-                    {
-                        let QueuedConversationCandidatePreparation::Prepared(candidate) =
-                            *preparation
-                        else {
-                            unreachable!("guarded queued preparation variant changed")
-                        };
+                }) => match candidate {
+                    Some(candidate) => {
                         let notice = format!(
                             "queued pre-turn compaction is unavailable ({reason}); dispatching the unchanged frozen request"
                         );
@@ -987,21 +971,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         last_queued_pre_turn_block = Some(block);
                         Some(*candidate)
                     }
-                    Some(Ok(preparation))
-                        if matches!(
-                            preparation.as_ref(),
-                            QueuedConversationCandidatePreparation::NoQueuedInput
-                        ) =>
-                    {
-                        last_queued_pre_turn_block = None;
-                        None
-                    }
-                    Some(Ok(preparation)) => {
-                        let QueuedConversationCandidatePreparation::Blocked { queue_id, reason } =
-                            *preparation
-                        else {
-                            unreachable!("guarded queued preparation variant changed")
-                        };
+                    None => {
                         let block = (queue_id, reason);
                         if last_queued_pre_turn_block.as_ref() != Some(&block) {
                             let _ = message_tx.send(WorkerMessage::Notice(format!(
@@ -1012,13 +982,6 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         last_queued_pre_turn_block = Some(block);
                         None
                     }
-                    Some(Err(error)) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                "queued fallback request could not be frozen; queued input was not sent: {error}"
-                            )));
-                        None
-                    }
-                    None => None,
                 },
                 Some(PreTurnV2CompactionPreparation {
                     admission: QueuedConversationPreTurnAdmission::ExactFit(admitted),
@@ -2495,6 +2458,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         let session_log_path = current_session_log_path.clone();
                         let options = options.clone();
                         let tools = agent.tool_registry().specs();
+                        let runtime_handle = runtime.handle().clone();
+                        let manual_context_resolver = context_resolver.clone();
                         compaction_preparation_tasks.start_manual(
                             &runtime,
                             request_id,
@@ -2520,6 +2485,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                     &session,
                                     &options,
                                     tools,
+                                    &manual_context_resolver,
+                                    &runtime_handle,
                                     preview,
                                 )
                                 .map_err(|error| format!("{error:#}"))?;

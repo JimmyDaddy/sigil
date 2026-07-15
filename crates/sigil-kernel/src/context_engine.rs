@@ -253,7 +253,7 @@ pub enum ContextPlacementMissingReason {
     RuntimePayloadNotRanked,
 }
 
-/// Stable provenance row for Context V0 audit, TUI summary, and quality evidence.
+/// Stable provenance row for context audit, TUI summary, and quality evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct ContextProvenanceRowV1 {
@@ -293,7 +293,7 @@ pub struct ContextProvenanceRowV1 {
 ///
 /// The kernel owns packing and validation, but it must not own repository scans, LSP startup, or
 /// plugin execution. Runtime layers provide already-screened candidates through this neutral
-/// container, preserving snippets for model-visible Context V0 rendering.
+/// container, preserving snippets for model-visible Context V1 rendering.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeContextCandidates {

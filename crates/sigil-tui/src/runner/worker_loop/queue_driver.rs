@@ -22,11 +22,13 @@ pub(in crate::runner) enum QueuedConversationTerminalClassification {
 /// The frozen request and capability registrations can carry exact user material. They are
 /// process-local only and must not be logged or persisted. The queue scheduler consumes this
 /// candidate behind the durable promotion and pre-send barriers.
+#[derive(Clone)]
 pub(in crate::runner) struct PreparedQueuedConversationCandidate {
     pub(in crate::runner) promotion: sigil_kernel::ConversationInputPromotedEntry,
     pub(in crate::runner) frozen_request: sigil_kernel::FrozenProviderRequestMaterial,
     pub(in crate::runner) reasoning_effort: Option<ReasoningEffort>,
     pub(in crate::runner) background_ready_context: Vec<ModelMessage>,
+    pub(in crate::runner) runtime_context: RuntimeContextCandidates,
     pub(in crate::runner) capability_registrations:
         Vec<sigil_kernel::UserUrlCapabilityRegistration>,
 }
@@ -119,6 +121,7 @@ pub(in crate::runner) enum QueuedConversationPressureAdmission {
     Blocked {
         queue_id: ConversationInputQueueId,
         reason: String,
+        candidate: Option<Box<PreparedQueuedConversationCandidate>>,
     },
 }
 
@@ -142,10 +145,15 @@ impl std::fmt::Debug for QueuedConversationPressureAdmission {
                 .field("input_tokens", input_tokens)
                 .field("budget", budget)
                 .finish(),
-            Self::Blocked { queue_id, reason } => formatter
+            Self::Blocked {
+                queue_id,
+                reason,
+                candidate,
+            } => formatter
                 .debug_struct("QueuedConversationPressureAdmission::Blocked")
                 .field("queue_id", queue_id)
                 .field("reason", reason)
+                .field("has_frozen_candidate", &candidate.is_some())
                 .finish(),
         }
     }
@@ -158,6 +166,7 @@ impl std::fmt::Debug for QueuedConversationPressureAdmission {
 /// their current transient-only plan semantics need their own durable promotion contract before
 /// they can use the chat pre-turn path.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(in crate::runner) fn prepare_next_queued_conversation_candidate(
     session: &Session,
     exact_prompts: &ExactConversationPromptStore,
@@ -176,6 +185,10 @@ pub(in crate::runner) fn prepare_next_queued_conversation_candidate(
         None,
         default_reasoning_effort,
         traffic_partition_key,
+        |query| {
+            sigil_runtime::context_candidates_from_safe_sources(workspace_root, query, None)
+                .unwrap_or_default()
+        },
     )
 }
 
@@ -184,7 +197,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_candidate(
 /// The reservation is only materialized in the frozen request. This helper performs no token
 /// proof, durable write, capability staging, or provider I/O.
 #[allow(clippy::too_many_arguments)]
-fn prepare_next_queued_conversation_candidate_with_target_max_tokens(
+fn prepare_next_queued_conversation_candidate_with_target_max_tokens<F>(
     session: &Session,
     exact_prompts: &ExactConversationPromptStore,
     workspace_root: &Path,
@@ -193,7 +206,11 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens(
     target_max_tokens: Option<u32>,
     default_reasoning_effort: Option<ReasoningEffort>,
     traffic_partition_key: Option<String>,
-) -> std::result::Result<QueuedConversationCandidatePreparation, String> {
+    resolve_runtime_context: F,
+) -> std::result::Result<QueuedConversationCandidatePreparation, String>
+where
+    F: FnOnce(&str) -> RuntimeContextCandidates,
+{
     let Some(durable_queue) = session
         .try_conversation_queue_durable_projection_from_durable()
         .map_err(|error| format!("failed to read durable conversation queue state: {error:#}"))?
@@ -316,9 +333,7 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens(
     let background_ready_context = queued_background_ready_transient_context(Some(session));
     let mut transient_messages = vec![exact_user_message];
     transient_messages.extend(background_ready_context.clone());
-    let runtime_context =
-        sigil_runtime::context_candidates_from_safe_sources(workspace_root, &exact_prompt, None)
-            .unwrap_or_default();
+    let runtime_context = resolve_runtime_context(&exact_prompt);
     let request = session
         .build_pre_turn_candidate_request(
             workspace_root,
@@ -329,7 +344,7 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens(
             session.latest_response_handle(session.provider_name()),
             traffic_partition_key,
             &transient_messages,
-            runtime_context,
+            runtime_context.clone(),
             &[],
         )
         .map_err(|error| format!("failed to build queued pre-turn candidate: {error:#}"))?;
@@ -343,6 +358,7 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens(
             frozen_request,
             reasoning_effort: queued.reasoning_effort,
             background_ready_context,
+            runtime_context,
             capability_registrations,
         },
     )))
@@ -355,6 +371,7 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens(
 /// Missing local proof or an unsupported profile returns a no-write block. This function does not
 /// start compaction; the portable-preflight branch owns that separately.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
     session: &Session,
     exact_prompts: &ExactConversationPromptStore,
@@ -365,6 +382,67 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
     traffic_partition_key: Option<String>,
     cache_root: &Path,
 ) -> std::result::Result<QueuedConversationPressureAdmission, String> {
+    prepare_next_queued_conversation_pressure_admission_with_context(
+        session,
+        exact_prompts,
+        workspace_root,
+        memory_config,
+        tools,
+        default_reasoning_effort,
+        traffic_partition_key,
+        cache_root,
+        |query| {
+            sigil_runtime::context_candidates_from_safe_sources(workspace_root, query, None)
+                .unwrap_or_default()
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission_with_resolver(
+    session: &Session,
+    exact_prompts: &ExactConversationPromptStore,
+    workspace_root: &Path,
+    memory_config: &MemoryConfig,
+    tools: Vec<sigil_kernel::ToolSpec>,
+    default_reasoning_effort: Option<ReasoningEffort>,
+    traffic_partition_key: Option<String>,
+    cache_root: &Path,
+    context_resolver: &sigil_runtime::RequestContextResolver,
+    runtime_handle: &tokio::runtime::Handle,
+) -> std::result::Result<QueuedConversationPressureAdmission, String> {
+    prepare_next_queued_conversation_pressure_admission_with_context(
+        session,
+        exact_prompts,
+        workspace_root,
+        memory_config,
+        tools,
+        default_reasoning_effort,
+        traffic_partition_key,
+        cache_root,
+        |query| {
+            runtime_handle
+                .block_on(context_resolver.resolve(query))
+                .unwrap_or_default()
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_next_queued_conversation_pressure_admission_with_context<F>(
+    session: &Session,
+    exact_prompts: &ExactConversationPromptStore,
+    workspace_root: &Path,
+    memory_config: &MemoryConfig,
+    tools: Vec<sigil_kernel::ToolSpec>,
+    default_reasoning_effort: Option<ReasoningEffort>,
+    traffic_partition_key: Option<String>,
+    cache_root: &Path,
+    resolve_runtime_context: F,
+) -> std::result::Result<QueuedConversationPressureAdmission, String>
+where
+    F: FnOnce(&str) -> RuntimeContextCandidates,
+{
     let profile_admitted = sigil_runtime::is_deepseek_v4_flash_portable_target_profile(
         session.provider_name(),
         session.model_name(),
@@ -380,13 +458,18 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
         target_max_tokens,
         default_reasoning_effort,
         traffic_partition_key,
+        resolve_runtime_context,
     )?;
     let candidate = match preparation {
         QueuedConversationCandidatePreparation::NoQueuedInput => {
             return Ok(QueuedConversationPressureAdmission::NoQueuedInput);
         }
         QueuedConversationCandidatePreparation::Blocked { queue_id, reason } => {
-            return Ok(QueuedConversationPressureAdmission::Blocked { queue_id, reason });
+            return Ok(QueuedConversationPressureAdmission::Blocked {
+                queue_id,
+                reason,
+                candidate: None,
+            });
         }
         QueuedConversationCandidatePreparation::Prepared(candidate) => candidate,
     };
@@ -395,6 +478,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
             queue_id: candidate.promotion.queue_id.clone(),
             reason: "queued pre-turn exact admission is unavailable for this provider/model"
                 .to_owned(),
+            candidate: Some(candidate),
         });
     }
 
@@ -409,6 +493,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
                 reason:
                     "queued pre-turn exact admission is unavailable from the local token profile"
                         .to_owned(),
+                candidate: Some(candidate),
             });
         }
     };

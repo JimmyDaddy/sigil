@@ -47,7 +47,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Headless automation | `sigil run` is useful for scripts but cannot show interactive approval modals. |
 | Local server | `sigil serve` starts an advanced local HTTP/SSE service with retained event replay and graceful shutdown. V1 is loopback-only, requires bearer auth for every route except health, and is not a remote or multi-user service. |
 | Execution sandbox | macOS, Linux, Docker, PTY, MCP stdio, and trusted plugin-hook paths have core coverage and receipts where supported, but coverage is not equivalent across all platforms and remote/container daemon scenarios. |
-| Context help | Sigil can use relevant session/task information and a small set of workspace files. Comprehensive automatic codebase analysis remains future work. |
+| Context help | New requests can include a bounded, request-local set of relevant Rust, Python, JavaScript/TypeScript, or Go snippets. Warm relevant LSP data is preferred; bundled Tree-sitter fallback remains ignore-, secret-, size-, and budget-limited. This is not a persistent semantic graph or full-repository index. |
 | Model quality reports | Internal automated checks exist, but repeatable end-user model comparisons and release trends are not a supported product feature yet. |
 
 ## Future Work

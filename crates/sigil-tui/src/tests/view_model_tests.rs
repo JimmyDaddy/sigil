@@ -458,12 +458,9 @@ fn context_provenance_summary_recommends_budget_adjustment_for_budget_only_exclu
     );
 }
 
-#[test]
-fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
-    let session_log_path = app.session_log_path.clone();
-    let payload = json!({
-        "schema": "sigil_context_v0",
+fn runtime_context_prefix_entries(schema: &str, header: &str) -> Vec<SessionLogEntry> {
+    let mut payload = json!({
+        "schema": schema,
         "placement": "dynamic_suffix",
         "budget": {
             "max_tokens": 64,
@@ -492,15 +489,18 @@ fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result
             ),
         ],
     });
+    if schema == "sigil_context_v1" {
+        payload["selection_policy"] = json!("warm_lsp_then_request_local_tree_sitter");
+    }
     let messages = json!([
         {
             "role": "system",
-            "content": format!("{RUNTIME_CONTEXT_V0_HEADER}{payload}"),
+            "content": format!("{header}{payload}"),
             "tool_calls": [],
         }
     ])
     .to_string();
-    let entries = vec![SessionLogEntry::Control(
+    vec![SessionLogEntry::Control(
         ControlEntry::PrefixSnapshotCaptured(sigil_kernel::PrefixSnapshot {
             materialized_text: format!("{messages}\n[]"),
             sha256: "sha-context".to_owned(),
@@ -510,7 +510,14 @@ fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result
             tool_schema_fingerprint: "tools".to_owned(),
             skill_index_fingerprint: "skills".to_owned(),
         }),
-    )];
+    )]
+}
+
+#[test]
+fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = runtime_context_prefix_entries("sigil_context_v0", RUNTIME_CONTEXT_V0_HEADER);
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
         session_log_path,
@@ -531,6 +538,29 @@ fn detail_info_rail_projects_runtime_context_v0_from_prefix_snapshot() -> Result
     app.toggle_info_rail_detail();
     let detail = UiViewModel::from_app(&app);
     let usage = detail.info_rail.usage_lines.join("\n");
+    assert!(usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
+    assert!(usage.contains("source: memory context · retrieval hit · 7 tokens"));
+    assert!(usage.contains("source: session archive · retrieval hit · 4 tokens"));
+    assert!(usage.contains("excluded: secret · 1 item(s)"));
+    assert!(usage.contains("action: review egress"));
+    Ok(())
+}
+
+#[test]
+fn detail_info_rail_projects_runtime_context_v1_from_prefix_snapshot() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = runtime_context_prefix_entries("sigil_context_v1", RUNTIME_CONTEXT_V1_HEADER);
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+    app.toggle_info_rail_detail();
+
+    let usage = UiViewModel::from_app(&app).info_rail.usage_lines.join("\n");
     assert!(usage.contains("context: 11 / 64 tokens · 2 included · 1 excluded"));
     assert!(usage.contains("source: memory context · retrieval hit · 7 tokens"));
     assert!(usage.contains("source: session archive · retrieval hit · 4 tokens"));

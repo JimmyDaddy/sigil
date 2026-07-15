@@ -220,6 +220,16 @@ For the official OpenAI Responses endpoint and exact supported snapshot, one pro
 
 ## Code Intelligence
 
+For new requests, Sigil can attach a small request-local set of relevant repository snippets. It
+uses an already-warm, query-relevant language-server snapshot when one is available; otherwise it
+falls back to bundled Tree-sitter adapters for Rust, Python, JavaScript/JSX,
+TypeScript/TSX, and Go. It does not start a language server just to assemble this context, build a
+persistent repository index, or download grammars at request time. Ignore rules, secret-like and
+generated paths, symlinks, file-size caps, and the final context budget still apply. The detailed
+info rail shows the latest included sources and exclusion reasons without exposing the raw prefix.
+Queued follow-ups and compaction preparation keep the context selected for their frozen request
+instead of silently selecting it again at dispatch time.
+
 Code intelligence is disabled by default. When enabled, Sigil registers code-query tools:
 
 - `code_symbols`
@@ -238,7 +248,9 @@ Language servers with the default `trust_required = true` start only after this 
 
 In the TUI, `Alt-D` can run diagnostics over git changed source files. Results appear as a normal activity and the LSP section of the info rail keeps a summary.
 
-If no LSP server is available, Rust projects can fall back to Tree-sitter Rust outline / syntax diagnostics. Failure does not block normal chat or tool calls.
+The separate `code_*` tool fallback for outline and syntax diagnostics remains Rust-specific when no
+LSP server is available. This is narrower than the multilingual automatic request context above.
+Failure does not block normal chat or tool calls.
 
 See [Sigil Configuration Guide](configuration.md) for configuration.
 

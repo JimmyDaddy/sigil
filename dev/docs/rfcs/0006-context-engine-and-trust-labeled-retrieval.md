@@ -113,6 +113,13 @@ Implementation progress:
 - 已完成 explicit-path precision polish：用户明确提到存在的 workspace-relative path 时，只注入该路径，不再被同名 README、RFC 或 lexical neighbor 干扰。
 - 已完成 source/symbol auto-context scheduling：对 Rust-like identifier、function/tool name、trait/type、runner handoff、TUI surface 和 source lookup prompt，runtime 会在 bounded `crates/**/*.rs` 范围内加入少量高置信源码候选；query term 会先分类为 intent hint、symbol-like、path-like、lexical hint 或 natural-language noise，显式反引号/引号包裹的单个代码 token 会优先保留为源码候选，避免把 `rust`、`source`、`which` 等自然语言或意图词当成 exact symbol evidence；exact symbol matches 标为 `exact_symbol_match`，source path/module matches 标为 `source_path_match`。
 
+2026-07-16 Context V1 更新：
+
+- [RFC-0032](0032-multilingual-repomap-context-v1.md) 把新请求 wire 升级为 `Sigil Context V1` / `sigil_context_v1`，同时保留 TUI 对旧 V0 durable prefix 的读取。
+- request-local RepoMap 已覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go，使用 ignore-aware bounded walk/read、编译期 grammar、deterministic cap 和 same-language unique-reference heuristic；不创建 persistent graph、vector index 或运行期下载。
+- production resolver 优先读取同一 code-intelligence service 的 query-relevant warm LSP cache；miss/disabled/timeout 才运行 Tree-sitter fallback。normal、plan、headless、queue 和 compaction preparation 使用同一选择契约，冻结后的 request 不在 dispatch 时重算。
+- ContextDigestV0、quality evidence schema 和历史 V0 fixture 名称仍是既有内部契约；它们不表示新 provider request 继续生成 V0 wire。
+
 2026-06-29 审计补充：
 
 - 当前实现是 V0 Context Engine：ContextDigestV0、session archive BM25、code-intel adapter、token budget packer、runtime repo-file provider、source/symbol auto-context scheduling、TUI provenance summary、deterministic context quality evidence pack 和 evidence sweep。

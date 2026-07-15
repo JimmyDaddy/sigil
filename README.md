@@ -74,6 +74,7 @@ sigil doctor
 - Lets trusted agent profiles be invoked directly with `@profile <prompt>` or trusted profile slash names.
 - Connects local stdio and user-root Streamable HTTP MCP servers under explicit trust, approval, and secret-egress policy.
 - Provides capability-backed `webfetch` and stable `websearch` routes with independent network policy, durable egress disclosure, and external-source provenance.
+- Adds a small, request-local set of relevant Rust, Python, JavaScript/TypeScript, or Go repository snippets while respecting ignore, secret, size, and context-budget limits.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 - Provides stable JSON/JSONL output for scripts and an advanced authenticated, loopback-only `sigil serve` interface for trusted local clients.
 - Manages saved sessions through explicit export, conversation fork, pin, exact delete review, and retention maintenance actions.

@@ -545,6 +545,7 @@ fn queued_pressure_candidate_binds_explicit_output_reservation_without_mutation(
         Some(sigil_runtime::deepseek_v4_flash_portable_target_output_tokens()),
         Some(ReasoningEffort::Low),
         None,
+        |_| RuntimeContextCandidates::default(),
     )
     .map_err(anyhow::Error::msg)?;
 
@@ -565,6 +566,83 @@ fn queued_pressure_candidate_binds_explicit_output_reservation_without_mutation(
     );
     assert_eq!(std::fs::read(store.path())?, before_stream);
     assert!(exact_prompts.contains_key(&candidate.promotion.queue_id));
+    Ok(())
+}
+
+#[test]
+fn queued_candidate_freezes_context_v1_for_the_exact_prompt_without_durable_leak() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        RAW_PROMPT.to_owned(),
+        ConversationInputKind::Chat,
+        ConversationInputTarget::MainThread,
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let session = session.expect("store-backed session should remain available");
+    let before_stream = std::fs::read(store.path())?;
+    let body = "export function queuedContextV1() { return true; }";
+    let item = sigil_kernel::ContextItem {
+        id: "repo-file:src/context.ts".to_owned(),
+        source: sigil_kernel::ContextSource::RepositoryFile,
+        source_event_id: None,
+        trust_level: sigil_kernel::ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: sigil_kernel::ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: Some("snapshot-queued".to_owned()),
+        token_cost: 12,
+        score: Some(100.0),
+        score_breakdown: Vec::new(),
+        inclusion_reason: sigil_kernel::ContextInclusionReason::RetrievalHit,
+        body_ref: sigil_kernel::ContextBodyRef::inline(body),
+    };
+    let mut expected_context = RuntimeContextCandidates::new();
+    expected_context
+        .snippets
+        .insert(item.id.clone(), body.to_owned());
+    expected_context.items.push(item);
+    let resolved_context = expected_context.clone();
+
+    let preparation = prepare_next_queued_conversation_candidate_with_target_max_tokens(
+        &session,
+        &exact_prompts,
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+        move |query| {
+            assert_eq!(query, RAW_PROMPT);
+            resolved_context
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    let QueuedConversationCandidatePreparation::Prepared(candidate) = preparation else {
+        panic!("queued chat should produce a frozen candidate");
+    };
+    assert_eq!(candidate.runtime_context, expected_context);
+    let request_text = candidate
+        .frozen_request
+        .request()
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("sigil_context_v1"));
+    assert!(request_text.contains("warm_lsp_then_request_local_tree_sitter"));
+    assert!(request_text.contains(body));
+    assert!(!format!("{candidate:?}").contains(body));
+    assert_eq!(std::fs::read(store.path())?, before_stream);
+    assert!(!String::from_utf8(before_stream)?.contains(body));
     Ok(())
 }
 
@@ -602,7 +680,11 @@ fn queued_pressure_admission_blocks_without_verified_local_tokenizer_without_mut
 
     assert!(matches!(
         admission,
-        QueuedConversationPressureAdmission::Blocked { ref reason, .. }
+        QueuedConversationPressureAdmission::Blocked {
+            ref reason,
+            candidate: Some(_),
+            ..
+        }
             if reason == "queued pre-turn exact admission is unavailable from the local token profile"
     ));
     assert_eq!(std::fs::read(store.path())?, before_stream);
@@ -646,7 +728,11 @@ fn queued_pressure_admission_blocks_unadmitted_profile_without_mutation() -> Res
 
     assert!(matches!(
         admission,
-        QueuedConversationPressureAdmission::Blocked { ref reason, .. }
+        QueuedConversationPressureAdmission::Blocked {
+            ref reason,
+            candidate: Some(_),
+            ..
+        }
             if reason == "queued pre-turn exact admission is unavailable for this provider/model"
     ));
     assert_eq!(std::fs::read(store.path())?, before_stream);

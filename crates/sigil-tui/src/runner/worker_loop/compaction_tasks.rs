@@ -8,7 +8,7 @@ use tokio::{runtime::Runtime, task::JoinHandle};
 
 use super::{
     IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction,
-    QueuedConversationCandidatePreparation, QueuedConversationPreTurnAdmission,
+    QueuedConversationPreTurnAdmission,
 };
 use crate::runner::V2CompactionReview;
 use sigil_kernel::ConversationInputQueueId;
@@ -26,8 +26,6 @@ pub(in crate::runner) struct IdleV2CompactionPreparation {
 pub(in crate::runner) struct PreTurnV2CompactionPreparation {
     pub(in crate::runner) queue_id: ConversationInputQueueId,
     pub(in crate::runner) admission: QueuedConversationPreTurnAdmission,
-    pub(in crate::runner) fallback:
-        Option<Result<Box<QueuedConversationCandidatePreparation>, String>>,
 }
 
 pub(in crate::runner) struct OverflowV2CompactionPreparation {

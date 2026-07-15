@@ -277,6 +277,7 @@ pub(in crate::runner) enum QueuedConversationPreTurnAdmission {
     Blocked {
         queue_id: sigil_kernel::ConversationInputQueueId,
         reason: String,
+        candidate: Option<Box<PreparedQueuedConversationCandidate>>,
     },
 }
 
@@ -294,10 +295,15 @@ impl std::fmt::Debug for QueuedConversationPreTurnAdmission {
                 .debug_tuple("QueuedConversationPreTurnAdmission::PortablePreflightReady")
                 .field(pending)
                 .finish(),
-            Self::Blocked { queue_id, reason } => formatter
+            Self::Blocked {
+                queue_id,
+                reason,
+                candidate,
+            } => formatter
                 .debug_struct("QueuedConversationPreTurnAdmission::Blocked")
                 .field("queue_id", queue_id)
                 .field("reason", reason)
+                .field("has_frozen_candidate", &candidate.is_some())
                 .finish(),
         }
     }
@@ -381,6 +387,7 @@ pub(in crate::runner) async fn prepare_overflow_recovery_compaction<P>(
     tools: Vec<sigil_kernel::ToolSpec>,
     source_physical_attempt_id: String,
     provider: &P,
+    context_resolver: &sigil_runtime::RequestContextResolver,
 ) -> Result<PendingV2Compaction>
 where
     P: sigil_kernel::Provider,
@@ -410,13 +417,14 @@ where
     let preview = session
         .v2_compaction_preview(effective_config.tail_messages)?
         .context("overflow recovery has no foldable V2 history")?;
+    let runtime_context = resolve_session_request_context(session, context_resolver).await;
     let target_input = PortableV2TargetRequestInput {
         tools,
         reasoning_effort: options.reasoning_effort.clone(),
         previous_response_handle: session.latest_response_handle(session.provider_name()),
         traffic_partition_key: options.traffic_partition_key.clone(),
         transient_messages: Vec::new(),
-        runtime_context: RuntimeContextCandidates::default(),
+        runtime_context,
     };
     prepare_portable_v2_compaction(
         request_id,
@@ -445,8 +453,12 @@ pub(in crate::runner) fn prepare_v2_compaction_review(
     session: &Session,
     options: &AgentRunOptions,
     tools: Vec<sigil_kernel::ToolSpec>,
+    context_resolver: &sigil_runtime::RequestContextResolver,
+    runtime_handle: &tokio::runtime::Handle,
     preview: V2CompactionPreview,
 ) -> Result<(V2CompactionReview, Option<PendingV2Compaction>)> {
+    let runtime_context =
+        runtime_handle.block_on(resolve_session_request_context(session, context_resolver));
     prepare_v2_compaction(
         request_id,
         CompactionInitiation::Manual,
@@ -456,6 +468,7 @@ pub(in crate::runner) fn prepare_v2_compaction_review(
         session,
         options,
         tools,
+        runtime_context,
         preview,
     )
 }
@@ -474,6 +487,8 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
     session: &Session,
     options: &AgentRunOptions,
     tools: Vec<sigil_kernel::ToolSpec>,
+    context_resolver: &sigil_runtime::RequestContextResolver,
+    runtime_handle: &tokio::runtime::Handle,
 ) -> Result<IdleAutoCompactionPreparation> {
     if !state.is_requested() {
         return Ok(IdleAutoCompactionPreparation::NotRequested);
@@ -511,6 +526,8 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         return Ok(IdleAutoCompactionPreparation::FailureLatched);
     }
 
+    let runtime_context =
+        runtime_handle.block_on(resolve_session_request_context(session, context_resolver));
     let (review, pending) = prepare_v2_compaction(
         0,
         CompactionInitiation::IdleAutomatic {
@@ -522,6 +539,7 @@ pub(in crate::runner) fn prepare_idle_auto_compaction(
         session,
         options,
         tools,
+        runtime_context,
         preview,
     )?;
     state.consume_request();
@@ -547,6 +565,7 @@ fn prepare_v2_compaction(
     session: &Session,
     options: &AgentRunOptions,
     tools: Vec<sigil_kernel::ToolSpec>,
+    runtime_context: RuntimeContextCandidates,
     preview: V2CompactionPreview,
 ) -> Result<(V2CompactionReview, Option<PendingV2Compaction>)> {
     let review = |admission| V2CompactionReview {
@@ -560,7 +579,7 @@ fn prepare_v2_compaction(
         previous_response_handle: session.latest_response_handle(session.provider_name()),
         traffic_partition_key: options.traffic_partition_key.clone(),
         transient_messages: Vec::new(),
-        runtime_context: RuntimeContextCandidates::default(),
+        runtime_context,
     };
     match prepare_portable_v2_compaction(
         request_id,
@@ -782,13 +801,15 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
     tools: Vec<sigil_kernel::ToolSpec>,
     default_reasoning_effort: Option<sigil_kernel::ReasoningEffort>,
     traffic_partition_key: Option<String>,
+    context_resolver: &sigil_runtime::RequestContextResolver,
+    runtime_handle: &tokio::runtime::Handle,
 ) -> Result<QueuedConversationPreTurnAdmission> {
     let paths = sigil_runtime::resolve_sigil_paths(
         &root_config.storage,
         &root_config.session,
         workspace_root,
     );
-    match super::prepare_next_queued_conversation_pressure_admission(
+    match super::prepare_next_queued_conversation_pressure_admission_with_resolver(
         session,
         exact_prompts,
         workspace_root,
@@ -797,6 +818,8 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
         default_reasoning_effort,
         traffic_partition_key,
         &paths.cache_root,
+        context_resolver,
+        runtime_handle,
     )
     .map_err(anyhow::Error::msg)?
     {
@@ -806,9 +829,15 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
         QueuedConversationPressureAdmission::ExactFit(candidate) => {
             Ok(QueuedConversationPreTurnAdmission::ExactFit(candidate))
         }
-        QueuedConversationPressureAdmission::Blocked { queue_id, reason } => {
-            Ok(QueuedConversationPreTurnAdmission::Blocked { queue_id, reason })
-        }
+        QueuedConversationPressureAdmission::Blocked {
+            queue_id,
+            reason,
+            candidate,
+        } => Ok(QueuedConversationPreTurnAdmission::Blocked {
+            queue_id,
+            reason,
+            candidate,
+        }),
         QueuedConversationPressureAdmission::PortablePreflightRequired { candidate, .. } => {
             let queue_id = candidate.promotion.queue_id.clone();
             let effective_config = sigil_runtime::effective_compaction_config(
@@ -820,8 +849,10 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
                 return Ok(QueuedConversationPreTurnAdmission::Blocked {
                     queue_id,
                     reason: "queued pre-turn portable compaction is disabled".to_owned(),
+                    candidate: Some(candidate),
                 });
             }
+            let fallback_candidate = candidate.clone();
             match prepare_queued_portable_preflight(
                 root_config,
                 workspace_root,
@@ -837,12 +868,14 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
                     queue_id,
                     reason: "queued pre-turn portable compaction has no foldable prior history"
                         .to_owned(),
+                    candidate: Some(fallback_candidate),
                 }),
                 Err(_) => Ok(QueuedConversationPreTurnAdmission::Blocked {
                     queue_id,
                     reason:
                         "queued pre-turn portable compaction is unavailable from the local target profile"
                             .to_owned(),
+                    candidate: Some(fallback_candidate),
                 }),
             }
         }
@@ -894,9 +927,7 @@ fn prepare_queued_portable_preflight(
         bail!("queued pre-turn candidate exact material no longer matches its promotion bind");
     }
 
-    let runtime_context =
-        sigil_runtime::context_candidates_from_safe_sources(workspace_root, exact_prompt, None)
-            .unwrap_or_default();
+    let runtime_context = candidate.runtime_context.clone();
     let direct_request = candidate.frozen_request.request();
     let mut transient_messages = vec![exact_user_message];
     transient_messages.extend(candidate.background_ready_context.clone());
@@ -928,6 +959,22 @@ fn prepare_queued_portable_preflight(
         candidate,
         pending_compaction,
     }))
+}
+
+async fn resolve_session_request_context(
+    session: &Session,
+    context_resolver: &sigil_runtime::RequestContextResolver,
+) -> RuntimeContextCandidates {
+    let query = session.messages().into_iter().rev().find_map(|message| {
+        matches!(message.role, sigil_kernel::MessageRole::User)
+            .then_some(message.content)
+            .flatten()
+            .filter(|content| !content.trim().is_empty())
+    });
+    match query {
+        Some(query) => context_resolver.resolve(&query).await.unwrap_or_default(),
+        None => RuntimeContextCandidates::default(),
+    }
 }
 
 pub(in crate::runner) fn has_failed_idle_automatic_scope(

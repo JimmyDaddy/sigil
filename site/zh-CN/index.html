@@ -282,8 +282,8 @@ sigil</code></pre>
             <p>日常工作保留在 TUI 中；脚本使用稳定 JSON 或 JSONL 输出，受信任的本机 client 通过带认证且仅允许 loopback 的服务接入。</p>
           </article>
           <article>
-            <h3>Session 与 context control</h3>
-            <p>显式 export、fork、pin 或删除已保存 session；用 <code>Ctrl-R</code> 受控恢复文件，用 <code>/compact</code> 执行经过检查的 context apply。</p>
+            <h3>Session 与相关上下文</h3>
+            <p>保持 session lifecycle 显式可控；Rust、Python、JavaScript/TypeScript 和 Go 的有界上下文继续遵守 ignore、secret、大小与 budget 限制。</p>
           </article>
         </div>
       </section>

@@ -199,6 +199,9 @@ fn queued_pre_turn_admission_blocks_without_local_proof_and_never_mutates_sessio
     .map_err(anyhow::Error::msg)?;
     let session = session.expect("store-backed session should remain available");
     let before_stream = std::fs::read(store.path())?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let context_resolver =
+        sigil_runtime::RequestContextResolver::request_local(temp.path().to_path_buf());
 
     let admission = prepare_next_queued_conversation_pre_turn_admission(
         &root_config,
@@ -210,11 +213,17 @@ fn queued_pre_turn_admission_blocks_without_local_proof_and_never_mutates_sessio
         Vec::new(),
         None,
         None,
+        &context_resolver,
+        runtime.handle(),
     )?;
 
     assert!(matches!(
         admission,
-        QueuedConversationPreTurnAdmission::Blocked { ref reason, .. }
+        QueuedConversationPreTurnAdmission::Blocked {
+            ref reason,
+            candidate: Some(_),
+            ..
+        }
             if reason == "queued pre-turn exact admission is unavailable from the local token profile"
     ));
     assert_eq!(std::fs::read(store.path())?, before_stream);

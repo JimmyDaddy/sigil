@@ -47,7 +47,7 @@
 | Headless automation | `sigil run` 可用于脚本，但不能展示交互 approval modal。 |
 | 本地服务 | `sigil serve` 会启动支持 retained event replay 和 graceful shutdown 的高级本机 HTTP/SSE 服务。V1 只允许 loopback，除 health 外所有 route 都要求 bearer auth；它不是远程或多用户服务。 |
 | Execution sandbox | macOS、Linux、Docker、PTY、MCP stdio 和受信任 plugin hook 路径在支持的平台上已有 core coverage 与 receipt，但不同平台、远端工具和容器/daemon 场景的覆盖并不等价。 |
-| 上下文帮助 | Sigil 可以使用相关的 session/task 信息和少量 workspace 文件；全面自动代码库分析仍是后续工作。 |
+| 上下文帮助 | 新请求可以包含少量有边界的相关 Rust、Python、JavaScript/TypeScript 或 Go 片段；已有且相关的 LSP 数据优先，否则使用内置 Tree-sitter fallback，并继续限制 ignore、secret、文件大小与 budget。它不是持久 semantic graph 或全仓索引。 |
 | 模型质量报告 | 已有内部自动化检查，但可重复的最终用户模型对比与 release 趋势还不是支持的产品功能。 |
 
 ## 未来工作

@@ -74,6 +74,7 @@ sigil doctor
 - 受信任的 agent profile 可通过 `@profile <prompt>` 或受信任的 profile slash name 直接调用。
 - 按显式 trust、approval 和 secret-egress policy 接入本地 stdio 与用户根 Streamable HTTP MCP server。
 - 提供 capability-backed `webfetch` 与 stable `websearch` route，并执行独立 network policy、durable egress disclosure 和 external-source provenance。
+- 每次请求可附带少量相关的 Rust、Python、JavaScript/TypeScript 或 Go 仓库片段，并继续遵守 ignore、secret、文件大小和 context budget 限制。
 - 可选开启 code intelligence，支持符号、引用、诊断、code action 和 rename preview。
 - 为脚本提供稳定 JSON/JSONL 输出，并为受信任本机 client 提供高级、带认证且仅允许 loopback 的 `sigil serve` 接口。
 - 通过显式 export、conversation fork、pin、精确 delete review 和 retention maintenance 管理已保存 session。

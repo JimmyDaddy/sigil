@@ -26,16 +26,17 @@ use sigil_kernel::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard,
-    SandboxProfileRequirement, SecretString, SequentialTaskOrchestrator, SequentialTaskRequest,
-    Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskRouteId, TaskRouteStatus,
-    TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId,
-    ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit,
-    UserUrlCapabilityRegistrar, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, build_workspace_snapshot,
-    default_user_config_dir, discover_candidate_checks_with_user_config, plan_draft_created_entry,
+    RuntimeContextCandidates, SandboxProfileRequirement, SecretString, SequentialTaskOrchestrator,
+    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode,
+    TaskChildSessionEntry, TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskRouteId,
+    TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepSpec, TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
+    TerminalTaskId, ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
+    ToolSubjectAudit, UserUrlCapabilityRegistrar, VerificationPolicy,
+    VerificationPolicyChangedEntry, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, build_workspace_snapshot, default_user_config_dir,
+    discover_candidate_checks_with_user_config, plan_draft_created_entry,
     plan_task_input_from_draft, plan_text_hash, plan_workspace_paths,
     rerun_task_verification_check, saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
@@ -101,16 +102,22 @@ pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;
 pub(in crate::runner) use provider_status::drain_provider_status_results;
 pub(in crate::runner) use queue_driver::{
     AdmittedQueuedConversationCandidate, ExactConversationPromptStore,
-    PreparedQueuedConversationCandidate, QueuedConversationCandidatePreparation,
-    QueuedConversationPressureAdmission, QueuedConversationTerminalClassification,
-    append_agent_result_continuation_status_and_notify,
+    PreparedQueuedConversationCandidate, QueuedConversationPressureAdmission,
+    QueuedConversationTerminalClassification, append_agent_result_continuation_status_and_notify,
     append_agent_result_continuation_status_entries, append_queue_failure_and_pause_and_notify,
     append_queue_status_and_notify, cancel_queued_conversation_input,
     classify_promoted_queued_conversation, commit_prepared_queued_conversation_candidate,
     edit_queued_conversation_input, mark_stale_dispatching_conversation_queue_items,
-    move_queued_conversation_input, prepare_next_queued_conversation_candidate,
-    prepare_next_queued_conversation_pressure_admission, promote_queued_conversation_input,
-    queue_conversation_input, send_conversation_queue_update, set_conversation_queue_paused,
+    move_queued_conversation_input,
+    prepare_next_queued_conversation_pressure_admission_with_resolver,
+    promote_queued_conversation_input, queue_conversation_input, send_conversation_queue_update,
+    set_conversation_queue_paused,
+};
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(in crate::runner) use queue_driver::{
+    QueuedConversationCandidatePreparation, prepare_next_queued_conversation_candidate,
+    prepare_next_queued_conversation_pressure_admission,
 };
 pub(in crate::runner) use scheduler::run_worker_loop;
 pub(in crate::runner) use session_lifecycle_runtime::{
