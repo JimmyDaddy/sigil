@@ -23,8 +23,9 @@ use crate::{
 use super::DeepSeekProvider;
 
 fn deepseek_provider(config: crate::DeepSeekProviderConfig) -> Result<DeepSeekProvider> {
-    let _guard = crate::test_env::lock();
-    DeepSeekProvider::new(config, ModelRequestTimeouts::default())
+    crate::test_env::with_clean_provider_env(|| {
+        DeepSeekProvider::new(config, ModelRequestTimeouts::default())
+    })
 }
 
 #[test]
@@ -857,8 +858,7 @@ async fn provider_bounds_and_redacts_non_success_response_body() -> Result<()> {
 #[tokio::test]
 async fn provider_times_out_while_reading_non_success_response_body() -> Result<()> {
     let server = spawn_hanging_error_body_server().await?;
-    let provider = {
-        let _guard = crate::test_env::lock();
+    let provider = crate::test_env::with_clean_provider_env(|| {
         DeepSeekProvider::new(
             crate::DeepSeekProviderConfig {
                 base_url: server.clone(),
@@ -875,8 +875,8 @@ async fn provider_times_out_while_reading_non_success_response_body() -> Result<
                 stream_idle_timeout: Duration::from_secs(1),
                 stream_total_timeout: None,
             },
-        )?
-    };
+        )
+    })?;
 
     let error = match provider
         .stream(simple_chat_request("deepseek-v4-flash"))

@@ -5,6 +5,8 @@ use sigil_runtime::DEFAULT_SETUP_API_KEY_ENV;
 
 #[test]
 fn setup_lines_include_startup_error_and_missing_auth_summary() {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let app = AppState::from_setup(
         Path::new("sigil.toml").to_path_buf(),
         Path::new(".").to_path_buf(),
@@ -333,6 +335,8 @@ fn setup_validation_and_builder_reject_empty_model_and_auth() {
 
 #[test]
 fn setup_screen_toggles_trust_and_opens_inline_field_modals() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let temp = tempdir()?;
     let config_path = temp.path().join("config").join("sigil.toml");
     let workspace_root = temp.path().join("workspace");

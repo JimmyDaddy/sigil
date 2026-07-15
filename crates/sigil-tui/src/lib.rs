@@ -8,6 +8,10 @@
 #[path = "tests/mcp_config_macros.rs"]
 mod mcp_config_macros;
 
+#[cfg(test)]
+#[path = "tests/test_env.rs"]
+pub(crate) mod test_env;
+
 pub(crate) mod agent_display;
 pub mod app;
 pub mod appearance_diagnostics;

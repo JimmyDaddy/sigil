@@ -1,12 +1,6 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    path::Path,
-    sync::{Mutex, OnceLock},
-};
+use std::{env, ffi::OsString, fs, path::Path};
 
 use anyhow::Result;
 use sigil_kernel::{
@@ -56,8 +50,6 @@ fn unavailable_configured_binding_remains_visible_without_a_bundled_fallback_cla
     assert!(binding.message.contains("unavailable:schemadrift"));
     assert!(binding.message.contains("raw MCP tool remains separate"));
 }
-
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn write_doctor_executable(workspace: &Path, stem: &str) -> Result<String> {
     let file_name = if cfg!(windows) {
@@ -228,6 +220,10 @@ api_key = "test-secret-key"
 fn doctor_explains_how_to_install_the_missing_deepseek_v4_tokenizer() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
+    let cache_root = workspace.join("empty-cache");
+    let cache_root = cache_root.to_string_lossy();
+    let _env_lock = crate::test_env::lock();
+    let _env_scope = EnvScope::set_many(&[(crate::SIGIL_CACHE_HOME_ENV, cache_root.as_ref())]);
     let config_path = workspace.join("sigil.toml");
     fs::write(
         &config_path,
@@ -260,6 +256,8 @@ api_key = "test-secret-key"
 fn doctor_reports_valid_config_without_leaking_plaintext_secret() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
+    let _env_lock = crate::test_env::lock();
+    let _env_scope = EnvScope::remove_many(&[SIGIL_API_KEY_ENV]);
     let mcp_command = write_doctor_executable(&workspace, "mcp-server")?;
     let rust_analyzer_command = write_doctor_executable(&workspace, "rust-analyzer")?;
     let config_path = workspace.join("sigil.toml");
@@ -1507,10 +1505,7 @@ root_markers = ["pyproject.toml"]
 
 #[test]
 fn doctor_terminal_check_reports_dumb_and_missing_term() {
-    let _env_lock = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock should not be poisoned");
+    let _env_lock = crate::test_env::lock();
 
     {
         let _env_scope = EnvScope::set_many(&[("TERM", "dumb")]);
@@ -1785,10 +1780,7 @@ fn terminal_environment_summary_covers_known_profiles_and_layers() {
 
 #[test]
 fn command_status_checks_path_and_relative_commands() -> Result<()> {
-    let _env_lock = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock should not be poisoned");
+    let _env_lock = crate::test_env::lock();
     let _env_scope = EnvScope::remove_many(&["PATH"]);
     let temp = tempdir()?;
     let workspace = temp.path();
@@ -1839,10 +1831,7 @@ fn command_status_checks_path_and_relative_commands() -> Result<()> {
 
 #[test]
 fn command_status_finds_pathless_commands_on_path() -> Result<()> {
-    let _env_lock = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock should not be poisoned");
+    let _env_lock = crate::test_env::lock();
     let temp = tempdir()?;
     let workspace = temp.path();
     let bin_dir = workspace.join("bin");
@@ -1875,7 +1864,7 @@ impl EnvScope {
         let mut saved = Vec::with_capacity(values.len());
         for (name, value) in values {
             saved.push((*name, env::var_os(name)));
-            // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+            // SAFETY: tests serialize process-wide env mutation with crate::test_env.
             unsafe { env::set_var(name, value) };
         }
         Self { saved }
@@ -1885,7 +1874,7 @@ impl EnvScope {
         let mut saved = Vec::with_capacity(names.len());
         for name in names {
             saved.push((*name, env::var_os(name)));
-            // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+            // SAFETY: tests serialize process-wide env mutation with crate::test_env.
             unsafe { env::remove_var(name) };
         }
         Self { saved }
@@ -1897,11 +1886,11 @@ impl Drop for EnvScope {
         for (name, value) in self.saved.drain(..).rev() {
             match value {
                 Some(value) => {
-                    // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+                    // SAFETY: tests serialize process-wide env mutation with crate::test_env.
                     unsafe { env::set_var(name, value) };
                 }
                 None => {
-                    // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+                    // SAFETY: tests serialize process-wide env mutation with crate::test_env.
                     unsafe { env::remove_var(name) };
                 }
             }

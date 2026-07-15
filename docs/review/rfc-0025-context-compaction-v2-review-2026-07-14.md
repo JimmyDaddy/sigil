@@ -323,3 +323,26 @@
 - K25.18C 已单独解除 `IdleAutomatic`：hard-threshold preparation 使用同一个 owner，worker 在结果返回后重新核对 session scope、active run、durable queue、agent continuation 与 manual review，executor 继续以 source CAS 拒绝 history drift。真实 tokenizer worker fixture 在 chat turn 返回后完成一次 idle apply；pre-turn 与 overflow 仍冻结。
 - K25.18D 已单独解除 `PreTurnPressure`：exact-fit、portable preflight 与 unchanged fallback 均在 owned task 中构造，所有 queue mutation 会取消 owner；结果返回后先核对 scope/next queue item，portable source CAS 成功后才进入独立 queue revision CAS 和 provider dispatch。真实 tokenizer 的 1.05M-token夹具验证了 compact → promotion → 单次 dispatch，stale queue revision 回归用例验证 promotion 前失败；overflow 仍冻结。
 - K25.18E 已单独解除 `OverflowRecovery`：仅 pinned 官方 OpenAI Responses snapshot 的精确、无 output/side-effect context rejection 可启动 owned preparation。被拒请求与压缩后 target 分别产生一组同步 `InputTokenMeasurement` start/completed terminal，portable source CAS 只放行这两组预绑定记录；exact before/after economics、target fit 与 rejection/session frontier 均通过后才进行一次 frozen retry，恢复 run 不再递归进入 overflow recovery。取消 owner 会抑制 stale result；已开始的 blocking remote count 仍完成 durable terminal，避免留下孤立 Started。
+
+## K25.18F 解除冻结完成与发布审计（2026-07-15）
+
+结论：K25.18A-E 的四个 staged initiator 已完成 release audit；RFC-0025 当前没有仍处于 `planned`、`ready` 或 `in_progress` 的可执行切片。全局的假 freeze 常量和永远返回 `false` 的分支已经删除，运行时只保留各 initiator 自身的 exact-proof、owner、frontier/CAS 与 fail-closed gate。
+
+审计中发现全量测试会继承开发机真实 provider 环境，导致“缺凭证”与启动时后台命令断言不确定。DeepSeek、runtime 与 TUI 测试现在通过各自 test-only 共享锁保存、清理并恢复 provider 环境；session tail-recovery fixture 也会等待后续 identity append，而不再把两个顺序写入之间的短暂窗口当成失败。它们不改变 production credential resolution 或 session recovery 语义。
+
+发布证据：
+
+- `./scripts/check-touched.sh --scope dirty --tier full`：通过；包含 `git diff --check`、`cargo fmt --all --check`、workspace `cargo check`、workspace `cargo test` 和 `cargo clippy --all-targets -- -D warnings`。该 gate 在调用 shell 仍设置真实 `SIGIL_API_KEY` 时通过。
+- `./scripts/coverage.sh`：通过；workspace region/function/line coverage 分别为 86.23% / 86.48% / 87.48%。
+- `cargo deny --offline check`：advisories、bans、licenses、sources 全部通过；duplicate dependency 仍按现有 warning policy 报告。
+- `cargo audit --no-fetch`：没有已知漏洞；`bincode` 与 `paste` 两个已登记的 unmaintained warning 保持可见。
+- 真实 `target/debug/sigil` PTY smoke：使用隔离的 state/cache/session 路径启动 TUI，确认 workspace trust 后键入 `/compact`；fresh session 正确显示 `0 durable message(s)`、raw tail `6` 和“增加完整轮次或降低 `compaction.tail_messages`”的下一步提示，Ctrl-C 正常退出并给出 resume 命令。该 smoke 未触发模型请求。
+- 已安装 checksum-pinned tokenizer 的 live fixtures：manual 连续三次 apply/reload、idle hard-threshold、1.05M-token pre-turn compact/promote/dispatch 均通过；overflow 的 exact rejection/count/economics/non-recursive retry 由离线协议 fixture 覆盖。
+- `./scripts/check-docs.sh` 与 Pages 的 structure、metadata、accessibility、table、artifact-link、repo-link 检查通过。组合 Pages gate 的 Chromium viewport 子进程仍复现本机已有的无输出挂起；它不影响本次 Rust/TUI 语义结论，也不被伪写成 viewport 已通过。
+
+明确保持 gated、不能从本次解除冻结推导为已完成的能力：
+
+- Anthropic/OpenAI provider-native candidate 的用户激活与 resume，需要独立的产品语义、provider 在线证据、恢复与回滚验收。
+- model switch continuation transfer，需要先决定 portable/native transfer 的用户语义和失败退路；当前 fresh session 行为不冒充 transfer。
+- session export rewrap、delete-time key destruction 与通用 retention，属于通用 session lifecycle RFC，不能夹带在 compaction release audit 中实现。
+- 任何新 provider/model/route/tokenizer binding 仍需要重新建立 exact hosted-parity evidence；现有 DeepSeek/OpenAI 窄路径不能泛化放行。

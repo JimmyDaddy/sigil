@@ -10,6 +10,8 @@ use super::*;
 
 #[test]
 fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     let mut config = test_config();

@@ -3630,6 +3630,8 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
 
 #[test]
 fn setup_save_requires_credentials() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let temp = tempdir()?;
     let config_path = temp.path().join("config").join("sigil.toml");
     let workspace_root = temp.path().join("workspace");

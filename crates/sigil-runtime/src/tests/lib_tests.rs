@@ -5,7 +5,7 @@ use std::{
     path::Path,
     process::Command,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -62,8 +62,6 @@ fn sandbox_execution_config(
     sandbox.container_image = container_image;
     sigil_kernel::ExecutionConfig::sandbox(sandbox)
 }
-
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn test_root_config(provider: &str) -> RootConfig {
     let model = match provider {
@@ -404,10 +402,7 @@ fn load_anthropic_and_gemini_config_read_provider_blocks() -> Result<()> {
 
 #[test]
 fn resolve_deepseek_api_key_uses_env_before_plaintext_config() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "env-key")]);
     let config = load_deepseek_config(&test_root_config("deepseek"))?;
 
@@ -423,10 +418,9 @@ fn resolve_deepseek_api_key_uses_env_before_plaintext_config() -> Result<()> {
 
 #[test]
 fn resolve_deepseek_api_key_ignores_deepseek_env_and_uses_config_fallback() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
+    let _base_scope =
+        EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "   "), ("DEEPSEEK_API_KEY", "   ")]);
     let config = load_deepseek_config(&test_root_config("deepseek"))?;
 
     {
@@ -444,10 +438,11 @@ fn resolve_deepseek_api_key_ignores_deepseek_env_and_uses_config_fallback() -> R
 
 #[test]
 fn resolve_openai_compat_api_key_prefers_env_session_then_config() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
+    let _base_scope = EnvScope::set_many(&[
+        (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
+        ("OPENAI_API_KEY", "   "),
+    ]);
     let config = load_openai_compat_config(&test_root_config("openai_compat"))?;
 
     {
@@ -486,10 +481,8 @@ fn resolve_openai_compat_api_key_prefers_env_session_then_config() -> Result<()>
 
 #[test]
 fn resolve_openai_responses_api_key_prefers_env_session_then_config() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
+    let _base_scope = EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "   ")]);
     let config = load_openai_responses_config(&test_root_config("openai_responses"))?;
 
     {
@@ -512,10 +505,14 @@ fn resolve_openai_responses_api_key_prefers_env_session_then_config() -> Result<
 
 #[test]
 fn resolve_anthropic_and_gemini_api_keys_prefer_env_session_then_config() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
+    let _base_scope = EnvScope::set_many(&[
+        (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
+        ("ANTHROPIC_API_KEY", "   "),
+        (SIGIL_GEMINI_API_KEY_ENV, "   "),
+        ("GEMINI_API_KEY", "   "),
+        ("GOOGLE_API_KEY", "   "),
+    ]);
     let anthropic = load_anthropic_config(&test_root_config("anthropic"))?;
     let gemini = load_gemini_config(&test_root_config("gemini"))?;
 
@@ -574,10 +571,7 @@ fn resolve_anthropic_and_gemini_api_keys_prefer_env_session_then_config() -> Res
 
 #[test]
 fn secret_redactor_for_root_config_redacts_resolved_api_key() {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "env-secret-key")]);
 
     let redactor = secret_redactor_for_root_config(&test_root_config("deepseek"));
@@ -590,10 +584,7 @@ fn secret_redactor_for_root_config_redacts_resolved_api_key() {
 
 #[test]
 fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_API_KEY_ENV, "openai-env-secret")]);
 
     let redactor = secret_redactor_for_root_config(&test_root_config("openai_compat"));
@@ -606,10 +597,7 @@ fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
 
 #[test]
 fn secret_redactor_for_root_config_redacts_openai_responses_api_key() {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "responses-env-secret")]);
 
     let redactor = secret_redactor_for_root_config(&test_root_config("openai_responses"));
@@ -622,10 +610,7 @@ fn secret_redactor_for_root_config_redacts_openai_responses_api_key() {
 
 #[test]
 fn secret_redactor_for_root_config_redacts_anthropic_and_gemini_api_keys() {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
         (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
         ("ANTHROPIC_API_KEY", "   "),
@@ -1078,10 +1063,7 @@ async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<
 
 #[test]
 fn resolve_deepseek_api_key_prefers_session_over_plaintext_and_skips_blank_values() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "   "), ("DEEPSEEK_API_KEY", "   ")]);
     let config = load_deepseek_config(&test_root_config("deepseek"))?;
 
@@ -3000,10 +2982,7 @@ async fn eager_remote_streamable_http_activates_real_transport_and_registers_too
     });
 
     let temp = tempfile::tempdir()?;
-    let _environment_guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("environment lock");
+    let _environment_guard = crate::test_env::lock();
     let proxy = format!("http://127.0.0.1:{proxy_port}");
     let _environment = EnvScope::set_owned(&[
         ("HTTP_PROXY", proxy.clone()),
@@ -3075,7 +3054,7 @@ impl EnvScope {
         let mut saved = Vec::with_capacity(values.len());
         for (name, value) in values {
             saved.push((*name, env::var_os(name)));
-            // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+            // SAFETY: tests serialize process-wide env mutation with crate::test_env.
             unsafe { env::set_var(name, value) };
         }
         Self { saved }
@@ -3085,7 +3064,7 @@ impl EnvScope {
         let mut saved = Vec::with_capacity(values.len());
         for (name, value) in values {
             saved.push((*name, env::var_os(name)));
-            // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+            // SAFETY: tests serialize process-wide env mutation with crate::test_env.
             unsafe { env::set_var(name, value) };
         }
         Self { saved }
@@ -3097,11 +3076,11 @@ impl Drop for EnvScope {
         for (name, value) in self.saved.drain(..).rev() {
             match value {
                 Some(value) => {
-                    // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+                    // SAFETY: tests serialize process-wide env mutation with crate::test_env.
                     unsafe { env::set_var(name, value) };
                 }
                 None => {
-                    // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+                    // SAFETY: tests serialize process-wide env mutation with crate::test_env.
                     unsafe { env::remove_var(name) };
                 }
             }

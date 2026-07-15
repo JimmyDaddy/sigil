@@ -648,6 +648,8 @@ fn tool_result_is_rendered_as_multiline_json_block() -> Result<()> {
 
 #[test]
 fn tool_result_card_redacts_configured_secret_from_display_payloads() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut config = test_config();
     config.providers.insert(
         "deepseek".to_owned(),

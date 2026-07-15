@@ -46,6 +46,10 @@ use tokio::process::Command;
 #[path = "tests/mcp_config_macros.rs"]
 mod mcp_config_macros;
 
+#[cfg(test)]
+#[path = "tests/test_env.rs"]
+pub(crate) mod test_env;
+
 mod mcp_registry; // local/MCP tool registry construction and activation.
 mod plugin_manifest_io; // bounded regular-file reads shared by discovery and activation.
 mod provider_factory; // provider construction, capabilities, and secrets.

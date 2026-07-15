@@ -518,6 +518,7 @@ fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::R
 #[test]
 fn process_app_action_queues_worker_command_until_runtime_is_ready() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let _ = app.drain_pending_worker_commands();
     let (worker_tx, command_rx) = mpsc::channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
@@ -712,6 +713,8 @@ fn send_worker_command_with_restart_reports_missing_runtime_config() -> Result<(
 
 #[test]
 fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (worker_tx, command_rx) = mpsc::channel();
     let (_message_tx, worker_rx) = mpsc::channel();
@@ -736,6 +739,8 @@ fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
 
 #[test]
 fn process_app_action_reports_disabled_osc52_clipboard() -> anyhow::Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut root_config = test_config();
     root_config.terminal.osc52_clipboard = false;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &root_config);
@@ -1157,6 +1162,8 @@ fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<(
 
 #[test]
 fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (old_runtime, old_commands) = fake_worker_runtime();
     let mut worker = Some(old_runtime);
@@ -1178,6 +1185,8 @@ fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
 
 #[test]
 fn process_app_action_restarts_worker_for_runtime_config_update() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (old_runtime, old_commands) = fake_worker_runtime();
     let mut worker = Some(old_runtime);
@@ -1237,6 +1246,8 @@ fn process_app_action_forwards_runtime_commands_to_worker() -> Result<()> {
 
 #[test]
 fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut app = AppState::from_setup(
         PathBuf::from("sigil.toml"),
         PathBuf::from("."),

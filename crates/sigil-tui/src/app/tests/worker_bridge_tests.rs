@@ -700,6 +700,7 @@ fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
 #[test]
 fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let _ = app.drain_pending_worker_commands();
     assert!(!app.poll_background_tasks());
     assert!(!app.has_pending_worker_commands());
 
@@ -752,6 +753,8 @@ fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()
 
 #[test]
 fn schedule_balance_refresh_handles_missing_config_and_auth() {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.config_snapshot = None;

@@ -40,15 +40,5 @@ pub use pricing::context_window_tokens as deepseek_context_window_tokens;
 pub use provider::DeepSeekProvider;
 
 #[cfg(test)]
-pub(crate) mod test_env {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    pub(crate) fn lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock poisoned")
-    }
-}
+#[path = "tests/test_env.rs"]
+pub(crate) mod test_env;

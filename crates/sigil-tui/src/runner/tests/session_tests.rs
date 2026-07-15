@@ -409,6 +409,12 @@ fn invalid_initial_session_log_is_tail_recovered() -> Result<()> {
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
     wait_for_tail_recovered_event(&session_log_path)?;
+    wait_for_session_entry(&session_log_path, |entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+        )
+    })?;
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(entries.iter().any(|entry| {
         matches!(
