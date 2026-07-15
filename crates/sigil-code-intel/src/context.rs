@@ -1,9 +1,12 @@
 use std::{
-    fs,
+    collections::BTreeMap,
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     ContextBodyRef, ContextEgressDecisionId, ContextInclusionReason, ContextItem, ContextItemId,
@@ -11,7 +14,9 @@ use sigil_kernel::{
     estimate_context_token_cost,
 };
 
-use crate::language::rust_document_symbols;
+use crate::repo_language::{
+    RepoDefinitionTag, RepoLanguage, extract_repo_tags, repo_language_for_path,
+};
 use crate::service::{CodeDiagnostic, CodeLocation, CodeRange, CodeSymbol};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -102,8 +107,10 @@ pub enum LspContextSnapshotStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoMapLite {
     pub repo_revision: Option<ContextRepoRevision>,
+    pub entries_walked: usize,
     pub files_scanned: usize,
     pub symbols: Vec<RepoSymbolRef>,
+    pub references: Vec<RepoReferenceRef>,
     pub source_files: Vec<RepoSourceFileRef>,
     pub edges: Vec<RepoMapEdge>,
 }
@@ -114,12 +121,14 @@ pub struct RepoSourceFileRef {
     pub language: String,
     pub token_cost_hint: usize,
     pub indexed_text: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSymbolRef {
     pub symbol_id: String,
     pub name: String,
+    pub language: String,
     pub kind: RepoSymbolKind,
     pub path: PathBuf,
     pub range: Option<CodeRange>,
@@ -127,9 +136,20 @@ pub struct RepoSymbolRef {
     pub token_cost_hint: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoReferenceRef {
+    pub name: String,
+    pub language: String,
+    pub path: PathBuf,
+    pub range: CodeRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RepoSymbolKind {
     Function,
+    Method,
+    Class,
+    Interface,
     Struct,
     Enum,
     Trait,
@@ -138,6 +158,7 @@ pub enum RepoSymbolKind {
     Static,
     Module,
     Impl,
+    Variable,
     Other,
 }
 
@@ -161,23 +182,36 @@ pub enum RepoMapEdgeKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoMapLiteOptions {
-    pub max_files_scanned: usize,
+    pub max_walked_entries: usize,
+    pub max_source_files: usize,
     pub max_index_bytes_per_file: usize,
+    pub max_definitions_per_file: usize,
+    pub max_references_per_file: usize,
+    pub max_definitions: usize,
+    pub max_references: usize,
+    pub max_edges: usize,
 }
 
 impl Default for RepoMapLiteOptions {
     fn default() -> Self {
         Self {
-            max_files_scanned: 640,
+            max_walked_entries: 4_096,
+            max_source_files: 640,
             max_index_bytes_per_file: 192 * 1024,
+            max_definitions_per_file: 128,
+            max_references_per_file: 256,
+            max_definitions: 8_192,
+            max_references: 16_384,
+            max_edges: 16_384,
         }
     }
 }
 
-/// Builds an in-memory Rust source map for one Context V0 collection pass.
+/// Builds an in-memory multilingual source map for one request-local context collection pass.
 ///
-/// This intentionally does not persist a repo graph. It scans bounded source roots, skips generated
-/// and local-development directories, and keeps indexed file text capped for request-local ranking.
+/// This intentionally does not persist a repo graph. It uses the repository's ignore rules, does
+/// not follow symlinks, caps both traversal and source parsing, and emits only same-language unique
+/// definition reference edges.
 ///
 /// # Errors
 ///
@@ -189,76 +223,113 @@ pub fn build_repo_map_lite(
     let workspace_root = workspace_root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", workspace_root.display()))?;
-    let max_files_scanned = options.max_files_scanned.max(1);
+    let max_walked_entries = options.max_walked_entries.max(1);
+    let max_source_files = options.max_source_files.max(1);
     let max_index_bytes = options.max_index_bytes_per_file.max(1);
+    let max_definitions_per_file = options.max_definitions_per_file.max(1);
+    let max_references_per_file = options.max_references_per_file.max(1);
+    let max_definitions = options.max_definitions.max(1);
+    let max_references = options.max_references.max(1);
+    let max_edges = options.max_edges.max(1);
     let mut map = RepoMapLite {
         repo_revision: None,
+        entries_walked: 0,
         files_scanned: 0,
         symbols: Vec::new(),
+        references: Vec::new(),
         source_files: Vec::new(),
         edges: Vec::new(),
     };
 
-    let mut stack = repo_map_scan_roots(&workspace_root);
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&path) else {
+    let filter_root = workspace_root.clone();
+    let mut walker = WalkBuilder::new(&workspace_root);
+    walker
+        .hidden(false)
+        .parents(true)
+        .ignore(true)
+        .git_global(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .sort_by_file_path(|left, right| left.cmp(right))
+        .filter_entry(move |entry| {
+            entry
+                .path()
+                .strip_prefix(&filter_root)
+                .map_or(true, |relative| !should_skip_repo_map_path(relative))
+        });
+
+    for result in walker.build() {
+        if map.entries_walked >= max_walked_entries || map.files_scanned >= max_source_files {
+            break;
+        }
+        map.entries_walked = map.entries_walked.saturating_add(1);
+        let Ok(entry) = result else {
             continue;
         };
-        let mut entries = entries.flatten().collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.path());
-        for entry in entries {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                if !should_skip_repo_map_dir(&path) {
-                    stack.push(path);
-                }
-                continue;
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() || file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.into_path();
+        let Ok(relative) = path.strip_prefix(&workspace_root) else {
+            continue;
+        };
+        if is_secret_like_repo_map_path(relative) {
+            continue;
+        }
+        let Some(language) = repo_language_for_path(relative) else {
+            continue;
+        };
+        map.files_scanned = map.files_scanned.saturating_add(1);
+        let Some(indexed) = read_repo_map_index(&path, max_index_bytes) else {
+            continue;
+        };
+        let relative = relative.to_path_buf();
+        let tags = extract_repo_tags(
+            language,
+            &workspace_root,
+            &path,
+            &indexed.text,
+            max_definitions_per_file,
+            max_references_per_file,
+        )
+        .with_context(|| format!("failed to extract RepoMap tags from {}", relative.display()))?;
+        map.source_files.push(RepoSourceFileRef {
+            path: relative.clone(),
+            language: language.as_str().to_owned(),
+            token_cost_hint: estimate_context_token_cost(&indexed.text),
+            indexed_text: indexed.text,
+            truncated: indexed.truncated,
+        });
+
+        for definition in tags.definitions {
+            if map.symbols.len() >= max_definitions {
+                break;
             }
-            if !file_type.is_file() || map.files_scanned >= max_files_scanned {
-                continue;
-            }
-            let Ok(relative) = path.strip_prefix(&workspace_root) else {
-                continue;
-            };
-            if should_skip_repo_map_path(relative) {
-                continue;
-            }
-            map.files_scanned = map.files_scanned.saturating_add(1);
-            if is_secret_like_repo_map_path(relative)
-                || relative
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    != Some("rs")
-            {
-                continue;
-            }
-            let Some(indexed_text) = read_repo_map_index(&path, max_index_bytes) else {
-                continue;
-            };
-            let relative = relative.to_path_buf();
-            map.source_files.push(RepoSourceFileRef {
-                path: relative.clone(),
-                language: "rust".to_owned(),
-                token_cost_hint: estimate_context_token_cost(&indexed_text),
-                indexed_text,
-            });
-            let symbols = rust_document_symbols(&workspace_root, &path, None, 128)
-                .unwrap_or_else(|_| Vec::new());
-            for symbol in symbols {
-                let symbol_ref = repo_symbol_ref(symbol);
+            let symbol_ref = repo_symbol_ref(language, &relative, definition);
+            if map.edges.len() < max_edges {
                 map.edges.push(RepoMapEdge {
                     from: symbol_ref.symbol_id.clone(),
                     to: format!("file:{}", symbol_ref.path.display()),
                     kind: RepoMapEdgeKind::DeclaredIn,
                 });
-                map.symbols.push(symbol_ref);
             }
+            map.symbols.push(symbol_ref);
         }
-        if map.files_scanned >= max_files_scanned {
-            break;
+        for reference in tags.references {
+            if map.references.len() >= max_references {
+                break;
+            }
+            map.references.push(RepoReferenceRef {
+                name: reference.name,
+                language: language.as_str().to_owned(),
+                path: relative.clone(),
+                range: reference.range,
+            });
         }
     }
 
@@ -270,11 +341,21 @@ pub fn build_repo_map_lite(
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| left.symbol_id.cmp(&right.symbol_id))
     });
+    map.references.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| code_range_key(&left.range).cmp(&code_range_key(&right.range)))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.language.cmp(&right.language))
+    });
+    append_unique_reference_edges(&mut map, max_edges);
     map.edges.sort_by(|left, right| {
         left.from
             .cmp(&right.from)
             .then_with(|| left.to.cmp(&right.to))
+            .then_with(|| repo_edge_kind_rank(left.kind).cmp(&repo_edge_kind_rank(right.kind)))
     });
+    map.edges.dedup();
     Ok(map)
 }
 
@@ -286,60 +367,87 @@ pub struct CodeContextBuilder {
     source_event_id: Option<EventId>,
 }
 
-fn repo_symbol_ref(symbol: CodeSymbol) -> RepoSymbolRef {
-    let path = PathBuf::from(symbol.path);
-    let kind = repo_symbol_kind(&symbol.kind);
-    let token_cost_hint = estimate_context_token_cost(&format!("{} {}", symbol.kind, symbol.name));
-    let symbol_id = format!("symbol:{}:{}", path.display(), symbol.name);
+fn repo_symbol_ref(
+    language: RepoLanguage,
+    path: &Path,
+    definition: RepoDefinitionTag,
+) -> RepoSymbolRef {
+    let token_cost_hint =
+        estimate_context_token_cost(&format!("{:?} {}", definition.kind, definition.name));
+    let symbol_id = format!(
+        "symbol:{}:{}:{}:{}:{}",
+        language.as_str(),
+        path.display(),
+        definition.name,
+        definition.range.start_line,
+        definition.range.start_character
+    );
     RepoSymbolRef {
         symbol_id,
-        name: symbol.name,
-        kind,
-        path,
-        range: Some(symbol.range),
+        name: definition.name,
+        language: language.as_str().to_owned(),
+        kind: definition.kind,
+        path: path.to_path_buf(),
+        range: Some(definition.range),
         visibility: None,
         token_cost_hint,
     }
 }
 
-fn repo_symbol_kind(kind: &str) -> RepoSymbolKind {
-    match kind {
-        "function" => RepoSymbolKind::Function,
-        "struct" => RepoSymbolKind::Struct,
-        "enum" => RepoSymbolKind::Enum,
-        "trait" => RepoSymbolKind::Trait,
-        "type" => RepoSymbolKind::Type,
-        "const" => RepoSymbolKind::Const,
-        "static" => RepoSymbolKind::Static,
-        "module" => RepoSymbolKind::Module,
-        "impl" => RepoSymbolKind::Impl,
-        _ => RepoSymbolKind::Other,
+fn append_unique_reference_edges(map: &mut RepoMapLite, max_edges: usize) {
+    let mut definitions = BTreeMap::<(String, String), Vec<String>>::new();
+    for symbol in &map.symbols {
+        definitions
+            .entry((symbol.language.clone(), symbol.name.clone()))
+            .or_default()
+            .push(symbol.symbol_id.clone());
+    }
+    for reference in &map.references {
+        if map.edges.len() >= max_edges {
+            break;
+        }
+        let Some(targets) = definitions.get(&(reference.language.clone(), reference.name.clone()))
+        else {
+            continue;
+        };
+        if let [target] = targets.as_slice() {
+            map.edges.push(RepoMapEdge {
+                from: format!("file:{}", reference.path.display()),
+                to: target.clone(),
+                kind: RepoMapEdgeKind::References,
+            });
+        }
     }
 }
 
-fn repo_map_scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
-    let crates_root = workspace_root.join("crates");
-    if crates_root.is_dir() {
-        vec![crates_root]
-    } else {
-        vec![workspace_root.to_path_buf()]
-    }
+struct RepoMapIndex {
+    text: String,
+    truncated: bool,
 }
 
-fn read_repo_map_index(path: &Path, max_bytes: usize) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    let indexed_len = bytes.len().min(max_bytes);
-    let indexed = &bytes[..indexed_len];
-    if indexed.contains(&0) {
+fn read_repo_map_index(path: &Path, max_bytes: usize) -> Option<RepoMapIndex> {
+    let file = File::open(path).ok()?;
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
+    file.take(read_limit).read_to_end(&mut bytes).ok()?;
+    if bytes.contains(&0) {
         return None;
     }
-    std::str::from_utf8(indexed).ok().map(str::to_owned)
-}
-
-fn should_skip_repo_map_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(is_skipped_repo_map_component)
+    let truncated = bytes.len() > max_bytes;
+    if truncated {
+        bytes.truncate(max_bytes);
+    }
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text.to_owned(),
+        Err(error) if error.error_len().is_none() => {
+            bytes.truncate(error.valid_up_to());
+            std::str::from_utf8(&bytes).ok()?.to_owned()
+        }
+        Err(_) => return None,
+    };
+    Some(RepoMapIndex { text, truncated })
 }
 
 fn should_skip_repo_map_path(relative: &Path) -> bool {
@@ -362,20 +470,52 @@ fn is_skipped_repo_map_component(name: &str) -> bool {
             | "dist"
             | "build"
             | "coverage"
+            | "vendor"
+            | "out"
+            | ".next"
+            | ".cache"
+            | ".mypy_cache"
             | ".pytest_cache"
+            | ".venv"
+            | "venv"
             | "__pycache__"
     )
 }
 
 fn is_secret_like_repo_map_path(relative: &Path) -> bool {
     let text = relative.to_string_lossy().to_lowercase();
-    text.ends_with(".env")
-        || text.contains("/.env")
+    let file_name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    file_name.starts_with(".env")
         || text.contains("id_rsa")
         || text.contains("id_ed25519")
         || text.contains("private_key")
         || text.ends_with(".pem")
         || text.ends_with(".key")
+}
+
+fn code_range_key(range: &CodeRange) -> (u64, u64, u64, u64) {
+    (
+        range.start_line,
+        range.start_character,
+        range.end_line,
+        range.end_character,
+    )
+}
+
+const fn repo_edge_kind_rank(kind: RepoMapEdgeKind) -> u8 {
+    match kind {
+        RepoMapEdgeKind::SameFile => 0,
+        RepoMapEdgeKind::SameModule => 1,
+        RepoMapEdgeKind::DeclaredIn => 2,
+        RepoMapEdgeKind::Imports => 3,
+        RepoMapEdgeKind::References => 4,
+        RepoMapEdgeKind::TestTarget => 5,
+        RepoMapEdgeKind::RecentlyChanged => 6,
+    }
 }
 
 impl Default for CodeContextBuilder {

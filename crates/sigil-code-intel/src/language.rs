@@ -14,8 +14,23 @@ pub fn rust_document_symbols(
 ) -> Result<Vec<CodeSymbol>> {
     let source =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    rust_document_symbols_from_source(workspace_root, path, &source, query, max_results)
+}
+
+/// Extracts Rust document symbols from caller-bounded UTF-8 source.
+///
+/// RepoMap callers use this entrypoint so they do not reopen or fully read a file after applying
+/// their request-local byte cap. Interactive code-intelligence requests continue to use
+/// [`rust_document_symbols`].
+pub(crate) fn rust_document_symbols_from_source(
+    workspace_root: &Path,
+    path: &Path,
+    source: &str,
+    query: Option<&str>,
+    max_results: usize,
+) -> Result<Vec<CodeSymbol>> {
     let mut parser = rust_parser()?;
-    let Some(tree) = parser.parse(&source, None) else {
+    let Some(tree) = parser.parse(source, None) else {
         return Ok(Vec::new());
     };
     let query = query.map(str::to_ascii_lowercase);

@@ -132,8 +132,9 @@ fn context_repo_map_lite_builds_rust_source_files_symbols_and_edges() {
     let map = build_repo_map_lite(
         temp.path(),
         RepoMapLiteOptions {
-            max_files_scanned: 16,
+            max_source_files: 16,
             max_index_bytes_per_file: 1024,
+            ..RepoMapLiteOptions::default()
         },
     )
     .expect("repo map should build");
@@ -147,6 +148,7 @@ fn context_repo_map_lite_builds_rust_source_files_symbols_and_edges() {
     assert!(map.symbols.iter().any(|symbol| {
         symbol.name == "RuntimeContextCandidates"
             && symbol.kind == RepoSymbolKind::Struct
+            && symbol.language == "rust"
             && symbol.path == std::path::Path::new("crates/sigil-runtime/src/context.rs")
             && symbol.range.is_some()
     }));
@@ -219,8 +221,9 @@ fn context_repo_map_lite_caps_index_text_per_file() {
     let map = build_repo_map_lite(
         temp.path(),
         RepoMapLiteOptions {
-            max_files_scanned: 16,
+            max_source_files: 16,
             max_index_bytes_per_file: 24,
+            ..RepoMapLiteOptions::default()
         },
     )
     .expect("repo map should build");
@@ -232,10 +235,11 @@ fn context_repo_map_lite_caps_index_text_per_file() {
 
     assert!(file.indexed_text.len() <= 24);
     assert!(file.indexed_text.contains("pub fn marker"));
+    assert!(file.truncated);
 }
 
 #[test]
-fn context_repo_map_lite_applies_scan_cap_before_rust_filter() {
+fn context_repo_map_lite_does_not_charge_unsupported_files_to_source_budget() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::create_dir_all(temp.path().join("crates/sigil-runtime/src")).expect("create source dir");
     fs::write(temp.path().join("crates/README.md"), "non-rust context\n")
@@ -249,13 +253,189 @@ fn context_repo_map_lite_applies_scan_cap_before_rust_filter() {
     let map = build_repo_map_lite(
         temp.path(),
         RepoMapLiteOptions {
-            max_files_scanned: 1,
+            max_source_files: 1,
             max_index_bytes_per_file: 1024,
+            ..RepoMapLiteOptions::default()
         },
     )
     .expect("repo map should build");
 
     assert_eq!(map.files_scanned, 1);
-    assert!(map.source_files.is_empty());
-    assert!(map.symbols.is_empty());
+    assert_eq!(map.source_files.len(), 1);
+    assert!(
+        map.symbols
+            .iter()
+            .any(|symbol| symbol.name == "should_not_be_scanned_after_cap")
+    );
+}
+
+#[test]
+fn context_repo_map_lite_builds_multilingual_unique_reference_edges() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixtures = [
+        (
+            "rust/lib.rs",
+            "pub fn rust_target() {}\nfn caller() { rust_target(); }\n",
+        ),
+        (
+            "python/main.py",
+            "def python_target():\n    pass\n\ndef caller():\n    python_target()\n",
+        ),
+        (
+            "web/main.ts",
+            "function ts_target(): void {}\nfunction caller(): void { ts_target(); }\n",
+        ),
+        (
+            "cmd/main.go",
+            "package main\nfunc goTarget() {}\nfunc caller() { goTarget() }\n",
+        ),
+    ];
+    for (relative, source) in fixtures {
+        let path = temp.path().join(relative);
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("create fixture dir");
+        fs::write(path, source).expect("write fixture");
+    }
+
+    let map = build_repo_map_lite(temp.path(), RepoMapLiteOptions::default())
+        .expect("multilingual repo map");
+    let languages = map
+        .source_files
+        .iter()
+        .map(|file| file.language.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        languages,
+        std::collections::BTreeSet::from(["go", "python", "rust", "typescript"])
+    );
+    for expected in ["rust_target", "python_target", "ts_target", "goTarget"] {
+        assert!(
+            map.symbols.iter().any(|symbol| symbol.name == expected),
+            "missing definition {expected}: {:?}",
+            map.symbols
+        );
+        assert!(
+            map.references
+                .iter()
+                .any(|reference| reference.name == expected),
+            "missing reference {expected}: {:?}",
+            map.references
+        );
+        assert!(
+            map.edges.iter().any(|edge| {
+                edge.kind == RepoMapEdgeKind::References
+                    && edge.to.contains(&format!(":{expected}:"))
+            }),
+            "missing unique reference edge {expected}: {:?}",
+            map.edges
+        );
+    }
+}
+
+#[test]
+fn context_repo_map_lite_omits_ambiguous_unresolved_and_cross_language_edges() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixtures = [
+        ("python/a.py", "def shared():\n    pass\n"),
+        ("python/b.py", "def shared():\n    pass\n"),
+        (
+            "python/c.py",
+            "def caller():\n    shared()\n    missing()\n",
+        ),
+        ("python/foreign.py", "def foreign():\n    pass\n"),
+        ("web/caller.js", "function caller() { foreign(); }\n"),
+    ];
+    for (relative, source) in fixtures {
+        let path = temp.path().join(relative);
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("create fixture dir");
+        fs::write(path, source).expect("write fixture");
+    }
+
+    let map = build_repo_map_lite(temp.path(), RepoMapLiteOptions::default())
+        .expect("ambiguous repo map");
+    let reference_edges = map
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == RepoMapEdgeKind::References)
+        .collect::<Vec<_>>();
+
+    assert!(
+        reference_edges
+            .iter()
+            .all(|edge| !edge.to.contains(":shared:"))
+    );
+    assert!(
+        reference_edges
+            .iter()
+            .all(|edge| !edge.to.contains(":missing:"))
+    );
+    assert!(
+        reference_edges
+            .iter()
+            .all(|edge| !edge.to.contains(":foreign:"))
+    );
+}
+
+#[test]
+fn context_repo_map_lite_respects_ignore_secret_symlink_and_walk_caps() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join(".gitignore"), "ignored.py\n").expect("write gitignore");
+    fs::write(temp.path().join("a.py"), "def visible():\n    pass\n").expect("write visible");
+    fs::write(temp.path().join("ignored.py"), "def ignored():\n    pass\n").expect("write ignored");
+    fs::write(temp.path().join(".env.py"), "def secret():\n    pass\n").expect("write secret");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+        fs::write(outside.path(), "def escaped():\n    pass\n").expect("write outside");
+        symlink(outside.path(), temp.path().join("linked.py")).expect("create symlink");
+
+        let map = build_repo_map_lite(temp.path(), RepoMapLiteOptions::default())
+            .expect("filtered repo map");
+        assert_eq!(
+            map.source_files
+                .iter()
+                .map(|file| file.path.as_path())
+                .collect::<Vec<_>>(),
+            vec![Path::new("a.py")]
+        );
+    }
+
+    let capped = build_repo_map_lite(
+        temp.path(),
+        RepoMapLiteOptions {
+            max_walked_entries: 2,
+            max_source_files: 8,
+            ..RepoMapLiteOptions::default()
+        },
+    )
+    .expect("walk-capped repo map");
+    assert_eq!(capped.entries_walked, 2);
+    assert!(capped.source_files.len() <= 1);
+}
+
+#[test]
+fn context_repo_map_lite_applies_global_caps_and_is_deterministic() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        temp.path().join("a.js"),
+        "function alpha() {}\nfunction beta() {}\nalpha();\nbeta();\n",
+    )
+    .expect("write javascript");
+    let options = RepoMapLiteOptions {
+        max_definitions: 1,
+        max_references: 1,
+        max_edges: 1,
+        ..RepoMapLiteOptions::default()
+    };
+
+    let first = build_repo_map_lite(temp.path(), options).expect("first repo map");
+    let second = build_repo_map_lite(temp.path(), options).expect("second repo map");
+
+    assert_eq!(first, second);
+    assert_eq!(first.symbols.len(), 1);
+    assert_eq!(first.references.len(), 1);
+    assert_eq!(first.edges.len(), 1);
 }

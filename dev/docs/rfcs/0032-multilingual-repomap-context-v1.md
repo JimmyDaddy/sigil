@@ -1,6 +1,6 @@
 # RFC-0032 Multilingual RepoMap / Context V1
 
-状态：accepted / R32.0 complete / implementation in progress
+状态：accepted / R32.0-R32.2 complete / implementation in progress
 
 创建日期：2026-07-16
 
@@ -142,3 +142,4 @@ git diff --check
 ## 13. Progress
 
 - R32.0 complete：互联网/竞品调研、language/admission/durable contract、commit/gate 边界已冻结；implementation 从 R32.1 开始。
+- R32.1-R32.2 complete：编译期 grammar adapter 覆盖 Rust、Python、JavaScript/JSX、TypeScript/TSX 和 Go；request-local RepoMap 已切换到 ignore-aware deterministic walker、bounded UTF-8 reader、硬上限和 same-language unique-reference heuristic。由于 adapter 在 R32.2 接入前没有 production consumer、无法独立通过 strict Clippy，两个相邻切片合并为同一个可独立通过 gate 的 semantic commit。

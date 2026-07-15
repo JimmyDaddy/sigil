@@ -1092,8 +1092,9 @@ fn collect_source_symbol_candidates(
     let Ok(repo_map) = sigil_code_intel::build_repo_map_lite(
         workspace_root,
         RepoMapLiteOptions {
-            max_files_scanned: SOURCE_CONTEXT_MAX_FILES_SCANNED,
+            max_source_files: SOURCE_CONTEXT_MAX_FILES_SCANNED,
             max_index_bytes_per_file: SOURCE_CONTEXT_MAX_INDEX_BYTES_PER_FILE,
+            ..RepoMapLiteOptions::default()
         },
     ) else {
         return;

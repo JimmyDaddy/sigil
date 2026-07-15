@@ -830,6 +830,43 @@ fn context_source_symbol_candidates_find_exact_rust_symbol() -> Result<()> {
 }
 
 #[test]
+fn context_source_symbol_candidates_find_python_and_typescript_symbols() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("services"))?;
+    fs::write(
+        temp.path().join("services/config.py"),
+        "def parse_configuration():\n    return {}\n",
+    )?;
+    fs::create_dir_all(temp.path().join("web"))?;
+    fs::write(
+        temp.path().join("web/session.ts"),
+        "export function buildSession(): void {}\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Where are parse_configuration and buildSession defined in source?",
+    )?;
+
+    for path in ["services/config.py", "web/session.ts"] {
+        let item = context
+            .items
+            .iter()
+            .find(|item| item.id == format!("repo-file:{path}"))
+            .unwrap_or_else(|| panic!("missing multilingual source candidate {path}"));
+        assert_eq!(
+            item.inclusion_reason,
+            ContextInclusionReason::ExactSymbolMatch
+        );
+        assert!(has_score_component(
+            item,
+            ContextScoreComponentKind::ExactSymbol
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn context_source_symbol_candidates_rank_source_paths_for_source_intent() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;
