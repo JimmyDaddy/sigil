@@ -66,6 +66,7 @@ pub mod egress_ordering;
 mod exa_text_v1;
 pub mod hosted_finalizer;
 mod hosted_web_search;
+pub mod machine_protocol;
 pub mod mcp_declaration;
 pub mod paths;
 pub mod plugins;

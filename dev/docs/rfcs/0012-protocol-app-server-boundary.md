@@ -1,6 +1,6 @@
 # RFC-0012 Protocol and App Server Boundary
 
-状态：draft / E12.1-E12.3 implemented / E12.4-E12.5 gated
+状态：draft / E12.1-E12.3 implemented / E12.4-E12.5 closure tracked by RFC-0026
 
 创建日期：2026-06-28
 
@@ -174,3 +174,11 @@ cargo test -p sigil-tui runner
 - Whether `sigil-protocol` should be a new crate before app-server is real.
 - Which TUI flow should migrate first to command/event bridge.
 - Whether OpenAPI should cover all commands in MVP or only session/run operations.
+
+## 12. Closure Track
+
+[RFC-0026 Stable Machine Protocol and Real Local Serve](0026-stable-machine-protocol-and-real-serve.md)
+负责收口剩余 product boundary：P26.1 已冻结 runtime-owned machine result/error/exit
+contract，并继续复用 kernel `PublicRunEvent`；P26.4A-P26.4C 将分别处理 command
+线性化、durable replay/production driver，以及真实 loopback listener。完成这些切片前，
+library-level registry/listener 仍不得被宣传为完整 app-server。

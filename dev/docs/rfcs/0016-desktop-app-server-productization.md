@@ -1,6 +1,6 @@
 # RFC-0016 Desktop and App Server Productization
 
-状态：draft / E16.1-E16.6 implemented / projection escalation gated
+状态：draft / E16.1-E16.6 implemented / production closure tracked by RFC-0026
 
 创建日期：2026-06-29
 
@@ -154,6 +154,14 @@ cargo test -p sigil-tui runner
 
 - Whether OpenAPI should cover all commands in MVP or only session/run/approval commands.
 - E16.7 何时由真实 desktop/server query pressure 触发 SQLite/materialized projection escalation。
+
+## 8.1 Production Closure Track
+
+[RFC-0026 Stable Machine Protocol and Real Local Serve](0026-stable-machine-protocol-and-real-serve.md)
+在不引入 SQLite 的前提下补齐 production closure。P26.4A 先修复并发 command
+de-duplication 与 foreground session lease；P26.4B 再接 production driver、durable replay、
+approval/cancel 与 disclosure；P26.4C 最后接 replay+live SSE、loopback bearer listener 和
+graceful drain。三片完成前，现有 E16 library proof 仍不等于可用的 `sigil serve`。
 
 ## 9. References
 
