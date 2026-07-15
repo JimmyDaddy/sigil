@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::ToolRegistryScope;
 
+mod campaign;
+pub use campaign::*;
+
 pub const MODEL_EVAL_FIXTURE_SCHEMA_VERSION: u16 = 1;
 pub const MODEL_EVAL_MAX_FILES: usize = 32;
 pub const MODEL_EVAL_MAX_TOTAL_SOURCE_BYTES: u64 = 1024 * 1024;
@@ -105,6 +108,8 @@ pub struct MaterializedModelEvalFixture {
     pub tree_digest: String,
     pub prompt: String,
     pub tool_scope: ToolRegistryScope,
+    pub max_turns: u32,
+    pub max_output_tokens: u32,
     pub checks: Vec<ModelEvalFixtureCheck>,
     pub expected_terminal: Vec<ModelEvalExpectedTerminal>,
     pub expected_verification: Vec<ModelEvalExpectedVerification>,
@@ -222,6 +227,8 @@ pub fn materialize_model_eval_fixture(
             fixture.manifest.allowed_tools.iter().cloned(),
             std::iter::empty::<String>(),
         ),
+        max_turns: fixture.manifest.max_turns,
+        max_output_tokens: fixture.manifest.max_output_tokens,
         checks: fixture.manifest.checks.clone(),
         expected_terminal: fixture.manifest.expected_terminal.clone(),
         expected_verification: fixture.manifest.expected_verification.clone(),

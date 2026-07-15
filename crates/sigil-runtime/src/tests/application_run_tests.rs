@@ -4,11 +4,13 @@ use std::sync::{
 };
 
 use anyhow::Result;
+use async_trait::async_trait;
 use sigil_kernel::{
     AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentRunTerminalReason, ApprovalHandler,
     AutoApproveHandler, JsonlSessionStore, PublicRunEvent, PublicRunEventKind,
-    RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session, ToolApproval,
-    ToolCall, ToolSpec,
+    RunCancellationOwner, RunCancellationTerminalOutcome, RunEvent, Session, Tool, ToolAccess,
+    ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
 };
 
 use super::{
@@ -16,9 +18,62 @@ use super::{
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
     ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, PublicApplicationEventBridge,
     application_run_input, application_terminal_projection, bind_application_session,
-    default_application_session_path, optional_eager_mcp_warning,
-    record_application_preparation_cancellation, validate_execution_contract,
+    constrain_application_tool_registry, default_application_session_path,
+    optional_eager_mcp_warning, record_application_preparation_cancellation,
+    validate_execution_contract,
 };
+
+struct NamedTool(&'static str);
+
+#[async_trait]
+impl Tool for NamedTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.0.to_owned(),
+            description: "application scope test tool".to_owned(),
+            input_schema: serde_json::json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.0,
+            "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[test]
+fn application_tool_scope_is_exact_and_rejects_unknown_names() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedTool("read_file")));
+    registry.register(Arc::new(NamedTool("bash")));
+    let scope =
+        ToolRegistryScope::from_names_and_prefixes(["read_file"], std::iter::empty::<&str>());
+    let scoped = constrain_application_tool_registry(registry.clone(), &scope)
+        .expect("known exact scope should apply");
+    assert!(scoped.spec_for("read_file").is_some());
+    assert!(scoped.spec_for("bash").is_none());
+
+    let unknown =
+        ToolRegistryScope::from_names_and_prefixes(["missing_tool"], std::iter::empty::<&str>());
+    let error = match constrain_application_tool_registry(registry, &unknown) {
+        Ok(_) => panic!("unknown tool scope must fail before dispatch"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("unknown tool"));
+}
 
 #[test]
 fn session_lease_rejects_overlapping_foreground_runs_and_releases_on_drop() -> Result<()> {

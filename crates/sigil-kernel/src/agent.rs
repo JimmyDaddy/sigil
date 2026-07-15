@@ -160,6 +160,7 @@ pub struct AgentRunInput {
     hosted_evidence_processor: Option<Arc<dyn crate::HostedEvidenceProcessor>>,
     hosted_turn_preparer: Option<Arc<dyn AgentHostedTurnPreparer>>,
     initial_frozen_provider_request: Option<FrozenProviderRequestMaterial>,
+    max_output_tokens: Option<u32>,
     suppressed_tool_names: Vec<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
 }
@@ -198,6 +199,7 @@ impl fmt::Debug for AgentRunInput {
                     .as_ref()
                     .map(|request| request.fingerprint()),
             )
+            .field("max_output_tokens", &self.max_output_tokens)
             .field("suppressed_tool_names", &self.suppressed_tool_names)
             .field(
                 "web_task_tree_budget",
@@ -234,6 +236,7 @@ impl AgentRunInput {
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
             initial_frozen_provider_request: None,
+            max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
         }
@@ -258,6 +261,7 @@ impl AgentRunInput {
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
             initial_frozen_provider_request: None,
+            max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
         }
@@ -281,6 +285,7 @@ impl AgentRunInput {
             hosted_evidence_processor: None,
             hosted_turn_preparer: None,
             initial_frozen_provider_request: None,
+            max_output_tokens: None,
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
         }
@@ -288,6 +293,13 @@ impl AgentRunInput {
 
     pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
         self.task_plan_update = Some(context);
+        self
+    }
+
+    /// Applies one provider-neutral output-token ceiling to every model turn in this run.
+    #[must_use]
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
         self
     }
 
@@ -878,6 +890,7 @@ where
             hosted_evidence_processor,
             hosted_turn_preparer,
             mut initial_frozen_provider_request,
+            max_output_tokens,
             suppressed_tool_names,
             web_task_tree_budget,
         } = input;
@@ -1071,10 +1084,11 @@ where
                 }
                 None => {
                     let mut request = session
-                        .build_request_with_transient_messages_context_and_overlays(
+                        .build_request_with_transient_messages_context_overlays_and_max_tokens(
                             &options.workspace_root,
                             &options.memory_config,
                             tool_specs,
+                            max_output_tokens,
                             options.reasoning_effort.clone(),
                             previous_response_handle.clone(),
                             options.traffic_partition_key.clone(),

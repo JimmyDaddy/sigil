@@ -385,6 +385,7 @@ impl HttpRunSupervisor {
             run_id: self.start.run.id.clone(),
             session_path: Some(PathBuf::from(&self.start.session.session_log_path)),
             interaction,
+            constraints: None,
         };
         let services = self.services.clone();
         let preparer = Arc::clone(&self.preparer);

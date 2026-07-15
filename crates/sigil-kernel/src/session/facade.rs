@@ -968,6 +968,35 @@ impl Session {
         runtime_context: RuntimeContextCandidates,
         overlays: &[crate::TransientMessageOverlay],
     ) -> Result<CompletionRequest> {
+        self.build_request_with_transient_messages_context_overlays_and_max_tokens(
+            workspace_root,
+            memory_config,
+            tools,
+            None,
+            reasoning_effort,
+            previous_response_handle,
+            traffic_partition_key,
+            transient_messages,
+            runtime_context,
+            overlays,
+        )
+    }
+
+    /// Builds one ordinary provider request with an optional per-run output-token ceiling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_request_with_transient_messages_context_overlays_and_max_tokens(
+        &mut self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        tools: Vec<ToolSpec>,
+        max_output_tokens: Option<u32>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
+        overlays: &[crate::TransientMessageOverlay],
+    ) -> Result<CompletionRequest> {
         let session_projection = self.request_context_projection()?;
         let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
         let projected_messages = session_projection.model_messages();
@@ -981,7 +1010,7 @@ impl Session {
             projected_messages,
             context_message,
             tools,
-            None,
+            max_output_tokens,
             reasoning_effort,
             previous_response_handle,
             traffic_partition_key,

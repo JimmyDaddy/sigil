@@ -14,7 +14,8 @@ use sigil_kernel::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, Session,
-    WorkspaceTrust, resolve_workspace_root, safe_persistence_text, workspace_trust_from_entries,
+    ToolRegistryScope, WorkspaceTrust, resolve_workspace_root, safe_persistence_text,
+    workspace_trust_from_entries,
 };
 
 use crate::{
@@ -140,6 +141,19 @@ pub struct ApplicationRunRequest {
     pub session_path: Option<PathBuf>,
     /// Whether the adapter can provide explicit approvals after run start.
     pub interaction: ApplicationRunInteraction,
+    /// Optional adapter-owned hard constraints applied before provider dispatch.
+    pub constraints: Option<ApplicationRunConstraints>,
+}
+
+/// Provider-neutral hard constraints for one shared application run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationRunConstraints {
+    /// Maximum model turns for this run.
+    pub max_turns: usize,
+    /// Maximum output tokens sent on every provider request in this run.
+    pub max_output_tokens: u32,
+    /// Maximum tool surface visible to the provider and executable by the agent.
+    pub tool_scope: ToolRegistryScope,
 }
 
 impl ApplicationRunRequest {
@@ -158,7 +172,15 @@ impl ApplicationRunRequest {
             run_id: run_id.into(),
             session_path: None,
             interaction: ApplicationRunInteraction::NonInteractive,
+            constraints: None,
         }
+    }
+
+    /// Applies adapter-owned hard constraints without changing the persisted user configuration.
+    #[must_use]
+    pub fn with_constraints(mut self, constraints: ApplicationRunConstraints) -> Self {
+        self.constraints = Some(constraints);
+        self
     }
 }
 
@@ -729,6 +751,7 @@ pub async fn prepare_application_run(
         prompt,
         interaction,
         redactor,
+        tool_scope,
     } = prepared;
     let mut registry =
         build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission(
@@ -784,6 +807,10 @@ pub async fn prepare_application_run(
             }
             warnings.push(optional_eager_mcp_warning(&redactor, &server_name, &error));
         }
+    }
+    if let Some(scope) = tool_scope {
+        registry = constrain_application_tool_registry(registry, &scope)
+            .map_err(ApplicationRunPrepareError::execution)?;
     }
     let session_id = session.session_scope_id().to_owned();
     let events = ApplicationRunEventSequence::new(session_id.clone(), run_id.clone());
@@ -947,12 +974,22 @@ struct BlockingApplicationRunPreparation {
     prompt: String,
     interaction: ApplicationRunInteraction,
     redactor: sigil_kernel::SecretRedactor,
+    tool_scope: Option<ToolRegistryScope>,
 }
 
 fn prepare_application_run_blocking(
     request: ApplicationRunRequest,
     session_leases: Arc<ApplicationSessionLeaseManager>,
 ) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
+    if let Some(constraints) = request.constraints.as_ref()
+        && (constraints.max_turns == 0
+            || constraints.max_output_tokens == 0
+            || constraints.tool_scope.is_empty())
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "application run constraints must be non-zero and non-empty".to_owned(),
+        });
+    }
     let root_config = RootConfig::load(&request.config_path)
         .map_err(ApplicationRunPrepareError::configuration)?;
     let provider =
@@ -994,14 +1031,20 @@ fn prepare_application_run_blocking(
     let root_task_guard = cancellation_handle
         .register_task()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let options = crate::build_run_options(
+    let mut options = crate::build_run_options(
         &root_config,
         workspace_root.clone(),
         request.interaction.kernel_mode(),
     );
-    let input = application_run_input(&workspace_root, request.prompt.clone())
+    if let Some(constraints) = request.constraints.as_ref() {
+        options.max_turns = Some(constraints.max_turns);
+    }
+    let mut input = application_run_input(&workspace_root, request.prompt.clone())
         .with_logical_run_id(request.run_id.clone())
         .with_cancellation(cancellation_handle.clone());
+    if let Some(constraints) = request.constraints.as_ref() {
+        input = input.with_max_output_tokens(constraints.max_output_tokens);
+    }
     let redactor = secret_redactor_for_root_config(&root_config);
     Ok(BlockingApplicationRunPreparation {
         root_config,
@@ -1022,7 +1065,38 @@ fn prepare_application_run_blocking(
         prompt: request.prompt,
         interaction: request.interaction,
         redactor,
+        tool_scope: request
+            .constraints
+            .map(|constraints| constraints.tool_scope),
     })
+}
+
+fn constrain_application_tool_registry(
+    registry: sigil_kernel::ToolRegistry,
+    scope: &ToolRegistryScope,
+) -> Result<sigil_kernel::ToolRegistry> {
+    if scope.is_empty() {
+        bail!("application tool scope must not be empty");
+    }
+    for name in &scope.names {
+        if registry.spec_for(name).is_none() {
+            bail!("application tool scope contains unknown tool: {name}");
+        }
+    }
+    for prefix in &scope.prefixes {
+        if !registry
+            .specs()
+            .iter()
+            .any(|spec| spec.name.starts_with(prefix))
+        {
+            bail!("application tool scope contains unmatched prefix: {prefix}");
+        }
+    }
+    let scoped = registry.scoped(scope.clone()).into_registry();
+    if scoped.specs().is_empty() {
+        bail!("application tool scope produced an empty registry");
+    }
+    Ok(scoped)
 }
 
 fn load_application_session_with_workspace_trust(

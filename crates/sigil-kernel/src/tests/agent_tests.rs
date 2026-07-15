@@ -366,6 +366,46 @@ impl Provider for ToolSideEffectProvider {
     }
 }
 
+#[tokio::test]
+async fn agent_run_input_applies_output_token_ceiling_to_provider_request() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("bounded run").with_max_output_tokens(321),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Headless,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_tokens, Some(321));
+    Ok(())
+}
+
 #[async_trait]
 impl Provider for ForegroundTerminalProvider {
     fn name(&self) -> &str {

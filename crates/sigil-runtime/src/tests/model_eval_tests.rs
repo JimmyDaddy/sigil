@@ -1,8 +1,40 @@
-use std::{fs, path::Path};
+use std::{
+    env, fs,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use sigil_kernel::{
+    DisclosurePresentationError, DisclosurePresentationReceipt, EgressDisclosurePresenter,
+    PreEgressDisclosure,
+};
 use tempfile::tempdir;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 
-use crate::model_eval::{load_model_eval_fixture, materialize_model_eval_fixture};
+use crate::{
+    application_run::ApplicationRunServices,
+    model_eval::{
+        ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalRunExecutionStatus,
+        load_model_eval_fixture, materialize_model_eval_fixture, run_model_eval_campaign,
+        write_isolated_model_eval_config,
+    },
+};
+
+struct RejectingPresenter;
+
+#[async_trait::async_trait]
+impl EgressDisclosurePresenter for RejectingPresenter {
+    async fn present(
+        &self,
+        _disclosure: PreEgressDisclosure,
+    ) -> Result<DisclosurePresentationReceipt, DisclosurePresentationError> {
+        Err(DisclosurePresentationError::SinkClosed)
+    }
+}
 
 fn fixture_root(id: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -93,6 +125,109 @@ fn model_eval_materializer_refuses_existing_destination() {
     assert!(error.to_string().contains("already exists"));
 }
 
+#[test]
+fn isolated_model_eval_config_removes_secrets_and_external_surfaces() {
+    let fixture = load_model_eval_fixture(fixture_root("small-code-edit")).expect("load fixture");
+    let temp = tempdir().expect("temp dir");
+    let run_root = temp.path().join("run");
+    fs::create_dir(&run_root).expect("run root");
+    let materialized = materialize_model_eval_fixture(&fixture, run_root.join("workspace"))
+        .expect("materialize fixture");
+    let source_config = temp.path().join("source.toml");
+    write_source_config(&source_config, "http://127.0.0.1:9", "auto-edit");
+
+    let isolated = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
+        .expect("write isolated config");
+    let rendered = fs::read_to_string(&isolated.config_path).expect("read isolated config");
+
+    assert!(!rendered.contains("inline-secret-must-not-copy"));
+    assert!(!rendered.to_ascii_lowercase().contains("api_key"));
+    assert!(rendered.contains("enabled = false"));
+    assert!(rendered.contains(&materialized.workspace_root.display().to_string()));
+    assert!(isolated.session_path.starts_with(&run_root));
+}
+
+#[test]
+fn isolated_model_eval_config_requires_noninteractive_write_permission() {
+    let fixture = load_model_eval_fixture(fixture_root("small-doc-edit")).expect("load fixture");
+    let temp = tempdir().expect("temp dir");
+    let run_root = temp.path().join("run");
+    fs::create_dir(&run_root).expect("run root");
+    let materialized = materialize_model_eval_fixture(&fixture, run_root.join("workspace"))
+        .expect("materialize fixture");
+    let source_config = temp.path().join("source.toml");
+    write_source_config(&source_config, "http://127.0.0.1:9", "manual");
+
+    let error = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
+        .expect_err("manual config without exact tool grants must fail");
+    assert!(error.to_string().contains("controlled workspace edits"));
+}
+
+#[test]
+fn model_eval_campaign_uses_production_run_constraints_and_budget() {
+    let _env_lock = crate::test_env::lock();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_deepseek_eval_server(Arc::clone(&requests))
+            .await
+            .expect("spawn server");
+        let _api_key = EnvironmentGuard::set("SIGIL_API_KEY", "model-eval-test-key");
+        let _base_url = EnvironmentGuard::set("SIGIL_BASE_URL", &base_url);
+        let _beta_url = EnvironmentGuard::set("SIGIL_BETA_BASE_URL", &base_url);
+        let _anthropic_url = EnvironmentGuard::set("SIGIL_ANTHROPIC_BASE_URL", &base_url);
+        let temp = tempdir().expect("temp dir");
+        let config_path = temp.path().join("source.toml");
+        write_source_config(&config_path, &base_url, "auto-edit");
+        let services = ApplicationRunServices::new(Arc::new(RejectingPresenter));
+
+        let campaign = run_model_eval_campaign(
+            ModelEvalCampaignRequest {
+                config_path,
+                fixture_roots: vec![fixture_root("small-code-edit")],
+                repetitions: 2,
+                max_cost_microusd: 500_000,
+                campaign_timeout: Duration::from_secs(10),
+                output_dir: temp.path().join("campaign"),
+            },
+            &services,
+        )
+        .await
+        .expect("run campaign");
+
+        assert_eq!(campaign.planned_runs, 2);
+        assert_eq!(campaign.runs.len(), 2);
+        assert_eq!(
+            campaign.runs[0].status,
+            ModelEvalRunExecutionStatus::Completed
+        );
+        assert_eq!(
+            campaign.runs[0].cost_confidence,
+            ModelEvalCostConfidence::Reported
+        );
+        assert_eq!(
+            campaign.runs[1].status,
+            ModelEvalRunExecutionStatus::BudgetSkipped
+        );
+        assert!(campaign.runs[0].session_path.is_file());
+        let request = requests
+            .lock()
+            .expect("requests lock")
+            .first()
+            .cloned()
+            .expect("provider request");
+        assert!(request.contains(r#""max_tokens":4096"#));
+        assert!(request.contains(r#""name":"read_file""#));
+        assert!(request.contains(r#""name":"edit_file""#));
+        assert!(!request.contains(r#""name":"bash""#));
+        assert!(!request.contains("websearch"));
+        assert_eq!(requests.lock().expect("requests lock").len(), 1);
+    });
+}
+
 fn copy_directory(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).expect("read fixture directory") {
         let entry = entry.expect("fixture entry");
@@ -102,6 +237,114 @@ fn copy_directory(source: &Path, destination: &Path) {
             copy_directory(&entry.path(), &target);
         } else {
             fs::copy(entry.path(), &target).expect("copy file");
+        }
+    }
+}
+
+fn write_source_config(path: &Path, base_url: &str, permission_mode: &str) {
+    fs::write(
+        path,
+        format!(
+            r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+max_turns = 12
+
+[permission]
+mode = "{permission_mode}"
+
+[providers.deepseek]
+base_url = "{base_url}"
+beta_base_url = "{base_url}"
+anthropic_base_url = "{base_url}"
+api_key = "inline-secret-must-not-copy"
+"#
+        ),
+    )
+    .expect("write source config");
+}
+
+async fn spawn_deepseek_eval_server(requests: Arc<Mutex<Vec<String>>>) -> anyhow::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let count = socket.read(&mut chunk).await.unwrap_or_default();
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            if http_request_is_complete(&bytes) || bytes.len() >= 64 * 1024 {
+                break;
+            }
+        }
+        requests
+            .lock()
+            .expect("requests lock")
+            .push(String::from_utf8_lossy(&bytes).into_owned());
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":10000000,\"completion_tokens\":2,",
+            "\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":10000000}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+    Ok(format!("http://{address}"))
+}
+
+fn http_request_is_complete(bytes: &[u8]) -> bool {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    content_length.is_some_and(|length| bytes.len() >= header_end + 4 + length)
+}
+
+struct EnvironmentGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvironmentGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = env::var_os(name);
+        // SAFETY: runtime tests serialize environment mutation through `test_env::lock`.
+        unsafe { env::set_var(name, value) };
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvironmentGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => {
+                // SAFETY: the same serialized test guard is still held during drop.
+                unsafe { env::set_var(self.name, value) };
+            }
+            None => {
+                // SAFETY: the same serialized test guard is still held during drop.
+                unsafe { env::remove_var(self.name) };
+            }
         }
     }
 }
