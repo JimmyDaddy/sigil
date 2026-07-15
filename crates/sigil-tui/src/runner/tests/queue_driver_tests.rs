@@ -318,6 +318,75 @@ fn queued_candidate_commit_promotes_once_and_persists_only_safe_user_material() 
 }
 
 #[test]
+fn queued_candidate_commit_rejects_a_stale_queue_revision_before_promotion() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut current_session = Some(Session::new("test", "model").with_store(store.clone()));
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut current_session,
+        &mut exact_prompts,
+        "first safe queued prompt".to_owned(),
+        ConversationInputKind::Chat,
+        ConversationInputTarget::MainThread,
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let preparation = prepare_next_queued_conversation_candidate(
+        current_session
+            .as_ref()
+            .expect("queued fixture keeps a session"),
+        &exact_prompts,
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let QueuedConversationCandidatePreparation::Prepared(candidate) = preparation else {
+        panic!("first queued item should produce a candidate");
+    };
+
+    queue_conversation_input(
+        store.path(),
+        &mut current_session,
+        &mut exact_prompts,
+        "second safe queued prompt".to_owned(),
+        ConversationInputKind::Chat,
+        ConversationInputTarget::MainThread,
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let error = commit_prepared_queued_conversation_candidate(
+        store.path(),
+        current_session
+            .as_mut()
+            .expect("queued fixture keeps a session"),
+        *candidate,
+    )
+    .expect_err("a changed queue revision must reject the prepared candidate");
+    assert!(
+        error.contains("queue revision"),
+        "unexpected error: {error}"
+    );
+
+    let durable_json = std::fs::read_to_string(store.path())?;
+    assert!(!durable_json.contains("conversation_input_promoted"));
+    assert_eq!(
+        current_session
+            .as_ref()
+            .expect("queued fixture keeps a session")
+            .conversation_queue_projection()
+            .items
+            .len(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
 fn promoted_queue_without_provider_attempt_is_rejected_on_recovery() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

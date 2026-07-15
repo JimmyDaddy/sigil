@@ -20,12 +20,8 @@ pub(in crate::runner) enum QueuedConversationTerminalClassification {
 /// A no-write, exact request candidate for the next queued chat input.
 ///
 /// The frozen request and capability registrations can carry exact user material. They are
-/// process-local only and must not be logged or persisted. K25.15C is responsible for consuming
-/// this candidate behind the durable promotion and pre-send barriers.
-#[allow(
-    dead_code,
-    reason = "K25.15B1 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
+/// process-local only and must not be logged or persisted. The queue scheduler consumes this
+/// candidate behind the durable promotion and pre-send barriers.
 pub(in crate::runner) struct PreparedQueuedConversationCandidate {
     pub(in crate::runner) promotion: sigil_kernel::ConversationInputPromotedEntry,
     pub(in crate::runner) frozen_request: sigil_kernel::FrozenProviderRequestMaterial,
@@ -61,10 +57,6 @@ impl std::fmt::Debug for PreparedQueuedConversationCandidate {
 /// The proof carries the versioned provider/tokenizer profile plus the explicit output and safety
 /// budget. It is valid only for `candidate.frozen_request`; neither the request bytes nor the
 /// raw queued prompt enter the durable stream here.
-#[allow(
-    dead_code,
-    reason = "K25.15B2 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
 pub(in crate::runner) struct AdmittedQueuedConversationCandidate {
     pub(in crate::runner) candidate: PreparedQueuedConversationCandidate,
     pub(in crate::runner) token_binding: sigil_kernel::TokenMeasurementBinding,
@@ -83,10 +75,6 @@ impl std::fmt::Debug for AdmittedQueuedConversationCandidate {
 }
 
 /// Result of trying to materialize the next queued request without changing session state.
-#[allow(
-    dead_code,
-    reason = "K25.15B1 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
 pub(in crate::runner) enum QueuedConversationCandidatePreparation {
     NoQueuedInput,
     Prepared(Box<PreparedQueuedConversationCandidate>),
@@ -117,13 +105,9 @@ impl std::fmt::Debug for QueuedConversationCandidatePreparation {
 
 /// Result of the local pre-turn pressure admission for one queued conversation input.
 ///
-/// `ExactFit` binds the explicit output/safety reservation to the exact frozen request that
-/// K25.15C must either send or discard. `Blocked` is deliberately no-write and never guesses a
+/// `ExactFit` binds the explicit output/safety reservation to the exact frozen request that the
+/// queue scheduler must either send or discard. `Blocked` is deliberately no-write and never guesses a
 /// provider output default or downloads a tokenizer.
-#[allow(
-    dead_code,
-    reason = "K25.15B2 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
 pub(in crate::runner) enum QueuedConversationPressureAdmission {
     NoQueuedInput,
     ExactFit(Box<AdmittedQueuedConversationCandidate>),
@@ -174,10 +158,6 @@ impl std::fmt::Debug for QueuedConversationPressureAdmission {
 /// their current transient-only plan semantics need their own durable promotion contract before
 /// they can use the chat pre-turn path.
 #[allow(clippy::too_many_arguments)]
-#[allow(
-    dead_code,
-    reason = "K25.15B1 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
 pub(in crate::runner) fn prepare_next_queued_conversation_candidate(
     session: &Session,
     exact_prompts: &ExactConversationPromptStore,
@@ -373,12 +353,8 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens(
 /// Only the default DeepSeek V4 Flash profile is currently admitted because it is the only
 /// provider/model pair with a versioned exact tokenizer and explicit portable target budget.
 /// Missing local proof or an unsupported profile returns a no-write block. This function does not
-/// start compaction; K25.15B's portable-preflight branch owns that separately.
+/// start compaction; the portable-preflight branch owns that separately.
 #[allow(clippy::too_many_arguments)]
-#[allow(
-    dead_code,
-    reason = "K25.15B2 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
 pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
     session: &Session,
     exact_prompts: &ExactConversationPromptStore,

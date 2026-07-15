@@ -62,6 +62,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let mut pending_agent_result_continuations =
         pending_agent_result_continuations_from_session(current_session.as_ref());
     let mut last_queued_pre_turn_block: Option<(ConversationInputQueueId, String)> = None;
+    let mut pending_queued_pre_turn_preparation: Option<PreTurnV2CompactionPreparation> = None;
     let mut next_terminal_task_refresh_at = Instant::now();
     let session_entries = current_session
         .as_ref()
@@ -216,6 +217,46 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         Err(error) => {
                             let _ = message_tx.send(WorkerMessage::Notice(format!(
                                 "automatic compaction preflight was not applied: {error}"
+                            )));
+                        }
+                    }
+                }
+                CompactionPreparationTaskResult::PreTurn {
+                    request_id,
+                    session_scope_id,
+                    result,
+                } => {
+                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                        continue;
+                    }
+                    let Some(session) = current_session.as_ref() else {
+                        continue;
+                    };
+                    if active_run.is_some() || session.session_scope_id() != session_scope_id {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "discarded stale queued pre-turn preparation".to_owned(),
+                        ));
+                        continue;
+                    }
+                    match result {
+                        Ok(prepared)
+                            if session
+                                .conversation_queue_projection()
+                                .next_dispatchable
+                                .as_ref()
+                                == Some(&prepared.queue_id) =>
+                        {
+                            pending_queued_pre_turn_preparation = Some(*prepared);
+                        }
+                        Ok(_) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(
+                                "discarded queued pre-turn preparation after queue frontier changed"
+                                    .to_owned(),
+                            ));
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "queued pre-turn admission was not evaluated; queued input was not sent: {error}"
                             )));
                         }
                     }
@@ -729,80 +770,176 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }
 
         if active_run.is_none() {
-            let admission = current_session.as_ref().map(|session| {
-                prepare_next_queued_conversation_pre_turn_admission(
-                    &root_config,
-                    &workspace_root,
-                    &current_session_log_path,
-                    session,
-                    &exact_conversation_prompts,
-                    &options.memory_config,
-                    agent.tool_registry().specs(),
-                    options.reasoning_effort.clone(),
-                    options.traffic_partition_key.clone(),
-                )
-            });
-            let candidate = match admission {
-                None | Some(Ok(QueuedConversationPreTurnAdmission::NoQueuedInput)) => {
-                    last_queued_pre_turn_block = None;
-                    None
-                }
-                Some(Ok(QueuedConversationPreTurnAdmission::Blocked { queue_id, reason })) => {
-                    let fallback = current_session.as_ref().map(|session| {
-                        prepare_next_queued_conversation_candidate(
-                            session,
-                            &exact_conversation_prompts,
+            let next_queue_id = current_session
+                .as_ref()
+                .and_then(|session| session.conversation_queue_projection().next_dispatchable);
+            if pending_queued_pre_turn_preparation.is_none()
+                && !compaction_preparation_tasks.has_active()
+                && let Some(queue_id) = next_queue_id.clone()
+                && let Some(session) = current_session.as_ref()
+            {
+                let request_id = next_v2_compaction_request_id;
+                next_v2_compaction_request_id = next_v2_compaction_request_id.saturating_add(1);
+                let expected_session_scope_id = session.session_scope_id().to_owned();
+                let provider_name = session.provider_name().to_owned();
+                let model_name = session.model_name().to_owned();
+                let root_config = root_config.clone();
+                let workspace_root = workspace_root.clone();
+                let session_log_path = current_session_log_path.clone();
+                let exact_prompts = exact_conversation_prompts.clone();
+                let options = options.clone();
+                let tools = agent.tool_registry().specs();
+                compaction_preparation_tasks.start_pre_turn(
+                    &runtime,
+                    request_id,
+                    expected_session_scope_id.clone(),
+                    compaction_preparation_tx.clone(),
+                    move || {
+                        let store = JsonlSessionStore::new(&session_log_path)
+                            .map_err(|error| format!("{error:#}"))?;
+                        let session = Session::load_from_store(provider_name, model_name, store)
+                            .map_err(|error| format!("{error:#}"))?;
+                        if session.session_scope_id() != expected_session_scope_id {
+                            return Err(
+                                "queued pre-turn preparation loaded a different session scope"
+                                    .to_owned(),
+                            );
+                        }
+                        if session
+                            .conversation_queue_projection()
+                            .next_dispatchable
+                            .as_ref()
+                            != Some(&queue_id)
+                        {
+                            return Err(
+                                "queued pre-turn preparation loaded a different queue frontier"
+                                    .to_owned(),
+                            );
+                        }
+                        let fallback_tools = tools.clone();
+                        let fallback_reasoning_effort = options.reasoning_effort.clone();
+                        let fallback_traffic_partition_key = options.traffic_partition_key.clone();
+                        let admission = prepare_next_queued_conversation_pre_turn_admission(
+                            &root_config,
                             &workspace_root,
+                            &session_log_path,
+                            &session,
+                            &exact_prompts,
                             &options.memory_config,
-                            agent.tool_registry().specs(),
+                            tools,
                             options.reasoning_effort.clone(),
                             options.traffic_partition_key.clone(),
                         )
-                    });
-                    match fallback {
-                        Some(Ok(QueuedConversationCandidatePreparation::Prepared(candidate))) => {
-                            let notice = format!(
-                                "queued pre-turn compaction is unavailable ({reason}); dispatching the unchanged frozen request"
-                            );
-                            let block = (queue_id, notice.clone());
-                            if last_queued_pre_turn_block.as_ref() != Some(&block) {
-                                let _ = message_tx.send(WorkerMessage::Notice(notice));
-                            }
-                            last_queued_pre_turn_block = Some(block);
-                            Some(*candidate)
-                        }
-                        Some(Ok(QueuedConversationCandidatePreparation::NoQueuedInput)) => {
-                            last_queued_pre_turn_block = None;
-                            None
-                        }
-                        Some(Ok(QueuedConversationCandidatePreparation::Blocked {
+                        .map_err(|error| format!("{error:#}"))?;
+                        let fallback = matches!(
+                            admission,
+                            QueuedConversationPreTurnAdmission::Blocked { .. }
+                        )
+                        .then(|| {
+                            prepare_next_queued_conversation_candidate(
+                                &session,
+                                &exact_prompts,
+                                &workspace_root,
+                                &options.memory_config,
+                                fallback_tools,
+                                fallback_reasoning_effort,
+                                fallback_traffic_partition_key,
+                            )
+                            .map(Box::new)
+                        });
+                        Ok(PreTurnV2CompactionPreparation {
                             queue_id,
-                            reason,
-                        })) => {
-                            let block = (queue_id, reason);
-                            if last_queued_pre_turn_block.as_ref() != Some(&block) {
-                                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                    "queued follow-up is waiting for a local pre-turn admission: {}",
-                                    block.1
-                                )));
-                            }
-                            last_queued_pre_turn_block = Some(block);
-                            None
+                            admission,
+                            fallback,
+                        })
+                    },
+                );
+            }
+
+            let candidate = match pending_queued_pre_turn_preparation.take() {
+                None => {
+                    if next_queue_id.is_none() {
+                        last_queued_pre_turn_block = None;
+                    }
+                    None
+                }
+                Some(PreTurnV2CompactionPreparation {
+                    admission: QueuedConversationPreTurnAdmission::NoQueuedInput,
+                    ..
+                }) => {
+                    last_queued_pre_turn_block = None;
+                    None
+                }
+                Some(PreTurnV2CompactionPreparation {
+                    admission: QueuedConversationPreTurnAdmission::Blocked { queue_id, reason },
+                    fallback,
+                    ..
+                }) => match fallback {
+                    Some(Ok(preparation))
+                        if matches!(
+                            preparation.as_ref(),
+                            QueuedConversationCandidatePreparation::Prepared(_)
+                        ) =>
+                    {
+                        let QueuedConversationCandidatePreparation::Prepared(candidate) =
+                            *preparation
+                        else {
+                            unreachable!("guarded queued preparation variant changed")
+                        };
+                        let notice = format!(
+                            "queued pre-turn compaction is unavailable ({reason}); dispatching the unchanged frozen request"
+                        );
+                        let block = (queue_id, notice.clone());
+                        if last_queued_pre_turn_block.as_ref() != Some(&block) {
+                            let _ = message_tx.send(WorkerMessage::Notice(notice));
                         }
-                        Some(Err(error)) => {
+                        last_queued_pre_turn_block = Some(block);
+                        Some(*candidate)
+                    }
+                    Some(Ok(preparation))
+                        if matches!(
+                            preparation.as_ref(),
+                            QueuedConversationCandidatePreparation::NoQueuedInput
+                        ) =>
+                    {
+                        last_queued_pre_turn_block = None;
+                        None
+                    }
+                    Some(Ok(preparation)) => {
+                        let QueuedConversationCandidatePreparation::Blocked { queue_id, reason } =
+                            *preparation
+                        else {
+                            unreachable!("guarded queued preparation variant changed")
+                        };
+                        let block = (queue_id, reason);
+                        if last_queued_pre_turn_block.as_ref() != Some(&block) {
                             let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "queued follow-up is waiting for a local pre-turn admission: {}",
+                                block.1
+                            )));
+                        }
+                        last_queued_pre_turn_block = Some(block);
+                        None
+                    }
+                    Some(Err(error)) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
                                 "queued fallback request could not be frozen; queued input was not sent: {error}"
                             )));
-                            None
-                        }
-                        None => None,
+                        None
                     }
-                }
-                Some(Ok(QueuedConversationPreTurnAdmission::ExactFit(admitted))) => {
+                    None => None,
+                },
+                Some(PreTurnV2CompactionPreparation {
+                    admission: QueuedConversationPreTurnAdmission::ExactFit(admitted),
+                    ..
+                }) => {
                     last_queued_pre_turn_block = None;
                     Some(admitted.candidate)
                 }
-                Some(Ok(QueuedConversationPreTurnAdmission::PortablePreflightReady(pending))) => {
+                Some(PreTurnV2CompactionPreparation {
+                    admission: QueuedConversationPreTurnAdmission::PortablePreflightReady(pending),
+                    ..
+                }) => {
                     let Some(session) = current_session.as_ref() else {
                         continue;
                     };
@@ -843,12 +980,6 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             None
                         }
                     }
-                }
-                Some(Err(error)) => {
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "queued pre-turn admission was not evaluated; queued input was not sent: {error:#}"
-                    )));
-                    None
                 }
             };
             if let Some(candidate) = candidate {
@@ -935,23 +1066,29 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 kind,
                 target,
                 reasoning_effort,
-            }) => match queue_conversation_input(
-                &current_session_log_path,
-                &mut current_session,
-                &mut exact_conversation_prompts,
-                prompt,
-                kind,
-                target,
-                reasoning_effort,
-            ) {
-                Ok(entries) => {
-                    send_conversation_queue_update(&message_tx, &entries);
+            }) => {
+                compaction_preparation_tasks.abort_all();
+                pending_queued_pre_turn_preparation = None;
+                match queue_conversation_input(
+                    &current_session_log_path,
+                    &mut current_session,
+                    &mut exact_conversation_prompts,
+                    prompt,
+                    kind,
+                    target,
+                    reasoning_effort,
+                ) {
+                    Ok(entries) => {
+                        send_conversation_queue_update(&message_tx, &entries);
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
                 }
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                }
-            },
+            }
             Ok(WorkerCommand::CancelQueuedConversationInput { queue_id }) => {
+                compaction_preparation_tasks.abort_all();
+                pending_queued_pre_turn_preparation = None;
                 match cancel_queued_conversation_input(
                     &current_session_log_path,
                     &mut current_session,
@@ -968,34 +1105,44 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 queue_id,
                 prompt,
                 reasoning_effort,
-            }) => match edit_queued_conversation_input(
-                &current_session_log_path,
-                &mut current_session,
-                &mut exact_conversation_prompts,
-                queue_id,
-                prompt,
-                reasoning_effort,
-            ) {
-                Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+            }) => {
+                compaction_preparation_tasks.abort_all();
+                pending_queued_pre_turn_preparation = None;
+                match edit_queued_conversation_input(
+                    &current_session_log_path,
+                    &mut current_session,
+                    &mut exact_conversation_prompts,
+                    queue_id,
+                    prompt,
+                    reasoning_effort,
+                ) {
+                    Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
                 }
-            },
+            }
             Ok(WorkerCommand::MoveQueuedConversationInput {
                 queue_id,
                 direction,
-            }) => match move_queued_conversation_input(
-                &current_session_log_path,
-                &mut current_session,
-                queue_id,
-                direction,
-            ) {
-                Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+            }) => {
+                compaction_preparation_tasks.abort_all();
+                pending_queued_pre_turn_preparation = None;
+                match move_queued_conversation_input(
+                    &current_session_log_path,
+                    &mut current_session,
+                    queue_id,
+                    direction,
+                ) {
+                    Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
                 }
-            },
+            }
             Ok(WorkerCommand::PromoteQueuedConversationInput { queue_id }) => {
+                compaction_preparation_tasks.abort_all();
+                pending_queued_pre_turn_preparation = None;
                 match promote_queued_conversation_input(
                     &current_session_log_path,
                     &mut current_session,
@@ -1008,6 +1155,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::SendQueuedConversationInputNow { queue_id }) => {
+                compaction_preparation_tasks.abort_all();
+                pending_queued_pre_turn_preparation = None;
                 match promote_queued_conversation_input(
                     &current_session_log_path,
                     &mut current_session,
@@ -2216,6 +2365,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             Ok(WorkerCommand::PreviewV2Compaction) => {
                 pending_v2_compaction = None;
+                pending_queued_pre_turn_preparation = None;
                 compaction_preparation_tasks.abort_all();
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
@@ -2893,6 +3043,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
 
                 pending_v2_compaction = None;
+                pending_queued_pre_turn_preparation = None;
                 compaction_preparation_tasks.abort_all();
 
                 match load_session_with_url_capability_attachment(
@@ -2955,6 +3106,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
 
                 pending_v2_compaction = None;
+                pending_queued_pre_turn_preparation = None;
                 compaction_preparation_tasks.abort_all();
 
                 match load_session_with_url_capability_attachment(

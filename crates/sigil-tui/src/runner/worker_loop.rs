@@ -93,7 +93,7 @@ pub(in crate::runner) use compaction_runtime::{
 };
 pub(in crate::runner) use compaction_tasks::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult, IdleV2CompactionPreparation,
-    ManualV2CompactionPreparation,
+    ManualV2CompactionPreparation, PreTurnV2CompactionPreparation,
 };
 pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;
 pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;

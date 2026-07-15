@@ -3,9 +3,10 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use sigil_kernel::{
     Agent, COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompletionRequest, ControlEntry,
-    DurableEventType, EffectiveTokenBudget, FrozenProviderRequestMaterial, InputTokenEvidence,
-    JsonlSessionStore, ModelMessage, PortableTargetRequestMaterial, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderRequestRejection, ReasoningEffort, RequestFitProof, SessionLogEntry,
+    ConversationInputKind, ConversationInputTarget, DurableEventType, EffectiveTokenBudget,
+    FrozenProviderRequestMaterial, InputTokenEvidence, JsonlSessionStore, ModelMessage,
+    PortableTargetRequestMaterial, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderRequestRejection, ReasoningEffort, RequestFitProof, Session, SessionLogEntry,
     TokenMeasurementBinding, TokenMeasurementScope, ToolRegistry, UsageStats,
     VersionedProfileIdentity,
 };
@@ -14,7 +15,7 @@ use std::{
     path::Path,
     pin::Pin,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tempfile::tempdir;
 
@@ -24,8 +25,8 @@ use super::{
 };
 use crate::runner::worker_loop::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult,
-    IdleAutoCompactionPreparation, IdleAutoCompactionState, IdleV2CompactionPreparation,
-    ManualV2CompactionPreparation,
+    ExactConversationPromptStore, IdleAutoCompactionPreparation, IdleAutoCompactionState,
+    IdleV2CompactionPreparation, ManualV2CompactionPreparation, queue_conversation_input,
 };
 
 #[test]
@@ -691,6 +692,121 @@ fn hard_threshold_idle_compaction_applies_after_owned_preparation() -> Result<()
             ..
         }
     ));
+    worker.shutdown()?;
+
+    assert_eq!(
+        JsonlSessionStore::read_event_records(&session_log_path)?
+            .iter()
+            .filter(|record| {
+                record.stored_event().event_type == DurableEventType::CompactionAppliedV2.as_str()
+            })
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the explicitly installed checksum-pinned DeepSeek V4 Flash tokenizer"]
+fn queued_pre_turn_compaction_applies_then_dispatches_the_frozen_request() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-pre-turn-compact-live.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut current_session =
+        Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+    {
+        let session = current_session
+            .as_mut()
+            .expect("pre-turn fixture keeps its seeded session");
+        for turn in 0..105 {
+            session.append_user_message(ModelMessage::user(format!(
+                "retain the same queued objective across pre-turn compaction {turn}"
+            )))?;
+            session.append_assistant_message(ModelMessage::assistant(
+                Some(" a".repeat(10_000)),
+                Vec::new(),
+            ))?;
+        }
+        session.append_user_message(ModelMessage::user("latest retained user turn"))?;
+        session.append_assistant_message(ModelMessage::assistant(
+            Some("latest retained assistant turn".to_owned()),
+            Vec::new(),
+        ))?;
+    }
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        &session_log_path,
+        &mut current_session,
+        &mut exact_prompts,
+        "dispatch this safe queued follow-up after compaction".to_owned(),
+        ConversationInputKind::Chat,
+        ConversationInputTarget::MainThread,
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+    root_config.providers.insert(
+        "deepseek".to_owned(),
+        serde_json::json!({
+            "api_key": std::env::var("SIGIL_API_KEY")?
+        }),
+    );
+    root_config.compaction.tail_messages = 2;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
+        ProviderChunk::TextDelta("queued request completed".to_owned()),
+        ProviderChunk::Done,
+    ])]);
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut notices = Vec::new();
+    let applied = loop {
+        let message = match worker
+            .recv_with_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(message) => message,
+            Err(error) => {
+                return Err(anyhow!(
+                    "queued pre-turn worker stopped before compaction ({error:#}); notices: {notices:?}"
+                ));
+            }
+        };
+        match message {
+            WorkerMessage::V2CompactionApplied {
+                source: super::super::V2CompactionApplySource::PreTurnPressure,
+                ..
+            } => break message,
+            WorkerMessage::Notice(notice) | WorkerMessage::RunFailed(notice) => {
+                notices.push(notice);
+            }
+            WorkerMessage::RunFinished { .. } => {
+                return Err(anyhow!(
+                    "queued request finished without pre-turn compaction; notices: {notices:?}"
+                ));
+            }
+            _ => {}
+        }
+    };
+    assert!(matches!(
+        applied,
+        WorkerMessage::V2CompactionApplied {
+            request_id: 0,
+            source: super::super::V2CompactionApplySource::PreTurnPressure,
+            ..
+        }
+    ));
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(30), |message| {
+        matches!(message, WorkerMessage::RunFinished { .. })
+    })?;
     worker.shutdown()?;
 
     assert_eq!(

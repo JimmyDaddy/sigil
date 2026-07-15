@@ -8,7 +8,7 @@
 
 ### 调整
 
-- 所选 profile 已安装 checksum-pinned tokenizer 且本地 exact target-fit proof 通过时，`/compact` 现在可以确认一次手动 Context Compaction V2 apply；完成的 hard-threshold chat turn 完全进入 idle 后也可以使用同一验证路径，pre-turn 与 overflow apply 仍保持冻结。
+- 所选 profile 已安装 checksum-pinned tokenizer 且本地 exact target-fit proof 通过时，`/compact` 现在可以确认一次手动 Context Compaction V2 apply；完成的 hard-threshold 与 queued pre-turn request 也可以使用同一 owned verified path，overflow apply 仍保持冻结。
 
 ## v0.0.1-alpha.2 - 2026-07-15
 

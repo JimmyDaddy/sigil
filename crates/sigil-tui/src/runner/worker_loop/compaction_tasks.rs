@@ -6,8 +6,12 @@ use std::sync::{
 
 use tokio::{runtime::Runtime, task::JoinHandle};
 
-use super::{IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction};
+use super::{
+    IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction,
+    QueuedConversationCandidatePreparation, QueuedConversationPreTurnAdmission,
+};
 use crate::runner::V2CompactionReview;
+use sigil_kernel::ConversationInputQueueId;
 
 pub(in crate::runner) struct ManualV2CompactionPreparation {
     pub(in crate::runner) review: V2CompactionReview,
@@ -17,6 +21,13 @@ pub(in crate::runner) struct ManualV2CompactionPreparation {
 pub(in crate::runner) struct IdleV2CompactionPreparation {
     pub(in crate::runner) state: IdleAutoCompactionState,
     pub(in crate::runner) preparation: IdleAutoCompactionPreparation,
+}
+
+pub(in crate::runner) struct PreTurnV2CompactionPreparation {
+    pub(in crate::runner) queue_id: ConversationInputQueueId,
+    pub(in crate::runner) admission: QueuedConversationPreTurnAdmission,
+    pub(in crate::runner) fallback:
+        Option<Result<Box<QueuedConversationCandidatePreparation>, String>>,
 }
 
 pub(in crate::runner) enum CompactionPreparationTaskResult {
@@ -29,6 +40,11 @@ pub(in crate::runner) enum CompactionPreparationTaskResult {
         request_id: u64,
         session_scope_id: String,
         result: Result<Box<IdleV2CompactionPreparation>, String>,
+    },
+    PreTurn {
+        request_id: u64,
+        session_scope_id: String,
+        result: Result<Box<PreTurnV2CompactionPreparation>, String>,
     },
 }
 
@@ -108,6 +124,42 @@ impl CompactionPreparationTaskManager {
                 return;
             }
             let _ = result_tx.send(CompactionPreparationTaskResult::Idle {
+                request_id,
+                session_scope_id: result_session_scope_id,
+                result,
+            });
+        });
+        self.active = Some(ActiveCompactionPreparationTask {
+            request_id,
+            session_scope_id,
+            cancelled,
+            handle,
+        });
+    }
+
+    pub(in crate::runner) fn start_pre_turn<F>(
+        &mut self,
+        runtime: &Runtime,
+        request_id: u64,
+        session_scope_id: String,
+        result_tx: mpsc::Sender<CompactionPreparationTaskResult>,
+        prepare: F,
+    ) where
+        F: FnOnce() -> Result<PreTurnV2CompactionPreparation, String> + Send + 'static,
+    {
+        self.abort_all();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::clone(&cancelled);
+        let result_session_scope_id = session_scope_id.clone();
+        let handle = runtime.spawn_blocking(move || {
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let result = prepare().map(Box::new);
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = result_tx.send(CompactionPreparationTaskResult::PreTurn {
                 request_id,
                 session_scope_id: result_session_scope_id,
                 result,

@@ -28,7 +28,9 @@ pub(in crate::runner) const V2_COMPACTION_APPLY_FREEZE_REASON: &str =
 fn v2_compaction_apply_is_frozen(initiation: &CompactionInitiation) -> bool {
     !matches!(
         initiation,
-        CompactionInitiation::Manual | CompactionInitiation::IdleAutomatic { .. }
+        CompactionInitiation::Manual
+            | CompactionInitiation::IdleAutomatic { .. }
+            | CompactionInitiation::PreTurnPressure { .. }
     )
 }
 
@@ -205,13 +207,9 @@ impl PreparedPortableV2Compaction {
 
 /// A fully admitted pre-turn portable path whose post-compaction request is frozen in memory.
 ///
-/// The contained queue promotion is still uncommitted. K25.15C must apply the independent
+/// The contained queue promotion is still uncommitted. The scheduler must apply the independent
 /// compaction CAS, append the promotion CAS, and commit capabilities before it can send this
 /// exact request.
-#[allow(
-    dead_code,
-    reason = "K25.15B2 prepares material only; K25.15C owns the durable pre-send handoff"
-)]
 pub(in crate::runner) struct PendingQueuedConversationPortablePreflight {
     pub(in crate::runner) candidate: PreparedQueuedConversationCandidate,
     pending_compaction: PendingV2Compaction,
@@ -254,10 +252,6 @@ impl PendingQueuedConversationPortablePreflight {
 }
 
 /// Complete no-write admission result for the next queued conversation input.
-#[allow(
-    dead_code,
-    reason = "K25.15B2 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
 pub(in crate::runner) enum QueuedConversationPreTurnAdmission {
     NoQueuedInput,
     ExactFit(Box<AdmittedQueuedConversationCandidate>),
@@ -775,10 +769,6 @@ fn prepare_portable_v2_compaction(
 /// Neither branch appends a queue promotion, compaction lifecycle, capability registration, or
 /// provider request.
 #[allow(clippy::too_many_arguments)]
-#[allow(
-    dead_code,
-    reason = "K25.15B2 is intentionally disconnected until K25.15C adds the durable pre-send barrier"
-)]
 pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
     root_config: &RootConfig,
     workspace_root: &std::path::Path,

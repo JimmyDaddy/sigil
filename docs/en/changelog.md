@@ -8,7 +8,7 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ### Changed
 
-- `/compact` can now confirm one manual Context Compaction V2 apply when the selected profile has an installed checksum-pinned tokenizer and exact local target-fit proof. A completed hard-threshold chat turn may use the same verified path after the session becomes fully idle; pre-turn and overflow apply remain frozen.
+- `/compact` can now confirm one manual Context Compaction V2 apply when the selected profile has an installed checksum-pinned tokenizer and exact local target-fit proof. Completed hard-threshold and queued pre-turn requests may use the same owned verified path; overflow apply remains frozen.
 
 ## v0.0.1-alpha.2 - 2026-07-15
 

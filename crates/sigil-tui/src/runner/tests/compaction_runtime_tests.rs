@@ -18,7 +18,7 @@ use super::*;
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=pre-turn-secret exactly";
 
 #[test]
-fn manual_and_idle_compaction_are_unfrozen_before_pre_turn_and_overflow() -> Result<()> {
+fn manual_idle_and_pre_turn_are_unfrozen_before_overflow() -> Result<()> {
     assert!(!v2_compaction_apply_is_frozen(
         &CompactionInitiation::Manual
     ));
@@ -27,7 +27,7 @@ fn manual_and_idle_compaction_are_unfrozen_before_pre_turn_and_overflow() -> Res
             scope_fingerprint: "scope-a".to_owned(),
         }
     ));
-    assert!(v2_compaction_apply_is_frozen(
+    assert!(!v2_compaction_apply_is_frozen(
         &CompactionInitiation::PreTurnPressure {
             queue_id: ConversationInputQueueId::new("queue_1")?,
         }
@@ -349,12 +349,12 @@ fn queued_portable_preflight_with_foldable_history_never_starts_without_verified
         &MemoryConfig { enabled: false },
         *candidate,
     )
-    .expect_err("the frozen V2 apply path must block target proof");
+    .expect_err("missing local target proof must block pre-turn compaction");
 
     assert!(
         error
             .to_string()
-            .contains("V2 context compaction apply is temporarily frozen"),
+            .contains("could not resolve DeepSeek transport for portable compaction"),
         "unexpected target-proof failure: {error:#}"
     );
     assert_eq!(std::fs::read(store.path())?, before_stream);
