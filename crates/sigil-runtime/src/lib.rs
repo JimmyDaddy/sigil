@@ -77,6 +77,7 @@ pub mod provider_config;
 pub mod provider_debug;
 pub mod provider_status;
 pub mod session_control;
+pub mod session_lifecycle;
 pub mod skills;
 #[allow(dead_code)] // E21.15 runtime-private route is intentionally dormant before E21.17.
 mod stable_mcp_search;
@@ -129,10 +130,11 @@ pub use mcp_declaration::{
 };
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR,
-    DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF,
-    DEFAULT_WORKSPACE_COMMANDS_LEAF, DEFAULT_WORKSPACE_PLUGINS_LEAF, DEFAULT_WORKSPACE_SKILLS_LEAF,
-    INPUT_HISTORY_FILE, PathResolverEnv, SIGIL_CACHE_HOME_ENV, SIGIL_STATE_HOME_ENV, SigilPaths,
-    StoragePlatform, resolve_sigil_paths, resolve_sigil_paths_with_env, workspace_id_for_root,
+    DEFAULT_SESSION_EXPORTS_DIR, DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR,
+    DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_COMMANDS_LEAF, DEFAULT_WORKSPACE_PLUGINS_LEAF,
+    DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE, PathResolverEnv, SIGIL_CACHE_HOME_ENV,
+    SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform, resolve_sigil_paths,
+    resolve_sigil_paths_with_env, workspace_id_for_root,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
@@ -176,6 +178,14 @@ pub use provider_status::{
 };
 pub use remote_mcp::{activate_eager_remote_mcp_server, activate_remote_mcp_server};
 pub use session_control::{append_session_control_entries, current_unix_time_ms};
+pub use session_lifecycle::{
+    DEFAULT_SESSION_CATALOG_MAX_ENTRIES, DEFAULT_SESSION_CATALOG_MAX_STREAM_BYTES,
+    DEFAULT_SESSION_CATALOG_MAX_TOTAL_VALIDATION_BYTES, DEFAULT_SESSION_EXPORT_MAX_BYTES,
+    DEFAULT_SESSION_EXPORT_MAX_MESSAGES, LocalSessionCatalog, LocalSessionCatalogEntry,
+    LocalSessionCatalogState, LocalSessionLifecycleLimits, LocalSessionLifecycleService,
+    SESSION_EXPORT_SCHEMA_VERSION, SessionExportMessageV1, SessionExportOutput,
+    SessionExportPayloadV1, SessionExportV1,
+};
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
     SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,

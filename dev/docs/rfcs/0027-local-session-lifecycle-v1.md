@@ -1,6 +1,6 @@
 # RFC-0027 Local Session Lifecycle V1
 
-状态：accepted / P27.1 implemented / P27.2-P27.6 planned
+状态：accepted / P27.1-P27.2 implemented / P27.3-P27.6 planned
 
 创建日期：2026-07-15
 
@@ -113,3 +113,4 @@ Retention 放在 `/config` Storage maintenance 中，先显示 policy、protecte
 ## 11. Progress
 
 - P27.1 complete：新增 finalized-turn projection/digest 与通用 turn fork；不再依赖 controlled mutation checkpoint。原 checkpoint workflow 保留并复用同一 safe-prefix creator，fork provenance 明确区分 turn binding 与可选 checkpoint binding。
+- P27.2 complete：runtime 新增 bounded local V2 catalog、legacy/invalid/oversize/scan-budget 状态、workspace `session-exports` 路径与 content-bound `SessionExportV1`。导出再次应用 SafePersist、验证 external provenance、完全省略 tool calls 和 control envelope，并使用 create-new hard-link publication 防止覆盖；`export_completed` journal 接线随 P27.3 的 journal writer 一并完成。
