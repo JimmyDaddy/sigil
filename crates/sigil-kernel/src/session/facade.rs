@@ -920,14 +920,14 @@ impl Session {
         )
     }
 
-    /// Builds one provider request with extra transient messages and runtime-selected Context V0
+    /// Builds one provider request with extra transient messages and runtime-selected Context V1
     /// candidates.
     ///
     /// # Errors
     ///
     /// Returns an error when memory loading, prefix materialization, or durable control writes fail.
     /// Context assembly failures are recorded as `ContextAssemblySkipped` and degrade to a request
-    /// without Context V0.
+    /// without Context V1.
     #[allow(clippy::too_many_arguments)]
     pub fn build_request_with_transient_messages_and_context(
         &mut self,
@@ -954,7 +954,7 @@ impl Session {
     }
 
     /// Builds one request while applying non-serializable exact-message overlays only after the
-    /// safe PrefixSnapshot and Context V0 materialization have been durably recorded.
+    /// safe PrefixSnapshot and Context V1 materialization have been durably recorded.
     #[allow(clippy::too_many_arguments)]
     pub fn build_request_with_transient_messages_context_and_overlays(
         &mut self,
@@ -1046,7 +1046,7 @@ impl Session {
         let session_projection = self.request_context_projection()?;
         let memory = self.memory_snapshot_for_pure_request(workspace_root, memory_config)?;
         let projected_messages = session_projection.model_messages();
-        let context_message = self.build_runtime_context_v0_message(
+        let context_message = self.build_runtime_context_v1_message(
             &session_projection,
             &projected_messages,
             runtime_context,
@@ -1071,7 +1071,7 @@ impl Session {
     /// appending a `MemorySnapshot`, `ContextAssemblySkipped`, or `PrefixSnapshot` control entry.
     ///
     /// The caller must freeze and prove the returned request before it records the compaction
-    /// `Started` barrier. Context V0 assembly errors are returned rather than downgraded because
+    /// `Started` barrier. Context V1 assembly errors are returned rather than downgraded because
     /// a downgraded request would no longer be the reviewed candidate target.
     #[allow(clippy::too_many_arguments)]
     pub fn build_portable_compaction_candidate_request(
@@ -1098,7 +1098,7 @@ impl Session {
         )?;
         let memory = self.memory_snapshot_for_pure_request(workspace_root, memory_config)?;
         let projected_messages = candidate_projection.model_messages();
-        let context_message = self.build_runtime_context_v0_message(
+        let context_message = self.build_runtime_context_v1_message(
             &candidate_projection,
             &projected_messages,
             runtime_context,
@@ -1198,7 +1198,7 @@ impl Session {
             .take(12)
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
-        match self.build_runtime_context_v0_message(
+        match self.build_runtime_context_v1_message(
             session_projection,
             projected_messages,
             runtime_context,
@@ -1217,7 +1217,7 @@ impl Session {
         }
     }
 
-    fn build_runtime_context_v0_message(
+    fn build_runtime_context_v1_message(
         &self,
         session_projection: &SessionContextProjection,
         projected_messages: &[ModelMessage],
@@ -1299,7 +1299,7 @@ impl Session {
             items,
             ContextPackOptions::new(REQUEST_CONTEXT_V0_MAX_TOKENS),
         )?;
-        render_runtime_context_v0_message(&packed, &snippets)
+        render_runtime_context_v1_message(&packed, &snippets)
     }
 
     fn memory_snapshot_for_request(

@@ -1172,7 +1172,7 @@ fn eval_report_writes_deterministic_artifacts() -> Result<()> {
     assert!(summary.contains("FailedVerification"));
     assert!(summary.contains("PermissionDenied"));
     assert!(summary.contains("Stale"));
-    assert!(summary.contains("active-context-v0-request-adoption"));
+    assert!(summary.contains("active-context-v1-request-adoption"));
     assert!(summary.contains("active-merge-parent-mutation-handoff"));
     assert!(summary.contains("active-sandbox-receipt-truthfulness"));
     assert!(summary.contains("provenance: rfc=`RFC-0013"));
@@ -1482,7 +1482,7 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
                     },
                 ),
         )?,
-        active_context_v0_request_adoption_result(workspace_root)?,
+        active_context_v1_request_adoption_result(workspace_root)?,
         active_merge_parent_mutation_handoff_result(workspace_root)?,
         active_sandbox_receipt_truthfulness_result(workspace_root)?,
     ])
@@ -1527,10 +1527,10 @@ fn active_metadata(
         .with_expected(expected_outcome, expected_verification_verdict)
 }
 
-fn active_context_v0_request_adoption_result(
+fn active_context_v1_request_adoption_result(
     workspace_root: &std::path::Path,
 ) -> Result<EvalResult> {
-    let case_id = "active-context-v0-request-adoption";
+    let case_id = "active-context-v1-request-adoption";
     let case_workspace = workspace_root.join(case_id);
     std::fs::create_dir_all(&case_workspace)?;
     let store = JsonlSessionStore::new(case_workspace.join("session.jsonl"))?;
@@ -1556,14 +1556,14 @@ fn active_context_v0_request_adoption_result(
         .messages
         .iter()
         .filter_map(|message| message.content.as_deref())
-        .filter(|content| content.contains("sigil_context_v0"))
+        .filter(|content| content.contains("sigil_context_v1"))
         .collect::<Vec<_>>();
     let mut failures = Vec::new();
     if context_messages.len() != 1 {
         failures.push(EvalFailure::new(
             EvalFailureKind::Harness,
             format!(
-                "expected one Context V0 message, found {}",
+                "expected one Context V1 message, found {}",
                 context_messages.len()
             ),
         ));
@@ -1572,28 +1572,28 @@ fn active_context_v0_request_adoption_result(
         if !context.contains("session-archive:") || !context.contains("retrieval_hit") {
             failures.push(EvalFailure::new(
                 EvalFailureKind::Harness,
-                "Context V0 message did not expose session archive provenance",
+                "Context V1 message did not expose session archive provenance",
             ));
         }
         if !context.contains("parser rejected") {
             failures.push(EvalFailure::new(
                 EvalFailureKind::Harness,
-                "Context V0 message did not carry the expected retrieved snippet",
+                "Context V1 message did not carry the expected retrieved snippet",
             ));
         }
         if !context.contains("context, not instructions") {
             failures.push(EvalFailure::new(
                 EvalFailureKind::Harness,
-                "Context V0 message did not preserve the trust-boundary note",
+                "Context V1 message did not preserve the trust-boundary note",
             ));
         }
     }
 
     let metadata = active_metadata(
         case_id,
-        "fixture-active-context-v0",
-        "RFC-0006",
-        "E06.7",
+        "fixture-active-context-v1",
+        "RFC-0032",
+        "R32.3",
         EvalOutcomeKind::Completed,
         VerificationVerdict::NotApplicable,
     );

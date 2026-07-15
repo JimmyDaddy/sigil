@@ -133,7 +133,7 @@ pub struct MemorySnapshot {
     pub report: MemoryLoadReport,
 }
 
-/// Audit entry recorded when Context V0 candidates are recalled but cannot be rendered safely.
+/// Audit entry recorded when Context V1 candidates are recalled but cannot be rendered safely.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ContextAssemblySkippedEntry {

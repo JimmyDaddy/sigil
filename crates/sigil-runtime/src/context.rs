@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, File},
+    io::Read,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
 };
@@ -10,7 +11,7 @@ use sigil_code_intel::context::{
     CodeContextBuilder, CodeContextHit, LspContextSnapshot, LspContextSnapshotStatus, RepoMapLite,
     RepoMapLiteOptions, RepoSourceFileRef,
 };
-use sigil_code_intel::service::{CodeDiagnostic, CodeLocation, CodeSymbol};
+use sigil_code_intel::service::{CodeDiagnostic, CodeLocation, CodeRange, CodeSymbol};
 use sigil_kernel::{
     ContextBodyRef, ContextInclusionReason, ContextItem, ContextScoreComponent,
     ContextScoreComponentKind, ContextSensitivity, ContextSource, ContextTrustLevel,
@@ -39,6 +40,8 @@ const MCP_RESOURCE_CONTEXT_MAX_ITEM_TOKENS: usize = 128;
 const MCP_RESOURCE_CONTEXT_MAX_TOTAL_TOKENS: usize = 256;
 const MCP_RESOURCE_CONTEXT_TIMEOUT_MS: u64 = 50;
 const MCP_RESOURCE_CONTEXT_MAX_BYTES: usize = 8 * 1024;
+const CONTEXT_QUERY_MAX_TERMS: usize = 64;
+const CONTEXT_QUERY_MAX_TERM_BYTES: usize = 96;
 
 #[derive(Debug, Clone)]
 struct RepoContextCandidate {
@@ -46,6 +49,7 @@ struct RepoContextCandidate {
     score_breakdown: Vec<ContextScoreComponent>,
     inclusion_reason: ContextInclusionReason,
     snippet_terms: BTreeSet<String>,
+    symbol_range: Option<CodeRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +70,7 @@ impl WarmLspContextProvider {
     }
 }
 
-/// Runtime adapter for bounded plugin hook output that may contribute Context V0 rows.
+/// Runtime adapter for bounded plugin hook output that may contribute request-context rows.
 ///
 /// The provider only admits output for manifests whose current trust decision is `Trusted`.
 /// Untrusted output is retained as excluded provenance and never gets a model-visible snippet.
@@ -138,7 +142,7 @@ impl McpResourceContextItem {
 ///
 /// This provider does not call an MCP server. MCP resource discovery/read still flows through the
 /// normal MCP tool permission, trust and egress path; this adapter only turns bounded text results
-/// into Context V0 candidates and re-applies context hard caps.
+/// into request-context candidates and re-applies context hard caps.
 #[derive(Debug, Clone)]
 pub struct McpResourceContextProvider {
     resources: Vec<McpResourceContextItem>,
@@ -213,7 +217,7 @@ impl ContextSourcePolicy {
     }
 }
 
-/// Runtime-owned adapter contract for bounded Context V0 sources.
+/// Runtime-owned adapter contract for bounded request-context sources.
 pub trait ContextSourceProvider {
     fn source_id(&self) -> &'static str;
     fn source_kind(&self) -> ContextSource;
@@ -490,11 +494,11 @@ fn mcp_resource_media_type_allowed(media_type: Option<&str>) -> bool {
         )
 }
 
-/// Builds bounded repository-file Context V0 candidates from a user query.
+/// Builds bounded repository-file Context V1 candidates from a user query.
 ///
 /// This is intentionally conservative: it never leaves the workspace root, avoids common generated
 /// and local-development directories, and emits excluded metadata instead of reading secret-like
-/// files. It is a production wiring point for Context V0, not a persistent repo index.
+/// files. It is a production wiring point for Context V1, not a persistent repo index.
 ///
 /// # Errors
 ///
@@ -525,6 +529,7 @@ pub fn context_candidates_from_repo_query(
                 )],
                 ContextInclusionReason::RetrievalHit,
                 BTreeSet::new(),
+                None,
             );
         }
     }
@@ -564,7 +569,7 @@ pub fn context_candidates_from_repo_query(
     Ok(runtime)
 }
 
-/// Builds bounded Context V0 candidates from safe request-local sources.
+/// Builds bounded request-context candidates from safe request-local sources.
 ///
 /// Repository context is collected synchronously with existing bounded scans. LSP context is only
 /// attached from a caller-supplied warm snapshot; this function never starts or queries a language
@@ -834,7 +839,7 @@ impl LspContextQueryProfile {
     fn from_query(query: &str) -> Self {
         let lexical_terms = lexical_query_terms(query);
         let source_profile = SourceQueryProfile::from_query(query, &lexical_terms);
-        let lower = query.to_ascii_lowercase();
+        let lower = query.to_lowercase();
         Self {
             source_intent: source_profile.source_intent,
             diagnostic_intent: contains_any(
@@ -862,13 +867,13 @@ fn lsp_symbol_score(
     symbol: &CodeSymbol,
     profile: &LspContextQueryProfile,
 ) -> Option<LspContextScore> {
-    let name = symbol.name.to_ascii_lowercase();
-    let path = symbol.path.to_ascii_lowercase();
+    let name = symbol.name.to_lowercase();
+    let path = symbol.path.to_lowercase();
     let container = symbol
         .container_name
         .as_deref()
         .unwrap_or_default()
-        .to_ascii_lowercase();
+        .to_lowercase();
     let mut score_breakdown = Vec::new();
 
     for term in &profile.symbol_terms {
@@ -938,8 +943,8 @@ fn lsp_diagnostic_score(
         return None;
     }
 
-    let path = diagnostic.path.to_ascii_lowercase();
-    let message = diagnostic.message.to_ascii_lowercase();
+    let path = diagnostic.path.to_lowercase();
+    let message = diagnostic.message.to_lowercase();
     let severity = diagnostic.severity.to_ascii_lowercase();
     let mut score_breakdown = Vec::new();
 
@@ -986,12 +991,12 @@ fn lsp_reference_score(
         return None;
     }
 
-    let path = location.path.to_ascii_lowercase();
+    let path = location.path.to_lowercase();
     let preview = location
         .preview
         .as_deref()
         .unwrap_or_default()
-        .to_ascii_lowercase();
+        .to_lowercase();
     let mut score_breakdown = Vec::new();
 
     if profile.reference_intent {
@@ -1069,6 +1074,7 @@ fn collect_lexical_file_candidates(
                     scored.score_breakdown,
                     ContextInclusionReason::RetrievalHit,
                     BTreeSet::new(),
+                    None,
                 );
             }
         }
@@ -1111,6 +1117,7 @@ fn collect_source_symbol_candidates(
             scored.score_breakdown,
             scored.inclusion_reason,
             scored.snippet_terms,
+            scored.symbol_range,
         );
     }
 }
@@ -1122,6 +1129,7 @@ fn upsert_context_candidate(
     score_breakdown: Vec<ContextScoreComponent>,
     inclusion_reason: ContextInclusionReason,
     snippet_terms: BTreeSet<String>,
+    symbol_range: Option<CodeRange>,
 ) {
     candidates
         .entry(path)
@@ -1131,8 +1139,10 @@ fn upsert_context_candidate(
                 existing.score_breakdown = score_breakdown.clone();
                 existing.inclusion_reason = inclusion_reason.clone();
                 existing.snippet_terms = snippet_terms.clone();
+                existing.symbol_range = symbol_range.clone();
             } else if score == existing.score && existing.snippet_terms.is_empty() {
                 existing.snippet_terms = snippet_terms.clone();
+                existing.symbol_range = symbol_range.clone();
             }
         })
         .or_insert(RepoContextCandidate {
@@ -1140,6 +1150,7 @@ fn upsert_context_candidate(
             score_breakdown,
             inclusion_reason,
             snippet_terms,
+            symbol_range,
         });
 }
 
@@ -1178,20 +1189,19 @@ fn repo_context_hit(
 }
 
 fn read_repo_context_snippet(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    let indexed_len = bytes.len().min(REPO_CONTEXT_MAX_BYTES_PER_FILE);
-    let indexed = &bytes[..indexed_len];
-    if indexed.contains(&0) {
-        return None;
-    }
-    let text = std::str::from_utf8(indexed).ok()?;
-    Some(truncate_to_char_boundary(text, REPO_CONTEXT_SNIPPET_MAX_BYTES).to_owned())
+    let text = read_bounded_repo_text(path, REPO_CONTEXT_MAX_BYTES_PER_FILE)?;
+    Some(truncate_to_char_boundary(&text, REPO_CONTEXT_SNIPPET_MAX_BYTES).to_owned())
 }
 
 fn read_repo_context_snippet_for_candidate(
     path: &Path,
     candidate: &RepoContextCandidate,
 ) -> Option<String> {
+    if let Some(range) = candidate.symbol_range.as_ref()
+        && let Some(snippet) = read_repo_context_snippet_around_range(path, range)
+    {
+        return Some(snippet);
+    }
     if !candidate.snippet_terms.is_empty()
         && let Some(snippet) =
             read_repo_context_snippet_around_terms(path, &candidate.snippet_terms)
@@ -1201,9 +1211,22 @@ fn read_repo_context_snippet_for_candidate(
     read_repo_context_snippet(path)
 }
 
+fn read_repo_context_snippet_around_range(path: &Path, range: &CodeRange) -> Option<String> {
+    let text = read_repo_context_index(path)?;
+    let line = usize::try_from(range.start_line).ok()?;
+    let position = if line == 0 {
+        0
+    } else {
+        text.match_indices('\n')
+            .nth(line - 1)
+            .map(|(index, _)| index.saturating_add(1))?
+    };
+    Some(snippet_window_around_byte(&text, position, REPO_CONTEXT_SNIPPET_MAX_BYTES).to_owned())
+}
+
 fn read_repo_context_snippet_around_terms(path: &Path, terms: &BTreeSet<String>) -> Option<String> {
     let text = read_repo_context_index(path)?;
-    let lower_text = text.to_ascii_lowercase();
+    let lower_text = text.to_lowercase();
     let mut ranked_terms = terms.iter().collect::<Vec<_>>();
     ranked_terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
     let position = ranked_terms
@@ -1268,7 +1291,7 @@ impl SourceQueryProfile {
 
         for term in explicit_code_query_terms(query) {
             if is_path_like_query_term(&term) {
-                source_terms.insert(term.to_ascii_lowercase());
+                source_terms.insert(term.to_lowercase());
             } else {
                 for variant in source_term_variants(&term) {
                     symbol_terms.insert(variant.clone());
@@ -1307,7 +1330,7 @@ impl SourceQueryProfile {
                     }
                 }
                 SourceQueryTermRole::LexicalHint => {
-                    source_terms.insert(token.to_ascii_lowercase());
+                    source_terms.insert(token.to_lowercase());
                 }
                 SourceQueryTermRole::NaturalLanguage => {}
             }
@@ -1340,7 +1363,7 @@ fn source_query_term_role(term: &str) -> SourceQueryTermRole {
         return SourceQueryTermRole::NaturalLanguage;
     }
 
-    let lower = trimmed.to_ascii_lowercase();
+    let lower = trimmed.to_lowercase();
     if is_path_like_query_term(trimmed) {
         return SourceQueryTermRole::PathLike;
     }
@@ -1353,7 +1376,7 @@ fn source_query_term_role(term: &str) -> SourceQueryTermRole {
     if is_code_like_query_token(trimmed) {
         return SourceQueryTermRole::SymbolLike;
     }
-    if lower.len() >= 4 {
+    if lower.chars().count() >= 2 {
         return SourceQueryTermRole::LexicalHint;
     }
 
@@ -1366,6 +1389,7 @@ struct SourceSymbolScore {
     score_breakdown: Vec<ContextScoreComponent>,
     inclusion_reason: ContextInclusionReason,
     snippet_terms: BTreeSet<String>,
+    symbol_range: Option<CodeRange>,
 }
 
 fn source_symbol_file_score(
@@ -1374,13 +1398,13 @@ fn source_symbol_file_score(
     profile: &SourceQueryProfile,
 ) -> Option<SourceSymbolScore> {
     let relative = &source_file.path;
-    let relative_text = relative.to_string_lossy().to_ascii_lowercase();
+    let relative_text = relative.to_string_lossy().to_lowercase();
     let file_stem = relative
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .map(str::to_ascii_lowercase)
+        .map(str::to_lowercase)
         .unwrap_or_default();
-    let index_text = source_file.indexed_text.to_ascii_lowercase();
+    let index_text = source_file.indexed_text.to_lowercase();
     let mut score_breakdown = Vec::new();
     if profile.source_intent {
         push_score_component(
@@ -1391,6 +1415,7 @@ fn source_symbol_file_score(
     }
     let mut matched_symbol = false;
     let mut snippet_terms = BTreeSet::new();
+    let mut symbol_range = None;
     let symbols = repo_map
         .symbols
         .iter()
@@ -1433,11 +1458,11 @@ fn source_symbol_file_score(
             matched_symbol = true;
             snippet_terms.insert(term.clone());
         }
-        if symbols.iter().any(|symbol| {
+        if let Some(symbol) = symbols.iter().find(|symbol| {
             source_term_variants(&symbol.name)
                 .iter()
                 .any(|variant| variant == term)
-                || symbol.name.to_ascii_lowercase().contains(term)
+                || symbol.name.to_lowercase().contains(term)
         }) {
             push_score_component(
                 &mut score_breakdown,
@@ -1446,6 +1471,7 @@ fn source_symbol_file_score(
             );
             matched_symbol = true;
             snippet_terms.insert(term.clone());
+            symbol_range = symbol_range.or_else(|| symbol.range.clone());
         }
     }
 
@@ -1494,6 +1520,7 @@ fn source_symbol_file_score(
         score_breakdown,
         inclusion_reason,
         snippet_terms,
+        symbol_range,
     })
 }
 
@@ -1524,13 +1551,30 @@ fn score_from_breakdown(breakdown: &[ContextScoreComponent]) -> f32 {
 }
 
 fn read_repo_context_index(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    let indexed_len = bytes.len().min(SOURCE_CONTEXT_MAX_INDEX_BYTES_PER_FILE);
-    let indexed = &bytes[..indexed_len];
-    if indexed.contains(&0) {
+    read_bounded_repo_text(path, SOURCE_CONTEXT_MAX_INDEX_BYTES_PER_FILE)
+}
+
+fn read_bounded_repo_text(path: &Path, max_bytes: usize) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
+    file.take(read_limit).read_to_end(&mut bytes).ok()?;
+    if bytes.contains(&0) {
         return None;
     }
-    std::str::from_utf8(indexed).ok().map(str::to_owned)
+    if bytes.len() > max_bytes {
+        bytes.truncate(max_bytes);
+    }
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => Some(text.to_owned()),
+        Err(error) if error.error_len().is_none() => {
+            bytes.truncate(error.valid_up_to());
+            std::str::from_utf8(&bytes).ok().map(str::to_owned)
+        }
+        Err(_) => None,
+    }
 }
 
 fn query_has_source_intent(query: &str) -> bool {
@@ -1559,12 +1603,8 @@ fn query_has_source_intent(query: &str) -> bool {
     )
 }
 
-fn source_query_tokens(query: &str) -> impl Iterator<Item = String> + '_ {
-    query
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
-        .map(str::trim)
-        .filter(|token| token.len() >= 3)
-        .map(str::to_owned)
+fn source_query_tokens(query: &str) -> impl Iterator<Item = String> {
+    unicode_query_terms(query, false).into_iter()
 }
 
 fn explicit_code_query_terms(query: &str) -> BTreeSet<String> {
@@ -1591,10 +1631,10 @@ fn collect_explicit_query_term(segment: &str, terms: &mut BTreeSet<String>) {
     let term = segment
         .trim()
         .trim_matches(|ch: char| matches!(ch, '`' | '"' | '\'' | '.' | ',' | ':' | ';'));
-    if term.len() < 3 || term.len() > 96 || term.chars().any(char::is_whitespace) {
+    if term.chars().count() < 2 || term.len() > 96 || term.chars().any(char::is_whitespace) {
         return;
     }
-    if term.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+    if term.chars().any(char::is_alphanumeric) {
         terms.insert(term.to_owned());
     }
 }
@@ -1678,7 +1718,7 @@ fn source_term_variants(token: &str) -> BTreeSet<String> {
     if trimmed.is_empty() {
         return variants;
     }
-    let lower = trimmed.to_ascii_lowercase();
+    let lower = trimmed.to_lowercase();
     variants.insert(lower.clone());
     variants.insert(lower.replace('-', "_"));
     variants.insert(lower.replace(['_', '-'], " "));
@@ -1745,11 +1785,8 @@ fn explicit_path_token_variants(token: &str) -> Vec<&str> {
 }
 
 fn lexical_query_terms(query: &str) -> BTreeSet<String> {
-    query
-        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-        .map(str::trim)
-        .filter(|term| term.len() >= 3)
-        .map(str::to_lowercase)
+    unicode_query_terms(query, true)
+        .into_iter()
         .filter(|term| {
             matches!(
                 source_query_term_role(term),
@@ -1759,6 +1796,71 @@ fn lexical_query_terms(query: &str) -> BTreeSet<String> {
             )
         })
         .collect()
+}
+
+fn unicode_query_terms(query: &str, lowercase: bool) -> BTreeSet<String> {
+    let mut terms = BTreeSet::new();
+    let mut token = String::new();
+    let mut token_class = None;
+
+    let flush = |token: &mut String, terms: &mut BTreeSet<String>| {
+        if token.is_empty() {
+            return;
+        }
+        let normalized = if lowercase {
+            token.to_lowercase()
+        } else {
+            token.clone()
+        };
+        let character_count = normalized.chars().count();
+        if terms.len() < CONTEXT_QUERY_MAX_TERMS && (character_count >= 3 || !normalized.is_ascii())
+        {
+            terms.insert(normalized.clone());
+        }
+        if normalized.chars().all(is_cjk_ideograph) && character_count > 2 {
+            let characters = normalized.chars().collect::<Vec<_>>();
+            for window in characters
+                .windows(2)
+                .take(CONTEXT_QUERY_MAX_TERMS.saturating_sub(terms.len()))
+            {
+                terms.insert(window.iter().collect());
+            }
+        }
+        token.clear();
+    };
+
+    for character in query.chars() {
+        let class = if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            Some(0_u8)
+        } else if is_cjk_ideograph(character) {
+            Some(1_u8)
+        } else if character.is_alphanumeric() {
+            Some(2_u8)
+        } else {
+            None
+        };
+        if class != token_class {
+            flush(&mut token, &mut terms);
+            token_class = class;
+        }
+        if class.is_some()
+            && token.len().saturating_add(character.len_utf8()) <= CONTEXT_QUERY_MAX_TERM_BYTES
+        {
+            token.push(character);
+        }
+    }
+    flush(&mut token, &mut terms);
+    terms
+}
+
+fn is_cjk_ideograph(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{2FA1F}'
+    )
 }
 
 fn normalize_workspace_relative_path(workspace_root: &Path, path: &Path) -> Option<PathBuf> {

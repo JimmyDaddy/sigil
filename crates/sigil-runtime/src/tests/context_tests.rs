@@ -867,6 +867,58 @@ fn context_source_symbol_candidates_find_python_and_typescript_symbols() -> Resu
 }
 
 #[test]
+fn context_source_symbol_candidates_match_cjk_query_and_identifier() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("services"))?;
+    fs::write(
+        temp.path().join("services/config.py"),
+        "def 配置解析器():\n    return {}\n",
+    )?;
+
+    let explicit =
+        context_candidates_from_repo_query(temp.path(), "请定位 `配置解析器` 函数的源码定义")?;
+    let item = explicit
+        .items
+        .iter()
+        .find(|item| item.id == "repo-file:services/config.py")
+        .expect("CJK identifier source candidate");
+    assert_eq!(
+        item.inclusion_reason,
+        ContextInclusionReason::ExactSymbolMatch
+    );
+
+    let natural = context_candidates_from_repo_query(temp.path(), "配置解析器函数在哪里定义？")?;
+    assert_eq!(
+        natural.items.first().map(|item| item.id.as_str()),
+        Some("repo-file:services/config.py")
+    );
+    Ok(())
+}
+
+#[test]
+fn context_source_symbol_snippet_centers_definition_range() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("services"))?;
+    let source = format!(
+        "# EARLY_DECOY build_session\n{}def build_session():\n    return 'LATE_DEFINITION'\n",
+        "# unrelated filler line with enough width\n".repeat(180)
+    );
+    fs::write(temp.path().join("services/session.py"), source)?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "Where is `build_session` defined in source?",
+    )?;
+    let snippet = context
+        .snippets
+        .get("repo-file:services/session.py")
+        .expect("range-centered source snippet");
+    assert!(snippet.contains("LATE_DEFINITION"));
+    assert!(!snippet.contains("EARLY_DECOY"));
+    Ok(())
+}
+
+#[test]
 fn context_source_symbol_candidates_rank_source_paths_for_source_intent() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path().join("crates/sigil-runtime/src"))?;

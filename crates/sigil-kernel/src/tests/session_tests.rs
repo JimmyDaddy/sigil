@@ -81,11 +81,11 @@ fn request_memory_text(request: &crate::CompletionRequest) -> String {
         .join("\n")
 }
 
-fn request_context_v0_messages(request: &crate::CompletionRequest) -> Vec<&ModelMessage> {
+fn request_context_v1_messages(request: &crate::CompletionRequest) -> Vec<&ModelMessage> {
     request
         .messages
         .iter()
-        .filter(|message| message.id.starts_with("context:v0:"))
+        .filter(|message| message.id.starts_with("context:v1:"))
         .collect()
 }
 
@@ -3972,7 +3972,7 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
 }
 
 #[test]
-fn build_request_injects_context_v0_dynamic_suffix_from_session_archive() -> Result<()> {
+fn build_request_injects_context_v1_dynamic_suffix_from_session_archive() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     session.append_user_message(ModelMessage::user("Earlier parser investigation"))?;
@@ -3992,12 +3992,14 @@ fn build_request_injects_context_v0_dynamic_suffix_from_session_archive() -> Res
         None,
         None,
     )?;
-    let context_messages = request_context_v0_messages(&first);
+    let context_messages = request_context_v1_messages(&first);
     assert_eq!(context_messages.len(), 1);
     let context = context_messages[0];
     assert!(matches!(context.role, crate::MessageRole::System));
     let context_text = context.content.as_deref().expect("context content");
-    assert!(context_text.contains("sigil_context_v0"));
+    assert!(context_text.starts_with("Sigil Context V1"));
+    assert!(context_text.contains("sigil_context_v1"));
+    assert!(context_text.contains("warm_lsp_then_request_local_tree_sitter"));
     assert!(context_text.contains("session-archive:"));
     assert!(context_text.contains("parser rejected"));
     assert!(context_text.contains("retrieval_hit"));
@@ -4022,7 +4024,7 @@ fn build_request_injects_context_v0_dynamic_suffix_from_session_archive() -> Res
         None,
         None,
     )?;
-    let second_context = request_context_v0_messages(&second);
+    let second_context = request_context_v1_messages(&second);
     assert_eq!(second_context.len(), 1);
     assert_eq!(context.id, second_context[0].id);
     assert_eq!(context.content, second_context[0].content);
@@ -4030,7 +4032,7 @@ fn build_request_injects_context_v0_dynamic_suffix_from_session_archive() -> Res
 }
 
 #[test]
-fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
+fn build_request_injects_context_v1_from_runtime_candidates() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     session.append_user_message(ModelMessage::user("Summarize README.md"))?;
@@ -4065,7 +4067,7 @@ fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
         runtime_context,
     )?;
 
-    let context_messages = request_context_v0_messages(&request);
+    let context_messages = request_context_v1_messages(&request);
     assert_eq!(context_messages.len(), 1);
     let context_text = context_messages[0]
         .content
@@ -4081,7 +4083,7 @@ fn build_request_injects_context_v0_from_runtime_candidates() -> Result<()> {
 }
 
 #[test]
-fn build_request_context_v0_payload_distinguishes_memory_archive_and_evidence_sources() -> Result<()>
+fn build_request_context_v1_payload_distinguishes_memory_archive_and_evidence_sources() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
@@ -4139,7 +4141,7 @@ fn build_request_context_v0_payload_distinguishes_memory_archive_and_evidence_so
         runtime_context,
     )?;
 
-    let context_messages = request_context_v0_messages(&request);
+    let context_messages = request_context_v1_messages(&request);
     assert_eq!(context_messages.len(), 1);
     let context_text = context_messages[0]
         .content
@@ -4194,7 +4196,7 @@ fn build_request_records_context_assembly_skip_for_invalid_runtime_snippet() -> 
         runtime_context,
     )?;
 
-    assert!(request_context_v0_messages(&request).is_empty());
+    assert!(request_context_v1_messages(&request).is_empty());
     let skipped = session
         .entries
         .iter()
@@ -4213,12 +4215,12 @@ fn build_request_records_context_assembly_skip_for_invalid_runtime_snippet() -> 
             .contains("snippet token cost 7 exceeds declared token cost 1")
     );
     let prefix = session.latest_prefix_snapshot().expect("prefix snapshot");
-    assert!(!prefix.materialized_text.contains("sigil_context_v0"));
+    assert!(!prefix.materialized_text.contains("sigil_context_v1"));
     Ok(())
 }
 
 #[test]
-fn build_request_retrieves_context_v0_from_long_history_tail() -> Result<()> {
+fn build_request_retrieves_context_v1_from_long_history_tail() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     session.append_user_message(ModelMessage::user("Earlier validation investigation"))?;
@@ -4238,7 +4240,7 @@ fn build_request_retrieves_context_v0_from_long_history_tail() -> Result<()> {
         None,
     )?;
 
-    let context_messages = request_context_v0_messages(&request);
+    let context_messages = request_context_v1_messages(&request);
     assert_eq!(context_messages.len(), 1);
     let context_text = context_messages[0]
         .content

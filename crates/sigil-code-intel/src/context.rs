@@ -103,7 +103,7 @@ pub enum LspContextSnapshotStatus {
     TimedOut { timeout_ms: u64 },
 }
 
-/// Bounded, request-local repository source map for Context V0 candidate selection.
+/// Bounded, request-local repository source map for Context V1 candidate selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoMapLite {
     pub repo_revision: Option<ContextRepoRevision>,
