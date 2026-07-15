@@ -1,4 +1,5 @@
 use std::{
+    env,
     future::Future,
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -7,8 +8,6 @@ use std::{
 
 pub mod egress_disclosure;
 
-#[cfg(not(test))]
-use std::env;
 #[cfg(not(test))]
 use std::io;
 #[cfg(not(test))]
@@ -23,15 +22,13 @@ use sigil_http::{
     HttpDurableCommandStore, HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal,
     HttpLiveEventBus, HttpLocalServer, HttpProductionRunDriver, HttpProductionRunDriverOptions,
 };
+#[cfg(not(test))]
+use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
     AutoApproveHandler, EventHandler, ProviderChunk, PublicRunEvent, PublicRunEventKind,
-    RootConfig, RunEvent, UsageStats,
+    RootConfig, RunEvent, UsageStats, resolve_workspace_root,
 };
-#[cfg(not(test))]
-use sigil_kernel::{preferred_config_path, resolve_workspace_root};
 use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
-#[cfg(not(test))]
-use sigil_runtime::resolve_sigil_paths;
 use sigil_runtime::{
     DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest,
     application_run::{
@@ -43,7 +40,13 @@ use sigil_runtime::{
         MachineError, MachineErrorCode, MachineExitCode, MachineRecord, MachineRunResult,
         MachineRunStatus,
     },
-    stream_deepseek_fim_debug, stream_deepseek_prefix_debug,
+    resolve_sigil_paths, secret_redactor_for_root_config, stream_deepseek_fim_debug,
+    stream_deepseek_prefix_debug,
+    support::{
+        DoctorSupportProjectionContext, DoctorSupportReportV1, SupportBuildInfo,
+        SupportEnvironmentV1, SupportPathKind, SupportPathRedaction,
+        project_doctor_support_report_v1,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +91,10 @@ enum Commands {
     Resume {
         session: Option<String>,
     },
-    Doctor,
+    Doctor {
+        #[arg(long, value_enum, default_value = "text")]
+        output: DoctorOutput,
+    },
     Tokenizer {
         #[command(subcommand)]
         command: TokenizerCommand,
@@ -149,6 +155,13 @@ enum RunOutput {
     Text,
     Json,
     Jsonl,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum DoctorOutput {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -240,7 +253,7 @@ async fn run_main() -> Result<u8> {
         Commands::Resume { session } => {
             sigil_tui::launcher::run_tui_resume(cli.config, session)?;
         }
-        Commands::Doctor => doctor_command(&config_path, &cwd)?,
+        Commands::Doctor { output } => doctor_command(&config_path, &cwd, output)?,
         Commands::Tokenizer { command } => {
             tokenizer_command(&config_path, &cwd, command).await?;
         }
@@ -440,8 +453,14 @@ fn render_version(info: BuildInfo) -> String {
     )
 }
 
-fn doctor_command(config_path: &Path, launch_cwd: &Path) -> Result<()> {
-    print!("{}", render_cli_doctor_report(config_path, launch_cwd));
+fn doctor_command(config_path: &Path, launch_cwd: &Path, output: DoctorOutput) -> Result<()> {
+    match output {
+        DoctorOutput::Text => print!("{}", render_cli_doctor_report(config_path, launch_cwd)),
+        DoctorOutput::Json => println!(
+            "{}",
+            build_cli_doctor_support_report(config_path, launch_cwd)?.to_pretty_json()?
+        ),
+    }
     Ok(())
 }
 
@@ -457,6 +476,49 @@ fn build_cli_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
         DoctorReportOptions {
             appearance_checks: Some(&sigil_tui::appearance_diagnostics::appearance_doctor_checks),
             ..DoctorReportOptions::default()
+        },
+    )
+}
+
+fn build_cli_doctor_support_report(
+    config_path: &Path,
+    launch_cwd: &Path,
+) -> Result<DoctorSupportReportV1> {
+    let report = build_cli_doctor_report(config_path, launch_cwd);
+    let root_config = RootConfig::load(config_path).ok();
+    let redactor = root_config
+        .as_ref()
+        .map(secret_redactor_for_root_config)
+        .unwrap_or_default();
+    let mut path_redactions = vec![
+        SupportPathRedaction::new(config_path, SupportPathKind::Config),
+        SupportPathRedaction::new(launch_cwd, SupportPathKind::Workspace),
+    ];
+    if let Some(root_config) = root_config.as_ref() {
+        let workspace_root =
+            resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+        let paths =
+            resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+        path_redactions.extend([
+            SupportPathRedaction::new(workspace_root, SupportPathKind::Workspace),
+            SupportPathRedaction::new(paths.cache_root, SupportPathKind::Cache),
+            SupportPathRedaction::new(paths.state_root, SupportPathKind::State),
+        ]);
+    }
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+        path_redactions.push(SupportPathRedaction::new(home, SupportPathKind::Home));
+    }
+    let build = BuildInfo::current();
+    let build = SupportBuildInfo::new(build.version, build.git_hash, build.target, build.profile);
+    let environment = SupportEnvironmentV1::current();
+    project_doctor_support_report_v1(
+        &report,
+        DoctorSupportProjectionContext {
+            generated_at_unix_ms: sigil_runtime::current_unix_time_ms(),
+            build: &build,
+            environment: &environment,
+            redactor: &redactor,
+            path_redactions: &path_redactions,
         },
     )
 }

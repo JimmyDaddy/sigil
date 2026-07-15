@@ -25,10 +25,11 @@ use tokio::{
 };
 
 use super::{
-    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, RunOutput, ServeOptions, ServeStartupPlan,
-    StdoutEventHandler, build_serve_startup_plan, drain_provider_stream, render_cli_doctor_report,
-    render_doctor_report, render_provider_chunk, render_run_event, render_serve_startup_plan,
-    render_version, run_machine_command_with_cancellation, run_machine_command_with_writer,
+    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, RunOutput, ServeOptions,
+    ServeStartupPlan, StdoutEventHandler, build_serve_startup_plan, drain_provider_stream,
+    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
+    render_serve_startup_plan, render_version, run_machine_command_with_cancellation,
+    run_machine_command_with_writer,
 };
 
 fn boxed_chunk_stream(
@@ -556,7 +557,25 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
         cli.config.as_deref(),
         Some(std::path::Path::new("custom.toml"))
     );
-    assert!(matches!(cli.command, Some(Commands::Doctor)));
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Doctor {
+            output: DoctorOutput::Text,
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_doctor_json_output() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "doctor", "--output", "json"])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Doctor {
+            output: DoctorOutput::Json,
+        })
+    ));
     Ok(())
 }
 
@@ -756,7 +775,11 @@ fn serve_startup_plan_rejects_disabled_auth_and_renders_token_env_fallback() -> 
 fn doctor_command_renders_report_for_missing_config() -> Result<()> {
     let workspace = create_test_workspace("doctor-command");
 
-    super::doctor_command(&workspace.join("missing.toml"), &workspace)
+    super::doctor_command(
+        &workspace.join("missing.toml"),
+        &workspace,
+        DoctorOutput::Text,
+    )
 }
 
 #[test]

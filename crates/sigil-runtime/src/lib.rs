@@ -83,6 +83,7 @@ pub mod skills;
 #[allow(dead_code)] // E21.15 runtime-private route is intentionally dormant before E21.17.
 mod stable_mcp_search;
 pub mod streamable_http;
+pub mod support;
 pub mod url_capability;
 pub mod web_destination;
 mod web_fetch_tool;
