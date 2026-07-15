@@ -8,7 +8,7 @@ use futures::StreamExt;
 use sigil_kernel::{
     CompletionRequest, HostedCitationFidelity, HostedEvidence, HostedQueryVisibility,
     HostedSourceFidelity, HostedToolKind, HostedToolLimits, HostedToolRequest, HostedToolSupport,
-    ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+    ImageInputCapability, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
 };
 
 use super::*;
@@ -68,6 +68,14 @@ fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()>
 
     assert_eq!(provider.name(), "gemini");
     assert!(provider.capabilities().supports_structured_output);
+    assert_eq!(
+        provider.image_input_capability("gemini-2.5-pro"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        provider.image_input_capability("gemini-test"),
+        ImageInputCapability::Unsupported
+    );
     Ok(())
 }
 

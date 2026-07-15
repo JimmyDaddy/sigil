@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    MessageRole, ModelMessage, ProviderContinuationState, ReasoningEffort, ToolAccess,
-    ToolCategory, ToolPreviewCapability, ToolSpec,
+    ImageAttachment, ImageMimeType, MessageRole, ModelMessage, ProviderContinuationState,
+    ReasoningEffort, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
 use crate::{
@@ -59,6 +59,46 @@ fn compatible_strict_tools_route_to_beta() -> Result<()> {
         prepared.body.tools.as_ref().expect("tools payload missing")[0]["function"]["strict"],
         Value::Bool(true)
     );
+    Ok(())
+}
+
+#[test]
+fn chat_request_rejects_image_input_before_mapping() -> Result<()> {
+    let mut user = ModelMessage::user("inspect");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let request = sigil_kernel::CompletionRequest {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        messages: vec![user],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+        hosted_tools: Vec::new(),
+    };
+
+    let error = match build_chat_request(
+        &request,
+        None,
+        StrictToolsMode::Off,
+        &DeepSeekProviderQuirkProfile::default(),
+    ) {
+        Ok(_) => anyhow::bail!("DeepSeek image input must fail closed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("does not support image input"));
     Ok(())
 }
 
@@ -129,6 +169,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         tool_call_id: None,
         assistant_kind: None,
         id: "assistant-1".to_owned(),
+        image_attachments: Vec::new(),
     };
     let tool = ModelMessage {
         role: MessageRole::Tool,
@@ -137,6 +178,7 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
         tool_call_id: Some("call-1".to_owned()),
         assistant_kind: None,
         id: "tool-1".to_owned(),
+        image_attachments: Vec::new(),
     };
     let request = sigil_kernel::CompletionRequest {
         provider_name: "deepseek".to_owned(),

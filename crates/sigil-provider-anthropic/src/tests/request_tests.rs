@@ -1,7 +1,8 @@
 use serde_json::{Value, json};
 use sigil_kernel::{
-    CompletionRequest, HostedToolKind, HostedToolLimits, HostedToolRequest, MessageRole,
-    ModelMessage, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
+    CompletionRequest, HostedToolKind, HostedToolLimits, HostedToolRequest, ImageAttachment,
+    ImageInputCapability, ImageMimeType, MessageRole, ModelMessage, ToolAccess, ToolCall,
+    ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
 use super::*;
@@ -157,6 +158,7 @@ fn build_messages_request_rejects_malformed_tool_args_and_missing_result_id() {
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        image_attachments: Vec::new(),
     }];
     let error = build_messages_request(&invalid, 1024).expect_err("missing id should fail");
     assert!(error.to_string().contains("missing tool_call_id"));
@@ -172,6 +174,50 @@ fn build_messages_request_honors_explicit_max_tokens() -> anyhow::Result<()> {
     assert_eq!(body.max_tokens, 77);
     assert_eq!(serde_json::to_value(&body)?["max_tokens"], Value::from(77));
     Ok(())
+}
+
+#[test]
+fn build_messages_request_maps_resolved_image_before_text() -> anyhow::Result<()> {
+    let mut user = ModelMessage::user("inspect");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let mut request = completion_request(vec![user]);
+    request.model_name = "claude-sonnet-4-6".to_owned();
+
+    let body = build_messages_request(&request, 1024)?;
+    assert_eq!(body.messages[0]["content"][0]["type"], "image");
+    assert_eq!(
+        body.messages[0]["content"][0]["source"],
+        json!({
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "AQID",
+        })
+    );
+    assert_eq!(body.messages[0]["content"][1]["text"], "inspect");
+    assert!(!format!("{body:?}").contains("AQID"));
+    Ok(())
+}
+
+#[test]
+fn anthropic_image_capability_is_allowlisted_and_unknown_models_fail_closed() {
+    assert_eq!(
+        anthropic_image_input_capability("claude-opus-4-6"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        anthropic_image_input_capability("claude-opus-4-6-20260204"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        anthropic_image_input_capability("claude-test"),
+        ImageInputCapability::Unsupported
+    );
 }
 
 #[test]

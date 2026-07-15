@@ -1,8 +1,10 @@
+use std::fmt;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sigil_kernel::SecretString;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiGenerateContentRequest {
     pub contents: Vec<Value>,
@@ -14,6 +16,19 @@ pub struct GeminiGenerateContentRequest {
     pub generation_config: Option<GeminiGenerationConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+}
+
+impl fmt::Debug for GeminiGenerateContentRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeminiGenerateContentRequest")
+            .field("content_count", &self.contents.len())
+            .field("tool_count", &self.tools.as_ref().map(Vec::len))
+            .field("has_system_instruction", &self.system_instruction.is_some())
+            .field("generation_config", &self.generation_config)
+            .field("store", &self.store)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

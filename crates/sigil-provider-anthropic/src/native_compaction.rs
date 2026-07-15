@@ -283,8 +283,10 @@ pub(crate) fn build_paused_compaction_request(
             "Anthropic native compaction currently requires a frozen window without provider continuation state"
         );
     }
+    let mut compactable = request.clone();
+    sigil_kernel::strip_request_image_attachments_for_compaction(&mut compactable);
     let mut body = build_messages_request_with_continuations(
-        request,
+        &compactable,
         default_max_tokens,
         &AnthropicHostedContinuationStore::default(),
     )?

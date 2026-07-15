@@ -2,7 +2,8 @@ use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
 use sigil_kernel::{
-    CompletionRequest, MessageRole, ModelMessage, ProviderContinuationState, ReasoningEffort,
+    CompletionRequest, ImageInputCapability, MessageRole, ModelMessage, ProviderContinuationState,
+    ReasoningEffort, validate_image_input_capability, validate_request_image_attachments,
 };
 
 use crate::{
@@ -27,6 +28,8 @@ pub fn build_chat_request(
     strict_tools_mode: StrictToolsMode,
     quirks: &DeepSeekProviderQuirkProfile,
 ) -> Result<PreparedChatRequest> {
+    validate_request_image_attachments(request)?;
+    validate_image_input_capability(ImageInputCapability::Unsupported, request)?;
     let replay_states = index_replay_states(&request.continuation_states);
     let messages = request
         .messages

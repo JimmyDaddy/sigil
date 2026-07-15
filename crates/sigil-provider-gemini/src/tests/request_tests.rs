@@ -1,7 +1,8 @@
 use serde_json::json;
 use sigil_kernel::{
-    CompletionRequest, HostedToolKind, HostedToolLimits, HostedToolRequest, ModelMessage,
-    ProviderContinuationState, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
+    CompletionRequest, HostedToolKind, HostedToolLimits, HostedToolRequest, ImageAttachment,
+    ImageInputCapability, ImageMimeType, ModelMessage, ProviderContinuationState, ToolAccess,
+    ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
 use super::*;
@@ -115,6 +116,42 @@ fn build_generate_content_request_maps_function_call_and_response() -> anyhow::R
         "ok"
     );
     Ok(())
+}
+
+#[test]
+fn build_generate_content_request_maps_resolved_inline_image_before_text() -> anyhow::Result<()> {
+    let mut user = ModelMessage::user("inspect");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let mut request = completion_request(vec![user]);
+    request.model_name = "gemini-2.5-pro".to_owned();
+
+    let request_body = build_generate_content_request(&request)?;
+    assert!(!format!("{request_body:?}").contains("AQID"));
+    let body = serde_json::to_value(request_body)?;
+    assert_eq!(
+        body["contents"][0]["parts"][0]["inline_data"],
+        json!({"mime_type": "image/png", "data": "AQID"})
+    );
+    assert_eq!(body["contents"][0]["parts"][1]["text"], "inspect");
+    Ok(())
+}
+
+#[test]
+fn gemini_image_capability_accepts_explicit_models_and_rejects_latest_alias() {
+    assert_eq!(
+        gemini_image_input_capability("models/gemini-2.5-pro"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        gemini_image_input_capability("gemini-flash-latest"),
+        ImageInputCapability::Unsupported
+    );
 }
 
 #[test]

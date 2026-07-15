@@ -7,8 +7,9 @@ use std::{
 use futures::StreamExt;
 use sigil_kernel::{
     CompactionCursor, CompletionRequest, DurableEventType, FrozenProviderRequestMaterial,
-    HostedEvidence, HostedToolKind, HostedToolLimits, HostedToolRequest, JsonlSessionStore,
-    ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk, Session, SessionLogEntry,
+    HostedEvidence, HostedToolKind, HostedToolLimits, HostedToolRequest, ImageInputCapability,
+    JsonlSessionStore, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk, Session,
+    SessionLogEntry,
 };
 
 use super::*;
@@ -72,6 +73,14 @@ fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()>
 
     assert_eq!(provider.name(), "anthropic");
     assert!(provider.capabilities().supports_tool_stream);
+    assert_eq!(
+        provider.image_input_capability("claude-sonnet-4-6"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        provider.image_input_capability("claude-test"),
+        ImageInputCapability::Unsupported
+    );
     Ok(())
 }
 

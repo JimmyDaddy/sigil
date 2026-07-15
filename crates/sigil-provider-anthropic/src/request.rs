@@ -1,8 +1,10 @@
 use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
 use sigil_kernel::{
-    CompletionRequest, HostedToolRequest, MessageRole, ModelMessage, ToolCall, ToolSpec,
+    CompletionRequest, HostedToolRequest, ImageInputCapability, MessageRole, ModelMessage,
+    ToolCall, ToolSpec, validate_image_input_capability, validate_request_image_attachments,
 };
 
 use crate::{
@@ -36,6 +38,11 @@ pub(crate) fn build_messages_request_with_continuations(
     default_max_tokens: u32,
     continuation_store: &AnthropicHostedContinuationStore,
 ) -> Result<PreparedAnthropicMessagesRequest> {
+    validate_request_image_attachments(request)?;
+    validate_image_input_capability(
+        anthropic_image_input_capability(&request.model_name),
+        request,
+    )?;
     let mut system_parts = Vec::new();
     let mut messages = Vec::new();
     let mut pending_tool_results = Vec::new();
@@ -50,10 +57,7 @@ pub(crate) fn build_messages_request_with_continuations(
             }
             MessageRole::User => {
                 flush_tool_results(&mut messages, &mut pending_tool_results);
-                messages.push(json!({
-                    "role": "user",
-                    "content": non_empty_content(message).unwrap_or_default(),
-                }));
+                messages.push(user_message_to_json(message)?);
             }
             MessageRole::Assistant => {
                 flush_tool_results(&mut messages, &mut pending_tool_results);
@@ -94,6 +98,62 @@ pub(crate) fn build_messages_request_with_continuations(
         },
         prior_hosted_invocations,
     })
+}
+
+fn user_message_to_json(message: &ModelMessage) -> Result<Value> {
+    if message.image_attachments.is_empty() {
+        return Ok(json!({
+            "role": "user",
+            "content": non_empty_content(message).unwrap_or_default(),
+        }));
+    }
+    let mut content = Vec::with_capacity(message.image_attachments.len() + 1);
+    for attachment in &message.image_attachments {
+        content.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": attachment.mime_type.as_str(),
+                "data": STANDARD.encode(attachment.resolved_bytes()?),
+            },
+        }));
+    }
+    if let Some(text) = non_empty_content(message) {
+        content.push(json!({"type": "text", "text": text}));
+    }
+    Ok(json!({"role": "user", "content": content}))
+}
+
+pub(crate) fn anthropic_image_input_capability(model_name: &str) -> ImageInputCapability {
+    const ALIASES: &[&str] = &[
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+    ];
+    let model_name = model_name.trim().to_ascii_lowercase();
+    if ALIASES
+        .iter()
+        .any(|alias| model_name == *alias || is_dated_model_id(&model_name, alias))
+    {
+        ImageInputCapability::Supported
+    } else {
+        ImageInputCapability::Unsupported
+    }
+}
+
+fn is_dated_model_id(model_name: &str, alias: &str) -> bool {
+    model_name
+        .strip_prefix(alias)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|date| date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn assistant_message_to_json(message: &ModelMessage) -> Result<Value> {

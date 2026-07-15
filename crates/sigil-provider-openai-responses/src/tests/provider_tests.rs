@@ -6,8 +6,8 @@ use std::{
 use anyhow::Result;
 use futures::StreamExt;
 use sigil_kernel::{
-    CompletionRequest, FrozenProviderRequestMaterial, ModelMessage, ModelRequestTimeouts, Provider,
-    ProviderChunk,
+    CompletionRequest, FrozenProviderRequestMaterial, ImageInputCapability, ModelMessage,
+    ModelRequestTimeouts, Provider, ProviderChunk,
 };
 
 use crate::{
@@ -40,6 +40,14 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
 
     assert_eq!(provider.name(), "openai_responses");
     assert!(provider.capabilities().supports_tool_stream);
+    assert_eq!(
+        provider.image_input_capability("gpt-4.1"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        provider.image_input_capability("gpt-test"),
+        ImageInputCapability::Unsupported
+    );
 
     let error = match provider.stream(test_request()).await {
         Ok(_) => anyhow::bail!("missing key should fail before network"),

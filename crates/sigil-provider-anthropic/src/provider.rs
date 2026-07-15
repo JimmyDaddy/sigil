@@ -6,7 +6,7 @@ use futures::{Stream, stream};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 
 use sigil_kernel::{
-    CompletionRequest, HostedWebSearchCapability, ModelRequestTimeouts,
+    CompletionRequest, HostedWebSearchCapability, ImageInputCapability, ModelRequestTimeouts,
     PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities, ProviderChunk,
     ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase, SecretRedactor,
     read_provider_error_body, timeout_provider_request, timeout_provider_stream_next,
@@ -23,7 +23,7 @@ use crate::{
     },
     mapper::StreamMapper,
     models::AnthropicStreamEnvelope,
-    request::build_messages_request_with_continuations,
+    request::{anthropic_image_input_capability, build_messages_request_with_continuations},
     stream::{AnthropicSseDecoder, AnthropicSseFrame},
 };
 
@@ -78,6 +78,10 @@ impl Provider for AnthropicProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
+        anthropic_image_input_capability(model_name)
     }
 
     fn hosted_web_search_capability(&self, model_name: &str) -> HostedWebSearchCapability {

@@ -8,9 +8,9 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use sigil_kernel::{
     CompletionRequest, HostedCitationFidelity, HostedConstraintEnforcement, HostedQueryVisibility,
     HostedRequestWireState, HostedSourceFidelity, HostedToolSupport, HostedWebSearchCapability,
-    ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
-    SecretRedactor, read_provider_error_body, timeout_provider_request,
+    ImageInputCapability, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
+    ProviderTimeoutPhase, SecretRedactor, read_provider_error_body, timeout_provider_request,
     timeout_provider_stream_next,
 };
 
@@ -22,7 +22,7 @@ use crate::{
     hosted_search::{gemini_hosted_web_search_supported, hosted_invocation},
     mapper::StreamMapper,
     models::GeminiStreamEnvelope,
-    request::build_generate_content_request,
+    request::{build_generate_content_request, gemini_image_input_capability},
     stream::{GeminiSseDecoder, GeminiSseFrame},
 };
 
@@ -87,6 +87,10 @@ impl Provider for GeminiProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
+        gemini_image_input_capability(model_name)
     }
 
     fn hosted_web_search_capability(&self, model_name: &str) -> HostedWebSearchCapability {

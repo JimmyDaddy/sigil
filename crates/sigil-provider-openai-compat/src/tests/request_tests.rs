@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sigil_kernel::{
-    CompletionRequest, ModelMessage, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability,
-    ToolSpec,
+    CompletionRequest, ImageAttachment, ImageMimeType, ModelMessage, ToolAccess, ToolCall,
+    ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
 use super::build_chat_request;
@@ -108,5 +108,37 @@ fn build_chat_request_omits_tools_and_sampling_when_absent() -> Result<()> {
     assert!(serialized.get("temperature").is_none());
     assert!(serialized.get("max_tokens").is_none());
     assert_eq!(serialized["messages"][0]["content"], "answer");
+    Ok(())
+}
+
+#[test]
+fn build_chat_request_rejects_image_input_before_mapping() -> Result<()> {
+    let mut user = ModelMessage::user("inspect");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let request = CompletionRequest {
+        provider_name: "openai_compat".to_owned(),
+        model_name: "gpt-4.1".to_owned(),
+        messages: vec![user],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+        hosted_tools: Vec::new(),
+    };
+
+    let error = build_chat_request(&request).expect_err("compatible image input must fail closed");
+    assert!(error.to_string().contains("does not support image input"));
     Ok(())
 }

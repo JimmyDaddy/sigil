@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde_json::json;
-use sigil_kernel::{CompletionRequest, ModelMessage};
+use sigil_kernel::{CompletionRequest, ImageAttachment, ImageMimeType, ModelMessage};
 
 use super::{
     ANTHROPIC_NATIVE_COMPACTION_MIN_TRIGGER_TOKENS, AnthropicNativeCompactionOptions,
@@ -50,6 +50,34 @@ fn paused_native_request_uses_only_the_documented_beta_shape() -> Result<()> {
             }]
         }))
     );
+    Ok(())
+}
+
+#[test]
+fn paused_native_request_strips_image_blocks_but_keeps_placeholder_text() -> Result<()> {
+    let mut request = request();
+    request.messages[0].content = Some("[Image attachment 1: image/png]".to_owned());
+    request.messages[0]
+        .image_attachments
+        .push(ImageAttachment::from_bytes(
+            "image-1",
+            ImageMimeType::Png,
+            1,
+            1,
+            vec![1, 2, 3],
+        )?);
+    let body = build_paused_compaction_request(
+        &request,
+        1024,
+        &AnthropicNativeCompactionOptions {
+            trigger_input_tokens: ANTHROPIC_NATIVE_COMPACTION_MIN_TRIGGER_TOKENS,
+            instructions: None,
+        },
+    )?;
+    let wire = serde_json::to_string(&body)?;
+    assert!(!wire.contains("AQID"));
+    assert!(!wire.contains("\"type\":\"image\""));
+    assert!(wire.contains("Image attachment 1"));
     Ok(())
 }
 

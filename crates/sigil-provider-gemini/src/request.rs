@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
-use sigil_kernel::{CompletionRequest, MessageRole, ModelMessage, ToolCall};
+use sigil_kernel::{
+    CompletionRequest, ImageInputCapability, MessageRole, ModelMessage, ToolCall,
+    validate_image_input_capability, validate_request_image_attachments,
+};
 
 use crate::{
     hosted_search::{gemini_hosted_custom_tools_supported, hosted_invocation},
@@ -14,6 +18,8 @@ use crate::{
 pub fn build_generate_content_request(
     request: &CompletionRequest,
 ) -> Result<GeminiGenerateContentRequest> {
+    validate_request_image_attachments(request)?;
+    validate_image_input_capability(gemini_image_input_capability(&request.model_name), request)?;
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
     let mut tool_names_by_id = BTreeMap::new();
@@ -26,7 +32,7 @@ pub fn build_generate_content_request(
                     system_parts.push(json!({"text": content}));
                 }
             }
-            MessageRole::User => contents.push(content_with_text_role("user", message)),
+            MessageRole::User => contents.push(user_message_to_content(message)?),
             MessageRole::Assistant => {
                 contents.push(assistant_message_to_content(
                     message,
@@ -54,13 +60,50 @@ pub fn build_generate_content_request(
     })
 }
 
-fn content_with_text_role(role: &str, message: &ModelMessage) -> Value {
-    json!({
-        "role": role,
-        "parts": [{
-            "text": non_empty_content(message).unwrap_or_default(),
-        }],
-    })
+fn user_message_to_content(message: &ModelMessage) -> Result<Value> {
+    let mut parts = Vec::with_capacity(1 + message.image_attachments.len());
+    for attachment in &message.image_attachments {
+        parts.push(json!({
+            "inline_data": {
+                "mime_type": attachment.mime_type.as_str(),
+                "data": STANDARD.encode(attachment.resolved_bytes()?),
+            },
+        }));
+    }
+    if message.image_attachments.is_empty()
+        || message
+            .content
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        parts.push(json!({"text": non_empty_content(message).unwrap_or_default()}));
+    }
+    Ok(json!({"role": "user", "parts": parts}))
+}
+
+pub(crate) fn gemini_image_input_capability(model_name: &str) -> ImageInputCapability {
+    let normalized = model_name
+        .trim()
+        .to_ascii_lowercase()
+        .strip_prefix("models/")
+        .map(str::to_owned)
+        .unwrap_or_else(|| model_name.trim().to_ascii_lowercase());
+    if matches!(
+        normalized.as_str(),
+        "gemini-3.5-flash"
+            | "gemini-3.1-flash-image-preview"
+            | "gemini-3.1-pro-preview"
+            | "gemini-3-pro-image-preview"
+            | "gemini-3-flash-preview"
+            | "gemini-2.5-pro"
+            | "gemini-2.5-flash"
+            | "gemini-2.5-flash-lite"
+            | "gemini-2.0-flash"
+    ) {
+        ImageInputCapability::Supported
+    } else {
+        ImageInputCapability::Unsupported
+    }
 }
 
 fn assistant_message_to_content(

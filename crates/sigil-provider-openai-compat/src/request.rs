@@ -1,11 +1,16 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use sigil_kernel::{CompletionRequest, MessageRole, ModelMessage, ToolSpec};
+use sigil_kernel::{
+    CompletionRequest, ImageInputCapability, MessageRole, ModelMessage, ToolSpec,
+    validate_image_input_capability, validate_request_image_attachments,
+};
 
 use crate::models::{OpenAiChatCompletionRequest, OpenAiStreamOptions};
 
 pub fn build_chat_request(request: &CompletionRequest) -> Result<OpenAiChatCompletionRequest> {
+    validate_request_image_attachments(request)?;
+    validate_image_input_capability(ImageInputCapability::Unsupported, request)?;
     let messages = request
         .messages
         .iter()

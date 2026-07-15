@@ -7,8 +7,8 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, value::RawValue};
 use sigil_kernel::{
     COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompactionCursor, CompletionRequest, ContextSensitivity,
-    EffectiveTokenBudget, FrozenProviderRequestMaterial, InputTokenEvidence, ModelRequestTimeouts,
-    NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
+    EffectiveTokenBudget, FrozenProviderRequestMaterial, ImageInputCapability, InputTokenEvidence,
+    ModelRequestTimeouts, NativeProviderCompactionAttempt, NativeProviderCompactionMaterialization,
     NativeProviderCompactionMetadata, NativeProviderCompactionRequest,
     PROVIDER_ERROR_BODY_LIMIT_BYTES, PortableTargetRequestMaterial, Provider, ProviderCapabilities,
     ProviderChunk, ProviderPhysicalAttemptOutcome, ProviderRequestRejection,
@@ -25,7 +25,10 @@ use crate::{
     errors::{OpenAiResponsesProviderError, classify_status},
     mapper::StreamMapper,
     models::OpenAiResponsesCompactedWindow,
-    request::{build_compaction_request, build_input_token_count_request, build_responses_request},
+    request::{
+        build_compaction_request, build_input_token_count_request, build_responses_request,
+        openai_responses_image_input_capability,
+    },
     stream::{OpenAiResponsesSseDecoder, OpenAiResponsesSseFrame},
 };
 
@@ -286,6 +289,10 @@ impl Provider for OpenAiResponsesProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         self.capabilities.clone()
+    }
+
+    fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {
+        openai_responses_image_input_capability(model_name)
     }
 
     fn classify_pre_generation_rejection(

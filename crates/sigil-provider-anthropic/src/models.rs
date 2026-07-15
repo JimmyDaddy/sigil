@@ -1,7 +1,9 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct AnthropicMessagesRequest {
     pub model: String,
     pub messages: Vec<Value>,
@@ -17,6 +19,23 @@ pub struct AnthropicMessagesRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_management: Option<Value>,
+}
+
+impl fmt::Debug for AnthropicMessagesRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AnthropicMessagesRequest")
+            .field("model", &self.model)
+            .field("message_count", &self.messages.len())
+            .field("max_tokens", &self.max_tokens)
+            .field("stream", &self.stream)
+            .field("has_system", &self.system.is_some())
+            .field("tool_count", &self.tools.as_ref().map(Vec::len))
+            .field("tool_choice", &self.tool_choice)
+            .field("temperature", &self.temperature)
+            .field("has_context_management", &self.context_management.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -8,6 +8,7 @@
 |---|---|---|---|---|---|
 | `image` | `0.25.10`；`default-features = false`；仅 `png,jpeg,webp` | `sigil-runtime/image_attachment` | 对 bounded encoded image 做真实格式识别、尺寸读取与完整 decode；在解码前执行 byte cap、在完整 decode 前执行 dimension/pixel cap，不接受扩展名推断或 SVG/GIF 等 V1 外格式 | `MIT OR Apache-2.0`；`image-rs/image` | 仅 runtime controlled cache ingress/resolution 直接消费；不启用 AVIF、BMP、DDS、EXR、FF、GIF、HDR、ICO、PNM、QOI、TIFF、TGA 等无关 codec |
 | `tempfile` | `3.27.0`；默认 feature | `sigil-runtime/image_attachment` | 在目标 cache 目录创建随机临时文件，完成 write+sync 后用 `persist_noclobber` 原子提交内容寻址 blob；拒绝覆盖既有 blob并重新校验已存在内容 | `MIT OR Apache-2.0`；`Stebalien/tempfile` | 从 runtime dev-dependency 提升为直接依赖；临时文件与最终文件同目录，不跨文件系统 rename |
+| `base64` | `0.22.1`；默认 feature | `sigil-provider-openai-responses, sigil-provider-anthropic, sigil-provider-gemini` | 只在 provider request material 已通过 metadata/bytes binding 与 exact-model capability admission 后，将受限 encoded image bytes 映射为三种官方 inline image wire；编码结果不进入 durable state、Debug 或 error | `MIT OR Apache-2.0`；`marshallpierce/rust-base64` | workspace 原有传递版本提升为显式直接依赖；DeepSeek 与 generic compatible 不依赖、不编码并在 transport 前拒绝 image input |
 
 R33.2 同时复用 workspace 已有的 `sha2`、`url` 与 `libc`。文件入口和 cache leaf 都以 no-follow regular-file 方式读取，大小、hash、格式、dimensions 与 canonical artifact ref 任一不一致即 fail closed；原始粘贴路径不会进入 session/export/provider request。
 

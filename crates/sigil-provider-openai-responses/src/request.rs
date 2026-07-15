@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sigil_kernel::{
-    CompletionRequest, MessageRole, ModelMessage, ProviderContinuationState, ReasoningEffort,
-    ToolSpec,
+    CompletionRequest, ImageInputCapability, MessageRole, ModelMessage, ProviderContinuationState,
+    ReasoningEffort, ToolSpec, strip_request_image_attachments_for_compaction,
+    validate_image_input_capability, validate_request_image_attachments,
 };
 
 use crate::{
@@ -20,6 +22,11 @@ pub const OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND: &str = "openai.responses.out
 const OUTPUT_ITEMS_STATE_SCHEMA_VERSION: u64 = 1;
 
 pub fn build_responses_request(request: &CompletionRequest) -> Result<OpenAiResponsesRequest> {
+    validate_request_image_attachments(request)?;
+    validate_image_input_capability(
+        openai_responses_image_input_capability(&request.model_name),
+        request,
+    )?;
     if request.background {
         return Err(OpenAiResponsesProviderError::BackgroundRequestsUnsupported.into());
     }
@@ -73,7 +80,9 @@ pub fn build_responses_request(request: &CompletionRequest) -> Result<OpenAiResp
 pub fn build_compaction_request(
     request: &CompletionRequest,
 ) -> Result<OpenAiResponsesCompactRequest> {
-    let responses_request = build_responses_request(request)?;
+    let mut compactable = request.clone();
+    strip_request_image_attachments_for_compaction(&mut compactable);
+    let responses_request = build_responses_request(&compactable)?;
     Ok(OpenAiResponsesCompactRequest {
         model: responses_request.model,
         input: responses_request.input,
@@ -174,7 +183,7 @@ fn model_message_to_input_items(message: &ModelMessage) -> Result<Vec<Value>> {
             "developer",
             message.content.as_deref(),
         )]),
-        MessageRole::User => Ok(vec![role_text_item("user", message.content.as_deref())]),
+        MessageRole::User => Ok(vec![user_input_item(message)?]),
         MessageRole::Assistant => {
             let mut items = Vec::new();
             if message.content.is_some() {
@@ -213,6 +222,87 @@ fn role_text_item(role: &str, text: Option<&str>) -> Value {
             "text": text.unwrap_or_default(),
         }],
     })
+}
+
+fn user_input_item(message: &ModelMessage) -> Result<Value> {
+    let mut content = Vec::with_capacity(1 + message.image_attachments.len());
+    if message.image_attachments.is_empty()
+        || message
+            .content
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        content.push(json!({
+            "type": "input_text",
+            "text": message.content.as_deref().unwrap_or_default(),
+        }));
+    }
+    for attachment in &message.image_attachments {
+        let encoded = STANDARD.encode(attachment.resolved_bytes()?);
+        content.push(json!({
+            "type": "input_image",
+            "image_url": format!("data:{};base64,{encoded}", attachment.mime_type.as_str()),
+            "detail": "high",
+        }));
+    }
+    Ok(json!({"role": "user", "content": content}))
+}
+
+pub(crate) fn openai_responses_image_input_capability(model_name: &str) -> ImageInputCapability {
+    const ALIASES: &[&str] = &[
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.5-pro",
+        "gpt-5.4",
+        "gpt-5.4-pro",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.3-codex",
+        "gpt-5.2",
+        "gpt-5.2-pro",
+        "gpt-5.1",
+        "gpt-5",
+        "gpt-5-pro",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o3",
+        "o3-pro",
+        "o4-mini",
+    ];
+    let model_name = model_name.trim().to_ascii_lowercase();
+    if ALIASES
+        .iter()
+        .any(|alias| model_name == *alias || is_dated_snapshot_of(&model_name, alias))
+    {
+        ImageInputCapability::Supported
+    } else {
+        ImageInputCapability::Unsupported
+    }
+}
+
+fn is_dated_snapshot_of(model_name: &str, alias: &str) -> bool {
+    let Some(snapshot) = model_name
+        .strip_prefix(alias)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
+        return false;
+    };
+    let bytes = snapshot.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
 }
 
 fn responses_tools(tools: &[ToolSpec]) -> Option<Vec<Value>> {

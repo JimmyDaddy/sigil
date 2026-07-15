@@ -141,3 +141,4 @@ git diff --check
 - R33.0 complete：官方 provider 协议、Rust clipboard/image 依赖和 Codex/Aider/Gemini CLI 竞品代码已调研；durable metadata、controlled cache、capability、compaction、TUI、limits 与 commit/gate 边界已冻结。
 - R33.1 complete：kernel 已实现 provider-neutral durable attachment、进程内 bytes overlay、safe persistence、resolver/capability admission、请求 material schema V2 与 placeholder-only compaction contract；kernel 全量测试通过。
 - R33.2 complete：runtime 已实现 workspace-scoped content-addressed cache、PNG/JPEG/WebP bounded decode、同目录原子 no-clobber 写入、path/file URL admission、no-follow regular-file 读取及 hash/format/dimension 重新校验；依赖台账、audit/deny 与 adversarial tests 通过。
+- R33.3 complete：OpenAI Responses、Anthropic 与 Gemini 已实现 exact-model capability 和官方 inline image wire，provider request DTO 的 Debug 已 redacted；OpenAI/Anthropic native compaction 移除 image block，DeepSeek/generic compatible 在 mapper/transport 前 fail closed，五个 provider crate 全量测试与 strict Clippy 通过。

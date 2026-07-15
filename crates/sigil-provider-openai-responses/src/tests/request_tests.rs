@@ -1,14 +1,15 @@
 use anyhow::Result;
 use sigil_kernel::{
-    CompletionRequest, ModelMessage, ProviderContinuationState, ReasoningEffort, ToolAccess,
-    ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
+    CompletionRequest, ImageAttachment, ImageInputCapability, ImageMimeType, ModelMessage,
+    ProviderContinuationState, ReasoningEffort, ToolAccess, ToolCall, ToolCategory,
+    ToolPreviewCapability, ToolSpec,
 };
 
 use crate::{
     OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND,
     request::{
         OPENAI_RESPONSES_PROVIDER_NAME, build_compaction_request, build_input_token_count_request,
-        build_responses_request, output_items_state,
+        build_responses_request, openai_responses_image_input_capability, output_items_state,
     },
 };
 
@@ -216,6 +217,58 @@ fn responses_request_rejects_max_reasoning_effort_instead_of_downgrading_it() {
     let error = build_responses_request(&request).expect_err("max must not be silently remapped");
 
     assert!(error.to_string().contains("low, medium, or high"));
+}
+
+#[test]
+fn responses_request_maps_resolved_image_and_compaction_strips_image_block() -> Result<()> {
+    let mut user = ModelMessage::user("inspect\n\n[Image attachment 1: image/png]");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    let mut request = simple_request(vec![user]);
+    request.model_name = "gpt-4.1".to_owned();
+
+    let body = serde_json::to_value(build_responses_request(&request)?)?;
+    assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
+    assert_eq!(body["input"][0]["content"][1]["detail"], "high");
+    assert_eq!(
+        body["input"][0]["content"][1]["image_url"],
+        "data:image/png;base64,AQID"
+    );
+    assert!(!format!("{:?}", build_responses_request(&request)?).contains("AQID"));
+
+    let compact = serde_json::to_value(build_compaction_request(&request)?)?;
+    let compact_wire = serde_json::to_string(&compact)?;
+    assert!(!compact_wire.contains("input_image"));
+    assert!(!compact_wire.contains("AQID"));
+    assert!(compact_wire.contains("Image attachment 1"));
+    Ok(())
+}
+
+#[test]
+fn responses_image_capability_is_allowlisted_and_mapper_requires_resolved_bytes() -> Result<()> {
+    assert_eq!(
+        openai_responses_image_input_capability("gpt-5.4-2026-03-05"),
+        ImageInputCapability::Supported
+    );
+    assert_eq!(
+        openai_responses_image_input_capability("gpt-4.1-unknown"),
+        ImageInputCapability::Unsupported
+    );
+    let mut user = ModelMessage::user("inspect");
+    user.image_attachments.push(
+        ImageAttachment::from_bytes("image-1", ImageMimeType::Png, 1, 1, vec![1, 2, 3])?
+            .without_resolved_bytes(),
+    );
+    let mut request = simple_request(vec![user]);
+    request.model_name = "gpt-4.1".to_owned();
+    let error = build_responses_request(&request).expect_err("unresolved bytes must fail");
+    assert!(error.to_string().contains("not resolved"));
+    Ok(())
 }
 
 fn simple_request(messages: Vec<ModelMessage>) -> CompletionRequest {
