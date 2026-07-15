@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use ignore::WalkBuilder;
 use sigil_code_intel::context::{
     CodeContextBuilder, CodeContextHit, LspContextSnapshot, LspContextSnapshotStatus, RepoMapLite,
     RepoMapLiteOptions, RepoSourceFileRef,
@@ -1167,47 +1168,59 @@ fn collect_lexical_file_candidates(
     terms: &BTreeSet<String>,
     candidates: &mut BTreeMap<PathBuf, RepoContextCandidate>,
 ) {
-    let mut stack = vec![workspace_root.to_path_buf()];
+    let filter_root = workspace_root.to_path_buf();
+    let mut walker = WalkBuilder::new(workspace_root);
+    walker
+        .hidden(false)
+        .parents(true)
+        .ignore(true)
+        .git_global(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .sort_by_file_path(|left, right| left.cmp(right))
+        .filter_entry(move |entry| {
+            entry
+                .path()
+                .strip_prefix(&filter_root)
+                .map_or(true, |relative| !should_skip_repo_context_path(relative))
+        });
     let mut scanned = 0usize;
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                if !should_skip_repo_context_dir(&path) {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if !file_type.is_file() || scanned >= REPO_CONTEXT_MAX_FILES_SCANNED {
-                continue;
-            }
-            scanned = scanned.saturating_add(1);
-            let Ok(relative) = path.strip_prefix(workspace_root) else {
-                continue;
-            };
-            if should_skip_repo_context_path(relative) {
-                continue;
-            }
-            if let Some(scored) = lexical_file_score(&path, relative, terms) {
-                upsert_context_candidate(
-                    candidates,
-                    relative.to_path_buf(),
-                    scored.score,
-                    scored.score_breakdown,
-                    ContextInclusionReason::RetrievalHit,
-                    BTreeSet::new(),
-                    None,
-                );
-            }
-        }
+    for result in walker.build() {
         if scanned >= REPO_CONTEXT_MAX_FILES_SCANNED {
             break;
+        }
+        let Ok(entry) = result else {
+            continue;
+        };
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() || file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.into_path();
+        let Ok(relative) = path.strip_prefix(workspace_root) else {
+            continue;
+        };
+        if should_skip_repo_context_path(relative) {
+            continue;
+        }
+        scanned = scanned.saturating_add(1);
+        if is_secret_like_path(relative) {
+            continue;
+        }
+        if let Some(scored) = lexical_file_score(&path, relative, terms) {
+            upsert_context_candidate(
+                candidates,
+                relative.to_path_buf(),
+                scored.score,
+                scored.score_breakdown,
+                ContextInclusionReason::RetrievalHit,
+                BTreeSet::new(),
+                None,
+            );
         }
     }
 }
@@ -2000,31 +2013,28 @@ fn normalize_workspace_relative_path(workspace_root: &Path, path: &Path) -> Opti
     }) {
         return None;
     }
-    let full_path = workspace_root.join(path);
-    if !full_path.is_file() {
+    let mut full_path = workspace_root.to_path_buf();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => full_path.push(segment),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+        if fs::symlink_metadata(&full_path)
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return None;
+        }
+    }
+    let metadata = fs::symlink_metadata(&full_path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    if !full_path.canonicalize().ok()?.starts_with(workspace_root) {
         return None;
     }
     Some(path.to_path_buf())
-}
-
-fn should_skip_repo_context_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            matches!(
-                name,
-                ".git"
-                    | ".sigil"
-                    | ".repo-local-dev"
-                    | "target"
-                    | "node_modules"
-                    | "dist"
-                    | "build"
-                    | "coverage"
-                    | ".pytest_cache"
-                    | "__pycache__"
-            )
-        })
 }
 
 fn should_skip_repo_context_path(relative: &Path) -> bool {
@@ -2040,7 +2050,14 @@ fn should_skip_repo_context_path(relative: &Path) -> bool {
                     | "dist"
                     | "build"
                     | "coverage"
+                    | "vendor"
+                    | "out"
+                    | ".next"
+                    | ".cache"
+                    | ".mypy_cache"
                     | ".pytest_cache"
+                    | ".venv"
+                    | "venv"
                     | "__pycache__"
             )
         })
@@ -2049,8 +2066,13 @@ fn should_skip_repo_context_path(relative: &Path) -> bool {
 
 fn is_secret_like_path(relative: &Path) -> bool {
     let text = relative.to_string_lossy().to_lowercase();
-    text.ends_with(".env")
-        || text.contains("/.env")
+    let file_name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    file_name == "sigil.toml"
+        || file_name.starts_with(".env")
         || text.contains("id_rsa")
         || text.contains("id_ed25519")
         || text.contains("private_key")

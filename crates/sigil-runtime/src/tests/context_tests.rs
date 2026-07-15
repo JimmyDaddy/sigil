@@ -848,6 +848,101 @@ fn context_repo_candidates_do_not_read_secret_like_files() -> Result<()> {
 }
 
 #[test]
+fn context_repo_candidates_do_not_read_workspace_sigil_config() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(
+        temp.path().join("sigil.toml"),
+        "[providers.deepseek]\napi_key = \"workspace-config-secret\"\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(temp.path(), "inspect sigil.toml")?;
+
+    let item = context
+        .items
+        .iter()
+        .find(|item| item.id == "repo-file:sigil.toml")
+        .expect("workspace Sigil config context item");
+    assert_eq!(item.source, ContextSource::RepositoryFile);
+    assert_eq!(
+        item.inclusion_reason,
+        ContextInclusionReason::ExcludedSecret
+    );
+    assert_eq!(
+        context
+            .snippets
+            .get("repo-file:sigil.toml")
+            .map(String::as_str),
+        Some("secret-like repository file omitted from automatic context")
+    );
+    assert!(
+        !context
+            .snippets
+            .values()
+            .any(|snippet| snippet.contains("workspace-config-secret"))
+    );
+    Ok(())
+}
+
+#[test]
+fn context_repo_candidates_respect_ignore_rules_in_lexical_fallback() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join(".gitignore"), "ignored-context.md\n")?;
+    fs::write(
+        temp.path().join("ignored-context.md"),
+        "lexical-only ignored marker must stay out of request context\n",
+    )?;
+
+    let context = context_candidates_from_repo_query(
+        temp.path(),
+        "where is the lexical-only ignored marker documented",
+    )?;
+
+    assert!(
+        context
+            .items
+            .iter()
+            .all(|item| item.id != "repo-file:ignored-context.md")
+    );
+    assert!(
+        context
+            .snippets
+            .values()
+            .all(|snippet| !snippet.contains("lexical-only ignored marker"))
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn context_repo_candidates_reject_explicit_symlink_paths() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir()?;
+    let outside = tempfile::NamedTempFile::new()?;
+    fs::write(
+        outside.path(),
+        "external symlink secret must remain outside\n",
+    )?;
+    symlink(outside.path(), temp.path().join("linked-context.md"))?;
+
+    let context = context_candidates_from_repo_query(temp.path(), "inspect linked-context.md")?;
+
+    assert!(
+        context
+            .items
+            .iter()
+            .all(|item| item.id != "repo-file:linked-context.md")
+    );
+    assert!(
+        context
+            .snippets
+            .values()
+            .all(|snippet| !snippet.contains("external symlink secret"))
+    );
+    Ok(())
+}
+
+#[test]
 fn context_source_symbol_candidates_find_exact_rust_symbol() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path().join("crates/sigil-kernel/src"))?;
