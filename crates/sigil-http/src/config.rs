@@ -49,14 +49,16 @@ impl HttpServerConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error when token auth is required but has no environment variable,
-    /// or when a non-loopback bind disables token auth.
+    /// Returns an error when the V1 listener is not loopback-only with mandatory bearer auth.
     pub fn validate(&self) -> Result<(), HttpServerConfigError> {
+        if !self.is_loopback_only() {
+            return Err(HttpServerConfigError::NonLoopbackBind);
+        }
+        if !self.auth.require_token {
+            return Err(HttpServerConfigError::TokenAuthRequired);
+        }
         if self.auth.require_token && self.auth.token_env.trim().is_empty() {
             return Err(HttpServerConfigError::MissingTokenEnv);
-        }
-        if !self.is_loopback_only() && !self.auth.require_token {
-            return Err(HttpServerConfigError::ExternalBindWithoutToken);
         }
         Ok(())
     }
@@ -116,25 +118,27 @@ impl HttpAuthConfig {
 /// Configuration validation errors for the HTTP/SSE adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpServerConfigError {
+    /// V1 never exposes the adapter outside loopback.
+    NonLoopbackBind,
+    /// V1 command routes always require bearer authentication.
+    TokenAuthRequired,
     /// Token auth is enabled but no environment variable name was configured.
     MissingTokenEnv,
-    /// A non-loopback bind address cannot disable token auth.
-    ExternalBindWithoutToken,
 }
 
 impl fmt::Display for HttpServerConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NonLoopbackBind => {
+                write!(f, "http V1 listener only accepts loopback bind addresses")
+            }
+            Self::TokenAuthRequired => {
+                write!(f, "http V1 listener requires bearer token authentication")
+            }
             Self::MissingTokenEnv => {
                 write!(
                     f,
                     "http auth token env must be set when token auth is required"
-                )
-            }
-            Self::ExternalBindWithoutToken => {
-                write!(
-                    f,
-                    "http token auth is required for non-loopback bind addresses"
                 )
             }
         }

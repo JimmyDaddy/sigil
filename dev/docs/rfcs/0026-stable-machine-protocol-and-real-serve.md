@@ -1,6 +1,6 @@
 # RFC-0026 Stable Machine Protocol and Real Local Serve
 
-状态：accepted / P26.1-P26.4B implemented / P26.4C ready
+状态：accepted / P26.1-P26.4C implemented / P26.5 ready
 
 创建日期：2026-07-15
 
@@ -20,7 +20,7 @@
 
 TUI 继续是第一用户入口。CLI machine output 与 HTTP server 都是 adapter，不复制 agent loop，不拥有 session truth，也不绕过 permission、approval、sandbox、egress disclosure、mutation 和 verification 控制面。
 
-## 2. Existing Baseline and Gap
+## 2. 立项基线与缺口
 
 当前已具备：
 
@@ -179,13 +179,17 @@ production driver 必须：
 
 registry 必须在创建 adapter session 时由 runtime driver 建立并校验 durable V2 scope/path binding；binding 失败时不得发布 session。foreground lease 只在 typed `finished` / `failed` / `cancelled` / `interrupted` terminal 回写后释放；相同 terminal 回写幂等，冲突 terminal 不覆盖先到达的状态。
 
-driver unwind 属于 unknown execution state：registry 必须投影非终态 `execution_uncertain` 并保留 foreground quarantine，直到后续 durable terminal 确认或进程重启后由 session recovery 接管，不得回滚成可继续运行，也不得把 quarantine 伪装为可被覆盖的 terminal。command identity 只保留 bounded cryptographic fingerprint 与 bounded completion；容量到达上限时，新 key 返回 unavailable，既有 key 仍重放/冲突，不得淘汰后静默重新执行，也不能无界保存 prompt。P26.4B 的 durable event journal 不替代 command identity store；P26.4C 在开放 real serve listener 前必须移除这一固定 256-key 过渡容量，且不能以静默淘汰旧 key 作为替代。
+driver unwind 属于 unknown execution state：registry 必须投影非终态 `execution_uncertain` 并保留 foreground quarantine，直到后续 durable terminal 确认或进程重启后由 session recovery 接管，不得回滚成可继续运行，也不得把 quarantine 伪装为可被覆盖的 terminal。command identity 只保留 bounded cryptographic fingerprint 与 bounded completion；容量到达上限时，新 key 返回 unavailable，既有 key 仍重放/冲突，不得淘汰后静默重新执行，也不能无界保存 prompt。P26.4B 的 durable event journal 不替代 command identity store。
+
+P26.4C 在 listener bind 前使用独立、单 writer、原子替换的 durable command store 取代固定 256-key 进程内过渡窗口。每个 command 必须先持久化 reservation 才能执行；进程重启时未完成 reservation 封口为 `aborted`，成功 completion 可重放，冲突 fingerprint fail closed，达到 hard count/file-byte capacity 后只拒绝新 key。持久化 receipt 明确省略 prompt preview，并对 correlation/reason 等文本再次执行 SafePersist。store 每次成功 reopen 都持久递增 server epoch，production adapter session/run id 带 epoch，避免 process-local counter 重置后误命中旧 command identity。
 
 `allow_readonly` 只能自动放行 read-only approval；`deny` 拒绝所有 gated tool call；`ask` 必须等待显式 approval endpoint decision。
 
 ### 7.3 Durable replay and live stream
 
 `Last-Event-ID` replay 不能只依赖进程内 buffer。Adapter 必须维护 crash-safe、bounded 的 durable protocol journal，或从同一 durable session evidence 确定性重建 cursor；进程内 bus 只负责 transient live fan-out。SSE route 必须先 replay durable suffix，再持续订阅 live events，不能返回有限 body 后立即关闭。
+
+P26.4C 的 listener 在 replay 前先订阅 live bus，发送 retained durable suffix 后继续输出匹配 run 的 transient/durable event，直到 run terminal、client disconnect、明确 live lag 或 server shutdown。live lag 输出 `stream_gap` 后关闭，client 用最后一个 durable cursor 重连；不为 transient event 伪造 replay id。listener 用 owned `JoinSet` 收割连接任务；graceful shutdown 先关闭 socket 与新 command 准入，再通过正常 cooperative cancellation 取消 active run，等待 production driver owner idle，最后关闭并 join SSE/HTTP connections。只有全部 owner 已释放才返回成功。
 
 P26.4B 使用持久化 high-watermark 与 retained suffix：Unix 原子替换在 temp file sync、rename 和 parent-directory sync 全部成功后才允许 live publish；Windows 使用 replace-existing + write-through 的原生替换语义。同一路径由进程独占 lease 防止双 writer。被裁剪的 cursor 返回显式 `cursor_expired`，不能把不完整 suffix 伪装成连续历史；terminal stream watermark 随 retained terminal event 一起滚动回收，active stream identity 超出容量则 fail closed。cursor 绑定 durable session scope 与 adapter run id，避免 process-local adapter session id 在重启后复用造成 stream collision。
 
@@ -195,7 +199,7 @@ durable HTTP envelope 在 journal 前必须执行 kernel SafePersist 文本/JSON
 
 真实 server 必须使用 production disclosure presenter，并让已认证 client 查询 disclosure replay records。旧 synthetic presenter 不能作为 production receipt。完成该 presenter 前，需要 disclosure 的 Web/remote MCP run 必须 fail closed。写入 replay surface 只证明 server 已安全接收 disclosure，不证明人类已阅读；文档与 event naming 不得扩大该声明。
 
-P26.4B 的 production driver 在构造边界直接接收 durable disclosure journal 并组装 production presenter，不能注入 synthetic presenter；presenter 只在 bounded journal 原子持久化成功后返回 path-bound sink receipt，写入与 sync 运行在 owned blocking worker。synthetic in-memory presenter 只保留测试用途。已认证 replay route 与 live transport 由 P26.4C 接线。
+P26.4B 的 production driver 在构造边界直接接收 durable disclosure journal 并组装 production presenter，不能注入 synthetic presenter；presenter 只在 bounded journal 原子持久化成功后返回 path-bound sink receipt，写入与 sync 运行在 owned blocking worker。synthetic in-memory presenter 只保留测试用途。P26.4C 的 production listener 通过 bearer-authenticated `GET /disclosures` 按 `Last-Event-ID` 查询 retained safe records；route 不扩大 receipt 为“人类已阅读”。
 
 ## 8. Durability and Recovery
 

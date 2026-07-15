@@ -18,6 +18,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::StreamExt;
 use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
+#[cfg(not(test))]
+use sigil_http::{
+    HttpDurableCommandStore, HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal,
+    HttpLiveEventBus, HttpLocalServer, HttpProductionRunDriver, HttpProductionRunDriverOptions,
+};
 use sigil_kernel::{
     AutoApproveHandler, EventHandler, ProviderChunk, PublicRunEvent, PublicRunEventKind,
     RootConfig, RunEvent, UsageStats,
@@ -25,6 +30,8 @@ use sigil_kernel::{
 #[cfg(not(test))]
 use sigil_kernel::{preferred_config_path, resolve_workspace_root};
 use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
+#[cfg(not(test))]
+use sigil_runtime::resolve_sigil_paths;
 use sigil_runtime::{
     DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest,
     application_run::{
@@ -235,6 +242,8 @@ async fn run_main() -> Result<u8> {
                 env::var(&token_env).ok()
             };
             serve_command(
+                &config_path,
+                &cwd,
                 ServeOptions {
                     host,
                     port,
@@ -242,7 +251,8 @@ async fn run_main() -> Result<u8> {
                     no_token,
                 },
                 token.as_deref(),
-            )?;
+            )
+            .await?;
         }
         Commands::Prefix {
             prompt,
@@ -367,9 +377,54 @@ struct ServeStartupPlan {
     token_env: Option<String>,
 }
 
-fn serve_command(options: ServeOptions, token: Option<&str>) -> Result<()> {
-    let plan = build_serve_startup_plan(options, token)?;
+#[cfg(not(test))]
+async fn serve_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    options: ServeOptions,
+    token: Option<&str>,
+) -> Result<()> {
+    let config = options.http_config();
+    let mut plan = build_serve_startup_plan(options, token)?;
+    let root_config = RootConfig::load(config_path)?;
+    let workspace_root =
+        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    let server_root = paths.workspace_state_root.join("http-server-v1");
+    let protocol_journal = std::sync::Arc::new(HttpDurableProtocolJournal::open(
+        server_root.join("protocol-events.json"),
+        4_096,
+    )?);
+    let disclosure_journal = std::sync::Arc::new(HttpDurableEgressDisclosureJournal::open(
+        server_root.join("egress-disclosures.json"),
+        4_096,
+    )?);
+    let command_store = std::sync::Arc::new(HttpDurableCommandStore::open(
+        server_root.join("command-identities.json"),
+        4_096,
+    )?);
+    let event_bus = std::sync::Arc::new(HttpLiveEventBus::with_durable_journal(
+        256,
+        protocol_journal,
+    ));
+    let driver = std::sync::Arc::new(HttpProductionRunDriver::new(
+        HttpProductionRunDriverOptions::new(config_path, launch_cwd),
+        std::sync::Arc::clone(&disclosure_journal),
+        std::sync::Arc::clone(&event_bus),
+        tokio::runtime::Handle::current(),
+    )?);
+    let registry = driver.build_registry(command_store)?;
+    let server =
+        HttpLocalServer::bind_production(config, token, registry, event_bus, disclosure_journal)
+            .await?;
+    plan.bind_addr = server.local_addr()?;
     print!("{}", render_serve_startup_plan(&plan));
+    io::stdout().flush()?;
+    server
+        .serve_until_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }
 
@@ -399,7 +454,7 @@ fn render_serve_startup_plan(plan: &ServeStartupPlan) -> String {
         "disabled".to_owned()
     };
     format!(
-        "Sigil HTTP/SSE adapter\nbind: {}\nauth: {}\nstatus: HTTP routing is not implemented yet; no listener started\n",
+        "Sigil HTTP/SSE adapter\nbind: {}\nauth: {}\nstatus: listening; press Ctrl-C for graceful shutdown\n",
         plan.bind_addr, auth
     )
 }

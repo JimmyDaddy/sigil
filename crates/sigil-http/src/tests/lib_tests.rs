@@ -4,10 +4,12 @@ use std::{
         Arc, Barrier, Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use serde_json::{Value, json};
 use sigil_kernel::{
+    EgressDataCategory, EgressDisclosureKind, EgressNetworkRoute, PreEgressDisclosure,
     PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision, ToolExecutionId,
     ToolProgressEvent,
 };
@@ -21,15 +23,16 @@ use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
     HTTP_RUN_EVENT_SSE_NAME, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpAuthValidator, HttpCommandEnvelope, HttpLiveEventBus, HttpLiveEventRecvError,
-    HttpLocalServer, HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer,
-    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpRegistryError, HttpRunApprovalMode, HttpRunCancelRequest,
-    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
-    HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
-    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
-    HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError, HttpSseEvent,
-    http_openapi_document, public_run_event_to_sse,
+    HttpAuthValidator, HttpCommandEnvelope, HttpDurableCommandStore,
+    HttpDurableEgressDisclosureJournal, HttpDurableProtocolJournal, HttpLiveEventBus,
+    HttpLiveEventRecvError, HttpLocalServer, HttpPendingApproval, HttpProtocolEvent,
+    HttpProtocolEventBuffer, HttpProtocolEventClass, HttpProtocolEventView,
+    HttpProtocolReplayError, HttpProtocolVersionError, HttpRegistryError, HttpRunApprovalMode,
+    HttpRunCancelRequest, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
+    HttpRunStatus, HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError,
+    HttpSessionBinding, HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError,
+    HttpSseEvent, http_openapi_document, public_run_event_to_sse,
 };
 
 #[test]
@@ -136,9 +139,10 @@ fn auth_override_does_not_change_bind_default() {
     assert_eq!(config.bind_host, IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert!(!config.token_required());
     assert!(config.is_loopback_only());
-    config
-        .validate()
-        .expect("local explicit auth disable should be valid");
+    assert_eq!(
+        config.validate(),
+        Err(HttpServerConfigError::TokenAuthRequired)
+    );
 }
 
 #[test]
@@ -162,7 +166,7 @@ fn config_validation_rejects_missing_token_env_when_token_required() {
 }
 
 #[test]
-fn config_validation_rejects_external_bind_without_token_auth() {
+fn config_validation_rejects_every_external_bind_before_auth() {
     let config = HttpServerConfig {
         bind_host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         auth: HttpAuthConfig {
@@ -174,11 +178,11 @@ fn config_validation_rejects_external_bind_without_token_auth() {
 
     assert_eq!(
         config.validate(),
-        Err(HttpServerConfigError::ExternalBindWithoutToken)
+        Err(HttpServerConfigError::NonLoopbackBind)
     );
     assert_eq!(
-        HttpServerConfigError::ExternalBindWithoutToken.to_string(),
-        "http token auth is required for non-loopback bind addresses"
+        HttpServerConfigError::NonLoopbackBind.to_string(),
+        "http V1 listener only accepts loopback bind addresses"
     );
 }
 
@@ -688,6 +692,235 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
     let _ = shutdown.send(());
 }
 
+#[tokio::test]
+async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_events() {
+    let (address, shutdown, _driver, registry, event_bus) =
+        spawn_test_http_server_with_registry_and_events().await;
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("stream events", HttpRunApprovalMode::Deny),
+        )
+        .expect("run should start");
+    event_bus
+        .publish_run_event(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "stream events".to_owned(),
+            },
+        ))
+        .expect("durable start should publish");
+
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("SSE client should connect");
+    stream
+        .write_all(
+            http_get(
+                &format!("/runs/{}/events", run.id),
+                Some("secret-token"),
+                None,
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("SSE request should write");
+    let mut received = Vec::new();
+    let mut chunk = [0_u8; 4_096];
+    while !String::from_utf8_lossy(&received).contains("run_started") {
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+            .await
+            .expect("replay should arrive before timeout")
+            .expect("replay should read");
+        assert!(read > 0, "SSE must not close after a nonterminal replay");
+        received.extend_from_slice(&chunk[..read]);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.read(&mut chunk))
+            .await
+            .is_err(),
+        "SSE should remain open while the run is active"
+    );
+
+    event_bus
+        .publish_run_event(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            2,
+            PublicRunEventKind::TextDelta {
+                text: "live-only".to_owned(),
+            },
+        ))
+        .expect("transient delta should publish");
+    event_bus
+        .publish_run_event(PublicRunEvent::new(
+            &session.durable_session_scope_id,
+            &run.id,
+            3,
+            PublicRunEventKind::RunFinished {
+                final_text: "done".to_owned(),
+            },
+        ))
+        .expect("durable terminal should publish");
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut received))
+        .await
+        .expect("terminal should close the SSE stream")
+        .expect("SSE tail should read");
+    let received = String::from_utf8(received).expect("SSE response should be UTF-8");
+    assert!(received.contains("live-only"));
+    assert!(received.contains("run_finished"));
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn graceful_shutdown_reaps_idle_connections_cancels_runs_and_stops_command_admission() {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::clone(&registry),
+    )
+    .await
+    .expect("listener should bind");
+    let address = server.local_addr().expect("address should resolve");
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("wait for shutdown", HttpRunApprovalMode::Deny),
+        )
+        .expect("run should start");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let mut idle = TcpStream::connect(address)
+        .await
+        .expect("idle client should connect");
+    idle.write_all(
+        http_get(
+            &format!("/runs/{}/events", run.id),
+            Some("secret-token"),
+            None,
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("idle SSE request should write");
+    let mut head = [0_u8; 256];
+    let read = tokio::time::timeout(Duration::from_secs(2), idle.read(&mut head))
+        .await
+        .expect("SSE response head should arrive")
+        .expect("SSE response head should read");
+    assert!(String::from_utf8_lossy(&head[..read]).contains("200 OK"));
+    shutdown_tx.send(()).expect("shutdown should signal");
+    tokio::time::timeout(Duration::from_secs(2), serving)
+        .await
+        .expect("server should drain before timeout")
+        .expect("server task should join")
+        .expect("graceful shutdown should succeed");
+    let mut tail = Vec::new();
+    idle.read_to_end(&mut tail)
+        .await
+        .expect("owned SSE connection should close cleanly");
+    assert!(tail.is_empty());
+    assert_eq!(driver.cancels().len(), 1);
+    assert_eq!(driver.cancels()[0].run_id, run.id);
+    assert_eq!(
+        registry.create_session(HttpSessionCreateRequest::default()),
+        Err(HttpRegistryError::ServerShuttingDown)
+    );
+}
+
+#[tokio::test]
+async fn production_listener_exposes_authenticated_durable_disclosure_replay() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 8)
+            .expect("protocol journal should open"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(8, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures.json"), 8)
+            .expect("disclosure journal should open"),
+    );
+    let record = disclosure_journal
+        .publish(
+            PreEgressDisclosure::new(
+                EgressDisclosureKind::Query,
+                Some("query-1".to_owned()),
+                "disclosure-1",
+                "http",
+                "Web search",
+                "route-fingerprint",
+                "profile-fingerprint",
+                "https://search.example/",
+                "https://search.example/",
+                EgressNetworkRoute::Direct,
+                vec![EgressDataCategory::SearchQuery],
+            )
+            .expect("safe disclosure should build"),
+        )
+        .expect("disclosure should persist");
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver));
+    let server = HttpLocalServer::bind_production(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        registry,
+        event_bus,
+        disclosure_journal,
+    )
+    .await
+    .expect("production listener should bind");
+    let address = server.local_addr().expect("address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let (status, body) = http_raw_request(
+        address,
+        http_get("/disclosures", Some("secret-token"), None),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["disclosures"][0]["replay_id"], record.replay_id);
+    assert_eq!(
+        body["disclosures"][0]["disclosure"]["safe_logical_destination"],
+        "https://search.example/"
+    );
+
+    let (status, body) = http_raw_request(
+        address,
+        http_get(
+            "/disclosures",
+            Some("secret-token"),
+            Some(&record.replay_id),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["disclosures"], json!([]));
+    shutdown_tx.send(()).expect("shutdown should signal");
+    serving
+        .await
+        .expect("server task should join")
+        .expect("server should drain");
+}
+
 #[test]
 fn openapi_document_covers_current_command_surface_and_approval_guards() {
     let document = http_openapi_document();
@@ -706,6 +939,8 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/sessions"]["post"]["responses"]["401"].is_object());
     assert!(document["paths"]["/sessions"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions"]["post"]["responses"]["500"].is_object());
+    assert!(document["paths"]["/openapi.json"]["get"]["responses"]["401"].is_object());
+    assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
     assert!(
         document["paths"]["/sessions/{session_id}/runs"]["post"]["responses"]["409"].is_object()
@@ -721,6 +956,10 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/runs/{run_id}"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/runs/{run_id}/cancel"]["post"]["responses"]["409"].is_object());
     assert!(document["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"].is_object());
+    assert_eq!(
+        document["paths"]["/runs/{run_id}/events"]["get"]["summary"],
+        "Replay durable run events then follow live events"
+    );
     assert!(
         document["paths"]["/runs/{run_id}/approvals/{call_id}"]["post"]["responses"]["409"]
             .is_object()
@@ -1279,6 +1518,78 @@ fn session_create_get_returns_stable_snapshot() {
             session_id: "missing".to_owned()
         })
     );
+}
+
+#[test]
+fn durable_registry_epoch_prevents_adapter_id_reuse_after_restart() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let first_id = {
+        let driver = Arc::new(RecordingRunDriver::default());
+        let store =
+            Arc::new(HttpDurableCommandStore::open(&path, 8).expect("first store should open"));
+        let registry = HttpSessionRunRegistry::with_durable_command_store(driver, store);
+        create_session(&registry, HttpSessionCreateRequest::default()).id
+    };
+    let second_id = {
+        let driver = Arc::new(RecordingRunDriver::default());
+        let store =
+            Arc::new(HttpDurableCommandStore::open(&path, 8).expect("second store should reopen"));
+        let registry = HttpSessionRunRegistry::with_durable_command_store(driver, store);
+        create_session(&registry, HttpSessionCreateRequest::default()).id
+    };
+
+    assert_ne!(first_id, second_id);
+    assert!(first_id.starts_with("http-session-e1-"));
+    assert!(second_id.starts_with("http-session-e2-"));
+}
+
+#[test]
+fn durable_command_receipt_omits_prompt_preview_and_replays_without_reexecution() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let driver = Arc::new(RecordingRunDriver::default());
+    let command;
+    let session_id;
+    {
+        let store =
+            Arc::new(HttpDurableCommandStore::open(&path, 8).expect("command store should open"));
+        let registry = HttpSessionRunRegistry::with_durable_command_store(driver.clone(), store);
+        let session = create_session(&registry, HttpSessionCreateRequest::default());
+        session_id = session.id.clone();
+        command = HttpCommandEnvelope::new(
+            "durable-command-1",
+            "client-1",
+            &session.id,
+            run_start(
+                "secret prompt must not enter command store",
+                HttpRunApprovalMode::Deny,
+            ),
+        );
+        let receipt = registry
+            .start_run_command(&session.id, command.clone())
+            .expect("first command should execute");
+        assert_eq!(
+            receipt.run.prompt_preview,
+            "secret prompt must not enter command store"
+        );
+    }
+    let stored = std::fs::read_to_string(&path).expect("command store should be readable");
+    assert!(!stored.contains("secret prompt"));
+    assert!(stored.contains("omitted from durable command receipt"));
+
+    let store =
+        Arc::new(HttpDurableCommandStore::open(&path, 8).expect("command store should reopen"));
+    let registry = HttpSessionRunRegistry::with_durable_command_store(driver.clone(), store);
+    let replay = registry
+        .start_run_command(&session_id, command)
+        .expect("durable receipt should replay without a process-local session");
+    assert!(replay.replayed);
+    assert_eq!(
+        replay.run.prompt_preview,
+        "[omitted from durable command receipt]"
+    );
+    assert_eq!(driver.starts().len(), 1);
 }
 
 #[test]
@@ -2554,7 +2865,10 @@ fn dependency_edges(manifest: &str) -> Vec<(String, String)> {
 
 fn registry_with_driver() -> (HttpSessionRunRegistry, Arc<RecordingRunDriver>) {
     let driver = Arc::new(RecordingRunDriver::default());
-    (HttpSessionRunRegistry::new(driver.clone()), driver)
+    (
+        HttpSessionRunRegistry::with_in_memory_command_capacity(driver.clone(), 256),
+        driver,
+    )
 }
 
 fn create_session(
@@ -2770,7 +3084,10 @@ async fn spawn_test_http_server_with_registry_and_events() -> (
     Arc<HttpLiveEventBus>,
 ) {
     let driver = Arc::new(RecordingRunDriver::default());
-    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let registry = Arc::new(HttpSessionRunRegistry::with_in_memory_command_capacity(
+        driver.clone(),
+        256,
+    ));
     let event_bus = Arc::new(HttpLiveEventBus::new(16));
     let server = HttpLocalServer::bind_with_event_bus(
         HttpServerConfig::default(),

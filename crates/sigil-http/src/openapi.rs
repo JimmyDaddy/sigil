@@ -36,6 +36,39 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/openapi.json": {
+                "get": {
+                    "summary": "Read this authenticated local API description",
+                    "responses": {
+                        "200": { "description": "OpenAPI 3.1 document" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" }
+                    }
+                }
+            },
+            "/disclosures": {
+                "get": {
+                    "summary": "Replay safe durable egress disclosures",
+                    "parameters": [{
+                        "name": "Last-Event-ID",
+                        "in": "header",
+                        "required": false,
+                        "schema": { "type": "string" }
+                    }],
+                    "responses": {
+                        "200": {
+                            "description": "Retained disclosure suffix",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/DisclosureListResponse" }
+                                }
+                            }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions": {
                 "get": {
                     "summary": "List local session handles",
@@ -173,7 +206,7 @@ pub fn http_openapi_document() -> Value {
             },
             "/runs/{run_id}/events": {
                 "get": {
-                    "summary": "Replay durable run events as finite SSE frames",
+                    "summary": "Replay durable run events then follow live events",
                     "parameters": [
                         { "$ref": "#/components/parameters/RunId" },
                         {
@@ -185,7 +218,7 @@ pub fn http_openapi_document() -> Value {
                     ],
                     "responses": {
                         "200": {
-                            "description": "Finite text/event-stream replay for durable events",
+                            "description": "Continuous text/event-stream until terminal, disconnect, lag, or shutdown",
                             "content": {
                                 "text/event-stream": {
                                     "schema": { "type": "string" }
@@ -265,7 +298,7 @@ pub fn http_openapi_document() -> Value {
                 "NotFound": { "description": "Session, run, or route was not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
                 "Conflict": { "description": "Command is stale, mismatched, expired, or not pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
                 "InternalError": { "description": "Session binding, driver routing, or command completion failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
-                "Unavailable": { "description": "The bounded command identity registry has no available slot", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+                "Unavailable": { "description": "The durable command identity store is unavailable or at capacity", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
             },
             "schemas": {
                 "HealthResponse": {
@@ -298,6 +331,16 @@ pub fn http_openapi_document() -> Value {
                         "sessions": {
                             "type": "array",
                             "items": { "$ref": "#/components/schemas/SessionSnapshot" }
+                        }
+                    }
+                },
+                "DisclosureListResponse": {
+                    "type": "object",
+                    "required": ["disclosures"],
+                    "properties": {
+                        "disclosures": {
+                            "type": "array",
+                            "items": { "type": "object" }
                         }
                     }
                 },

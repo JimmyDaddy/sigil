@@ -21,11 +21,11 @@ use sigil_runtime::application_run::{
 use tokio::{runtime::Handle, sync::mpsc};
 
 use crate::{
-    HTTP_APPROVAL_POLICY_VERSION, HttpApprovalDecisionRecord, HttpDurableEgressDisclosureJournal,
-    HttpDurableEgressDisclosurePresenter, HttpLiveEventBus, HttpPendingApproval,
-    HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome, HttpSessionBinding,
-    HttpSessionRunRegistry,
+    HTTP_APPROVAL_POLICY_VERSION, HttpApprovalDecisionRecord, HttpDurableCommandStore,
+    HttpDurableEgressDisclosureJournal, HttpDurableEgressDisclosurePresenter, HttpLiveEventBus,
+    HttpPendingApproval, HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval,
+    HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart, HttpRunTerminalOutcome,
+    HttpSessionBinding, HttpSessionRunRegistry,
 };
 
 const DEFAULT_HTTP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -90,6 +90,7 @@ pub struct HttpProductionRunDriver {
     runtime: Handle,
     registry: OnceLock<Weak<HttpSessionRunRegistry>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
+    active_runs_ready: Arc<Condvar>,
 }
 
 impl std::fmt::Debug for HttpProductionRunDriver {
@@ -148,6 +149,7 @@ impl HttpProductionRunDriver {
             runtime,
             registry: OnceLock::new(),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
+            active_runs_ready: Arc::new(Condvar::new()),
         })
     }
 
@@ -158,9 +160,13 @@ impl HttpProductionRunDriver {
     /// Returns an error when the driver was already attached to another registry.
     pub fn build_registry(
         self: &Arc<Self>,
+        command_store: Arc<HttpDurableCommandStore>,
     ) -> Result<Arc<HttpSessionRunRegistry>, HttpRunDriverError> {
         let driver: Arc<dyn HttpRunDriver> = self.clone();
-        let registry = Arc::new(HttpSessionRunRegistry::new(driver));
+        let registry = Arc::new(HttpSessionRunRegistry::with_durable_command_store(
+            driver,
+            command_store,
+        ));
         self.registry
             .set(Arc::downgrade(&registry))
             .map_err(|_| HttpRunDriverError::new("production driver registry already attached"))?;
@@ -237,6 +243,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
         };
         let task = self.runtime.spawn(supervisor.run());
         let active_runs = Arc::clone(&self.active_runs);
+        let active_runs_ready = Arc::clone(&self.active_runs_ready);
         let registry = Arc::downgrade(&registry);
         let run_id = start.run.id;
         self.runtime.spawn(async move {
@@ -250,6 +257,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
             }
             if let Ok(mut runs) = active_runs.lock() {
                 runs.remove(&run_id);
+                active_runs_ready.notify_all();
             }
         });
         Ok(())
@@ -305,6 +313,35 @@ impl HttpRunDriver for HttpProductionRunDriver {
             ));
         }
         run.broker.resolve(&approval.call_id, approval.decision)
+    }
+
+    fn wait_for_idle(&self, timeout: Duration) -> Result<(), HttpRunDriverError> {
+        let deadline = Instant::now() + timeout;
+        let mut runs = self
+            .active_runs
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+        while !runs.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(HttpRunDriverError::new(format!(
+                    "production shutdown timed out with {} owned run supervisor(s)",
+                    runs.len()
+                )));
+            }
+            let (next, wait) = self
+                .active_runs_ready
+                .wait_timeout(runs, remaining)
+                .map_err(|_| HttpRunDriverError::new("production active-run state unavailable"))?;
+            runs = next;
+            if wait.timed_out() && !runs.is_empty() {
+                return Err(HttpRunDriverError::new(format!(
+                    "production shutdown timed out with {} owned run supervisor(s)",
+                    runs.len()
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

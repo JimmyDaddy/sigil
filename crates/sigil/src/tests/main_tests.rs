@@ -29,7 +29,6 @@ use super::{
     StdoutEventHandler, build_serve_startup_plan, drain_provider_stream, render_cli_doctor_report,
     render_doctor_report, render_provider_chunk, render_run_event, render_serve_startup_plan,
     render_version, run_machine_command_with_cancellation, run_machine_command_with_writer,
-    serve_command,
 };
 
 fn boxed_chunk_stream(
@@ -610,25 +609,24 @@ fn serve_startup_plan_requires_token_by_default() {
 }
 
 #[test]
-fn serve_startup_plan_rejects_external_bind_without_token() {
+fn serve_startup_plan_rejects_every_external_bind() {
     let options = ServeOptions {
         host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        no_token: true,
         ..default_serve_options()
     };
 
-    let error = build_serve_startup_plan(options, None)
-        .expect_err("external bind without token should be rejected");
+    let error = build_serve_startup_plan(options, Some("secret-token"))
+        .expect_err("V1 external bind should be rejected");
 
     assert!(
         error
             .to_string()
-            .contains("token auth is required for non-loopback bind addresses")
+            .contains("only accepts loopback bind addresses")
     );
 }
 
 #[test]
-fn serve_startup_plan_renders_pending_routing_hint() -> Result<()> {
+fn serve_startup_plan_renders_listener_status_without_token_value() -> Result<()> {
     let plan = build_serve_startup_plan(default_serve_options(), Some("secret-token"))?;
     let rendered = render_serve_startup_plan(&plan);
 
@@ -638,29 +636,28 @@ fn serve_startup_plan_renders_pending_routing_hint() -> Result<()> {
     assert!(rendered.contains("Sigil HTTP/SSE adapter"));
     assert!(rendered.contains("bind: 127.0.0.1:0"));
     assert!(rendered.contains("auth: bearer token from SIGIL_HTTP_TOKEN"));
-    assert!(rendered.contains("HTTP routing is not implemented yet"));
-    serve_command(default_serve_options(), Some("secret-token"))?;
+    assert!(rendered.contains("status: listening; press Ctrl-C for graceful shutdown"));
+    assert!(!rendered.contains("secret-token"));
     Ok(())
 }
 
 #[test]
-fn serve_startup_plan_renders_disabled_auth_and_token_env_fallback() -> Result<()> {
+fn serve_startup_plan_rejects_disabled_auth_and_renders_token_env_fallback() -> Result<()> {
     let disabled = build_serve_startup_plan(
         ServeOptions {
             no_token: true,
             ..default_serve_options()
         },
         None,
-    )?;
+    )
+    .expect_err("V1 should reject disabled bearer authentication");
     let fallback = ServeStartupPlan {
         bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         token_required: true,
         token_env: None,
     };
 
-    assert!(!disabled.token_required);
-    assert_eq!(disabled.token_env, None);
-    assert!(render_serve_startup_plan(&disabled).contains("auth: disabled"));
+    assert!(disabled.to_string().contains("requires bearer token"));
     assert!(
         render_serve_startup_plan(&fallback).contains("auth: bearer token from SIGIL_HTTP_TOKEN")
     );

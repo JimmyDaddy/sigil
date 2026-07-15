@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error as ThisError;
 
 use crate::dto::{
@@ -71,6 +73,18 @@ pub trait HttpRunDriver: Send + Sync {
     ///
     /// Returns an error when the underlying runtime cannot route the approval decision.
     fn submit_approval(&self, approval: HttpRunDriverApproval) -> Result<(), HttpRunDriverError>;
+
+    /// Waits until every driver-owned run supervisor has completed cleanup.
+    ///
+    /// Synthetic drivers own no background execution by default. Production drivers override this
+    /// hook so a successful listener shutdown cannot leave an unowned run task behind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when owned work does not drain before `timeout`.
+    fn wait_for_idle(&self, _timeout: Duration) -> Result<(), HttpRunDriverError> {
+        Ok(())
+    }
 }
 
 /// Error returned by an HTTP run driver.

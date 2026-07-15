@@ -214,8 +214,12 @@ model = "deepseek-v4-flash"
         )
         .expect("production driver should initialize"),
     );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands.json"), 16)
+            .expect("command store should initialize"),
+    );
     let registry = driver
-        .build_registry()
+        .build_registry(command_store)
         .expect("production registry should attach");
     let session = registry
         .create_session(HttpSessionCreateRequest::default())
@@ -401,8 +405,12 @@ model = "deepseek-v4-flash"
         )
         .expect("production driver should accept a durable event bus"),
     );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands.json"), 32)
+            .expect("command store should initialize"),
+    );
     let registry = driver
-        .build_registry()
+        .build_registry(command_store)
         .expect("production registry should attach");
     let session = registry
         .create_session(HttpSessionCreateRequest::default())

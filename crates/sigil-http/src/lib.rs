@@ -1,4 +1,7 @@
+#![recursion_limit = "256"]
+
 mod auth;
+mod command_store;
 mod config;
 mod disclosure;
 mod driver;
@@ -13,6 +16,7 @@ mod registry;
 mod sse;
 
 pub use auth::{HttpAuthError, HttpAuthValidator};
+pub use command_store::{HttpCommandStoreError, HttpDurableCommandStore};
 pub use config::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig, HttpServerConfigError};
 pub use disclosure::{
     HTTP_EGRESS_DISCLOSURE_SCHEMA_VERSION, HttpDisclosureReplayError, HttpDurableDisclosureError,

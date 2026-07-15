@@ -6,14 +6,20 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use sigil_kernel::safe_persistence_text;
 use thiserror::Error as ThisError;
 
 use crate::{
+    HttpCommandStoreError, HttpDurableCommandStore,
+    command_store::{
+        HTTP_DURABLE_COMMAND_PROMPT_OMISSION, HttpStoredCommandClaim, HttpStoredCommandCompletion,
+        HttpStoredCommandIdentity, HttpStoredCommandKey,
+    },
     driver::{HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverStart},
     dto::{
         HttpApprovalCommandReceipt, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest,
@@ -25,7 +31,7 @@ use crate::{
     protocol::HttpCommandEnvelope,
 };
 
-const MAX_HTTP_COMMAND_RESERVATIONS: usize = 256;
+const DEFAULT_IN_MEMORY_COMMAND_CAPACITY: usize = 4_096;
 
 /// Errors returned by the HTTP session/run registry.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
@@ -145,12 +151,20 @@ pub enum HttpRegistryError {
     /// The bounded fail-closed command identity window has reached capacity.
     #[error("http command registry is at its bounded identity capacity")]
     CommandRegistrySaturated,
+    /// Durable command identity state could not be reserved or completed safely.
+    #[error("http command identity persistence failed: {message}")]
+    CommandIdentityPersistenceFailed { message: String },
+    /// Graceful shutdown has stopped admission of new commands.
+    #[error("http server is shutting down and is not accepting new commands")]
+    ServerShuttingDown,
 }
 
 /// In-memory registry for HTTP adapter sessions, runs, cancellations, and approvals.
 pub struct HttpSessionRunRegistry {
     state: Mutex<HttpRegistryState>,
     driver: Arc<dyn HttpRunDriver>,
+    command_store: Option<Arc<HttpDurableCommandStore>>,
+    in_memory_command_capacity: usize,
 }
 
 /// Process-local registry activity used by graceful-drain and concurrency diagnostics.
@@ -173,6 +187,36 @@ impl HttpSessionRunRegistry {
         Self {
             state: Mutex::new(HttpRegistryState::default()),
             driver,
+            command_store: None,
+            in_memory_command_capacity: DEFAULT_IN_MEMORY_COMMAND_CAPACITY,
+        }
+    }
+
+    /// Creates a production registry backed by a crash-safe command identity store.
+    #[must_use]
+    pub fn with_durable_command_store(
+        driver: Arc<dyn HttpRunDriver>,
+        command_store: Arc<HttpDurableCommandStore>,
+    ) -> Self {
+        let id_namespace = format!("e{}", command_store.server_epoch());
+        Self {
+            state: Mutex::new(HttpRegistryState::with_id_namespace(id_namespace)),
+            driver,
+            command_store: Some(command_store),
+            in_memory_command_capacity: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_in_memory_command_capacity(
+        driver: Arc<dyn HttpRunDriver>,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            state: Mutex::new(HttpRegistryState::default()),
+            driver,
+            command_store: None,
+            in_memory_command_capacity: capacity,
         }
     }
 
@@ -186,7 +230,11 @@ impl HttpSessionRunRegistry {
         &self,
         request: HttpSessionCreateRequest,
     ) -> Result<HttpSessionSnapshot, HttpRegistryError> {
-        let id = self.lock_state().next_session_id();
+        let id = {
+            let mut state = self.lock_state();
+            state.ensure_accepting_commands()?;
+            state.next_session_id()
+        };
         let binding = self.driver.bind_session(&id).map_err(|error| {
             HttpRegistryError::SessionBindingRejected {
                 session_id: id.clone(),
@@ -254,6 +302,7 @@ impl HttpSessionRunRegistry {
         let prompt = request.prompt;
         let (run_id, session_snapshot, run_snapshot) = {
             let mut state = self.lock_state();
+            state.ensure_accepting_commands()?;
             let run_id = state.next_run_id();
             let session = state.sessions.get_mut(session_id).ok_or_else(|| {
                 HttpRegistryError::SessionNotFound {
@@ -377,6 +426,54 @@ impl HttpSessionRunRegistry {
         }
     }
 
+    /// Stops admission of new command identities while preserving replay for already reserved keys.
+    pub fn begin_shutdown(&self) {
+        self.lock_state().accepting_commands = false;
+    }
+
+    /// Cooperatively cancels every active run through the normal driver control path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first cancellation failure after attempting every active run.
+    pub fn cancel_active_runs(&self, reason: &str) -> Result<(), HttpRegistryError> {
+        let run_ids = {
+            let state = self.lock_state();
+            state
+                .runs
+                .values()
+                .filter(|run| {
+                    !run.status.is_terminal() && run.status != HttpRunStatus::ExecutionUncertain
+                })
+                .map(|run| run.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut first_error = None;
+        for run_id in run_ids {
+            if let Err(error) = self.cancel_run_with_reason(&run_id, Some(reason.to_owned()))
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Waits for all driver-owned run supervisors to release their owners.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the driver cannot prove idle state before the deadline.
+    pub fn wait_for_driver_idle(&self, timeout: Duration) -> Result<(), HttpRegistryError> {
+        self.driver
+            .wait_for_idle(timeout)
+            .map_err(|error| HttpRegistryError::DriverRejected {
+                operation: "shutdown drain",
+                run_id: "all".to_owned(),
+                message: error.message,
+            })
+    }
+
     /// Starts one run from a command envelope with retry de-duplication.
     ///
     /// # Errors
@@ -416,7 +513,7 @@ impl HttpSessionRunRegistry {
                     run,
                     replayed: false,
                 });
-        completion.complete(HttpCommandCompletion::Start(result.clone()));
+        completion.complete(HttpCommandCompletion::Start(result.clone()))?;
         result
     }
 
@@ -587,7 +684,7 @@ impl HttpSessionRunRegistry {
                 replayed: false,
             })
         })();
-        completion.complete(HttpCommandCompletion::Cancel(result.clone()));
+        completion.complete(HttpCommandCompletion::Cancel(result.clone()))?;
         result
     }
 
@@ -716,7 +813,7 @@ impl HttpSessionRunRegistry {
                 replayed: false,
             })
         })();
-        completion.complete(HttpCommandCompletion::Approval(result.clone()));
+        completion.complete(HttpCommandCompletion::Approval(result.clone()))?;
         result
     }
 
@@ -832,8 +929,44 @@ impl HttpSessionRunRegistry {
             }
             return Ok(HttpCommandClaim::Wait(Arc::clone(existing)));
         }
-        state.ensure_command_reservation_capacity()?;
-        let reservation = Arc::new(HttpCommandReservation::new(request));
+        if !state.accepting_commands {
+            return Err(HttpRegistryError::ServerShuttingDown);
+        }
+        let stored_identity = request.stored_identity(&key);
+        if let Some(command_store) = &self.command_store {
+            let claim = command_store
+                .reserve(stored_identity.clone())
+                .map_err(command_store_registry_error)?;
+            match claim {
+                HttpStoredCommandClaim::Conflict => {
+                    return Err(HttpRegistryError::CommandKeyConflict {
+                        session_id: key.session_id,
+                        client_id: key.client_id,
+                        command_id: key.command_id,
+                    });
+                }
+                HttpStoredCommandClaim::Existing(completion) => {
+                    let reservation = Arc::new(HttpCommandReservation::completed(
+                        request,
+                        Arc::clone(command_store),
+                        stored_identity,
+                        *completion,
+                    ));
+                    state
+                        .command_reservations
+                        .insert(key, Arc::clone(&reservation));
+                    return Ok(HttpCommandClaim::Wait(reservation));
+                }
+                HttpStoredCommandClaim::Execute => {}
+            }
+        } else if state.command_reservations.len() >= self.in_memory_command_capacity {
+            return Err(HttpRegistryError::CommandRegistrySaturated);
+        }
+        let reservation = Arc::new(HttpCommandReservation::new(
+            request,
+            self.command_store.clone(),
+            stored_identity,
+        ));
         state
             .command_reservations
             .insert(key.clone(), Arc::clone(&reservation));
@@ -847,13 +980,28 @@ impl HttpSessionRunRegistry {
     }
 }
 
-#[derive(Default)]
 struct HttpRegistryState {
     sessions: BTreeMap<String, HttpSessionState>,
     runs: BTreeMap<String, HttpRunState>,
     command_reservations: BTreeMap<HttpCommandKey, Arc<HttpCommandReservation>>,
     next_session_number: u64,
     next_run_number: u64,
+    accepting_commands: bool,
+    id_namespace: Option<String>,
+}
+
+impl Default for HttpRegistryState {
+    fn default() -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            runs: BTreeMap::new(),
+            command_reservations: BTreeMap::new(),
+            next_session_number: 0,
+            next_run_number: 0,
+            accepting_commands: true,
+            id_namespace: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -886,6 +1034,14 @@ impl HttpCommandKind {
             Self::Start => b"start",
             Self::Cancel => b"cancel",
             Self::Approval => b"approval",
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Cancel => "cancel",
+            Self::Approval => "approval",
         }
     }
 }
@@ -940,6 +1096,18 @@ impl HttpReservedCommand {
             fingerprint: hasher.finalize().into(),
         })
     }
+
+    fn stored_identity(&self, key: &HttpCommandKey) -> HttpStoredCommandIdentity {
+        HttpStoredCommandIdentity {
+            key: HttpStoredCommandKey {
+                session_id: key.session_id.clone(),
+                client_id: key.client_id.clone(),
+                command_id: key.command_id.clone(),
+            },
+            kind: self.kind.name().to_owned(),
+            fingerprint_sha256: hex_lower(&self.fingerprint),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -950,11 +1118,68 @@ enum HttpCommandCompletion {
     Aborted,
 }
 
+impl HttpCommandCompletion {
+    fn stored_projection(&self) -> HttpStoredCommandCompletion {
+        match self {
+            Self::Start(Ok(receipt)) => {
+                let mut receipt = receipt.clone();
+                project_stored_run_snapshot(&mut receipt.run);
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Start(receipt)
+            }
+            Self::Cancel(Ok(receipt)) => {
+                let mut receipt = receipt.clone();
+                project_stored_run_snapshot(&mut receipt.run);
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Cancel(receipt)
+            }
+            Self::Approval(Ok(receipt)) => {
+                let mut receipt = receipt.clone();
+                receipt.correlation_id = receipt
+                    .correlation_id
+                    .map(|value| safe_persistence_text(&value));
+                receipt.decision.reason = receipt
+                    .decision
+                    .reason
+                    .map(|value| safe_persistence_text(&value));
+                HttpStoredCommandCompletion::Approval(receipt)
+            }
+            Self::Start(Err(_)) | Self::Cancel(Err(_)) | Self::Approval(Err(_)) | Self::Aborted => {
+                HttpStoredCommandCompletion::Aborted
+            }
+        }
+    }
+
+    fn from_stored(completion: HttpStoredCommandCompletion) -> Self {
+        match completion {
+            HttpStoredCommandCompletion::Start(receipt) => Self::Start(Ok(receipt)),
+            HttpStoredCommandCompletion::Cancel(receipt) => Self::Cancel(Ok(receipt)),
+            HttpStoredCommandCompletion::Approval(receipt) => Self::Approval(Ok(receipt)),
+            HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted => {
+                Self::Aborted
+            }
+        }
+    }
+}
+
+fn project_stored_run_snapshot(run: &mut HttpRunSnapshot) {
+    run.prompt_preview = HTTP_DURABLE_COMMAND_PROMPT_OMISSION.to_owned();
+    for call_id in &mut run.pending_approval_call_ids {
+        *call_id = safe_persistence_text(call_id);
+    }
+}
+
 struct HttpCommandReservation {
     request: HttpReservedCommand,
     completion: Mutex<Option<HttpCommandCompletion>>,
     ready: Condvar,
     waiters: AtomicUsize,
+    command_store: Option<Arc<HttpDurableCommandStore>>,
+    stored_identity: HttpStoredCommandIdentity,
 }
 
 struct HttpCancelOperation {
@@ -1014,16 +1239,52 @@ impl HttpCancelOperation {
 }
 
 impl HttpCommandReservation {
-    fn new(request: HttpReservedCommand) -> Self {
+    fn new(
+        request: HttpReservedCommand,
+        command_store: Option<Arc<HttpDurableCommandStore>>,
+        stored_identity: HttpStoredCommandIdentity,
+    ) -> Self {
         Self {
             request,
             completion: Mutex::new(None),
             ready: Condvar::new(),
             waiters: AtomicUsize::new(0),
+            command_store,
+            stored_identity,
         }
     }
 
-    fn complete(&self, completion: HttpCommandCompletion) {
+    fn completed(
+        request: HttpReservedCommand,
+        command_store: Arc<HttpDurableCommandStore>,
+        stored_identity: HttpStoredCommandIdentity,
+        completion: HttpStoredCommandCompletion,
+    ) -> Self {
+        Self {
+            request,
+            completion: Mutex::new(Some(HttpCommandCompletion::from_stored(completion))),
+            ready: Condvar::new(),
+            waiters: AtomicUsize::new(0),
+            command_store: Some(command_store),
+            stored_identity,
+        }
+    }
+
+    fn complete(&self, completion: HttpCommandCompletion) -> Result<(), HttpRegistryError> {
+        if let Some(command_store) = &self.command_store
+            && let Err(error) =
+                command_store.complete(&self.stored_identity, completion.stored_projection())
+        {
+            let mut slot = self
+                .completion
+                .lock()
+                .expect("http command completion lock should not be poisoned");
+            if slot.is_none() {
+                *slot = Some(HttpCommandCompletion::Aborted);
+                self.ready.notify_all();
+            }
+            return Err(command_store_registry_error(error));
+        }
         let mut slot = self
             .completion
             .lock()
@@ -1032,6 +1293,7 @@ impl HttpCommandReservation {
             *slot = Some(completion);
             self.ready.notify_all();
         }
+        Ok(())
     }
 
     fn is_complete(&self) -> bool {
@@ -1131,36 +1393,50 @@ impl HttpCommandExecutionGuard {
         }
     }
 
-    fn complete(&mut self, completion: HttpCommandCompletion) {
-        self.reservation.complete(completion);
+    fn complete(&mut self, completion: HttpCommandCompletion) -> Result<(), HttpRegistryError> {
         self.completed = true;
+        self.reservation.complete(completion)
     }
 }
 
 impl Drop for HttpCommandExecutionGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.reservation.complete(HttpCommandCompletion::Aborted);
+            let _ = self.reservation.complete(HttpCommandCompletion::Aborted);
         }
     }
 }
 
 impl HttpRegistryState {
+    fn with_id_namespace(id_namespace: String) -> Self {
+        Self {
+            id_namespace: Some(id_namespace),
+            ..Self::default()
+        }
+    }
+
+    fn ensure_accepting_commands(&self) -> Result<(), HttpRegistryError> {
+        if self.accepting_commands {
+            Ok(())
+        } else {
+            Err(HttpRegistryError::ServerShuttingDown)
+        }
+    }
+
     fn next_session_id(&mut self) -> String {
         self.next_session_number += 1;
-        format!("http-session-{}", self.next_session_number)
+        self.id_namespace.as_ref().map_or_else(
+            || format!("http-session-{}", self.next_session_number),
+            |namespace| format!("http-session-{namespace}-{}", self.next_session_number),
+        )
     }
 
     fn next_run_id(&mut self) -> String {
         self.next_run_number += 1;
-        format!("http-run-{}", self.next_run_number)
-    }
-
-    fn ensure_command_reservation_capacity(&self) -> Result<(), HttpRegistryError> {
-        if self.command_reservations.len() < MAX_HTTP_COMMAND_RESERVATIONS {
-            return Ok(());
-        }
-        Err(HttpRegistryError::CommandRegistrySaturated)
+        self.id_namespace.as_ref().map_or_else(
+            || format!("http-run-{}", self.next_run_number),
+            |namespace| format!("http-run-{namespace}-{}", self.next_run_number),
+        )
     }
 
     fn transition_run_terminal(
@@ -1363,6 +1639,25 @@ fn prompt_preview(prompt: &str) -> String {
 fn update_command_fingerprint_part(hasher: &mut Sha256, part: &[u8]) {
     hasher.update((part.len() as u64).to_be_bytes());
     hasher.update(part);
+}
+
+fn command_store_registry_error(error: HttpCommandStoreError) -> HttpRegistryError {
+    match error {
+        HttpCommandStoreError::Saturated => HttpRegistryError::CommandRegistrySaturated,
+        error => HttpRegistryError::CommandIdentityPersistenceFailed {
+            message: error.to_string(),
+        },
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[(byte >> 4) as usize]));
+        output.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    output
 }
 
 fn validate_session_binding(

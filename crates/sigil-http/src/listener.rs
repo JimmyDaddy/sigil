@@ -1,27 +1,36 @@
-use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc};
+use std::{collections::BTreeMap, future::Future, net::SocketAddr, str, sync::Arc, time::Duration};
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sigil_kernel::PublicRunEventKind;
 use thiserror::Error as ThisError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::watch,
+    task::JoinSet,
 };
 
 use crate::{
     auth::HttpAuthValidator,
     config::HttpServerConfig,
+    disclosure::HttpDurableEgressDisclosureJournal,
     dto::{
         HttpApprovalDecisionRequest, HttpRunCancelRequest, HttpRunStartRequest,
         HttpSessionCreateRequest,
     },
     protocol::HttpCommandEnvelope,
     registry::{HttpRegistryError, HttpSessionRunRegistry},
-    sse::{HTTP_RUN_EVENT_SSE_NAME, HttpLiveEventBus, HttpSseEvent},
+    sse::{
+        HTTP_RUN_EVENT_SSE_NAME, HttpLiveEventBus, HttpLiveEventRecvError, HttpProtocolEvent,
+        HttpSseEvent,
+    },
 };
 
 const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
 const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
+const HTTP_SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const HTTP_GRACEFUL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Errors returned by the localhost HTTP listener boundary.
 #[derive(Debug, ThisError)]
@@ -55,6 +64,7 @@ pub struct HttpLocalServer {
     validator: HttpAuthValidator,
     registry: Arc<HttpSessionRunRegistry>,
     event_bus: Arc<HttpLiveEventBus>,
+    disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
 }
 
 impl HttpLocalServer {
@@ -90,6 +100,36 @@ impl HttpLocalServer {
         registry: Arc<HttpSessionRunRegistry>,
         event_bus: Arc<HttpLiveEventBus>,
     ) -> Result<Self, HttpListenerError> {
+        Self::bind_with_surfaces(config, token, registry, event_bus, None).await
+    }
+
+    /// Binds the production listener with durable run and disclosure replay surfaces.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when production replay is not durable or listener safety validation fails.
+    pub async fn bind_production(
+        config: HttpServerConfig,
+        token: Option<&str>,
+        registry: Arc<HttpSessionRunRegistry>,
+        event_bus: Arc<HttpLiveEventBus>,
+        disclosure_journal: Arc<HttpDurableEgressDisclosureJournal>,
+    ) -> Result<Self, HttpListenerError> {
+        if !event_bus.has_durable_journal() {
+            return Err(HttpListenerError::Config {
+                message: "production listener requires a durable protocol journal".to_owned(),
+            });
+        }
+        Self::bind_with_surfaces(config, token, registry, event_bus, Some(disclosure_journal)).await
+    }
+
+    async fn bind_with_surfaces(
+        config: HttpServerConfig,
+        token: Option<&str>,
+        registry: Arc<HttpSessionRunRegistry>,
+        event_bus: Arc<HttpLiveEventBus>,
+        disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
+    ) -> Result<Self, HttpListenerError> {
         config
             .validate()
             .map_err(|error| HttpListenerError::Config {
@@ -108,6 +148,7 @@ impl HttpLocalServer {
             validator,
             registry,
             event_bus,
+            disclosure_journal,
         })
     }
 
@@ -130,20 +171,58 @@ impl HttpLocalServer {
         F: Future<Output = ()> + Send,
     {
         tokio::pin!(shutdown);
+        let (connection_shutdown, _) = watch::channel(false);
+        let mut connections = JoinSet::new();
         loop {
             tokio::select! {
-                () = &mut shutdown => return Ok(()),
+                () = &mut shutdown => break,
                 accepted = self.listener.accept() => {
                     let (stream, _) = accepted?;
                     let validator = self.validator.clone();
                     let registry = Arc::clone(&self.registry);
                     let event_bus = Arc::clone(&self.event_bus);
-                    tokio::spawn(async move {
-                        let _ = handle_http_connection(stream, validator, registry, event_bus).await;
+                    let disclosure_journal = self.disclosure_journal.clone();
+                    let connection_shutdown = connection_shutdown.subscribe();
+                    connections.spawn(async move {
+                        handle_http_connection(
+                            stream,
+                            validator,
+                            registry,
+                            event_bus,
+                            disclosure_journal,
+                            connection_shutdown,
+                        )
+                        .await
                     });
                 }
+                Some(_joined) = connections.join_next(), if !connections.is_empty() => {}
             }
         }
+        drop(self.listener);
+        self.registry.begin_shutdown();
+        let registry = Arc::clone(&self.registry);
+        let cancellation = tokio::task::spawn_blocking(move || {
+            registry.cancel_active_runs("HTTP server graceful shutdown")
+        })
+        .await
+        .map_err(|_| HttpListenerError::Response {
+            message: "HTTP shutdown cancellation worker failed".to_owned(),
+        })?;
+        let registry = Arc::clone(&self.registry);
+        let drained = tokio::task::spawn_blocking(move || {
+            registry.wait_for_driver_idle(HTTP_GRACEFUL_DRAIN_TIMEOUT)
+        })
+        .await
+        .map_err(|_| HttpListenerError::Response {
+            message: "HTTP shutdown drain worker failed".to_owned(),
+        })?;
+        let _ = connection_shutdown.send(true);
+        while connections.join_next().await.is_some() {}
+        cancellation
+            .and(drained)
+            .map_err(|error| HttpListenerError::Response {
+                message: format!("HTTP shutdown could not drain every active run: {error}"),
+            })
     }
 }
 
@@ -152,11 +231,36 @@ async fn handle_http_connection(
     validator: HttpAuthValidator,
     registry: Arc<HttpSessionRunRegistry>,
     event_bus: Arc<HttpLiveEventBus>,
+    disclosure_journal: Option<Arc<HttpDurableEgressDisclosureJournal>>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), HttpListenerError> {
-    let response = match read_http_request(&mut stream).await {
+    let request = tokio::select! {
+        request = read_http_request(&mut stream) => request,
+        _ = wait_for_shutdown(&mut shutdown) => {
+            stream.shutdown().await?;
+            return Ok(());
+        }
+    };
+    let response = match request {
         Ok(request) => {
+            if request.method == "GET" && run_events_route_id(&request.path).is_some() {
+                return stream_run_events(
+                    &mut stream,
+                    request,
+                    &validator,
+                    &registry,
+                    &event_bus,
+                    &mut shutdown,
+                )
+                .await;
+            }
             match tokio::task::spawn_blocking(move || {
-                route_http_request(request, &validator, &registry, &event_bus)
+                route_http_request(
+                    request,
+                    &validator,
+                    &registry,
+                    disclosure_journal.as_deref(),
+                )
             })
             .await
             {
@@ -168,14 +272,20 @@ async fn handle_http_connection(
         }
         Err(error) => http_error_response(400, "bad_request", error.to_string()),
     };
-    write_http_response(&mut stream, response).await
+    tokio::select! {
+        result = write_http_response(&mut stream, response) => result,
+        _ = wait_for_shutdown(&mut shutdown) => {
+            stream.shutdown().await?;
+            Ok(())
+        }
+    }
 }
 
 fn route_http_request(
     request: HttpRequest,
     validator: &HttpAuthValidator,
     registry: &HttpSessionRunRegistry,
-    event_bus: &HttpLiveEventBus,
+    disclosure_journal: Option<&HttpDurableEgressDisclosureJournal>,
 ) -> HttpResponse {
     if request.method == "GET" && request.path == "/health" {
         return json_response(200, json!({ "status": "ok" }));
@@ -188,6 +298,24 @@ fn route_http_request(
 
     if request.method == "GET" && request.path == "/sessions" {
         return json_response(200, json!({ "sessions": registry.list_sessions() }));
+    }
+
+    if request.method == "GET" && request.path == "/openapi.json" {
+        return json_response(200, crate::http_openapi_document());
+    }
+
+    if request.method == "GET" && request.path == "/disclosures" {
+        let Some(journal) = disclosure_journal else {
+            return http_error_response(
+                503,
+                "disclosure_unavailable",
+                "durable disclosure replay is unavailable",
+            );
+        };
+        return match journal.replay_after(request.header("last-event-id").map(String::as_str)) {
+            Ok(records) => json_response(200, json!({ "disclosures": records })),
+            Err(error) => http_error_response(409, "replay_error", error.to_string()),
+        };
     }
 
     if request.method == "POST" && request.path == "/sessions" {
@@ -260,21 +388,6 @@ fn route_http_request(
         };
     }
 
-    if request.method == "GET"
-        && let Some(run_id) = request
-            .path
-            .strip_prefix("/runs/")
-            .and_then(|suffix| suffix.strip_suffix("/events"))
-            .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
-    {
-        return run_events_response(
-            registry,
-            event_bus,
-            run_id,
-            request.header("last-event-id").map(String::as_str),
-        );
-    }
-
     if request.method == "POST"
         && let Some((run_id, call_id)) = approval_route_parts(&request.path)
     {
@@ -292,45 +405,166 @@ fn route_http_request(
     http_error_response(404, "not_found", "http route not found")
 }
 
-fn run_events_response(
+async fn stream_run_events(
+    stream: &mut TcpStream,
+    request: HttpRequest,
+    validator: &HttpAuthValidator,
     registry: &HttpSessionRunRegistry,
     event_bus: &HttpLiveEventBus,
-    run_id: &str,
-    last_event_id: Option<&str>,
-) -> HttpResponse {
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<(), HttpListenerError> {
+    if let Err(error) =
+        validator.validate_authorization_header(request.header("authorization").map(String::as_str))
+    {
+        return write_http_response(
+            stream,
+            http_error_response(401, "unauthorized", error.to_string()),
+        )
+        .await;
+    }
+    let Some(run_id) = run_events_route_id(&request.path) else {
+        return write_http_response(
+            stream,
+            http_error_response(404, "not_found", "http route not found"),
+        )
+        .await;
+    };
+    let mut subscriber = event_bus.subscribe();
     let run = match registry.get_run(run_id) {
         Ok(run) => run,
-        Err(error) => return registry_error_response(error),
+        Err(error) => return write_http_response(stream, registry_error_response(error)).await,
     };
     let session = match registry.get_session(&run.session_id) {
         Ok(session) => session,
-        Err(error) => return registry_error_response(error),
+        Err(error) => return write_http_response(stream, registry_error_response(error)).await,
     };
     let events = match event_bus.replay_run_after(
         &session.durable_session_scope_id,
         run_id,
-        last_event_id,
+        request.header("last-event-id").map(String::as_str),
     ) {
         Ok(events) => events,
-        Err(error) => return http_error_response(409, "replay_error", error.to_string()),
+        Err(error) => {
+            return write_http_response(
+                stream,
+                http_error_response(409, "replay_error", error.to_string()),
+            )
+            .await;
+        }
     };
-    let mut body = String::new();
+    write_sse_response_head(stream).await?;
+    let mut last_sequence = 0;
     for event in events {
-        let data = match serde_json::to_string(&event) {
-            Ok(data) => data,
-            Err(error) => {
-                return http_error_response(500, "sse_error", error.to_string());
-            }
-        };
-        let frame = match HttpSseEvent::with_id(event.replay_id, HTTP_RUN_EVENT_SSE_NAME, data) {
-            Ok(frame) => frame,
-            Err(error) => {
-                return http_error_response(500, "sse_error", error.to_string());
-            }
-        };
-        body.push_str(&frame.encode());
+        last_sequence = last_sequence.max(event.run_event.sequence);
+        write_protocol_event(stream, &event).await?;
+        if protocol_event_is_terminal(&event) {
+            stream.shutdown().await?;
+            return Ok(());
+        }
     }
-    bytes_response(200, "text/event-stream", body.into_bytes())
+    if run.status.is_terminal() {
+        stream.shutdown().await?;
+        return Ok(());
+    }
+    stream.flush().await?;
+
+    let mut keepalive = tokio::time::interval(HTTP_SSE_KEEPALIVE_INTERVAL);
+    keepalive.tick().await;
+    loop {
+        tokio::select! {
+            _ = wait_for_shutdown(shutdown) => {
+                stream.shutdown().await?;
+                return Ok(());
+            }
+            _ = keepalive.tick() => {
+                stream.write_all(b": keep-alive\n\n").await?;
+                stream.flush().await?;
+            }
+            received = subscriber.recv() => {
+                let event = match received {
+                    Ok(event) => event,
+                    Err(HttpLiveEventRecvError::Lagged { dropped }) => {
+                        let frame = HttpSseEvent::new(
+                            "stream_gap",
+                            json!({ "dropped_live_events": dropped }).to_string(),
+                        ).map_err(|error| HttpListenerError::Response {
+                            message: error.to_string(),
+                        })?;
+                        stream.write_all(frame.encode().as_bytes()).await?;
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                    Err(HttpLiveEventRecvError::Closed) => {
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                };
+                if event.run_event.session_id != session.durable_session_scope_id
+                    || event.run_event.run_id != run_id
+                    || event.run_event.sequence <= last_sequence
+                {
+                    continue;
+                }
+                last_sequence = event.run_event.sequence;
+                write_protocol_event(stream, &event).await?;
+                stream.flush().await?;
+                if protocol_event_is_terminal(&event) {
+                    stream.shutdown().await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn run_events_route_id(path: &str) -> Option<&str> {
+    path.strip_prefix("/runs/")
+        .and_then(|suffix| suffix.strip_suffix("/events"))
+        .filter(|run_id| !run_id.is_empty() && !run_id.contains('/'))
+}
+
+async fn write_sse_response_head(stream: &mut TcpStream) -> Result<(), HttpListenerError> {
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+        )
+        .await?;
+    Ok(())
+}
+
+async fn write_protocol_event(
+    stream: &mut TcpStream,
+    event: &HttpProtocolEvent,
+) -> Result<(), HttpListenerError> {
+    let data = serde_json::to_string(event).map_err(|error| HttpListenerError::Response {
+        message: error.to_string(),
+    })?;
+    let frame = HttpSseEvent::with_id(event.replay_id.clone(), HTTP_RUN_EVENT_SSE_NAME, data)
+        .map_err(|error| HttpListenerError::Response {
+            message: error.to_string(),
+        })?;
+    stream.write_all(frame.encode().as_bytes()).await?;
+    Ok(())
+}
+
+fn protocol_event_is_terminal(event: &HttpProtocolEvent) -> bool {
+    matches!(
+        event.run_event.event,
+        PublicRunEventKind::RunFinished { .. }
+            | PublicRunEventKind::RunFailed { .. }
+            | PublicRunEventKind::RunCancelled
+    )
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
 }
 
 fn approval_route_parts(path: &str) -> Option<(&str, &str)> {
@@ -481,8 +715,9 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::SessionBindingRejected { .. }
         | HttpRegistryError::InvalidSessionBinding { .. }
         | HttpRegistryError::CommandExecutionAborted
-        | HttpRegistryError::CommandIdentityEncodingFailed => 500,
-        HttpRegistryError::CommandRegistrySaturated => 503,
+        | HttpRegistryError::CommandIdentityEncodingFailed
+        | HttpRegistryError::CommandIdentityPersistenceFailed { .. } => 500,
+        HttpRegistryError::CommandRegistrySaturated | HttpRegistryError::ServerShuttingDown => 503,
     };
     http_error_response(status, "registry_error", error.to_string())
 }
