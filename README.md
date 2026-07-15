@@ -75,6 +75,8 @@ sigil doctor
 - Connects local stdio and user-root Streamable HTTP MCP servers under explicit trust, approval, and secret-egress policy.
 - Provides capability-backed `webfetch` and stable `websearch` routes with independent network policy, durable egress disclosure, and external-source provenance.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
+- Provides stable JSON/JSONL output for scripts and an advanced authenticated, loopback-only `sigil serve` interface for trusted local clients.
+- Manages saved sessions through explicit export, conversation fork, pin, exact delete review, and retention maintenance actions.
 
 ## Daily Workflow
 
@@ -89,7 +91,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
 | Verify task completion and inspect evidence | Focus the Verification card with `Alt-V`; run the recommended check or inspect its snapshot and changeset evidence |
 | Review a safe recovery point | Press `Ctrl-R` to preview a controlled checkpoint restore or fork before changing files |
-| Review or apply long-context compaction | Use `/compact` for a read-only V2 preview, then confirm only when exact target admission is ready |
+| Review or apply long-context compaction | Use `/compact` to inspect the V2 fold plan, then confirm only when exact local admission is ready |
 | Add a follow-up while Sigil is busy | Submit ordinary chat while a run is active; Sigil shows it in Follow-ups and adds the user message when it dispatches at the next safe turn |
 | Review pending follow-ups | `Tab` focuses the follow-up panel; `/queue show`, `/queue next`, `/queue interrupt`, `/queue edit`, and `/queue delete` are advanced controls |
 | Require a child agent from chat | Say so explicitly, for example "use a sub-agent for ..." |

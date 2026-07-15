@@ -6,9 +6,14 @@
 
 ## Unreleased - main
 
+### 新增
+
+- 为脚本增加稳定的 `sigil run --output json` 与 `--output jsonl` 格式，并增加只监听本机、要求 bearer 认证的高级 `sigil serve` 接口。
+- 增加显式的已保存 session 操作：安全导出、conversation fork、pin、精确删除 review，以及 retention 清理 preview 与确认。
+
 ### 调整
 
-- 所选 profile 已安装 checksum-pinned tokenizer 且本地 exact target-fit proof 通过时，`/compact` 现在可以确认一次手动 Context Compaction V2 apply；完成的 hard-threshold 与 queued pre-turn request 也可以使用同一 owned verified path。pinned 官方 OpenAI Responses snapshot 可在精确 rejection evidence、两次受审计计数与 minimum-savings proof 通过后执行一次不递归的 overflow recovery。
+- 所选模型具备已安装的本地计数支持，且压缩后请求已证明可以装入上下文时，`/compact` 现在可以确认一次手动上下文压缩。已完成的长对话与排队请求可以使用同一检查路径。一个固定的官方 OpenAI Responses 模型也可以在确认尚未产生输出的上下文超限后，经过独立计数和节省量检查，只恢复一次。
 
 ## v0.0.1-alpha.2 - 2026-07-15
 

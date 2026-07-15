@@ -6,9 +6,14 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+### Added
+
+- Added stable `sigil run --output json` and `--output jsonl` formats for scripts, plus an advanced bearer-authenticated `sigil serve` interface that only listens on the local machine.
+- Added explicit saved-session actions for safe export, conversation fork, pinning, exact delete review, and retention cleanup preview and confirmation.
+
 ### Changed
 
-- `/compact` can now confirm one manual Context Compaction V2 apply when the selected profile has an installed checksum-pinned tokenizer and exact local target-fit proof. Completed hard-threshold and queued pre-turn requests may use the same owned verified path. The pinned official OpenAI Responses snapshot may perform one non-recursive overflow recovery after exact rejection evidence, two audited counts, and minimum-savings proof.
+- `/compact` can now confirm one manual context compaction when the selected model has installed local counting support and the compacted request is proven to fit. Completed long conversations and queued requests may use the same checked path. One pinned official OpenAI Responses model can also recover once from a confirmed pre-output context-limit rejection after separate count and savings checks.
 
 ## v0.0.1-alpha.2 - 2026-07-15
 

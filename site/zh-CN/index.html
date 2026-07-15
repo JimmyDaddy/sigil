@@ -250,7 +250,7 @@ sigil</code></pre>
           </a>
           <a class="visual-card terminal-window-compaction" href="docs/visual-tour/#上下文压缩预览">
             <img src="../assets/screenshots/compaction-preview.svg" alt="Sigil 上下文压缩预览截图" loading="lazy" decoding="async">
-            <span>Compaction 预览</span>
+            <span>Compaction 检查</span>
           </a>
         </div>
       </section>
@@ -278,12 +278,12 @@ sigil</code></pre>
             <p>通过 provider-hosted、configured MCP 或 bundled route 搜索，再只读取 session 已观察到的精确 URL，并执行 disclosure、SSRF 与 budget 控制。</p>
           </article>
           <article>
-            <h3>Configurable runtime</h3>
-            <p>Provider、permission、Web policy、terminal、appearance、code intelligence、MCP、plugins、skills 和 agents 都收敛在 TUI-first 工作流里。</p>
+            <h3>TUI-first 自动化</h3>
+            <p>日常工作保留在 TUI 中；脚本使用稳定 JSON 或 JSONL 输出，受信任的本机 client 通过带认证且仅允许 loopback 的服务接入。</p>
           </article>
           <article>
-            <h3>Recovery 与 context control</h3>
-            <p>用 <code>Ctrl-R</code> 预览受控 restore 或 conversation fork，观察 context pressure，并 review 只读 <code>/compact</code> preview。</p>
+            <h3>Session 与 context control</h3>
+            <p>显式 export、fork、pin 或删除已保存 session；用 <code>Ctrl-R</code> 受控恢复文件，用 <code>/compact</code> 执行经过检查的 context apply。</p>
           </article>
         </div>
       </section>

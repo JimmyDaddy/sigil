@@ -75,6 +75,8 @@ sigil doctor
 - 按显式 trust、approval 和 secret-egress policy 接入本地 stdio 与用户根 Streamable HTTP MCP server。
 - 提供 capability-backed `webfetch` 与 stable `websearch` route，并执行独立 network policy、durable egress disclosure 和 external-source provenance。
 - 可选开启 code intelligence，支持符号、引用、诊断、code action 和 rename preview。
+- 为脚本提供稳定 JSON/JSONL 输出，并为受信任本机 client 提供高级、带认证且仅允许 loopback 的 `sigil serve` 接口。
+- 通过显式 export、conversation fork、pin、精确 delete review 和 retention maintenance 管理已保存 session。
 
 ## 日常工作流
 
@@ -89,7 +91,7 @@ sigil doctor
 | 执行 durable 多步骤任务 | `/task <任务>`；未完成任务用 `/task continue` |
 | 验证任务完成情况并查看证据 | 用 `Alt-V` 聚焦 Verification card；运行推荐检查，或查看 snapshot 与 changeset 证据 |
 | 检查安全恢复点 | 按 `Ctrl-R` 预览受控 checkpoint restore 或 fork，再决定是否变更文件 |
-| 审查或应用长上下文压缩 | 用 `/compact` 打开只读 V2 preview，仅在 exact target admission ready 后确认 |
+| 审查或应用长上下文压缩 | 用 `/compact` 检查 V2 折叠计划，仅在本地 exact admission ready 后确认 |
 | Sigil 忙碌时追加后续消息 | 在当前 run 进行中提交普通 chat；Sigil 会显示在 Follow-ups，并在下一次安全 turn 派发时追加用户消息 |
 | 查看待处理 follow-ups | `Tab` 聚焦 follow-up panel；`/queue show`、`/queue next`、`/queue interrupt`、`/queue edit` 和 `/queue delete` 是高级控制 |
 | 要求普通 chat 使用子 agent | 明确说明“使用子 agent ...” |
