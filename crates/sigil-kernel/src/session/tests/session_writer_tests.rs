@@ -1055,6 +1055,19 @@ fn session_writer_parent_directory_sync_failure_retries_before_receipt() -> Resu
 }
 
 #[test]
+fn session_writer_parent_directory_sync_contract_is_cross_platform() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let file = std::fs::File::create(&session_path)?;
+    file.sync_all()?;
+
+    super::sync_parent_dir(&session_path)?;
+
+    assert!(session_path.is_file());
+    Ok(())
+}
+
+#[test]
 fn session_writer_receipt_offset_and_event_identity_tampering_fails_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

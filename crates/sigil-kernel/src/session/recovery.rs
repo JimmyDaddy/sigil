@@ -337,9 +337,18 @@ pub(super) fn clear_tail_recovery_intent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub(super) fn sync_parent_dir(path: &Path) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let dir = File::open(parent).with_context(|| format!("failed to open {}", parent.display()))?;
     dir.sync_all()
         .with_context(|| format!("failed to sync {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+pub(super) fn sync_parent_dir(_path: &Path) -> Result<()> {
+    // Rust's standard library cannot open and fsync directory handles on Windows. The data file
+    // and recovery-intent files are still synced before this boundary; directory-entry flushing
+    // remains an explicit platform limitation instead of making every durable append fail.
+    Ok(())
 }

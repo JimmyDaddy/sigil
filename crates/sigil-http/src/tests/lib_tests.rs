@@ -1503,7 +1503,7 @@ fn session_create_get_returns_stable_snapshot() {
     assert_eq!(session.durable_session_scope_id, "scope-http-session-1");
     assert_eq!(
         session.session_log_path,
-        "/tmp/sigil-http-tests/http-session-1.jsonl"
+        recording_session_log_path("http-session-1")
     );
     assert_eq!(session.foreground_run_id, None);
     assert_eq!(
@@ -3014,7 +3014,7 @@ impl HttpRunDriver for RecordingRunDriver {
         }
         Ok(HttpSessionBinding {
             session_scope_id: format!("scope-{session_id}"),
-            session_log_path: format!("/tmp/sigil-http-tests/{session_id}.jsonl"),
+            session_log_path: recording_session_log_path(session_id),
         })
     }
 
@@ -3054,6 +3054,14 @@ impl HttpRunDriver for RecordingRunDriver {
         lock(&self.approvals).push(approval);
         Ok(())
     }
+}
+
+fn recording_session_log_path(session_id: &str) -> String {
+    std::env::temp_dir()
+        .join("sigil-http-tests")
+        .join(format!("{session_id}.jsonl"))
+        .display()
+        .to_string()
 }
 
 type StartObserver = Arc<dyn Fn(&HttpRunDriverStart) + Send + Sync>;
