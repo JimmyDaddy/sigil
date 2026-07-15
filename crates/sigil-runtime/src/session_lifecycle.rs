@@ -115,6 +115,8 @@ pub struct SessionExportMessageV1 {
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_kind: Option<AssistantMessageKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_attachments: Vec<sigil_kernel::ImageAttachment>,
 }
 
 /// Content-bound payload of one safe local session export.
@@ -1017,6 +1019,11 @@ fn export_messages(messages: &[ModelMessage], limit: usize) -> Result<Vec<Sessio
             role: message.role.clone(),
             content: message.content.as_deref().map(safe_persistence_text),
             assistant_kind: message.assistant_kind,
+            image_attachments: message
+                .image_attachments
+                .iter()
+                .map(sigil_kernel::ImageAttachment::without_resolved_bytes)
+                .collect(),
         })
         .collect())
 }
@@ -1037,6 +1044,7 @@ fn validate_export_provenance(
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     assistant_kind: message.assistant_kind,
+                    image_attachments: message.image_attachments.clone(),
                 },
             )
         })

@@ -3,8 +3,8 @@ use std::fs;
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    AssistantMessageKind, ControlEntry, DurableEventType, EventClass, JsonlSessionStore,
-    ModelMessage, Session, SessionLogEntry, ToolCall,
+    AssistantMessageKind, ControlEntry, DurableEventType, EventClass, ImageAttachment,
+    ImageMimeType, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, ToolCall,
 };
 
 use super::*;
@@ -219,6 +219,53 @@ fn safe_session_export_redacts_text_omits_tool_calls_and_is_content_bound() -> R
             status: LocalSessionLifecycleRecoveryStatus::Completed,
         }]
     );
+    Ok(())
+}
+
+#[test]
+fn safe_session_export_keeps_image_metadata_without_process_local_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-image.jsonl");
+    let store = JsonlSessionStore::new(&source)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "openai".to_owned(),
+        model_name: "gpt-5".to_owned(),
+    }))?;
+    let mut user = ModelMessage::user("inspect\n\n[Image attachment 1: image/png]");
+    user.image_attachments.push(ImageAttachment::from_bytes(
+        "image-1",
+        ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?);
+    store.append(&SessionLogEntry::User(user))?;
+    let assistant = ModelMessage::assistant_with_kind(
+        Some("done".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    );
+    store.append(&SessionLogEntry::Assistant(assistant.clone()))?;
+    store.append_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({"run_status": "completed", "final_message_id": assistant.id}),
+    )?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    let output = service.export_session(&source, None, 1234)?;
+    let bytes = fs::read(&output.path)?;
+    let text = String::from_utf8(bytes.clone())?;
+    assert!(!text.contains("AQID"));
+    assert!(!text.contains("resolved_bytes"));
+    let artifact: SessionExportV1 = serde_json::from_slice(&bytes)?;
+    let attachment = &artifact.payload.messages[0].image_attachments[0];
+    assert_eq!(attachment.attachment_id, "image-1");
+    assert!(!attachment.has_resolved_bytes());
+    artifact.validate_digest()?;
     Ok(())
 }
 

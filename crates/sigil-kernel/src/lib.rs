@@ -15,6 +15,7 @@ pub mod event;
 pub mod execution_backend;
 pub mod external;
 pub mod hosted;
+pub mod image_attachment;
 pub mod memory;
 pub mod mutation;
 pub mod permission;
@@ -206,6 +207,16 @@ pub use hosted::{
     HostedToolRequest, HostedToolRequestError, HostedToolSupport, HostedTurnBuffer,
     HostedTurnBufferLimits, HostedTurnError, HostedWebSearchCapability, HostedWireStateError,
 };
+pub use image_attachment::{
+    ImageAttachment, ImageAttachmentResolver, ImageInputCapability, ImageMimeType,
+    MAX_IMAGE_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES_PER_TURN,
+    MAX_IMAGE_ATTACHMENT_DIMENSION, MAX_IMAGE_ATTACHMENT_PIXELS,
+    MAX_IMAGE_ATTACHMENT_VISUAL_TOKENS_PER_TURN, MAX_IMAGE_ATTACHMENTS_PER_TURN,
+    estimate_visual_tokens, render_image_attachment_placeholders,
+    resolve_request_image_attachments, strip_request_image_attachments_for_compaction,
+    validate_image_input_capability, validate_message_image_attachments,
+    validate_request_image_attachments,
+};
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
     CheckpointRestoreConflict, CheckpointRestoreConflictReason, CheckpointRestored,
@@ -246,8 +257,9 @@ pub use persistence::{
     canonical_web_url_persistence_projection, project_message_for_persistence,
     project_tool_call_for_persistence, project_user_message_for_persistence,
     project_user_message_for_persistence_with_nonce,
-    project_user_message_for_persistence_with_nonce_and_issued_at, safe_persistence_json_value,
-    safe_persistence_text,
+    project_user_message_for_persistence_with_nonce_and_issued_at,
+    project_user_message_with_attachments_for_persistence_with_nonce_and_issued_at,
+    safe_persistence_json_value, safe_persistence_text,
 };
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,

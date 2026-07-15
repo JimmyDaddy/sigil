@@ -15,6 +15,7 @@ pub struct Session {
 #[derive(Default)]
 pub(super) struct SessionRuntimeAttachments {
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
+    image_attachment_resolver: Option<Arc<dyn crate::ImageAttachmentResolver>>,
 }
 
 impl std::fmt::Debug for SessionRuntimeAttachments {
@@ -25,6 +26,13 @@ impl std::fmt::Debug for SessionRuntimeAttachments {
                 "user_url_capability_registrar",
                 &self
                     .user_url_capability_registrar
+                    .as_ref()
+                    .map(|_| "configured"),
+            )
+            .field(
+                "image_attachment_resolver",
+                &self
+                    .image_attachment_resolver
                     .as_ref()
                     .map(|_| "configured"),
             )
@@ -204,6 +212,23 @@ impl Session {
         self.runtime_attachments
             .user_url_capability_registrar
             .clone()
+    }
+
+    /// Attaches the process-local controlled-cache resolver used before ordinary request freeze.
+    pub fn try_attach_image_attachment_resolver(
+        &mut self,
+        resolver: Arc<dyn crate::ImageAttachmentResolver>,
+    ) -> Result<()> {
+        if self.runtime_attachments.image_attachment_resolver.is_some() {
+            bail!("session already has an image attachment resolver");
+        }
+        self.runtime_attachments.image_attachment_resolver = Some(resolver);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn image_attachment_resolver(&self) -> Option<Arc<dyn crate::ImageAttachmentResolver>> {
+        self.runtime_attachments.image_attachment_resolver.clone()
     }
 
     /// Appends a validated external provenance sidecar for an already-persisted safe message.
@@ -1005,7 +1030,7 @@ impl Session {
             &projected_messages,
             runtime_context,
         )?;
-        let assembled = self.assemble_request_from_components(
+        let mut assembled = self.assemble_request_from_components(
             &memory,
             projected_messages,
             context_message,
@@ -1016,6 +1041,12 @@ impl Session {
             traffic_partition_key,
             transient_messages,
             overlays,
+        )?;
+        crate::resolve_request_image_attachments(
+            &mut assembled.request,
+            self.runtime_attachments
+                .image_attachment_resolver
+                .as_deref(),
         )?;
         self.append_control(ControlEntry::PrefixSnapshotCaptured(
             assembled.prefix_snapshot,
@@ -1051,7 +1082,7 @@ impl Session {
             &projected_messages,
             runtime_context,
         )?;
-        Ok(self
+        let mut request = self
             .assemble_request_from_components(
                 &memory,
                 projected_messages,
@@ -1064,7 +1095,14 @@ impl Session {
                 transient_messages,
                 overlays,
             )?
-            .request)
+            .request;
+        crate::resolve_request_image_attachments(
+            &mut request,
+            self.runtime_attachments
+                .image_attachment_resolver
+                .as_deref(),
+        )?;
+        Ok(request)
     }
 
     /// Materializes the exact request that would follow a portable compaction activation without
@@ -1103,7 +1141,7 @@ impl Session {
             &projected_messages,
             runtime_context,
         )?;
-        Ok(self
+        let mut request = self
             .assemble_request_from_components(
                 &memory,
                 projected_messages,
@@ -1116,7 +1154,9 @@ impl Session {
                 transient_messages,
                 overlays,
             )?
-            .request)
+            .request;
+        crate::strip_request_image_attachments_for_compaction(&mut request);
+        Ok(request)
     }
 
     #[allow(clippy::too_many_arguments)]

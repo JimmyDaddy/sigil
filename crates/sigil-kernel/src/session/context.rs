@@ -246,6 +246,7 @@ pub(super) fn render_runtime_context_v1_message(
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        image_attachments: Vec::new(),
     }))
 }
 

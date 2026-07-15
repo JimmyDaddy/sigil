@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::provider::CompletionRequest;
 
 /// Schema version for the provider-neutral request material frozen before provider I/O.
-pub const PROVIDER_REQUEST_MATERIAL_SCHEMA_VERSION: u16 = 1;
+pub const PROVIDER_REQUEST_MATERIAL_SCHEMA_VERSION: u16 = 2;
 
 static PROVIDER_REQUEST_MATERIAL_FINGERPRINT_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 

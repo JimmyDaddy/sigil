@@ -146,6 +146,7 @@ pub struct AgentRunResult {
 pub struct AgentRunInput {
     pub persisted_user_message: Option<String>,
     pub persisted_user_message_id: Option<String>,
+    pub persisted_image_attachments: Vec<crate::ImageAttachment>,
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
@@ -174,6 +175,10 @@ impl fmt::Debug for AgentRunInput {
                 &self.persisted_user_message.as_ref().map(|_| "[redacted]"),
             )
             .field("persisted_user_message_id", &self.persisted_user_message_id)
+            .field(
+                "persisted_image_attachment_count",
+                &self.persisted_image_attachments.len(),
+            )
             .field("transient_context_count", &self.transient_context.len())
             .field("runtime_context", &self.runtime_context)
             .field("task_plan_update", &self.task_plan_update)
@@ -222,6 +227,7 @@ impl AgentRunInput {
         Self {
             persisted_user_message: Some(prompt.into()),
             persisted_user_message_id: Some(message_id),
+            persisted_image_attachments: Vec::new(),
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
@@ -247,6 +253,7 @@ impl AgentRunInput {
         Self {
             persisted_user_message: Some(prompt.into()),
             persisted_user_message_id: Some(message_id),
+            persisted_image_attachments: Vec::new(),
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
@@ -271,6 +278,7 @@ impl AgentRunInput {
         Self {
             persisted_user_message: None,
             persisted_user_message_id: None,
+            persisted_image_attachments: Vec::new(),
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
@@ -289,6 +297,13 @@ impl AgentRunInput {
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
         }
+    }
+
+    /// Adds process-local image bytes and durable metadata to the persisted user turn.
+    #[must_use]
+    pub fn with_image_attachments(mut self, attachments: Vec<crate::ImageAttachment>) -> Self {
+        self.persisted_image_attachments = attachments;
+        self
     }
 
     pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
@@ -876,6 +891,7 @@ where
         let AgentRunInput {
             persisted_user_message,
             persisted_user_message_id,
+            persisted_image_attachments,
             mut transient_context,
             runtime_context,
             task_plan_update,
@@ -914,9 +930,10 @@ where
         if let Some(message) = persisted_user_message {
             let durable_message_id = persisted_user_message_id
                 .ok_or_else(|| anyhow!("persisted user message is missing its durable entry id"))?;
-            let projection = crate::project_user_message_for_persistence_with_nonce_and_issued_at(
+            let projection = crate::project_user_message_with_attachments_for_persistence_with_nonce_and_issued_at(
                 durable_message_id,
                 message.clone(),
+                persisted_image_attachments,
                 source_capability_nonce.as_deref(),
                 url_capability_issued_at_ms.ok_or_else(|| {
                     anyhow!("persisted user message is missing its URL capability issue time")
@@ -930,7 +947,9 @@ where
                 _ => None,
             });
             if let Some(existing) = existing_by_id {
-                if existing.content != projection.durable_message.content {
+                if existing.content != projection.durable_message.content
+                    || existing.image_attachments != projection.durable_message.image_attachments
+                {
                     rollback_user_capabilities(
                         user_url_capability_registrar.as_ref(),
                         &projection.durable_message.id,

@@ -575,6 +575,8 @@ pub struct ModelMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_kind: Option<AssistantMessageKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_attachments: Vec<crate::ImageAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -729,6 +731,12 @@ pub trait Provider: Send + Sync {
         crate::HostedWebSearchCapability::default()
     }
 
+    /// Returns exact-model image input support. Compatible or unknown providers fail closed by
+    /// default instead of inferring multimodal support from a text protocol shape.
+    fn image_input_capability(&self, _model_name: &str) -> crate::ImageInputCapability {
+        crate::ImageInputCapability::Unsupported
+    }
+
     /// Classifies a provider-declared request rejection that is proven to have happened before
     /// any model generation or side effect.
     ///
@@ -788,6 +796,10 @@ where
 
     fn hosted_web_search_capability(&self, model_name: &str) -> crate::HostedWebSearchCapability {
         (**self).hosted_web_search_capability(model_name)
+    }
+
+    fn image_input_capability(&self, model_name: &str) -> crate::ImageInputCapability {
+        (**self).image_input_capability(model_name)
     }
 
     fn classify_pre_generation_rejection(
@@ -867,6 +879,7 @@ impl ModelMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             assistant_kind: None,
+            image_attachments: Vec::new(),
         }
     }
 }

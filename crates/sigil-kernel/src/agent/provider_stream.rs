@@ -79,6 +79,11 @@ where
         anyhow::bail!("frozen provider request belongs to a different session scope");
     }
     let request = frozen_request.request().clone();
+    crate::validate_request_image_attachments(&request)?;
+    crate::validate_image_input_capability(
+        provider.image_input_capability(&request.model_name),
+        &request,
+    )?;
     let hosted_enabled = !request.hosted_tools.is_empty();
     if hosted_enabled && hosted_processor.is_none() {
         return Err(crate::HostedTurnError::MissingProcessor.into());

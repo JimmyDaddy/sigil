@@ -512,11 +512,36 @@ pub fn project_user_message_for_persistence_with_nonce_and_issued_at(
     issued_at_ms: u64,
     registrar: Option<&Arc<dyn UserUrlCapabilityRegistrar>>,
 ) -> Result<UserMessagePersistenceProjection> {
+    project_user_message_with_attachments_for_persistence_with_nonce_and_issued_at(
+        durable_message_id,
+        raw_message,
+        Vec::new(),
+        source_id_nonce,
+        issued_at_ms,
+        registrar,
+    )
+}
+
+/// Projects one user message with validated image attachments. Durable content retains only
+/// fixed placeholders and metadata; the current-run overlay retains resolved bytes.
+pub fn project_user_message_with_attachments_for_persistence_with_nonce_and_issued_at(
+    durable_message_id: impl Into<String>,
+    raw_message: impl Into<String>,
+    image_attachments: Vec<crate::ImageAttachment>,
+    source_id_nonce: Option<&str>,
+    issued_at_ms: u64,
+    registrar: Option<&Arc<dyn UserUrlCapabilityRegistrar>>,
+) -> Result<UserMessagePersistenceProjection> {
     let durable_message_id = durable_message_id.into();
     if durable_message_id.trim().is_empty() {
         bail!("durable user message id must not be empty");
     }
     let raw_message = raw_message.into();
+    let mut attachment_probe = ModelMessage::user(String::new());
+    attachment_probe.image_attachments = image_attachments.clone();
+    crate::validate_message_image_attachments(&attachment_probe)?;
+    let placeholders = crate::render_image_attachment_placeholders(&image_attachments);
+    let exact_content = append_attachment_placeholders(&raw_message, &placeholders);
     let (safe_content, capability_registrations) = project_text_urls(
         &durable_message_id,
         &raw_message,
@@ -524,7 +549,8 @@ pub fn project_user_message_for_persistence_with_nonce_and_issued_at(
         issued_at_ms,
         true,
     )?;
-    let safe_content = redact_secret_carriers(&safe_content);
+    let safe_content =
+        append_attachment_placeholders(&redact_secret_carriers(&safe_content), &placeholders);
     if let Some(registrar) = registrar {
         for registration in &capability_registrations {
             if let Err(error) = registrar.stage(registration.clone()) {
@@ -545,14 +571,19 @@ pub fn project_user_message_for_persistence_with_nonce_and_issued_at(
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        image_attachments: image_attachments
+            .iter()
+            .map(crate::ImageAttachment::without_resolved_bytes)
+            .collect(),
     };
     let exact_message = ModelMessage {
         id: durable_message_id.clone(),
         role: MessageRole::User,
-        content: Some(raw_message),
+        content: Some(exact_content),
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        image_attachments,
     };
     let overlay = TransientMessageOverlay::new(durable_message_id, exact_message)?;
     Ok(UserMessagePersistenceProjection {
@@ -560,6 +591,14 @@ pub fn project_user_message_for_persistence_with_nonce_and_issued_at(
         overlay,
         capability_registrations,
     })
+}
+
+fn append_attachment_placeholders(content: &str, placeholders: &str) -> String {
+    match (content.trim().is_empty(), placeholders.is_empty()) {
+        (_, true) => content.to_owned(),
+        (true, false) => placeholders.to_owned(),
+        (false, false) => format!("{content}\n\n{placeholders}"),
+    }
 }
 
 /// Produces a safe durable/event representation of one exact tool call.
@@ -620,6 +659,16 @@ pub fn project_message_for_persistence(
         .map(project_tool_call_for_persistence)
         .map(|projection| projection.map(|projection| projection.durable_call))
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    crate::validate_message_image_attachments(&exact_message).map_err(|error| {
+        SafePersistenceError::OverlayInvariant {
+            reason: format!("invalid exact image attachments: {error:#}"),
+        }
+    })?;
+    durable_message.image_attachments = exact_message
+        .image_attachments
+        .iter()
+        .map(crate::ImageAttachment::without_resolved_bytes)
+        .collect();
     let overlay =
         TransientMessageOverlay::new(exact_message.id.clone(), exact_message).map_err(|error| {
             SafePersistenceError::OverlayInvariant {
@@ -674,6 +723,20 @@ pub fn apply_exact_message_overlays(
             return Err(SafePersistenceError::OverlayInvariant {
                 reason: format!(
                     "overlay role for durable message {} differs from safe message role",
+                    overlay.durable_message_id()
+                ),
+            });
+        }
+        let exact_durable_attachments = overlay
+            .exact_message()
+            .image_attachments
+            .iter()
+            .map(crate::ImageAttachment::without_resolved_bytes)
+            .collect::<Vec<_>>();
+        if safe.image_attachments != exact_durable_attachments {
+            return Err(SafePersistenceError::OverlayInvariant {
+                reason: format!(
+                    "overlay image attachments for durable message {} differ from safe metadata",
                     overlay.durable_message_id()
                 ),
             });

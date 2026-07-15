@@ -139,3 +139,4 @@ git diff --check
 ## 14. Progress
 
 - R33.0 complete：官方 provider 协议、Rust clipboard/image 依赖和 Codex/Aider/Gemini CLI 竞品代码已调研；durable metadata、controlled cache、capability、compaction、TUI、limits 与 commit/gate 边界已冻结。
+- R33.1 complete：kernel 已实现 provider-neutral durable attachment、进程内 bytes overlay、safe persistence、resolver/capability admission、请求 material schema V2 与 placeholder-only compaction contract；kernel 全量测试通过。

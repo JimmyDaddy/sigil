@@ -79,6 +79,45 @@ fn safe_persistence_user_projection_masks_query_and_keeps_exact_overlay() -> Res
 }
 
 #[test]
+fn safe_persistence_image_projection_keeps_metadata_and_exact_bytes_only_in_overlay() -> Result<()>
+{
+    let attachment = crate::ImageAttachment::from_bytes(
+        "image-1",
+        crate::ImageMimeType::Png,
+        1,
+        1,
+        vec![1, 2, 3],
+    )?;
+    let projection =
+        project_user_message_with_attachments_for_persistence_with_nonce_and_issued_at(
+            "user-image-1",
+            "inspect this",
+            vec![attachment],
+            None,
+            1,
+            None,
+        )?;
+
+    assert!(!projection.durable_message.image_attachments[0].has_resolved_bytes());
+    assert!(
+        projection
+            .durable_message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("[Image attachment 1:"))
+    );
+    let durable_json = serde_json::to_string(&projection.durable_message)?;
+    assert!(!durable_json.contains("AQID"));
+
+    let exact = apply_exact_message_overlays(
+        std::slice::from_ref(&projection.durable_message),
+        std::slice::from_ref(&projection.overlay),
+    )?;
+    assert_eq!(exact[0].image_attachments[0].resolved_bytes()?, &[1, 2, 3]);
+    Ok(())
+}
+
+#[test]
 fn safe_persistence_sensitive_and_percent_encoded_paths_are_not_replayable() -> Result<()> {
     for (index, raw) in [
         "download https://example.com/files/known-secret-token",
