@@ -1,6 +1,6 @@
 # RFC-0013 Eval Harness
 
-状态：draft / deterministic harness, adoption gate and active RFC matrix implemented / E13.11 model eval gated
+状态：implemented / deterministic harness complete / model track moved to RFC-0028
 
 创建日期：2026-06-28
 
@@ -10,6 +10,7 @@
 - Depends on: [RFC-0001 Durable Event Stream and Event Taxonomy](0001-durable-event-stream-and-event-taxonomy.md)
 - Depends on: [RFC-0002 Crash-consistent Mutation Protocol](0002-crash-consistent-mutation-protocol.md)
 - Depends on: [RFC-0003 Verification Contract and Workspace Snapshot](0003-verification-contract-and-workspace-snapshot.md)
+- Follow-up: [RFC-0028 Real-model Acceptance and Provider Conformance V1](0028-real-model-acceptance-and-provider-conformance-v1.md)
 
 ## 1. Summary
 
@@ -137,9 +138,9 @@ Implementation progress:
 - 2026-06-28: E13.9 added integrity eval cases for the RFC-0001/0002 fact layer. The cases map checksum mismatch, sequence gap, middle stream corruption, unknown critical events, prepared-without-commit, file-written-without-commit, and partial changeset reconciliation into structured `EvalResult` diagnostics without introducing projection or protocol product surfaces.
 - 2026-06-28: E13.8 added path/capability security eval cases. The cases cover symlink escape, parent path normalization bypass, read-only shell write denial through permission/capability policy, and approval denial mapping, without implementing real OS sandbox backends or a security dashboard.
 - 2026-06-28: E13.10 added `scripts/run-evals.sh --deterministic` and deterministic report artifacts. The runner writes structured JSONL results, a Markdown summary, and retained session-log artifacts for non-success outcomes under a repo-local output directory, without invoking real providers or making evals part of normal user flows.
-- 2026-06-29: E13.11 tracks the future model eval runner trigger. It remains gated by deterministic baseline stability, fixture/provider metadata repeatability, budget policy and nightly/release-prep execution policy. Deterministic eval results must not be presented as real-model task success rates.
+- 2026-06-29: E13.11 recorded the future model eval runner trigger. Its gate was resolved on 2026-07-15 by RFC-0028, which freezes committed generated fixtures, bounded opt-in execution, repetition/trend policy and honest local cost-admission semantics. Deterministic eval results still must not be presented as real-model task success rates.
 - 2026-06-29: E13.12 made deterministic evals usable as an RFC core-semantics adoption gate. The report directory now includes `results.jsonl`, `summary.md`, retained non-success artifacts and `manifest.json`; the script verifies required artifacts exist and stay non-empty, and remains developer-only rather than a normal user flow or default commit gate.
-- 2026-06-30: E13.13 added the active RFC deterministic regression matrix. Eval metadata now records RFC/slice provenance plus expected outcome and expected verification verdict; report schema v2 emits a matrix with expected/observed outcome, expected/observed verification verdict and durable stream cursor. The first active cases cover Context V0 request assembly, E14.5 parent mutation handoff, verification staleness through existing cases, and sandbox receipt truthfulness. E13.11 model eval remains gated.
+- 2026-06-30: E13.13 added the active RFC deterministic regression matrix. Eval metadata now records RFC/slice provenance plus expected outcome and expected verification verdict; report schema v2 emits a matrix with expected/observed outcome, expected/observed verification verdict and durable stream cursor. The first active cases cover Context V0 request assembly, E14.5 parent mutation handoff, verification staleness through existing cases, and sandbox receipt truthfulness. The later E13.11 gate resolution is defined by RFC-0028.
 
 ## 9. Acceptance Criteria
 
@@ -160,8 +161,9 @@ cargo test -p sigil-runtime eval
 
 Full model eval should not be part of ordinary local commit gates.
 
-## 11. Open Questions
+## 11. Resolved Follow-up Boundary
 
-- Which fixture repos should be committed versus generated.
-- How many repeats are enough for provider/model trend comparisons.
-- Whether eval reports should live under `.repo-local-dev` or a dedicated `dev/evals` directory.
+- Model fixture manifests and source templates are committed under `dev/evals/model-fixtures`; each run materializes a fresh isolated workspace under its explicit output directory.
+- One repetition is smoke-only; at least three homogeneous repetitions are required for trend eligibility.
+- Generated reports stay under an explicit ignored output directory such as `.repo-local-dev/evals`; only fixture definitions and report contracts are tracked.
+- Real-provider execution, budget admission and provider conformance now belong to RFC-0028.
