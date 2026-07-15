@@ -8,6 +8,12 @@ max_output_tokens = 4096
 expected_terminal = ["completed"]
 expected_verification = ["passed"]
 
+[[assertions]]
+id = "multiply-implementation"
+kind = "file_contains"
+path = "src/lib.rs"
+text = "left * right"
+
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"

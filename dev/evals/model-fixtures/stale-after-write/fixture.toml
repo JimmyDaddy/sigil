@@ -8,6 +8,18 @@ max_output_tokens = 4096
 expected_terminal = ["completed"]
 expected_verification = ["stale"]
 
+[[assertions]]
+id = "answer-implementation"
+kind = "file_contains"
+path = "src/lib.rs"
+text = "    2"
+
+[[assertions]]
+id = "post-verification-mutation"
+kind = "file_contains"
+path = "README.md"
+text = "fixture_generation = 2"
+
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"

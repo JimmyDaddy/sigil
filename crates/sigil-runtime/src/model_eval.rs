@@ -24,6 +24,7 @@ pub const MODEL_EVAL_MAX_PROMPT_BYTES: u64 = 16 * 1024;
 pub const MODEL_EVAL_MAX_TURNS: u32 = 16;
 pub const MODEL_EVAL_MAX_OUTPUT_TOKENS: u32 = 32 * 1024;
 pub const MODEL_EVAL_MAX_CHECKS: usize = 4;
+pub const MODEL_EVAL_MAX_ASSERTIONS: usize = 8;
 pub const MODEL_EVAL_MAX_CHECK_TIMEOUT_MS: u64 = 60_000;
 
 const MODEL_EVAL_ALLOWED_TOOLS: &[&str] = &["edit_file", "read_file", "write_file"];
@@ -43,6 +44,7 @@ pub struct ModelEvalFixtureManifest {
     pub expected_verification: Vec<ModelEvalExpectedVerification>,
     pub files: Vec<ModelEvalFixtureFile>,
     pub checks: Vec<ModelEvalFixtureCheck>,
+    pub assertions: Vec<ModelEvalFixtureAssertion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
 }
@@ -72,6 +74,46 @@ pub struct ModelEvalPostRunMutation {
     pub path: PathBuf,
     pub old_text: String,
     pub new_text: String,
+}
+
+/// One committed safety or outcome assertion evaluated without assistant-text authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalFixtureAssertion {
+    pub id: String,
+    #[serde(flatten)]
+    pub assertion: ModelEvalFixtureAssertionKind,
+}
+
+/// Supported V1 fixture assertions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ModelEvalFixtureAssertionKind {
+    FileContains {
+        path: PathBuf,
+        text: String,
+    },
+    ToolStatus {
+        tool_name: String,
+        status: ModelEvalExpectedToolStatus,
+    },
+    ToolNotCalled {
+        tool_name: String,
+    },
+    PathAbsent {
+        path: PathBuf,
+    },
+    WorkspaceSourceUnchanged,
+}
+
+/// Terminal tool status accepted by a fixture assertion.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvalExpectedToolStatus {
+    Succeeded,
+    Failed,
+    Denied,
+    Interrupted,
 }
 
 /// Allowed agent terminal buckets for one fixture.
@@ -115,6 +157,8 @@ pub struct MaterializedModelEvalFixture {
     pub max_turns: u32,
     pub max_output_tokens: u32,
     pub checks: Vec<ModelEvalFixtureCheck>,
+    pub assertions: Vec<ModelEvalFixtureAssertion>,
+    pub fixture_files: Vec<PathBuf>,
     pub expected_terminal: Vec<ModelEvalExpectedTerminal>,
     pub expected_verification: Vec<ModelEvalExpectedVerification>,
     pub post_run_mutation: Option<ModelEvalPostRunMutation>,
@@ -234,6 +278,13 @@ pub fn materialize_model_eval_fixture(
         max_turns: fixture.manifest.max_turns,
         max_output_tokens: fixture.manifest.max_output_tokens,
         checks: fixture.manifest.checks.clone(),
+        assertions: fixture.manifest.assertions.clone(),
+        fixture_files: fixture
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect(),
         expected_terminal: fixture.manifest.expected_terminal.clone(),
         expected_verification: fixture.manifest.expected_verification.clone(),
         post_run_mutation: fixture.manifest.post_run_mutation.clone(),
@@ -347,6 +398,48 @@ fn validate_manifest(manifest: &ModelEvalFixtureManifest) -> Result<()> {
             bail!("model eval post-run mutation text is invalid");
         }
     }
+    if manifest.assertions.is_empty() || manifest.assertions.len() > MODEL_EVAL_MAX_ASSERTIONS {
+        bail!(
+            "model eval fixture must contain between 1 and {} assertions",
+            MODEL_EVAL_MAX_ASSERTIONS
+        );
+    }
+    let mut assertion_ids = BTreeSet::new();
+    for assertion in &manifest.assertions {
+        validate_id("assertion id", &assertion.id)?;
+        if !assertion_ids.insert(assertion.id.as_str()) {
+            bail!(
+                "model eval fixture contains duplicate assertion id: {}",
+                assertion.id
+            );
+        }
+        match &assertion.assertion {
+            ModelEvalFixtureAssertionKind::FileContains { path, text } => {
+                validate_relative_path("assertion file path", path)?;
+                if !destinations.contains(path) || text.is_empty() || text.len() > 4096 {
+                    bail!("model eval file assertion is invalid");
+                }
+            }
+            ModelEvalFixtureAssertionKind::ToolStatus { tool_name, .. } => {
+                if !manifest
+                    .allowed_tools
+                    .iter()
+                    .any(|allowed| allowed == tool_name)
+                {
+                    bail!("model eval tool assertion references an unavailable tool");
+                }
+            }
+            ModelEvalFixtureAssertionKind::ToolNotCalled { tool_name } => {
+                if tool_name.is_empty() || tool_name.len() > 64 {
+                    bail!("model eval tool assertion has an invalid tool name");
+                }
+            }
+            ModelEvalFixtureAssertionKind::PathAbsent { path } => {
+                validate_bounded_parent_path("assertion absent path", path)?;
+            }
+            ModelEvalFixtureAssertionKind::WorkspaceSourceUnchanged => {}
+        }
+    }
     Ok(())
 }
 
@@ -391,6 +484,30 @@ fn validate_relative_path(field: &str, path: &Path) -> Result<()> {
             | Component::RootDir
             | Component::Prefix(_) => bail!("{field} contains an unsafe path component"),
         }
+    }
+    Ok(())
+}
+
+fn validate_bounded_parent_path(field: &str, path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() || path.is_absolute() || path.as_os_str().len() > 240 {
+        bail!("{field} must be a bounded relative path");
+    }
+    let mut components = path.components();
+    if components.next() != Some(Component::ParentDir) {
+        bail!("{field} must start with exactly one parent component");
+    }
+    let mut normal_count = 0_usize;
+    for component in components {
+        match component {
+            Component::Normal(_) => normal_count += 1,
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => bail!("{field} contains an unsafe path component"),
+        }
+    }
+    if normal_count == 0 {
+        bail!("{field} must name a path below the fixture parent");
     }
     Ok(())
 }
@@ -501,6 +618,30 @@ fn materialize_files(fixture: &LoadedModelEvalFixture, workspace_root: &Path) ->
         let path = file.path.to_string_lossy();
         tree_hasher.update((path.len() as u64).to_le_bytes());
         tree_hasher.update(path.as_bytes());
+        tree_hasher.update((bytes.len() as u64).to_le_bytes());
+        tree_hasher.update(&bytes);
+    }
+    Ok(format!("sha256:{:x}", tree_hasher.finalize()))
+}
+
+/// Recomputes the digest of committed fixture source paths, excluding generated check artifacts.
+pub fn current_model_eval_fixture_tree_digest(
+    fixture: &MaterializedModelEvalFixture,
+) -> Result<String> {
+    let mut paths = fixture.fixture_files.clone();
+    paths.sort();
+    let mut tree_hasher = Sha256::new();
+    tree_hasher.update(b"sigil-model-eval-tree-v1\0");
+    for path in paths {
+        let absolute = fixture.workspace_root.join(&path);
+        let bytes = read_bounded_regular_file(
+            &absolute,
+            MODEL_EVAL_MAX_TOTAL_SOURCE_BYTES,
+            "materialized model eval fixture source",
+        )?;
+        let rendered = path.to_string_lossy();
+        tree_hasher.update((rendered.len() as u64).to_le_bytes());
+        tree_hasher.update(rendered.as_bytes());
         tree_hasher.update((bytes.len() as u64).to_le_bytes());
         tree_hasher.update(&bytes);
     }

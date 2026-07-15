@@ -1,6 +1,6 @@
 # RFC-0028 Real-model Acceptance and Provider Conformance V1
 
-状态：accepted / R28.1-R28.5 implemented / R28.6 ready
+状态：implemented / R28.1-R28.6 complete
 
 创建日期：2026-07-15
 
@@ -211,3 +211,4 @@ git diff --check
 - R28.3 complete：共享 application run 新增 provider-neutral hard constraints，逐 run 限制 model turns、每次请求 output tokens 与 provider-visible tool scope；未知/空 scope 在 dispatch 前失败。runtime campaign 使用 secret-free isolated config、独立 state/cache/session/workspace、production provider/session/tool path、absolute deadline 与 cooperative cancellation，并在每次准入前执行 microusd budget reservation。loopback provider 验收证明请求只看到 fixture tools 和 token ceiling，reported cost 超出 reservation 后后续 repetition 被跳过。
 - R28.4 complete：fixture checks 通过共享 execution backend 生成真实 verification receipt，并显式持久化 check spec、policy 与 receipt control；`stale-after-write` 在 passed receipt 后执行 harness-owned durable mutation，最终 snapshot 正确得到 stale。provider-neutral report schema V3 输出逐 run JSONL、campaign manifest 与 human summary，归一化 volatile run path 后形成 config identity，只有至少三次 provider-admitted 且 fixture/provider/model/config/tool/sandbox/toolchain 全同的 repetition 才可进入 trend。
 - R28.5 complete：新增隐藏 `sigil model-eval` process adapter 与 `scripts/run-evals.sh --model` 显式入口。binary loopback acceptance 通过真实 DeepSeek adapter、production tool registry、durable mutation、verification 和 report 路径完成 `small-code-edit`；缺少 credential 的进程测试证明首次 provider I/O 前失败。model mode 仍不出现在普通帮助、TUI 或默认测试/CI 流程中。
+- R28.6 complete：五类 committed fixture 均增加 machine-evaluated assertion，并由 scripted loopback provider 经过 production application path 验收。文档/代码案例证明受控 doc/code edit、passed-to-stale receipt、repository command 不可见/未调用、workspace 外写入失败且外部路径与 source tree 不变；EN/ZH developer guide、roadmap/RFC 状态与全量 gate 同步完成。真实付费 provider smoke 仍是显式 release-prep 操作，本次完成结论不伪称已执行公网或付费模型。

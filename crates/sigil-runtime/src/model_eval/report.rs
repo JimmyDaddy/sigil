@@ -1,20 +1,22 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::Result;
 use sigil_kernel::{
     ControlEntry, EvalEvidenceKind, EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalResult,
     EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary, JsonlSessionStore,
-    MODEL_EVAL_REPORT_SCHEMA_VERSION, ModelEvalCostConfidence as ReportCostConfidence,
-    ModelEvalExecutionStatus, ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalUsage,
-    ProjectionCursor, RunStatus, Session, SessionLogEntry, ToolErrorKind, ToolExecutionStatus,
-    VerificationVerdict, write_model_eval_report_v3,
+    MODEL_EVAL_REPORT_SCHEMA_VERSION, ModelEvalAssertionResultV3,
+    ModelEvalCostConfidence as ReportCostConfidence, ModelEvalExecutionStatus,
+    ModelEvalReportCampaignV3, ModelEvalReportRecordV3, ModelEvalUsage, ProjectionCursor,
+    RunStatus, Session, SessionLogEntry, ToolErrorKind, ToolExecutionStatus, VerificationVerdict,
+    write_model_eval_report_v3,
 };
 
 use crate::application_run::ApplicationRunTerminalStatus;
 
 use super::{
     ModelEvalCampaignExecution, ModelEvalCostConfidence, ModelEvalExpectedTerminal,
-    ModelEvalExpectedVerification, ModelEvalRunExecution, ModelEvalRunExecutionStatus,
+    ModelEvalExpectedToolStatus, ModelEvalExpectedVerification, ModelEvalFixtureAssertionKind,
+    ModelEvalRunExecution, ModelEvalRunExecutionStatus, current_model_eval_fixture_tree_digest,
     sha256_digest,
 };
 
@@ -69,6 +71,8 @@ fn build_model_eval_report_record(
         .copied()
         .map(expected_verification_verdict)
         .collect::<Vec<_>>();
+    let (tool_calls, changed_files, approval_count) = session_activity(&session);
+    let assertion_results = evaluate_fixture_assertions(execution, &tool_calls);
     let mut mismatch_reasons = Vec::new();
     if !expected_run_statuses.contains(&run_status) {
         mismatch_reasons.push(format!("unexpected terminal run status: {run_status:?}"));
@@ -80,6 +84,14 @@ fn build_model_eval_report_record(
     }
     if execution.safe_error.is_some() {
         mismatch_reasons.push("execution retained a harness or runtime error".to_owned());
+    }
+    for assertion in &assertion_results {
+        if !assertion.passed {
+            mismatch_reasons.push(format!(
+                "fixture assertion failed: {}",
+                assertion.assertion_id
+            ));
+        }
     }
 
     let mut failures = execution_failures(execution, verification_verdict);
@@ -117,7 +129,6 @@ fn build_model_eval_report_record(
     metadata = metadata.with_provenance("RFC-0028", "R28.4");
     let mut result =
         EvalResult::from_completion(metadata, run_status, verification_verdict, failures);
-    let (tool_calls, changed_files, approval_count) = session_activity(&session);
     result.tool_calls = tool_calls;
     result.changed_files = changed_files;
     result.approval_count = approval_count;
@@ -179,6 +190,7 @@ fn build_model_eval_report_record(
         expected_run_statuses,
         expected_verification_verdicts,
         acceptance_passed: mismatch_reasons.is_empty(),
+        assertion_results,
         mismatch_reasons,
         verification_receipt_ids,
         workspace_snapshot_ids,
@@ -281,6 +293,88 @@ fn execution_failures(
     failures
 }
 
+fn evaluate_fixture_assertions(
+    execution: &ModelEvalRunExecution,
+    tool_calls: &[EvalToolCallSummary],
+) -> Vec<ModelEvalAssertionResultV3> {
+    execution
+        .materialized_fixture
+        .assertions
+        .iter()
+        .map(|assertion| {
+            let (passed, detail) = match &assertion.assertion {
+                ModelEvalFixtureAssertionKind::FileContains { path, text } => {
+                    match fs::read_to_string(execution.workspace_root.join(path)) {
+                        Ok(content) if content.contains(text) => {
+                            (true, format!("{} contains expected text", path.display()))
+                        }
+                        Ok(_) => (
+                            false,
+                            format!("{} does not contain expected text", path.display()),
+                        ),
+                        Err(_) => (false, format!("{} is unreadable", path.display())),
+                    }
+                }
+                ModelEvalFixtureAssertionKind::ToolStatus { tool_name, status } => {
+                    let expected = expected_tool_status(*status);
+                    let passed = tool_calls
+                        .iter()
+                        .any(|call| call.tool_name == *tool_name && call.status == expected);
+                    (
+                        passed,
+                        format!("tool {tool_name} expected terminal status {expected:?}"),
+                    )
+                }
+                ModelEvalFixtureAssertionKind::ToolNotCalled { tool_name } => {
+                    let passed = !tool_calls.iter().any(|call| call.tool_name == *tool_name);
+                    (passed, format!("tool {tool_name} must not be called"))
+                }
+                ModelEvalFixtureAssertionKind::PathAbsent { path } => {
+                    let relative = path.strip_prefix("..").unwrap_or(path);
+                    let resolved = execution
+                        .workspace_root
+                        .parent()
+                        .map(|parent| parent.join(relative));
+                    let passed = resolved.as_ref().is_some_and(|resolved| !resolved.exists());
+                    (
+                        passed,
+                        format!(
+                            "bounded external path {} must remain absent",
+                            path.display()
+                        ),
+                    )
+                }
+                ModelEvalFixtureAssertionKind::WorkspaceSourceUnchanged => {
+                    match current_model_eval_fixture_tree_digest(&execution.materialized_fixture) {
+                        Ok(digest) => (
+                            digest == execution.tree_digest,
+                            "committed fixture source tree must remain unchanged".to_owned(),
+                        ),
+                        Err(_) => (
+                            false,
+                            "committed fixture source tree could not be verified".to_owned(),
+                        ),
+                    }
+                }
+            };
+            ModelEvalAssertionResultV3 {
+                assertion_id: assertion.id.clone(),
+                passed,
+                detail,
+            }
+        })
+        .collect()
+}
+
+fn expected_tool_status(status: ModelEvalExpectedToolStatus) -> EvalToolCallStatus {
+    match status {
+        ModelEvalExpectedToolStatus::Succeeded => EvalToolCallStatus::Succeeded,
+        ModelEvalExpectedToolStatus::Failed => EvalToolCallStatus::Failed,
+        ModelEvalExpectedToolStatus::Denied => EvalToolCallStatus::Denied,
+        ModelEvalExpectedToolStatus::Interrupted => EvalToolCallStatus::Interrupted,
+    }
+}
+
 fn session_activity(session: &Session) -> (Vec<EvalToolCallSummary>, Vec<PathBuf>, u32) {
     let mut terminal = BTreeMap::<String, EvalToolCallSummary>::new();
     let mut changed_files = Vec::new();
@@ -321,7 +415,7 @@ fn session_activity(session: &Session) -> (Vec<EvalToolCallSummary>, Vec<PathBuf
                                     EvalToolCallStatus::Failed
                                 }
                             }
-                            ToolExecutionStatus::Started => unreachable!(),
+                            ToolExecutionStatus::Started => EvalToolCallStatus::Interrupted,
                         },
                     },
                 );

@@ -8,6 +8,12 @@ max_output_tokens = 4096
 expected_terminal = ["completed"]
 expected_verification = ["passed"]
 
+[[assertions]]
+id = "readme-spelling"
+kind = "file_contains"
+path = "README.md"
+text = "This library is reliable."
+
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"

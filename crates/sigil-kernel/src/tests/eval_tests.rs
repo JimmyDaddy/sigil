@@ -188,6 +188,7 @@ fn model_report_record(repetition: u32, accepted: bool) -> ModelEvalReportRecord
         expected_run_statuses: vec![RunStatus::Completed],
         expected_verification_verdicts: vec![VerificationVerdict::Passed],
         acceptance_passed: accepted,
+        assertion_results: Vec::new(),
         mismatch_reasons: Vec::new(),
         verification_receipt_ids: vec![format!("receipt-{repetition}")],
         workspace_snapshot_ids: vec![format!("snapshot-{repetition}")],

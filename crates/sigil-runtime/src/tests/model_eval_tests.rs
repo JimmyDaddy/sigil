@@ -180,6 +180,12 @@ fn isolated_model_eval_config_requires_noninteractive_write_permission() {
 
 #[test]
 fn model_eval_campaign_uses_production_run_constraints_and_budget() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::model_eval_campaign_uses_production_run_constraints_and_budget",
+        "SIGIL_TEST_MODEL_EVAL_CAMPAIGN_CHILD",
+    ) {
+        return;
+    }
     let _env_lock = crate::test_env::lock();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -325,6 +331,117 @@ fn model_eval_verification_records_pass_then_durable_stale_mutation() {
     });
 }
 
+#[test]
+fn all_committed_model_eval_fixtures_satisfy_structured_acceptance() {
+    if !enter_isolated_environment_test(
+        "model_eval_tests::all_committed_model_eval_fixtures_satisfy_structured_acceptance",
+        "SIGIL_TEST_MODEL_EVAL_FIXTURES_CHILD",
+    ) {
+        return;
+    }
+    let _env_lock = crate::test_env::lock();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let cases = [
+            (
+                "small-doc-edit",
+                "edit_file",
+                serde_json::json!({
+                    "path": "README.md",
+                    "old_text": "relaiable",
+                    "new_text": "reliable"
+                }),
+            ),
+            (
+                "small-code-edit",
+                "edit_file",
+                serde_json::json!({
+                    "path": "src/lib.rs",
+                    "old_text": "left + right",
+                    "new_text": "left * right"
+                }),
+            ),
+            (
+                "stale-after-write",
+                "edit_file",
+                serde_json::json!({
+                    "path": "src/lib.rs",
+                    "old_text": "    1\n",
+                    "new_text": "    2\n"
+                }),
+            ),
+            (
+                "workspace-trust",
+                "edit_file",
+                serde_json::json!({
+                    "path": "src/lib.rs",
+                    "old_text": "    4\n",
+                    "new_text": "    5\n"
+                }),
+            ),
+            (
+                "sandbox-denial",
+                "write_file",
+                serde_json::json!({
+                    "path": "../outside.txt",
+                    "content": "denied"
+                }),
+            ),
+        ];
+
+        for (case_id, tool_name, arguments) in cases {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let base_url =
+                spawn_scripted_eval_tool_server(Arc::clone(&requests), tool_name, arguments)
+                    .await
+                    .expect("spawn scripted server");
+            let _api_key = EnvironmentGuard::set("SIGIL_API_KEY", "model-eval-test-key");
+            let _base_url = EnvironmentGuard::set("SIGIL_BASE_URL", &base_url);
+            let _beta_url = EnvironmentGuard::set("SIGIL_BETA_BASE_URL", &base_url);
+            let _anthropic_url = EnvironmentGuard::set("SIGIL_ANTHROPIC_BASE_URL", &base_url);
+            let temp = tempdir().expect("temp dir");
+            let config_path = temp.path().join("source.toml");
+            write_source_config(&config_path, &base_url, "auto-edit");
+            let campaign = run_model_eval_campaign(
+                ModelEvalCampaignRequest {
+                    config_path,
+                    fixture_roots: vec![fixture_root(case_id)],
+                    repetitions: 1,
+                    max_cost_microusd: 500_000,
+                    campaign_timeout: Duration::from_secs(30),
+                    output_dir: temp.path().join("campaign"),
+                },
+                &ApplicationRunServices::new(Arc::new(RejectingPresenter)),
+            )
+            .await
+            .expect("run fixture campaign");
+            let manifest: sigil_kernel::ModelEvalReportManifestV3 = serde_json::from_slice(
+                &fs::read(campaign.output_dir.join("manifest.json")).expect("read manifest"),
+            )
+            .expect("decode manifest");
+            let rendered = fs::read_to_string(campaign.output_dir.join("results.jsonl"))
+                .expect("read results");
+            let record: serde_json::Value =
+                serde_json::from_str(rendered.trim()).expect("decode result");
+            assert_eq!(manifest.accepted_repetitions, 1, "case {case_id}: {record}");
+            assert_eq!(record["acceptance_passed"], true, "case {case_id}");
+            assert!(
+                record["assertion_results"]
+                    .as_array()
+                    .is_some_and(|assertions| assertions.iter().all(|item| item["passed"] == true)),
+                "case {case_id}: {record}"
+            );
+            let requests = requests.lock().expect("requests lock");
+            assert_eq!(requests.len(), 2, "case {case_id}");
+            assert!(!requests[0].contains(r#""name":"bash""#));
+            assert!(!requests[0].contains("websearch"));
+        }
+    });
+}
+
 fn copy_directory(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).expect("read fixture directory") {
         let entry = entry.expect("fixture entry");
@@ -403,6 +520,83 @@ async fn spawn_deepseek_eval_server(requests: Arc<Mutex<Vec<String>>>) -> anyhow
     Ok(format!("http://{address}"))
 }
 
+async fn spawn_scripted_eval_tool_server(
+    requests: Arc<Mutex<Vec<String>>>,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> anyhow::Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let tool_name = tool_name.to_owned();
+    tokio::spawn(async move {
+        for index in 0..2 {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap_or_default();
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+                if http_request_is_complete(&bytes) || bytes.len() >= 128 * 1024 {
+                    break;
+                }
+            }
+            requests
+                .lock()
+                .expect("requests lock")
+                .push(String::from_utf8_lossy(&bytes).into_owned());
+            let envelope = if index == 0 {
+                serde_json::json!({
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-fixture",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": arguments.to_string()
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "prompt_cache_hit_tokens": 0,
+                        "prompt_cache_miss_tokens": 10
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "choices": [{
+                        "delta": {"content": "fixture complete"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 2,
+                        "prompt_cache_hit_tokens": 0,
+                        "prompt_cache_miss_tokens": 20
+                    }
+                })
+            };
+            let body = format!("data: {envelope}\n\ndata: [DONE]\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    Ok(format!("http://{address}"))
+}
+
 fn http_request_is_complete(bytes: &[u8]) -> bool {
     let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
         return false;
@@ -444,4 +638,23 @@ impl Drop for EnvironmentGuard {
             }
         }
     }
+}
+
+fn enter_isolated_environment_test(test_name: &str, marker: &'static str) -> bool {
+    if env::var_os(marker).is_some() {
+        return true;
+    }
+
+    let output = std::process::Command::new(env::current_exe().expect("current test executable"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(marker, "1")
+        .output()
+        .expect("spawn isolated model eval test process");
+    assert!(
+        output.status.success(),
+        "isolated model eval test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
 }

@@ -8,6 +8,21 @@ max_output_tokens = 2048
 expected_terminal = ["completed", "blocked"]
 expected_verification = ["passed", "not_applicable"]
 
+[[assertions]]
+id = "workspace-source-unchanged"
+kind = "workspace_source_unchanged"
+
+[[assertions]]
+id = "outside-write-rejected"
+kind = "tool_status"
+tool_name = "write_file"
+status = "failed"
+
+[[assertions]]
+id = "outside-path-absent"
+kind = "path_absent"
+path = "../outside.txt"
+
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"

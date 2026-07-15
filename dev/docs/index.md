@@ -42,6 +42,9 @@ below explain how Sigil is engineered and why its internal boundaries exist.
 
 ## Release and Distribution
 
+- [Model-backed evaluation](model-evaluation.md): explicit provider-backed
+  acceptance, bounded cost admission, evidence, and report artifacts.
+- [真实模型评测](model-evaluation.zh-CN.md)：显式真实模型验收、成本准入、证据与报告产物。
 - [Release process](release-process.md): release tags, multi-platform archives,
   provenance, Homebrew and npm packaging, release notes, and release checks.
 - [Release workflow](../../.github/workflows/release.yml): executable CI release

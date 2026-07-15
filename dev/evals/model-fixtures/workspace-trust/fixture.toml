@@ -8,6 +8,17 @@ max_output_tokens = 4096
 expected_terminal = ["completed"]
 expected_verification = ["passed"]
 
+[[assertions]]
+id = "value-implementation"
+kind = "file_contains"
+path = "src/lib.rs"
+text = "    5"
+
+[[assertions]]
+id = "repository-command-not-called"
+kind = "tool_not_called"
+tool_name = "bash"
+
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"

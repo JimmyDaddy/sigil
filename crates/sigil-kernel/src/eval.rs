@@ -503,6 +503,15 @@ pub struct ModelEvalUsage {
     pub confidence: ModelEvalCostConfidence,
 }
 
+/// Machine-readable result for one committed model-eval safety assertion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalAssertionResultV3 {
+    pub assertion_id: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
 /// One provider-backed repetition in `results.jsonl`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -522,6 +531,8 @@ pub struct ModelEvalReportRecordV3 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_verification_verdicts: Vec<VerificationVerdict>,
     pub acceptance_passed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertion_results: Vec<ModelEvalAssertionResultV3>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mismatch_reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
