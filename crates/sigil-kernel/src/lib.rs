@@ -155,7 +155,11 @@ pub use eval::{
     EvalProviderStep, EvalRepoCheckPromotion, EvalReportArtifact, EvalReportArtifacts,
     EvalReportManifest, EvalReportMatrixEntry, EvalReportRecord, EvalRequiredAction,
     EvalRequiredActionKind, EvalResult, EvalRunId, EvalRunMetadata, EvalStepId, EvalToolCallId,
-    EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture, write_eval_report_artifacts,
+    EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture,
+    MODEL_EVAL_REPORT_SCHEMA_VERSION, ModelEvalCostConfidence, ModelEvalExecutionStatus,
+    ModelEvalReportArtifactsV3, ModelEvalReportCampaignV3, ModelEvalReportManifestV3,
+    ModelEvalReportRecordV3, ModelEvalTrendBucketV3, ModelEvalTrendEligibility, ModelEvalUsage,
+    write_eval_report_artifacts, write_model_eval_report_v3,
 };
 pub use event::{
     ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent,

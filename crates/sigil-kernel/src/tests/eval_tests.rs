@@ -8,13 +8,15 @@ use crate::{
     EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRepoCheckPromotion,
     EvalRequiredActionKind, EvalResult, EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary,
     EvalWorkspaceFixture, EventClass, JsonlSessionStore, MemoryConfig, MergeDecision,
-    MergeReviewId, MergeReviewParentMutationRequest, MergeReviewRequested, ModelMessage,
-    MutationBatchStatus, MutationEventRecorder, MutationObservedState, MutationReconciled,
-    MutationResolution, PermissionConfig, PermissionMode, PermissionPolicy, ProjectionCursor,
-    RunStatus, Session, SessionLogEntry, SessionStreamRecord, StoredEvent, ToolAccess,
-    ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject, VerificationVerdict,
-    VisibleCompletionState, WorkspaceTrust, bytes_hash, resolve_merge_review_parent_mutation,
-    write_eval_report_artifacts,
+    MergeReviewId, MergeReviewParentMutationRequest, MergeReviewRequested, ModelEvalCostConfidence,
+    ModelEvalExecutionStatus, ModelEvalReportCampaignV3, ModelEvalReportRecordV3,
+    ModelEvalTrendEligibility, ModelEvalUsage, ModelMessage, MutationBatchStatus,
+    MutationEventRecorder, MutationObservedState, MutationReconciled, MutationResolution,
+    PermissionConfig, PermissionMode, PermissionPolicy, ProjectionCursor, RunStatus, Session,
+    SessionLogEntry, SessionStreamRecord, StoredEvent, ToolAccess, ToolCategory,
+    ToolPreviewCapability, ToolSpec, ToolSubject, VerificationVerdict, VisibleCompletionState,
+    WorkspaceTrust, bytes_hash, resolve_merge_review_parent_mutation, write_eval_report_artifacts,
+    write_model_eval_report_v3,
 };
 
 #[test]
@@ -49,6 +51,151 @@ fn eval_outcome_distinguishes_verified_and_unverified_completion() {
         unverified.verification_verdict,
         VerificationVerdict::Missing
     );
+}
+
+#[test]
+fn model_eval_report_v3_requires_three_provider_admitted_runs_for_trend() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("report");
+    let records = (1..=3)
+        .map(|repetition| model_report_record(repetition, true))
+        .collect::<Vec<_>>();
+    write_model_eval_report_v3(
+        &output,
+        &ModelEvalReportCampaignV3 {
+            campaign_id: "campaign-1".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: 3,
+            charged_microusd: 42,
+            records,
+        },
+    )?;
+
+    let manifest: crate::ModelEvalReportManifestV3 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    assert_eq!(manifest.report_schema_version, 3);
+    assert_eq!(manifest.provider_admitted_repetitions, 3);
+    assert_eq!(manifest.accepted_repetitions, 3);
+    assert_eq!(manifest.trend_buckets.len(), 1);
+    assert_eq!(
+        manifest.trend_buckets[0].eligibility,
+        ModelEvalTrendEligibility::Eligible
+    );
+    assert!(manifest.trend_buckets[0].smoke_only_reason.is_none());
+    assert_eq!(
+        std::fs::read_to_string(output.join("results.jsonl"))?
+            .lines()
+            .count(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
+fn model_eval_report_v3_marks_single_run_smoke_only() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("report");
+    write_model_eval_report_v3(
+        &output,
+        &ModelEvalReportCampaignV3 {
+            campaign_id: "campaign-smoke".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: 1,
+            charged_microusd: 0,
+            records: vec![model_report_record(1, false)],
+        },
+    )?;
+
+    let manifest: crate::ModelEvalReportManifestV3 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    assert_eq!(
+        manifest.trend_buckets[0].eligibility,
+        ModelEvalTrendEligibility::SmokeOnly
+    );
+    assert!(
+        manifest.trend_buckets[0]
+            .smoke_only_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("observed 1"))
+    );
+    Ok(())
+}
+
+#[test]
+fn model_eval_report_v3_splits_different_sandbox_identities() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("report");
+    let mut records = vec![
+        model_report_record(1, true),
+        model_report_record(2, true),
+        model_report_record(3, true),
+    ];
+    records[2].result.metadata.sandbox_backend = "docker".to_owned();
+    write_model_eval_report_v3(
+        &output,
+        &ModelEvalReportCampaignV3 {
+            campaign_id: "campaign-sandbox-split".to_owned(),
+            started_at_unix_ms: 10,
+            ended_at_unix_ms: 20,
+            requested_repetitions: 3,
+            charged_microusd: 3,
+            records,
+        },
+    )?;
+
+    let manifest: crate::ModelEvalReportManifestV3 =
+        serde_json::from_slice(&std::fs::read(output.join("manifest.json"))?)?;
+    assert_eq!(manifest.trend_buckets.len(), 2);
+    assert!(manifest.trend_buckets.iter().all(|bucket| {
+        bucket.eligibility == ModelEvalTrendEligibility::SmokeOnly
+            && bucket.smoke_only_reason.is_some()
+    }));
+    Ok(())
+}
+
+fn model_report_record(repetition: u32, accepted: bool) -> ModelEvalReportRecordV3 {
+    let mut metadata = EvalRunMetadata::deterministic("case-model", "run-model", "fixture-model");
+    metadata.provider = "provider".to_owned();
+    metadata.model = "model".to_owned();
+    metadata.config_hash = "sha256:config".to_owned();
+    metadata.tool_schema_digest = "sha256:tools".to_owned();
+    let result = EvalResult::from_completion(
+        metadata,
+        RunStatus::Completed,
+        VerificationVerdict::Passed,
+        Vec::new(),
+    );
+    ModelEvalReportRecordV3 {
+        report_schema_version: 3,
+        repetition,
+        execution_status: ModelEvalExecutionStatus::Completed,
+        fixture_source_digest: "sha256:source".to_owned(),
+        fixture_tree_digest: "sha256:tree".to_owned(),
+        isolated_config_digest: "sha256:isolated-config".to_owned(),
+        usage: ModelEvalUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            cache_hit_tokens: 0,
+            cache_miss_tokens: 10,
+            reported_cost_microusd: Some(1),
+            charged_microusd: 1,
+            confidence: ModelEvalCostConfidence::Reported,
+        },
+        wall_time_ms: 1,
+        public_event_count: 1,
+        expected_run_statuses: vec![RunStatus::Completed],
+        expected_verification_verdicts: vec![VerificationVerdict::Passed],
+        acceptance_passed: accepted,
+        mismatch_reasons: Vec::new(),
+        verification_receipt_ids: vec![format!("receipt-{repetition}")],
+        workspace_snapshot_ids: vec![format!("snapshot-{repetition}")],
+        changeset_ids: Vec::new(),
+        session_artifact_path: None,
+        safe_error: None,
+        result,
+    }
 }
 
 #[test]

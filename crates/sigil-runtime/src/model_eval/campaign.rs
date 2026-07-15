@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -19,6 +19,7 @@ use crate::application_run::{
 use super::{
     LoadedModelEvalFixture, MaterializedModelEvalFixture, load_model_eval_fixture,
     materialize_model_eval_fixture, sha256_digest, sync_directory,
+    verification::ModelEvalVerificationExecution,
 };
 
 pub const MODEL_EVAL_MAX_CASES: usize = 16;
@@ -42,6 +43,7 @@ pub struct ModelEvalCampaignRequest {
 pub struct ModelEvalIsolatedConfig {
     pub config_path: PathBuf,
     pub config_digest: String,
+    pub isolated_config_digest: String,
     pub provider: String,
     pub model: String,
     pub session_path: PathBuf,
@@ -108,6 +110,7 @@ pub struct ModelEvalRunExecution {
     pub workspace_root: PathBuf,
     pub config_path: PathBuf,
     pub config_digest: String,
+    pub isolated_config_digest: String,
     pub session_path: PathBuf,
     pub manifest_digest: String,
     pub tree_digest: String,
@@ -121,6 +124,7 @@ pub struct ModelEvalRunExecution {
     pub wall_time: Duration,
     pub public_event_count: u64,
     pub safe_error: Option<String>,
+    pub verification: Option<ModelEvalVerificationExecution>,
     pub materialized_fixture: MaterializedModelEvalFixture,
 }
 
@@ -128,6 +132,8 @@ pub struct ModelEvalRunExecution {
 #[derive(Debug, Clone)]
 pub struct ModelEvalCampaignExecution {
     pub campaign_id: String,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
     pub output_dir: PathBuf,
     pub planned_runs: usize,
     pub reservation_microusd_per_run: u64,
@@ -162,11 +168,6 @@ pub fn write_isolated_model_eval_config(
     for value in config.providers.values_mut() {
         scrub_provider_secret_fields(value)?;
     }
-    config.workspace.root = fixture.workspace_root.display().to_string();
-    config.storage.state_root = StorageRoot::Path(run_root.join("state").display().to_string());
-    config.storage.cache_root = StorageRoot::Path(run_root.join("cache").display().to_string());
-    let session_dir = run_root.join("sessions");
-    config.session.log_dir = Some(session_dir.display().to_string());
     config.agent.max_turns = Some(
         usize::try_from(fixture.max_turns).context("model eval max_turns does not fit usize")?,
     );
@@ -181,6 +182,20 @@ pub fn write_isolated_model_eval_config(
     config.web.network_mode = NetworkPolicy::Deny;
     config.web.search_mcp = None;
     config.mcp_servers.clear();
+
+    config.workspace.root = "<model-eval-workspace>".to_owned();
+    config.storage.state_root = StorageRoot::Path("<model-eval-state>".to_owned());
+    config.storage.cache_root = StorageRoot::Path("<model-eval-cache>".to_owned());
+    config.session.log_dir = Some("<model-eval-sessions>".to_owned());
+    let comparison_config = toml::to_string(&config)
+        .context("failed to serialize normalized model eval config identity")?;
+    let config_digest = sha256_digest(comparison_config.as_bytes());
+
+    config.workspace.root = fixture.workspace_root.display().to_string();
+    config.storage.state_root = StorageRoot::Path(run_root.join("state").display().to_string());
+    config.storage.cache_root = StorageRoot::Path(run_root.join("cache").display().to_string());
+    let session_dir = run_root.join("sessions");
+    config.session.log_dir = Some(session_dir.display().to_string());
 
     fs::create_dir_all(&session_dir)
         .with_context(|| format!("failed to create {}", session_dir.display()))?;
@@ -205,7 +220,8 @@ pub fn write_isolated_model_eval_config(
 
     Ok(ModelEvalIsolatedConfig {
         config_path,
-        config_digest: sha256_digest(&config_bytes),
+        config_digest,
+        isolated_config_digest: sha256_digest(&config_bytes),
         provider: config.agent.provider,
         model: config.agent.model,
         session_path: session_dir.join("run.jsonl"),
@@ -222,6 +238,7 @@ pub async fn run_model_eval_campaign(
     request: ModelEvalCampaignRequest,
     services: &ApplicationRunServices,
 ) -> Result<ModelEvalCampaignExecution> {
+    let started_at_unix_ms = unix_time_ms()?;
     let fixtures = preflight_campaign(&request)?;
     let planned_runs = fixtures
         .len()
@@ -297,16 +314,20 @@ pub async fn run_model_eval_campaign(
             runs.push(execution);
         }
     }
-    sync_directory(&output_dir)?;
-
-    Ok(ModelEvalCampaignExecution {
+    let ended_at_unix_ms = unix_time_ms()?;
+    let campaign = ModelEvalCampaignExecution {
         campaign_id,
+        started_at_unix_ms,
+        ended_at_unix_ms,
         output_dir,
         planned_runs,
         reservation_microusd_per_run,
         charged_microusd,
         runs,
-    })
+    };
+    super::write_model_eval_campaign_report(&campaign)?;
+    sync_directory(&campaign.output_dir)?;
+    Ok(campaign)
 }
 
 fn preflight_campaign(request: &ModelEvalCampaignRequest) -> Result<Vec<LoadedModelEvalFixture>> {
@@ -430,6 +451,36 @@ async fn execute_model_eval_run(
         safe_error = Some("application run cancellation could not be audited".to_owned());
     }
 
+    let verification = if status == ModelEvalRunExecutionStatus::Completed {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        match tokio::time::timeout(
+            remaining,
+            super::verify_model_eval_run(
+                fixture,
+                &isolated.config_path,
+                &isolated.session_path,
+                &isolated.provider,
+                &isolated.model,
+                &run_id,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(verification)) => Some(verification),
+            Ok(Err(_)) => {
+                safe_error =
+                    Some("fixture verification could not produce durable evidence".to_owned());
+                None
+            }
+            Err(_) => {
+                safe_error = Some("fixture verification exceeded the campaign deadline".to_owned());
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let cost_confidence = if events.usage.total_cost_usd().is_some() {
         ModelEvalCostConfidence::Reported
     } else {
@@ -442,6 +493,7 @@ async fn execute_model_eval_run(
         workspace_root: fixture.workspace_root.clone(),
         config_path: isolated.config_path,
         config_digest: isolated.config_digest,
+        isolated_config_digest: isolated.isolated_config_digest,
         session_path: isolated.session_path,
         manifest_digest: fixture.manifest_digest.clone(),
         tree_digest: fixture.tree_digest.clone(),
@@ -455,6 +507,7 @@ async fn execute_model_eval_run(
         wall_time: started.elapsed(),
         public_event_count: events.event_count,
         safe_error,
+        verification,
         materialized_fixture: fixture.clone(),
     }
 }
@@ -475,6 +528,7 @@ fn base_execution(
         workspace_root: fixture.workspace_root.clone(),
         config_path: isolated.config_path,
         config_digest: isolated.config_digest,
+        isolated_config_digest: isolated.isolated_config_digest,
         session_path: isolated.session_path,
         manifest_digest: fixture.manifest_digest.clone(),
         tree_digest: fixture.tree_digest.clone(),
@@ -488,6 +542,7 @@ fn base_execution(
         wall_time,
         public_event_count: 0,
         safe_error,
+        verification: None,
         materialized_fixture: fixture.clone(),
     }
 }
@@ -603,4 +658,11 @@ fn usd_to_microusd(value: f64) -> Option<u64> {
         return None;
     }
     Some((value * 1_000_000.0).ceil() as u64)
+}
+
+fn unix_time_ms() -> Result<u64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?;
+    Ok(elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
 }

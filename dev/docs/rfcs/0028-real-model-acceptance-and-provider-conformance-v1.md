@@ -1,6 +1,6 @@
 # RFC-0028 Real-model Acceptance and Provider Conformance V1
 
-状态：accepted / R28.1-R28.3 implemented / R28.4 ready
+状态：accepted / R28.1-R28.4 implemented / R28.5 ready
 
 创建日期：2026-07-15
 

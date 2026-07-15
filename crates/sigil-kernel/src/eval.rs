@@ -450,6 +450,385 @@ pub struct EvalReportArtifacts {
     pub artifact_dir: PathBuf,
 }
 
+/// Current machine-readable schema for provider-backed model evaluation reports.
+pub const MODEL_EVAL_REPORT_SCHEMA_VERSION: u16 = 3;
+
+/// Execution phase reached by one provider-backed model evaluation repetition.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvalExecutionStatus {
+    Completed,
+    PreparationFailed,
+    ExecutionFailed,
+    TimedOut,
+    BudgetSkipped,
+    DeadlineSkipped,
+}
+
+impl ModelEvalExecutionStatus {
+    #[must_use]
+    pub fn provider_admitted(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::ExecutionFailed | Self::TimedOut
+        )
+    }
+
+    #[must_use]
+    pub fn skipped(self) -> bool {
+        matches!(self, Self::BudgetSkipped | Self::DeadlineSkipped)
+    }
+}
+
+/// Confidence attached to the normalized monetary cost for one repetition.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvalCostConfidence {
+    Reported,
+    Estimated,
+    Unknown,
+}
+
+/// Provider-neutral token and cost totals retained in report schema V3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_hit_tokens: u64,
+    pub cache_miss_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cost_microusd: Option<u64>,
+    pub charged_microusd: u64,
+    pub confidence: ModelEvalCostConfidence,
+}
+
+/// One provider-backed repetition in `results.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalReportRecordV3 {
+    pub report_schema_version: u16,
+    pub repetition: u32,
+    pub execution_status: ModelEvalExecutionStatus,
+    pub fixture_source_digest: String,
+    pub fixture_tree_digest: String,
+    pub isolated_config_digest: String,
+    pub usage: ModelEvalUsage,
+    pub wall_time_ms: u64,
+    #[serde(default)]
+    pub public_event_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_run_statuses: Vec<RunStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_verification_verdicts: Vec<VerificationVerdict>,
+    pub acceptance_passed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mismatch_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_receipt_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_snapshot_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changeset_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_artifact_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_error: Option<String>,
+    pub result: EvalResult,
+}
+
+/// Regression eligibility for one exact comparison bucket.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvalTrendEligibility {
+    Eligible,
+    SmokeOnly,
+}
+
+/// Aggregate for repetitions sharing every comparison identity dimension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalTrendBucketV3 {
+    pub bucket_digest: String,
+    pub fixture_id: String,
+    pub fixture_source_digest: String,
+    pub fixture_tree_digest: String,
+    pub provider: String,
+    pub model: String,
+    pub model_parameters_hash: String,
+    pub config_hash: String,
+    pub tool_schema_digest: String,
+    pub sandbox_backend: String,
+    pub os_toolchain: String,
+    pub attempted_repetitions: usize,
+    pub accepted_repetitions: usize,
+    pub eligibility: ModelEvalTrendEligibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoke_only_reason: Option<String>,
+}
+
+/// Campaign-level aggregate for model evaluation report schema V3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalReportManifestV3 {
+    pub report_schema_version: u16,
+    pub campaign_id: String,
+    pub mode: String,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
+    pub requested_repetitions: usize,
+    pub provider_admitted_repetitions: usize,
+    pub completed_repetitions: usize,
+    pub skipped_repetitions: usize,
+    pub accepted_repetitions: usize,
+    pub charged_microusd: u64,
+    pub results_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trend_buckets: Vec<ModelEvalTrendBucketV3>,
+}
+
+/// Input required to write one provider-backed campaign report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalReportCampaignV3 {
+    pub campaign_id: String,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
+    pub requested_repetitions: usize,
+    pub charged_microusd: u64,
+    pub records: Vec<ModelEvalReportRecordV3>,
+}
+
+/// Paths written by [`write_model_eval_report_v3`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelEvalReportArtifactsV3 {
+    pub results_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub manifest_path: PathBuf,
+}
+
+/// Writes a provider-backed report without interpreting assistant prose as acceptance evidence.
+pub fn write_model_eval_report_v3(
+    output_dir: impl AsRef<Path>,
+    campaign: &ModelEvalReportCampaignV3,
+) -> Result<ModelEvalReportArtifactsV3> {
+    let output_dir = output_dir.as_ref();
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    if campaign
+        .records
+        .iter()
+        .any(|record| record.report_schema_version != MODEL_EVAL_REPORT_SCHEMA_VERSION)
+    {
+        anyhow::bail!("model eval record schema version does not match report schema V3");
+    }
+
+    let results_jsonl_path = output_dir.join("results.jsonl");
+    let mut results_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&results_jsonl_path)
+        .with_context(|| format!("failed to create {}", results_jsonl_path.display()))?;
+    for record in &campaign.records {
+        serde_json::to_writer(&mut results_file, record)
+            .context("failed to serialize model eval report record")?;
+        results_file
+            .write_all(b"\n")
+            .context("failed to write model eval report newline")?;
+    }
+    results_file
+        .sync_all()
+        .context("failed to sync model eval results")?;
+
+    let summary_path = output_dir.join("summary.md");
+    let summary = render_model_eval_report_summary(campaign);
+    write_new_synced(&summary_path, summary.as_bytes())?;
+
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest = build_model_eval_report_manifest(
+        campaign,
+        results_jsonl_path.clone(),
+        summary_path.clone(),
+    );
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .context("failed to serialize model eval report manifest")?;
+    write_new_synced(&manifest_path, &manifest_bytes)?;
+
+    Ok(ModelEvalReportArtifactsV3 {
+        results_jsonl_path,
+        summary_path,
+        manifest_path,
+    })
+}
+
+fn build_model_eval_report_manifest(
+    campaign: &ModelEvalReportCampaignV3,
+    results_jsonl_path: PathBuf,
+    summary_path: PathBuf,
+) -> ModelEvalReportManifestV3 {
+    let provider_admitted_repetitions = campaign
+        .records
+        .iter()
+        .filter(|record| record.execution_status.provider_admitted())
+        .count();
+    let completed_repetitions = campaign
+        .records
+        .iter()
+        .filter(|record| record.execution_status == ModelEvalExecutionStatus::Completed)
+        .count();
+    let skipped_repetitions = campaign
+        .records
+        .iter()
+        .filter(|record| record.execution_status.skipped())
+        .count();
+    let accepted_repetitions = campaign
+        .records
+        .iter()
+        .filter(|record| record.acceptance_passed)
+        .count();
+
+    ModelEvalReportManifestV3 {
+        report_schema_version: MODEL_EVAL_REPORT_SCHEMA_VERSION,
+        campaign_id: campaign.campaign_id.clone(),
+        mode: "model".to_owned(),
+        started_at_unix_ms: campaign.started_at_unix_ms,
+        ended_at_unix_ms: campaign.ended_at_unix_ms,
+        requested_repetitions: campaign.requested_repetitions,
+        provider_admitted_repetitions,
+        completed_repetitions,
+        skipped_repetitions,
+        accepted_repetitions,
+        charged_microusd: campaign.charged_microusd,
+        results_jsonl_path,
+        summary_path,
+        trend_buckets: model_eval_trend_buckets(&campaign.records),
+    }
+}
+
+fn model_eval_trend_buckets(records: &[ModelEvalReportRecordV3]) -> Vec<ModelEvalTrendBucketV3> {
+    let mut grouped = BTreeMap::<String, Vec<&ModelEvalReportRecordV3>>::new();
+    for record in records {
+        let metadata = &record.result.metadata;
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            metadata.fixture_id,
+            record.fixture_source_digest,
+            record.fixture_tree_digest,
+            metadata.provider,
+            metadata.model,
+            metadata.model_parameters_hash,
+            metadata.config_hash,
+            metadata.tool_schema_digest,
+            metadata.sandbox_backend,
+            metadata.os_toolchain
+        );
+        grouped.entry(key).or_default().push(record);
+    }
+
+    grouped
+        .into_iter()
+        .map(|(key, records)| {
+            let first = records[0];
+            let attempted_repetitions = records
+                .iter()
+                .filter(|record| record.execution_status.provider_admitted())
+                .count();
+            let eligibility = if attempted_repetitions >= 3 {
+                ModelEvalTrendEligibility::Eligible
+            } else {
+                ModelEvalTrendEligibility::SmokeOnly
+            };
+            ModelEvalTrendBucketV3 {
+                bucket_digest: crate::stable_event_hash(key.as_bytes()),
+                fixture_id: first.result.metadata.fixture_id.clone(),
+                fixture_source_digest: first.fixture_source_digest.clone(),
+                fixture_tree_digest: first.fixture_tree_digest.clone(),
+                provider: first.result.metadata.provider.clone(),
+                model: first.result.metadata.model.clone(),
+                model_parameters_hash: first.result.metadata.model_parameters_hash.clone(),
+                config_hash: first.result.metadata.config_hash.clone(),
+                tool_schema_digest: first.result.metadata.tool_schema_digest.clone(),
+                sandbox_backend: first.result.metadata.sandbox_backend.clone(),
+                os_toolchain: first.result.metadata.os_toolchain.clone(),
+                attempted_repetitions,
+                accepted_repetitions: records
+                    .iter()
+                    .filter(|record| record.acceptance_passed)
+                    .count(),
+                eligibility,
+                smoke_only_reason: (eligibility == ModelEvalTrendEligibility::SmokeOnly).then(|| {
+                    format!(
+                        "requires at least 3 provider-admitted homogeneous repetitions; observed {attempted_repetitions}"
+                    )
+                }),
+            }
+        })
+        .collect()
+}
+
+fn render_model_eval_report_summary(campaign: &ModelEvalReportCampaignV3) -> String {
+    let manifest = build_model_eval_report_manifest(
+        campaign,
+        PathBuf::from("results.jsonl"),
+        PathBuf::from("summary.md"),
+    );
+    let mut summary = String::new();
+    summary.push_str("# Sigil Model Evaluation Report\n\n");
+    summary.push_str(&format!("Campaign: `{}`\n\n", campaign.campaign_id));
+    summary.push_str(&format!(
+        "Requested: {}, provider-admitted: {}, completed: {}, skipped: {}, accepted: {}\n\n",
+        manifest.requested_repetitions,
+        manifest.provider_admitted_repetitions,
+        manifest.completed_repetitions,
+        manifest.skipped_repetitions,
+        manifest.accepted_repetitions
+    ));
+    summary.push_str("## Runs\n\n");
+    for record in &campaign.records {
+        summary.push_str(&format!(
+            "- `{}` repetition {}: execution=`{:?}`, run=`{:?}`, verification=`{:?}`, accepted=`{}`\n",
+            record.result.metadata.fixture_id,
+            record.repetition,
+            record.execution_status,
+            record.result.run_status,
+            record.result.verification_verdict,
+            record.acceptance_passed
+        ));
+        for reason in &record.mismatch_reasons {
+            summary.push_str(&format!("  - mismatch: {reason}\n"));
+        }
+    }
+    summary.push_str("\n## Trend buckets\n\n");
+    for bucket in &manifest.trend_buckets {
+        summary.push_str(&format!(
+            "- `{}`: attempted={}, accepted={}, eligibility=`{:?}`",
+            bucket.fixture_id,
+            bucket.attempted_repetitions,
+            bucket.accepted_repetitions,
+            bucket.eligibility
+        ));
+        if let Some(reason) = &bucket.smoke_only_reason {
+            summary.push_str(&format!(", reason={reason}"));
+        }
+        summary.push('\n');
+    }
+    summary
+}
+
+fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", path.display()))
+}
+
 /// Writes deterministic eval report artifacts without invoking a real model.
 ///
 /// The report keeps structured JSONL as the machine-readable source and a small Markdown summary

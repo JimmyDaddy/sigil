@@ -14,6 +14,11 @@ source = "files/Cargo.toml"
 sha256 = "sha256:226fd36537aabfae1d593f3fda7d4260d36508c8a9941bd81ac81da7ffec3df1"
 
 [[files]]
+path = "Cargo.lock"
+source = "files/Cargo.lock"
+sha256 = "sha256:cbe8e814d346a583a470da57e58178aebd4fec21fd6b96c2485ed63d1860aae3"
+
+[[files]]
 path = ".sigil/commands/verify.md"
 source = "files/.sigil/commands/verify.md"
 sha256 = "sha256:10f607bc7a8cdbc7c6f94bc991f1f2ea8164ca31692b4ccb3b0560a16b560529"

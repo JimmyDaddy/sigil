@@ -14,6 +14,11 @@ source = "files/Cargo.toml"
 sha256 = "sha256:53dea6fd4015c8a5206d26c3ec63bf921dfbfdb4ccb05e9f36d641a756d63c16"
 
 [[files]]
+path = "Cargo.lock"
+source = "files/Cargo.lock"
+sha256 = "sha256:7fbde065e0cd0af6438d28c5bcee2f4be31e9f9b78a421e0980ab8b6cfe42c67"
+
+[[files]]
 path = "src/lib.rs"
 source = "files/src/lib.rs"
 sha256 = "sha256:75295bad247442e25c7624a20ab3aaaff30a654c00ff89a9fadc1fdef4125c77"

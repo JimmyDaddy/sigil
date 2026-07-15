@@ -12,6 +12,10 @@ use sigil_kernel::ToolRegistryScope;
 
 mod campaign;
 pub use campaign::*;
+mod report;
+pub use report::*;
+mod verification;
+pub use verification::*;
 
 pub const MODEL_EVAL_FIXTURE_SCHEMA_VERSION: u16 = 1;
 pub const MODEL_EVAL_MAX_FILES: usize = 32;

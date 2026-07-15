@@ -14,6 +14,11 @@ source = "files/Cargo.toml"
 sha256 = "sha256:6dc8c253d3dc469e91bb75bd23709a23ac81d9c87540718b4531537d96d80b25"
 
 [[files]]
+path = "Cargo.lock"
+source = "files/Cargo.lock"
+sha256 = "sha256:ddf13c210bd0aec0a9e12b6fc12d08936205f54cab91aeb2fc45f3985f084a73"
+
+[[files]]
 path = "README.md"
 source = "files/README.md"
 sha256 = "sha256:8444e94f093fc9643a0a1442949a636b857ce3340df5fcb046cda0a124c134f9"

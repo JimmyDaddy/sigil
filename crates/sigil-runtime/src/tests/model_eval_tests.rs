@@ -6,8 +6,9 @@ use std::{
 };
 
 use sigil_kernel::{
-    DisclosurePresentationError, DisclosurePresentationReceipt, EgressDisclosurePresenter,
-    PreEgressDisclosure,
+    ControlEntry, DisclosurePresentationError, DisclosurePresentationReceipt,
+    EgressDisclosurePresenter, JsonlSessionStore, PreEgressDisclosure, ReceiptStatus, Session,
+    VerificationVerdict, write_file_with_mutation,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -20,7 +21,7 @@ use crate::{
     model_eval::{
         ModelEvalCampaignRequest, ModelEvalCostConfidence, ModelEvalRunExecutionStatus,
         load_model_eval_fixture, materialize_model_eval_fixture, run_model_eval_campaign,
-        write_isolated_model_eval_config,
+        verify_model_eval_run, write_isolated_model_eval_config,
     },
 };
 
@@ -145,6 +146,20 @@ fn isolated_model_eval_config_removes_secrets_and_external_surfaces() {
     assert!(rendered.contains("enabled = false"));
     assert!(rendered.contains(&materialized.workspace_root.display().to_string()));
     assert!(isolated.session_path.starts_with(&run_root));
+
+    let second_run_root = temp.path().join("run-2");
+    fs::create_dir(&second_run_root).expect("second run root");
+    let second_materialized =
+        materialize_model_eval_fixture(&fixture, second_run_root.join("workspace"))
+            .expect("materialize second fixture");
+    let second =
+        write_isolated_model_eval_config(&source_config, &second_materialized, &second_run_root)
+            .expect("write second isolated config");
+    assert_eq!(isolated.config_digest, second.config_digest);
+    assert_ne!(
+        isolated.isolated_config_digest,
+        second.isolated_config_digest
+    );
 }
 
 #[test]
@@ -213,6 +228,9 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
             ModelEvalRunExecutionStatus::BudgetSkipped
         );
         assert!(campaign.runs[0].session_path.is_file());
+        assert!(campaign.output_dir.join("results.jsonl").is_file());
+        assert!(campaign.output_dir.join("manifest.json").is_file());
+        assert!(campaign.output_dir.join("summary.md").is_file());
         let request = requests
             .lock()
             .expect("requests lock")
@@ -225,6 +243,85 @@ fn model_eval_campaign_uses_production_run_constraints_and_budget() {
         assert!(!request.contains(r#""name":"bash""#));
         assert!(!request.contains("websearch"));
         assert_eq!(requests.lock().expect("requests lock").len(), 1);
+    });
+}
+
+#[test]
+fn model_eval_verification_records_pass_then_durable_stale_mutation() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let fixture =
+            load_model_eval_fixture(fixture_root("stale-after-write")).expect("load fixture");
+        let temp = tempdir().expect("temp dir");
+        let run_root = temp.path().join("run");
+        fs::create_dir(&run_root).expect("run root");
+        let materialized = materialize_model_eval_fixture(&fixture, run_root.join("workspace"))
+            .expect("materialize fixture");
+        let source_config = temp.path().join("source.toml");
+        write_source_config(&source_config, "http://127.0.0.1:9", "auto-edit");
+        let isolated = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
+            .expect("write isolated config");
+        let store = JsonlSessionStore::new(&isolated.session_path).expect("session store");
+        let mut session = Session::new(&isolated.provider, &isolated.model).with_store(store);
+        session
+            .append_control(ControlEntry::Note {
+                kind: "model_eval_test".to_owned(),
+                data: serde_json::json!({"phase": "model_completed"}),
+            })
+            .expect("initialize session");
+        let source_path = materialized.workspace_root.join("src/lib.rs");
+        let source = fs::read_to_string(&source_path).expect("read fixture source");
+        let updated = source.replace("    1\n", "    2\n");
+        let recorder = session
+            .mutation_event_recorder()
+            .expect("durable mutation recorder");
+        write_file_with_mutation(
+            Some(&recorder),
+            &materialized.workspace_root,
+            "model-edit",
+            "src/lib.rs",
+            &source_path,
+            updated.as_bytes(),
+        )
+        .expect("record model mutation");
+        drop(session);
+
+        let verification = verify_model_eval_run(
+            &materialized,
+            &isolated.config_path,
+            &isolated.session_path,
+            &isolated.provider,
+            &isolated.model,
+            "run-stale",
+        )
+        .await
+        .expect("verify fixture");
+
+        assert_eq!(verification.verdict, VerificationVerdict::Stale);
+        assert!(verification.post_run_mutation_recorded);
+        assert_eq!(verification.receipts.len(), 1);
+        assert_eq!(
+            verification.receipts[0].receipt.check_status,
+            ReceiptStatus::Succeeded
+        );
+        assert!(
+            fs::read_to_string(materialized.workspace_root.join("README.md"))
+                .expect("read mutated readme")
+                .contains("fixture_generation = 2")
+        );
+        let reloaded = Session::load_from_store(
+            &isolated.provider,
+            &isolated.model,
+            JsonlSessionStore::new(&isolated.session_path).expect("reopen store"),
+        )
+        .expect("reload session");
+        assert!(reloaded.entries().iter().any(|entry| matches!(
+            entry,
+            sigil_kernel::SessionLogEntry::Control(ControlEntry::VerificationRecorded(_))
+        )));
     });
 }
 
