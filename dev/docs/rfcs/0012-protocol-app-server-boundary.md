@@ -1,6 +1,6 @@
 # RFC-0012 Protocol and App Server Boundary
 
-状态：draft / E12.1-E12.3 implemented / E12.4-E12.5 closure tracked by RFC-0026
+状态：accepted / E12.1-E12.5 implemented / production closure completed by RFC-0026
 
 创建日期：2026-06-28
 
@@ -129,8 +129,9 @@ Core DTO semantics implemented:
 - Protocol event envelopes retain durable/transient classification, and expose
   explicit durable and transient view DTOs so clients can distinguish replayable
   cursor-bearing events from live-only progress events.
-- Existing HTTP run registry and SSE buffer remain transport-thin; this slice
-  does not start an HTTP listener or create a new protocol crate.
+- The HTTP run registry and SSE adapter remain transport-thin; the completed
+  production entrypoint starts a loopback-only listener without creating a new
+  protocol crate or duplicating the agent loop.
 - Approval command protection is now implemented at the `sigil-http` registry
   boundary: pending approvals and decision payloads carry
   `approval_request_id`, `tool_call_hash`, `policy_version`, and `expires_at_ms`;
@@ -145,10 +146,10 @@ Core DTO semantics implemented:
   `sigil-tui` depend on the HTTP adapter while preserving the RFC command
   envelope shape.
 
-Productization remains:
+Production closure:
 
-- Localhost listener, OpenAPI and SSE productization are tracked in RFC-0016.
-- 2026-06-29 审计确认：当前实现是 DTO / registry / runner bridge，不是完整 app-server。E12.4 / E12.5 继续 gated；没有 auth/local-only listener 前，不应宣传 OpenAPI/SSE productization。
+- RFC-0016 implemented the local transport, command routes, durable/transient event split and OpenAPI surface.
+- RFC-0026 completed durable command identity, production runtime execution, replay+live SSE, bearer-authenticated disclosure replay, the real `sigil serve` process entrypoint and graceful drain. E12.4/E12.5 are therefore complete for the loopback-only V1 scope; remote and multi-user service remain out of scope.
 
 ## 9. Acceptance Criteria
 
@@ -178,7 +179,7 @@ cargo test -p sigil-tui runner
 ## 12. Closure Track
 
 [RFC-0026 Stable Machine Protocol and Real Local Serve](0026-stable-machine-protocol-and-real-serve.md)
-负责收口剩余 product boundary：P26.1 已冻结 runtime-owned machine result/error/exit
-contract，并继续复用 kernel `PublicRunEvent`；P26.4A-P26.4C 将分别处理 command
-线性化、durable replay/production driver，以及真实 loopback listener。完成这些切片前，
-library-level registry/listener 仍不得被宣传为完整 app-server。
+已收口该 product boundary：machine result/error/exit contract 与 kernel `PublicRunEvent`
+已冻结；command identity、production driver、durable replay、真实 loopback listener、
+process E2E 与 graceful drain 均已实现。V1 可以作为本机受认证 adapter 使用，但不扩大为
+remote、multi-user 或自动启动的 daemon。

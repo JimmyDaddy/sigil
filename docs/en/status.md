@@ -14,6 +14,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Distribution | npm alpha, Homebrew tap, Cargo git-tag, source, and release-archive paths are available; use [Installation](installation.md) for current commands and channel details. |
 | Quick Setup | First-run setup can create a usable local config. |
 | Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |
+| Automation output | `sigil run --output json` emits one versioned result, while `--output jsonl` emits ordered versioned events followed by one terminal result or error. |
 | Chat workflow | Users can work through the composer with visible tool activity. |
 | Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |
 | Session recovery | Session and control records are append-only and restore visible state after restart for current V2 session logs. Older raw session logs are reported as unsupported and left unchanged. |
@@ -43,7 +44,7 @@ This page separates what users can rely on today from what is experimental, limi
 | MCP lazy startup | Lazy servers are configured but do not register fake tools until activated. |
 | External directories | Disabled by default and should stay narrow and approval-backed. |
 | Headless automation | `sigil run` is useful for scripts but cannot show interactive approval modals. |
-| Local server | `sigil serve` currently checks local server settings but does not start a service. |
+| Local server | `sigil serve` starts an advanced local HTTP/SSE service with retained event replay and graceful shutdown. V1 is loopback-only, requires bearer auth for every route except health, and is not a remote or multi-user service. |
 | Execution sandbox | macOS, Linux, Docker, PTY, MCP stdio, and trusted plugin-hook paths have core coverage and receipts where supported, but coverage is not equivalent across all platforms and remote/container daemon scenarios. |
 | Context help | Sigil can use relevant session/task information and a small set of workspace files. Comprehensive automatic codebase analysis remains future work. |
 | Model quality reports | Internal automated checks exist, but repeatable end-user model comparisons and release trends are not a supported product feature yet. |

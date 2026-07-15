@@ -20,6 +20,12 @@ If you have not installed Sigil yet, see [Installation](installation.md). During
 
 For authentication options, including environment variables, see [Sigil Configuration Guide](configuration.md).
 
+## Headless And Local API Workflows
+
+The TUI remains the normal user surface. For scripts, `sigil run "<task>"` uses human text by default; choose `--output json` for one terminal record or `--output jsonl` for an ordered event stream plus one terminal record. Machine stdout contains no human progress lines, so a standard JSON parser can consume it directly. Headless runs cannot open an approval modal: an unresolved `ask` decision fails closed.
+
+`sigil serve` is an advanced loopback-only HTTP/SSE interface for a trusted local client. It requires `SIGIL_HTTP_TOKEN` by default, prints its actual OS-selected address, and stops gracefully on `Ctrl-C`. Do not expose it through a public bind or treat it as a multi-user daemon. See [Machine output and local server](reference.md#machine-output-and-local-server) for startup, routes, authentication, replay, and exit-code details.
+
 ## Main Screen
 
 The TUI is organized around these areas:

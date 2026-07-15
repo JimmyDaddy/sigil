@@ -1,6 +1,6 @@
 # RFC-0026 Stable Machine Protocol and Real Local Serve
 
-状态：accepted / P26.1-P26.4C implemented / P26.5 ready
+状态：accepted / P26.1-P26.5 implemented / complete
 
 创建日期：2026-07-15
 
@@ -245,3 +245,16 @@ cargo clippy --all-targets -- -D warnings
 ./scripts/check-docs.sh
 git diff --check
 ```
+
+## 12. Completion Result
+
+P26.1-P26.5 已全部完成，并按独立 commit 边界交付：
+
+- machine protocol V1、JSON/JSONL terminal 语义与 exit code 已冻结并具备 process fixtures；
+- CLI 与 HTTP 共用同一 runtime application service；
+- production server 使用 durable command identity、protocol event 与 disclosure stores，所有 command 都在执行前完成持久化 reservation；
+- `sigil serve` 真实绑定 loopback bearer listener，支持 authenticated OpenAPI/disclosure route、session/run/approval/cancel、durable replay+live SSE 与 graceful drain；
+- 真实 binary fixture 使用 deterministic loopback provider 完成 health、auth、session、run、terminal SSE、Ctrl-C、restart epoch，并证明 missing token、`--no-token` 与 non-loopback 均在 listener state 创建前失败；
+- EN/ZH status、reference、user guide、safety 与 RFC-0012/RFC-0016 boundary 已同步。
+
+最终 Full-Audit 通过 workspace fmt/check/test/Clippy、docs mirror/link/command metadata、Pages site、dependency advisories/bans/licenses/sources 与 diff gate；未发现剩余 P0/P1/P2 finding。V1 边界仍明确排除 remote bind、multi-user tenancy、daemon auto-start 与 session export/delete/retention。

@@ -33,7 +33,7 @@ Context V0、source provenance、projection、verification receipt、workspace s
 
 `sigil-http` 是 transport-thin 的本地 HTTP/SSE 入口，它不能复制 agent loop、permission、approval、verification 或 durable session truth。版本化 command envelope、durable replay 和 transient live event 的边界由 RFC-0012 和 RFC-0016 维护。
 
-在 `sigil serve` 接入真实共享运行时之前，公开文档只能描述它会检查本地服务设置、尚不启动服务。不要将 preflight 输出或 library-level listener smoke 宣传为可供用户使用的 server。
+RFC-0026 已让 `sigil serve` 接入真实共享运行时、loopback bearer listener、retained event replay 与 graceful shutdown。公开文档现在可以说明用户如何启动、认证、读取事件和安全停止，但仍只描述可观察效果；durable command identity、journal、driver ownership、cursor fencing 与内部状态转换继续留在 RFC 和开发者文档中。V1 不得被宣传为 remote、multi-user 或自动启动的 daemon。
 
 ## 写作规则
 

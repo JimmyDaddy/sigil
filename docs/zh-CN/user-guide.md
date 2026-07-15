@@ -20,6 +20,12 @@ sigil
 
 认证方式和环境变量配置见 [Sigil 配置指南](configuration.md)。
 
+## Headless 与本地 API 工作流
+
+TUI 仍是日常使用的主要表面。脚本可以使用 `sigil run "<task>"`，默认输出人类可读文本；`--output json` 输出唯一 terminal record，`--output jsonl` 输出有序 event stream 和唯一 terminal record。Machine stdout 不包含人类可读进度行，可以直接交给标准 JSON parser。Headless run 无法打开 approval modal；未解决的 `ask` decision 会 fail closed。
+
+`sigil serve` 是供受信任本机 client 使用的高级 loopback-only HTTP/SSE 接口。默认必须提供 `SIGIL_HTTP_TOKEN`，启动后会打印 OS 实际选择的地址，按 `Ctrl-C` graceful stop。不要通过 public bind 暴露它，也不要把它当作 multi-user daemon。启动、route、认证、replay 和 exit code 见 [Machine Output 与本地服务](reference.md#machine-output-与本地服务)。
+
 ## 主界面
 
 Sigil 的主界面围绕这几个区域组织：

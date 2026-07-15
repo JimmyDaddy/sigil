@@ -67,13 +67,28 @@ Workspace trust is handled by the startup workspace trust gate, not a slash comm
 | --- | --- |
 | `sigil` | Open the TUI in the current workspace |
 | `sigil doctor` | Run local diagnostics |
-| `sigil run "<task>"` | Run a non-interactive automation task |
+| `sigil run "<task>" [--output text|json|jsonl]` | Run a non-interactive task; machine modes keep stdout parseable |
 | `sigil resume [session-id]` | Open the TUI and restore the latest or requested session; TUI exit prints a copyable resume command |
-| `sigil serve` | Check local server settings; starting a service is not implemented yet |
+| `sigil serve` | Start the loopback-only, bearer-authenticated local HTTP/SSE service |
 | `sigil --version` | Print the installed version |
 | `sigil --config <path> doctor` | Run diagnostics with an explicit config file |
 
 Subcommands are for automation, diagnostics, scripts, and setup checks. The full product surface is the TUI.
+
+## Machine Output And Local Server
+
+`sigil run --output json` writes one versioned terminal record to stdout. `--output jsonl` writes ordered versioned event records and then exactly one terminal result or error. Human progress and safe network-disclosure notices stay on stderr. Stable exit codes are `0` for success, `1` for execution failure, `2` for invalid invocation or configuration, and `130` for a cooperatively cancelled run.
+
+The local server is an advanced interface for a local client; it does not replace the TUI. Start it with a token stored in an environment variable:
+
+```bash
+export SIGIL_HTTP_TOKEN="$(openssl rand -hex 32)"
+sigil serve
+```
+
+The command prints the actual loopback address selected by the OS. `GET /health` is unauthenticated; `GET /openapi.json`, `GET /disclosures`, and every session, run, event, cancellation, or approval route require `Authorization: Bearer <token>`. V1 rejects non-loopback hosts, a missing token, and `--no-token` before opening a listener. It does not enable cookie auth, wildcard CORS, remote access, daemon auto-start, or multi-user isolation.
+
+Run events replay durable history and then remain live until a terminal event, disconnect, stream gap, or server shutdown. `Last-Event-ID` resumes retained durable events; transient text and reasoning progress is best effort and has no replay id. `Ctrl-C` closes command admission, cooperatively cancels active runs, drains owned workers and connections, and then exits.
 
 ## Config Resolution
 
@@ -93,6 +108,7 @@ Default user config path:
 | User state root `workspaces/<workspace-id>/sessions/` | Default append-only session logs |
 | User state root `workspaces/<workspace-id>/input-history.jsonl` | Composer input history |
 | User state root `workspaces/<workspace-id>/artifacts/` | Terminal and changeset artifacts |
+| User state root `workspaces/<workspace-id>/http-server-v1/` | Local-server recovery and audit data |
 | User cache root `workspaces/<workspace-id>/tmp/` | Shell scratch directory exposed as `$SIGIL_SCRATCH_DIR` and shown as `cache/tmp` |
 | User config `sigil.toml` | Default local machine config |
 | `.sigil/agents/`, `.sigil/commands/`, `.sigil/skills/`, `.sigil/plugins/` | Optional workspace project assets |

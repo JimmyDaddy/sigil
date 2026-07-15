@@ -67,13 +67,28 @@ Workspace trust 由启动时的 workspace trust gate 处理，不是 slash comma
 | --- | --- |
 | `sigil` | 在当前 workspace 打开 TUI |
 | `sigil doctor` | 运行本地诊断 |
-| `sigil run "<task>"` | 运行非交互自动化任务 |
+| `sigil run "<task>" [--output text|json|jsonl]` | 运行非交互任务；machine mode 保持 stdout 可直接解析 |
 | `sigil resume [session-id]` | 打开 TUI 并恢复 latest 或指定 session；TUI 退出时会打印可复制的恢复命令 |
-| `sigil serve` | 检查本地服务设置；尚不能启动服务 |
+| `sigil serve` | 启动只允许 loopback、要求 bearer auth 的本机 HTTP/SSE 服务 |
 | `sigil --version` | 打印安装版本 |
 | `sigil --config <path> doctor` | 使用显式 config 文件运行诊断 |
 
 子命令用于自动化、诊断、脚本和设置检查。完整产品表面是 TUI。
+
+## Machine Output 与本地服务
+
+`sigil run --output json` 向 stdout 写入唯一一条带版本的 terminal record。`--output jsonl` 写入有序的带版本 event records，并以唯一 terminal result 或 error 结束。人类可读进度和安全的 network-disclosure notice 保留在 stderr。稳定 exit code 为：成功 `0`、执行失败 `1`、调用或配置无效 `2`、cooperative cancellation `130`。
+
+本地服务是供本机 client 使用的高级接口，不替代 TUI。使用保存在环境变量中的 token 启动：
+
+```bash
+export SIGIL_HTTP_TOKEN="$(openssl rand -hex 32)"
+sigil serve
+```
+
+命令会打印 OS 实际选择的 loopback 地址。`GET /health` 不要求认证；`GET /openapi.json`、`GET /disclosures`，以及所有 session、run、event、cancel 和 approval route 都要求 `Authorization: Bearer <token>`。V1 会在打开 listener 前拒绝 non-loopback host、缺失 token 和 `--no-token`。它不启用 cookie auth、wildcard CORS、remote access、daemon auto-start 或 multi-user isolation。
+
+Run event 会先 replay durable history，再保持 live，直到 terminal event、client disconnect、stream gap 或 server shutdown。`Last-Event-ID` 用于继续读取 retained durable events；transient text/reasoning progress 是 best effort，没有 replay id。按 `Ctrl-C` 后，服务会关闭新 command admission、cooperatively cancel active runs、drain owned workers 和 connections，然后退出。
 
 ## Config 解析顺序
 
@@ -93,6 +108,7 @@ Sigil 按以下顺序解析 config：
 | 用户态 state root `workspaces/<workspace-id>/sessions/` | 默认 append-only session logs |
 | 用户态 state root `workspaces/<workspace-id>/input-history.jsonl` | composer input history |
 | 用户态 state root `workspaces/<workspace-id>/artifacts/` | terminal 和 changeset artifacts |
+| 用户态 state root `workspaces/<workspace-id>/http-server-v1/` | 本地服务的恢复与审计数据 |
 | 用户态 cache root `workspaces/<workspace-id>/tmp/` | shell scratch 目录，通过 `$SIGIL_SCRATCH_DIR` 暴露，对模型显示为 `cache/tmp` |
 | 用户配置目录 `sigil.toml` | 默认本机配置 |
 | `.sigil/agents/`、`.sigil/commands/`、`.sigil/skills/`、`.sigil/plugins/` | 可选 workspace project assets |

@@ -10,6 +10,7 @@ Sigil is designed to make tool-backed coding visible and reviewable. The model c
 - File writes, edits, deletes, shell execution, external directories, MCP tools, and LSP edit tools can require approval.
 - Approval cards show what is about to happen before the action runs.
 - Headless `sigil run` cannot ask interactively; final `ask` decisions become structured `approval_required` tool errors.
+- `sigil serve` is loopback-only in V1 and requires bearer authentication for every route except `GET /health`.
 - Session and control records are append-only so later recovery and review can explain what happened.
 
 ## Permission Modes
@@ -164,6 +165,12 @@ Prefer environment variables for provider credentials. Choose the provider first
 Saving an API key through Quick Setup or `/config` writes plaintext to `sigil.toml`. That may be acceptable for a private local config, but never commit real secrets.
 
 `doctor` reports credential source, not secret values.
+
+## Local HTTP/SSE Service
+
+Treat `sigil serve` as a privileged local control surface. V1 accepts loopback addresses only and rejects disabled or missing bearer authentication before it binds. Keep `SIGIL_HTTP_TOKEN` in the environment, use a high-entropy value, pass it only in the `Authorization` header, and do not put it in URLs, config committed to a repository, logs, or screenshots. Sigil prints the token environment-variable name, never its value.
+
+Only `GET /health` is unauthenticated and it returns no session data. OpenAPI, disclosure replay, session/run queries, commands, cancellation, approval, and SSE all require the bearer token. The server does not use cookies or wildcard CORS and does not claim remote-access or multi-user isolation. Per-run approval mode remains explicit: `deny` blocks gated tools, `allow_readonly` only auto-allows read-only work, and `ask` waits for the authenticated approval route.
 
 ## Recovery And Audit
 

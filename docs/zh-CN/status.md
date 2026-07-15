@@ -14,6 +14,7 @@
 | 分发 | 当前提供 npm alpha、Homebrew tap、Cargo git-tag、源码和 release archive 路径；最新命令和渠道细节见[安装](installation.md)。 |
 | Quick Setup | 首次运行 setup 可以创建可用本地配置。 |
 | Doctor | `sigil doctor` 和 `/doctor` 报告 config、auth、workspace、MCP、code intelligence 和 terminal readiness。 |
+| 自动化输出 | `sigil run --output json` 输出一条带版本的结果；`--output jsonl` 输出有序的带版本事件，并以唯一 terminal result 或 error 结束。 |
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
 | Tool approvals | 文件变更、shell execution、外部路径和外部工具可在执行前 review。 |
 | Session recovery | Session 和 control records 是 append-only；当前 V2 session log 可在重启后恢复可见状态。旧 raw session log 会明确提示为不受支持并保持原样。 |
@@ -43,7 +44,7 @@
 | MCP lazy startup | Lazy server 会记录配置，但激活前不会注册假工具。 |
 | External directories | 默认关闭，应保持窄范围和 approval-backed。 |
 | Headless automation | `sigil run` 可用于脚本，但不能展示交互 approval modal。 |
-| 本地服务 | `sigil serve` 当前只检查本地服务设置，不会启动服务。 |
+| 本地服务 | `sigil serve` 会启动支持 retained event replay 和 graceful shutdown 的高级本机 HTTP/SSE 服务。V1 只允许 loopback，除 health 外所有 route 都要求 bearer auth；它不是远程或多用户服务。 |
 | Execution sandbox | macOS、Linux、Docker、PTY、MCP stdio 和受信任 plugin hook 路径在支持的平台上已有 core coverage 与 receipt，但不同平台、远端工具和容器/daemon 场景的覆盖并不等价。 |
 | 上下文帮助 | Sigil 可以使用相关的 session/task 信息和少量 workspace 文件；全面自动代码库分析仍是后续工作。 |
 | 模型质量报告 | 已有内部自动化检查，但可重复的最终用户模型对比与 release 趋势还不是支持的产品功能。 |

@@ -1,6 +1,6 @@
 # RFC-0016 Desktop and App Server Productization
 
-状态：draft / E16.1-E16.6 implemented / production closure tracked by RFC-0026
+状态：accepted / E16.1-E16.6 implemented / production closure completed by RFC-0026
 
 创建日期：2026-06-29
 
@@ -38,8 +38,8 @@ E16.1 决策如下：
 
 - `HttpServerConfig::default()` 绑定 `127.0.0.1:0`。
 - `HttpAuthConfig::default()` 要求 bearer token，并使用 `SIGIL_HTTP_TOKEN`。
-- `HttpServerConfig::validate()` 拒绝 token env 为空的 required-token 配置，并拒绝 non-loopback + auth disabled。
-- `sigil serve` 目前仍是 preflight-only，不启动 listener；E16.2 才允许实现真实监听。
+- `HttpServerConfig::validate()` 拒绝空 token env、关闭 token auth 和所有 non-loopback bind。
+- `sigil serve` 通过 production driver 启动真实 listener，并在 bind 前完成以上安全检查。
 
 E16.2 进展：
 
@@ -48,7 +48,7 @@ E16.2 进展：
 - 已支持 `GET /health`、`POST /sessions` 和 `POST /sessions/{session_id}/runs`。
 - `POST /sessions/{session_id}/runs` 使用 `HttpCommandEnvelope<HttpRunStartRequest>`，并通过 `HttpSessionRunRegistry::start_run_command` 做 command-id retry de-duplication。
 - 未认证 command endpoint 返回 401；默认不启用 CORS，不提供 unauthenticated state-changing endpoint。
-- `sigil serve` 的完整产品入口仍待后续切片接入；当前完成的是可测试的 local listener/registry boundary，不是完整桌面端 adapter。
+- `sigil serve` 已接入完整本机产品入口；listener/registry 仍是 adapter，不拥有 session truth 或 agent loop。
 
 E16.3 进展：
 
@@ -62,21 +62,21 @@ E16.4 进展：
 - `HttpLiveEventBus` 已提供 bounded live event fan-out。
 - `HttpLiveEventSubscriber::recv` 会把 subscriber lag 显式报告为 dropped live events。
 - Transient events 可以 live delivery，但不提供 `replay_id`，也不会进入 durable replay 结果。
-- 当前仍未暴露完整 HTTP/SSE live route；E16.4 完成的是可复用 live-stream primitive。
+- `GET /runs/{run_id}/events` 已在 durable replay 后继续 live delivery，直到 terminal、disconnect、lag 或 shutdown。
 
 E16.5 进展：
 
 - `sigil-http` 已新增 `http_openapi_document()`，覆盖当前已实现的 MVP local command surface。
-- OpenAPI 文档只描述已实现路由：`GET /health`、session create/list/get、run start/get/cancel、finite durable event replay，以及 approval decision submission。
+- OpenAPI 文档只描述已实现路由：`GET /health`、authenticated OpenAPI/disclosure replay、session create/list/get、run start/get/cancel、continuous replay+live SSE，以及 approval decision submission。
 - Approval command route 已接入 listener，复用 `HttpCommandEnvelope<HttpApprovalDecisionRequest>`、stale approval guard 和 command retry de-duplication。
 - 文档组件覆盖 bearer auth、command envelope、run-start payload、approval guard 字段、receipt 和 shared error response。
 
 E16.6 进展：
 
-- 已选择 library-level HTTP route smoke + headless adapter proof，不进入完整桌面壳、不接 `sigil serve` 产品入口、不引入 SQLite projection。
+- E16.6 当时选择 library-level HTTP route smoke + headless adapter proof，不进入完整桌面壳，也未在该切片接 `sigil serve` 产品入口或引入 SQLite projection；production entry 后续由 RFC-0026 完成。
 - Listener 已补齐最小外部客户端查询/控制面：`GET /sessions`、`GET /sessions/{session_id}`、`GET /runs/{run_id}`、`POST /runs/{run_id}/cancel`。
 - Run cancel 使用 `HttpCommandEnvelope<HttpRunCancelRequest>` 和 `HttpRunCancelCommandReceipt`，复用 command id retry de-duplication、session match 和 stale stream-sequence guard。
-- `GET /runs/{run_id}/events` 提供有限 `text/event-stream` durable replay，并使用 `Last-Event-ID` cursor；transient live events 仍通过 `HttpLiveEventBus` primitive 证明，不承诺可重放。
+- `GET /runs/{run_id}/events` 提供 `text/event-stream` durable replay 和 live follow，并使用 `Last-Event-ID` cursor；transient live events 不承诺可重放。
 - `desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events` 覆盖 connect/list/start/cancel/approval/durable replay/transient-live-only 边界，证明外部/桌面 adapter 使用同一 registry/driver/protocol 路径，而不是复制 agent loop。
 
 安全依据：
@@ -158,10 +158,10 @@ cargo test -p sigil-tui runner
 ## 8.1 Production Closure Track
 
 [RFC-0026 Stable Machine Protocol and Real Local Serve](0026-stable-machine-protocol-and-real-serve.md)
-在不引入 SQLite 的前提下补齐 production closure。P26.4A 先修复并发 command
-de-duplication 与 foreground session lease；P26.4B 再接 production driver、durable replay、
-approval/cancel 与 disclosure；P26.4C 最后接 replay+live SSE、loopback bearer listener 和
-graceful drain。三片完成前，现有 E16 library proof 仍不等于可用的 `sigil serve`。
+已在不引入 SQLite 的前提下完成 production closure：linearizable durable command identity、
+foreground lease、production driver、durable replay、approval/cancel、disclosure、replay+live
+SSE、loopback bearer listener、真实 `sigil serve`、process E2E 与 graceful drain 均已落地。
+SQLite/materialized projection 仍只在真实 query pressure 出现后重新评估。
 
 ## 9. References
 
