@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 async-trait.workspace = true
+fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -13,6 +15,12 @@ sigil-kernel = { path = "../sigil-kernel" }
 sigil-runtime = { path = "../sigil-runtime" }
 thiserror.workspace = true
 tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

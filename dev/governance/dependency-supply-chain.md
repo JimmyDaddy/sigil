@@ -48,6 +48,15 @@ K25.12B2 的 coordinator 强制 `stage ciphertext -> append+sync Committed -> at
 
 该 tokenizer 依赖的例外不是“已修复漏洞”的声明，而是发布前可见、可复核的临时风险接受：项目不得把 `paste` 用于运行时代码，也不得在未重新执行 `cargo deny check advisories` 和更新本台账的情况下扩大 tokenizers feature 或用途。
 
+## HTTP durable journal filesystem primitives（RFC-0026 P26.4B）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `fs2` | `0.4.3`；默认 feature | `sigil-http/durable_io` | 对 protocol/disclosure journal 的 sidecar lock file 取得 OS advisory exclusive lease，拒绝同一路径双 writer；不用于跨网络协调，也不把 lock file 当 durable evidence | `MIT OR Apache-2.0`；`danburkert/fs2-rs` | `sigil-http` 新增直接消费；journal owner drop 后释放 lease，append 的 durability 仍由原子替换与 sync 单独证明 |
+| `windows-sys` | `0.61.2`；仅 Windows target；`Win32_Storage_FileSystem` | `sigil-http/durable_io` | Windows 上调用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`，避免 `std::fs::rename` 无法覆盖既有 journal，并在成功返回前要求 write-through replace 完成 | `MIT OR Apache-2.0`；Microsoft/windows-rs | 仅在 `cfg(windows)` 编译；Unix 继续使用 rename + parent-directory fsync，不扩大公共 API 或 provider/runtime 依赖面 |
+
+P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为 HTTP journal 引入另一套 secret scanner 或 event-size 常量。journal 的 exclusive lease 只解决单机同路径 writer ownership；它不替代 append-only session evidence、command identity store 或跨进程服务选主。
+
 ## 发布前扫描与显式例外（E21.17）
 
 2026-07-12 使用 `cargo-audit 0.22.2` 与 `cargo-deny 0.20.2` 对启用 all-features 的 workspace 依赖图执行扫描。首次扫描发现 `crossbeam-epoch 0.9.18`、`quinn-proto 0.11.14` 与经 `syntect` 默认 plist feature 引入的 `quick-xml 0.39.4` 存在已公开漏洞。处置如下：

@@ -2721,14 +2721,18 @@ dependencies = [
 name = "sigil-http"
 version = "0.0.1-alpha.2"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "fs2",
  "serde",
  "serde_json",
  "sha2",
  "sigil-kernel",
  "sigil-runtime",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

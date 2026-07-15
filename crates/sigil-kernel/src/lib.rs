@@ -236,7 +236,8 @@ pub use persistence::{
     canonical_web_url_persistence_projection, project_message_for_persistence,
     project_tool_call_for_persistence, project_user_message_for_persistence,
     project_user_message_for_persistence_with_nonce,
-    project_user_message_for_persistence_with_nonce_and_issued_at, safe_persistence_text,
+    project_user_message_for_persistence_with_nonce_and_issued_at, safe_persistence_json_value,
+    safe_persistence_text,
 };
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,

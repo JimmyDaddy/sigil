@@ -352,7 +352,16 @@ impl PreEgressDisclosure {
         Ok(())
     }
 
-    fn validate(&self) -> Result<(), EgressAuditError> {
+    /// Revalidates all safe-field and content-digest invariants after deserialization.
+    ///
+    /// Product adapters must call this at persistence and replay trust boundaries because serde
+    /// construction intentionally cannot recompute the canonical digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a safe field is malformed or the stored digest no longer matches the
+    /// canonical disclosure content.
+    pub fn validate(&self) -> Result<(), EgressAuditError> {
         self.validate_without_digest()?;
         validate_sha256("disclosure_content_sha256", &self.disclosure_content_sha256)?;
         if self.compute_content_digest()? != self.disclosure_content_sha256 {

@@ -1,9 +1,15 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
 use serde::{Deserialize, Serialize};
-use sigil_kernel::{PublicRunEvent, PublicRunEventKind};
+use sigil_kernel::{
+    PublicRunEvent, PublicRunEventKind, ToolCall, ToolResultStatus, safe_persistence_json_value,
+    safe_persistence_text,
+};
 use thiserror::Error as ThisError;
 use tokio::sync::broadcast;
+
+use crate::journal::HttpDurableProtocolJournal;
+use crate::{HTTP_APPROVAL_POLICY_VERSION, HttpPendingApproval};
 
 /// SSE event name used for public run events.
 pub const HTTP_RUN_EVENT_SSE_NAME: &str = "run_event";
@@ -126,6 +132,9 @@ pub struct HttpProtocolEvent {
     /// SSE `id:` value for durable events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_id: Option<String>,
+    /// Guard material required to resolve an HTTP-owned approval request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_request: Option<HttpPendingApproval>,
     /// Public run event payload.
     pub run_event: PublicRunEvent,
 }
@@ -136,8 +145,11 @@ impl HttpProtocolEvent {
     /// # Errors
     ///
     /// Returns an error when a durable cursor cannot be generated for the event.
-    pub fn from_run_event(event: PublicRunEvent) -> Result<Self, HttpProtocolCursorError> {
+    pub fn from_run_event(mut event: PublicRunEvent) -> Result<Self, HttpProtocolCursorError> {
         let event_class = protocol_event_class(&event.event);
+        if event_class == HttpProtocolEventClass::Durable {
+            project_durable_text_for_persistence(&mut event.event);
+        }
         let replay_id = match event_class {
             HttpProtocolEventClass::Durable => {
                 Some(HttpProtocolCursor::from_run_event(&event)?.encode())
@@ -148,6 +160,7 @@ impl HttpProtocolEvent {
             schema_version: HTTP_PROTOCOL_EVENT_SCHEMA_VERSION,
             event_class,
             replay_id,
+            approval_request: None,
             run_event: event,
         })
     }
@@ -166,6 +179,7 @@ impl HttpProtocolEvent {
                 HttpProtocolEventView::Durable(HttpDurableEventView {
                     schema_version: self.schema_version,
                     replay_id: self.replay_id.clone().unwrap_or_default(),
+                    approval_request: self.approval_request.clone(),
                     run_event: self.run_event.clone(),
                 })
             }
@@ -177,6 +191,178 @@ impl HttpProtocolEvent {
             }
         }
     }
+
+    pub(crate) fn has_valid_approval_metadata(&self) -> bool {
+        match (&self.approval_request, &self.run_event.event) {
+            (None, _) => true,
+            (Some(approval), PublicRunEventKind::ApprovalRequested { call, spec, .. }) => {
+                self.is_durable()
+                    && approval.call_id == call.id
+                    && approval.tool_name == spec.name
+                    && approval_guard_is_persistence_safe(approval)
+            }
+            (Some(_), _) => false,
+        }
+    }
+}
+
+fn approval_guard_is_persistence_safe(approval: &HttpPendingApproval) -> bool {
+    approval.expires_at_ms > 0
+        && approval.policy_version == HTTP_APPROVAL_POLICY_VERSION
+        && approval
+            .approval_request_id
+            .strip_prefix("http-approval-v1:")
+            .is_some_and(is_lower_hex_sha256)
+        && is_lower_hex_sha256(&approval.tool_call_hash)
+        && safe_persistence_text(&approval.call_id) == approval.call_id
+        && safe_persistence_text(&approval.tool_name) == approval.tool_name
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
+    match event {
+        PublicRunEventKind::RunStarted { prompt } => {
+            *prompt = safe_persistence_text(prompt);
+        }
+        PublicRunEventKind::TaskRunStarted { objective, .. } => {
+            *objective = safe_persistence_text(objective);
+        }
+        PublicRunEventKind::RunFinished { final_text } => {
+            *final_text = safe_persistence_text(final_text);
+        }
+        PublicRunEventKind::TaskRunFinished { status, .. } => {
+            *status = safe_persistence_text(status);
+        }
+        PublicRunEventKind::RunFailed { error } => {
+            *error = safe_persistence_text(error);
+        }
+        PublicRunEventKind::ApprovalResolved { reason, .. } => {
+            if let Some(reason) = reason {
+                *reason = safe_persistence_text(reason);
+            }
+        }
+        PublicRunEventKind::AssistantMessage { message } => {
+            if let Some(content) = &mut message.content {
+                *content = safe_persistence_text(content);
+            }
+            for call in &mut message.tool_calls {
+                project_tool_call_for_http_persistence(call);
+            }
+        }
+        PublicRunEventKind::Notice { message } => {
+            *message = safe_persistence_text(message);
+        }
+        PublicRunEventKind::ToolCallStarted { call }
+        | PublicRunEventKind::ToolCallCompleted { call } => {
+            project_tool_call_for_http_persistence(call);
+        }
+        PublicRunEventKind::ApprovalRequested {
+            call,
+            command_permission_matches,
+            confirmation,
+            spec,
+            subjects,
+            preview,
+            ..
+        } => {
+            project_tool_call_for_http_persistence(call);
+            spec.description = safe_persistence_text(&spec.description);
+            spec.input_schema = safe_persistence_json_value(std::mem::take(&mut spec.input_schema));
+            for subject in subjects {
+                subject.original = safe_persistence_text(&subject.original);
+                subject.normalized = safe_persistence_text(&subject.normalized);
+                if let Some(path) = &mut subject.canonical_path {
+                    *path = safe_persistence_text(&path.to_string_lossy()).into();
+                }
+            }
+            for matched in command_permission_matches {
+                matched.pattern = safe_persistence_text(&matched.pattern);
+                matched.command = safe_persistence_text(&matched.command);
+            }
+            if let Some(sigil_kernel::PermissionConfirmation::TypePhrase { phrase }) = confirmation
+            {
+                *phrase = safe_persistence_text(phrase);
+            }
+            if let Some(preview) = preview {
+                preview.title = safe_persistence_text(&preview.title);
+                preview.summary = safe_persistence_text(&preview.summary);
+                preview.body = safe_persistence_text(&preview.body);
+                preview.changed_files = preview
+                    .changed_files
+                    .iter()
+                    .map(|path| safe_persistence_text(path))
+                    .collect();
+                for file in &mut preview.file_diffs {
+                    file.path = safe_persistence_text(&file.path);
+                    file.diff = safe_persistence_text(&file.diff);
+                }
+            }
+        }
+        PublicRunEventKind::ToolResult { result } => {
+            result.content = safe_persistence_text(&result.content);
+            result.metadata.changed_files = result
+                .metadata
+                .changed_files
+                .iter()
+                .map(|path| safe_persistence_text(path))
+                .collect();
+            result.metadata.details =
+                safe_persistence_json_value(std::mem::take(&mut result.metadata.details));
+            if let Some(receipt) = &mut result.metadata.receipt {
+                if let Some(key) = &mut receipt.idempotency_key {
+                    *key = safe_persistence_text(key);
+                }
+                receipt.mutation_operation_ids = receipt
+                    .mutation_operation_ids
+                    .iter()
+                    .map(|id| safe_persistence_text(id))
+                    .collect();
+            }
+            if let ToolResultStatus::Error(error) = &mut result.status {
+                error.message = safe_persistence_text(&error.message);
+                error.details = safe_persistence_json_value(std::mem::take(&mut error.details));
+            }
+        }
+        PublicRunEventKind::ContinuationState { state } => {
+            state.provider_name = safe_persistence_text(&state.provider_name);
+            state.state_kind = safe_persistence_text(&state.state_kind);
+            if let Some(message_id) = &mut state.message_id {
+                *message_id = safe_persistence_text(message_id);
+            }
+            state.opaque_blob = serde_json::json!({
+                "projection": "omitted_from_http_durable_event"
+            });
+        }
+        PublicRunEventKind::Control { control } => {
+            control.kind = safe_persistence_text(&control.kind);
+            control.payload = None;
+        }
+        PublicRunEventKind::RunCancelled
+        | PublicRunEventKind::TextDelta { .. }
+        | PublicRunEventKind::ReasoningDelta { .. }
+        | PublicRunEventKind::ToolCallArgsDelta { .. }
+        | PublicRunEventKind::ToolProgress { .. }
+        | PublicRunEventKind::Usage { .. } => {}
+    }
+}
+
+fn project_tool_call_for_http_persistence(call: &mut ToolCall) {
+    call.args_json = serde_json::from_str(&call.args_json).map_or_else(
+        |_| {
+            serde_json::json!({
+                "projection": "malformed_arguments",
+                "raw_bytes": call.args_json.len(),
+            })
+            .to_string()
+        },
+        |value| safe_persistence_json_value(value).to_string(),
+    );
 }
 
 /// Explicit durable/transient event view used by future protocol clients.
@@ -193,6 +379,8 @@ pub enum HttpProtocolEventView {
 pub struct HttpDurableEventView {
     pub schema_version: u32,
     pub replay_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_request: Option<HttpPendingApproval>,
     pub run_event: PublicRunEvent,
 }
 
@@ -301,6 +489,26 @@ pub enum HttpProtocolReplayError {
     /// The cursor is newer than the buffered run stream.
     #[error("http protocol replay cursor is ahead of buffered events")]
     CursorAhead,
+    /// The cursor refers to durable history older than the bounded retained suffix.
+    #[error("http protocol replay cursor has expired from retained history")]
+    CursorExpired,
+    /// Durable replay storage could not be read safely.
+    #[error("http protocol replay journal is unavailable")]
+    JournalUnavailable,
+}
+
+/// Errors returned while durably publishing an HTTP protocol event.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum HttpEventPublishError {
+    /// The public event could not produce a stable replay cursor.
+    #[error("http protocol event cursor is invalid: {message}")]
+    Cursor { message: String },
+    /// The durable event could not be committed to the production replay journal.
+    #[error("http protocol event journal rejected publication: {message}")]
+    Journal { message: String },
+    /// HTTP approval guard material did not match the public approval event.
+    #[error("http protocol approval metadata does not match its run event")]
+    ApprovalMetadata,
 }
 
 /// Errors returned while receiving a transient live event.
@@ -407,10 +615,12 @@ impl HttpProtocolEventBuffer {
 /// Bounded live event bus for local clients.
 ///
 /// The bus broadcasts both durable and transient protocol events to active subscribers. Durable
-/// replay still comes from `HttpProtocolEventBuffer`; lagged transient delivery is reported as a
-/// live-stream drop and never mutates durable replay semantics.
+/// replay comes from the configured journal in production, while synthetic adapters retain an
+/// in-memory replay buffer. Lagged transient delivery is reported as a live-stream drop and never
+/// mutates durable replay semantics.
 pub struct HttpLiveEventBus {
     buffer: HttpProtocolEventBuffer,
+    durable_journal: Option<std::sync::Arc<HttpDurableProtocolJournal>>,
     sender: broadcast::Sender<HttpProtocolEvent>,
 }
 
@@ -422,6 +632,22 @@ impl HttpLiveEventBus {
         let (sender, _) = broadcast::channel(capacity);
         Self {
             buffer: HttpProtocolEventBuffer::new(),
+            durable_journal: None,
+            sender,
+        }
+    }
+
+    /// Creates a live bus backed by a restart-safe durable replay journal.
+    #[must_use]
+    pub fn with_durable_journal(
+        capacity: usize,
+        journal: std::sync::Arc<HttpDurableProtocolJournal>,
+    ) -> Self {
+        let capacity = capacity.max(1);
+        let (sender, _) = broadcast::channel(capacity);
+        Self {
+            buffer: HttpProtocolEventBuffer::new(),
+            durable_journal: Some(journal),
             sender,
         }
     }
@@ -434,6 +660,12 @@ impl HttpLiveEventBus {
         }
     }
 
+    /// Returns whether durable replay is configured for every durable publication.
+    #[must_use]
+    pub fn has_durable_journal(&self) -> bool {
+        self.durable_journal.is_some()
+    }
+
     /// Records one run event and broadcasts it to active subscribers.
     ///
     /// # Errors
@@ -442,10 +674,57 @@ impl HttpLiveEventBus {
     pub fn publish_run_event(
         &self,
         event: PublicRunEvent,
-    ) -> Result<HttpProtocolEvent, HttpProtocolCursorError> {
-        let event = self.buffer.push_run_event(event)?;
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        self.publish_run_event_with_approval(event, None)
+    }
+
+    /// Publishes a run event with adapter-owned guard material for an approval request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the guard does not match the public approval event or durable
+    /// publication fails.
+    pub fn publish_run_event_with_approval(
+        &self,
+        event: PublicRunEvent,
+        approval_request: Option<HttpPendingApproval>,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        let mut event = HttpProtocolEvent::from_run_event(event).map_err(|error| {
+            HttpEventPublishError::Cursor {
+                message: error.to_string(),
+            }
+        })?;
+        event.approval_request = approval_request;
+        if !event.has_valid_approval_metadata() {
+            return Err(HttpEventPublishError::ApprovalMetadata);
+        }
+        if event.is_durable()
+            && let Some(journal) = &self.durable_journal
+        {
+            journal
+                .append(event.clone())
+                .map_err(|error| HttpEventPublishError::Journal {
+                    message: error.to_string(),
+                })?;
+        }
+        if self.durable_journal.is_none() {
+            self.buffer
+                .events
+                .lock()
+                .expect("http protocol event buffer lock should not be poisoned")
+                .push(event.clone());
+        }
         let _ = self.sender.send(event.clone());
         Ok(event)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_buffer_len(&self) -> usize {
+        self.buffer
+            .events
+            .lock()
+            .expect("http protocol event buffer lock should not be poisoned")
+            .len()
     }
 
     /// Replays durable events for one run after an optional cursor.
@@ -459,8 +738,12 @@ impl HttpLiveEventBus {
         run_id: &str,
         last_event_id: Option<&str>,
     ) -> Result<Vec<HttpProtocolEvent>, HttpProtocolReplayError> {
-        self.buffer
-            .replay_run_after(session_id, run_id, last_event_id)
+        match &self.durable_journal {
+            Some(journal) => journal.replay_run_after(session_id, run_id, last_event_id),
+            None => self
+                .buffer
+                .replay_run_after(session_id, run_id, last_event_id),
+        }
     }
 }
 

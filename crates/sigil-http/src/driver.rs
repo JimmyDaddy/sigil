@@ -22,6 +22,8 @@ pub struct HttpRunDriverCancel {
     pub session_id: String,
     /// Run id being canceled.
     pub run_id: String,
+    /// Optional user-facing reason persisted by the runtime cancellation control plane.
+    pub reason: Option<String>,
 }
 
 /// Approval context delivered to the HTTP run driver.

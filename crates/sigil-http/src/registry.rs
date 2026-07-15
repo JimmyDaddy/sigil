@@ -340,6 +340,18 @@ impl HttpSessionRunRegistry {
         self.lock_state().transition_run_terminal(run_id, outcome)
     }
 
+    /// Quarantines a run whose owned production execution task unwound without a durable terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the run is unknown.
+    pub fn record_run_execution_uncertain(
+        &self,
+        run_id: &str,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        self.lock_state().mark_run_driver_uncertain(run_id)
+    }
+
     /// Returns a point-in-time process-local activity snapshot.
     #[must_use]
     pub fn activity(&self) -> HttpRegistryActivity {
@@ -430,6 +442,14 @@ impl HttpSessionRunRegistry {
     ///
     /// Returns an error when the run is unknown, terminal, or the driver rejects cancellation.
     pub fn cancel_run(&self, run_id: &str) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        self.cancel_run_with_reason(run_id, None)
+    }
+
+    fn cancel_run_with_reason(
+        &self,
+        run_id: &str,
+        reason: Option<String>,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
         let claim = {
             let mut state = self.lock_state();
             let run = state
@@ -456,6 +476,7 @@ impl HttpSessionRunRegistry {
                     cancel: HttpRunDriverCancel {
                         session_id: run.session_id.clone(),
                         run_id: run.id.clone(),
+                        reason,
                     },
                 }
             }
@@ -555,7 +576,7 @@ impl HttpSessionRunRegistry {
                     });
                 }
             }
-            let run = self.cancel_run(run_id)?;
+            let run = self.cancel_run_with_reason(run_id, command.payload.reason.clone())?;
             Ok(HttpRunCancelCommandReceipt {
                 command_id: command.command_id,
                 client_id: command.client_id,
@@ -594,6 +615,41 @@ impl HttpSessionRunRegistry {
             .insert(approval.call_id.clone(), approval);
         run.status = HttpRunStatus::WaitingForApproval;
         run.advance_stream_sequence();
+        Ok(run.snapshot())
+    }
+
+    /// Removes an approval request whose adapter-owned wait expired before a decision arrived.
+    ///
+    /// The method is idempotent for a request already removed by a racing decision or terminal
+    /// transition. It never removes an approval that has already entered driver delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the run is unknown.
+    pub fn expire_approval_request(
+        &self,
+        run_id: &str,
+        call_id: &str,
+    ) -> Result<HttpRunSnapshot, HttpRegistryError> {
+        let mut state = self.lock_state();
+        let run = state
+            .runs
+            .get_mut(run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        if run.status.is_terminal() {
+            return Ok(run.snapshot());
+        }
+        if run.pending_approvals.remove(call_id).is_some() {
+            if run.pending_approvals.is_empty()
+                && run.in_flight_approvals.is_empty()
+                && run.status == HttpRunStatus::WaitingForApproval
+            {
+                run.status = HttpRunStatus::Running;
+            }
+            run.advance_stream_sequence();
+        }
         Ok(run.snapshot())
     }
 

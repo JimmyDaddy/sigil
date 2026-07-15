@@ -15,8 +15,9 @@ use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
     ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, PublicApplicationEventBridge,
-    application_run_input, application_terminal_projection, default_application_session_path,
-    optional_eager_mcp_warning, validate_execution_contract,
+    application_run_input, application_terminal_projection, bind_application_session,
+    default_application_session_path, optional_eager_mcp_warning,
+    record_application_preparation_cancellation, validate_execution_contract,
 };
 
 #[test]
@@ -80,10 +81,83 @@ fn default_session_path_and_repo_context_are_application_owned() -> Result<()> {
 }
 
 #[test]
+fn adapter_session_binding_creates_and_reopens_the_same_durable_v2_scope() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+api_key = "test-secret-key"
+"#,
+    )?;
+    let requested_path = temp.path().join("state/sessions/http.jsonl");
+
+    let first = bind_application_session(&config_path, temp.path(), Some(&requested_path))?;
+    let second = bind_application_session(&config_path, temp.path(), Some(&requested_path))?;
+
+    assert_eq!(first, second);
+    assert!(first.session_log_path.is_absolute());
+    assert!(first.session_log_path.exists());
+    assert!(!first.session_scope_id.is_empty());
+    Ok(())
+}
+
+#[test]
+fn preparation_cancellation_is_durable_idempotent_and_secret_safe() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )?;
+    let session_path = temp.path().join("state/sessions/http.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+
+    let first = record_application_preparation_cancellation(
+        &config_path,
+        &binding.session_log_path,
+        "run-1",
+        "stop token=super-secret",
+    )?;
+    let second = record_application_preparation_cancellation(
+        &config_path,
+        &binding.session_log_path,
+        "run-1",
+        "stop token=super-secret",
+    )?;
+
+    assert_eq!(first, binding);
+    assert_eq!(second, binding);
+    let durable = std::fs::read_to_string(&binding.session_log_path)?;
+    assert_eq!(durable.matches("cancel-preparation-run-1").count(), 2);
+    assert!(durable.contains("\"outcome\":\"cancelled\""));
+    assert!(durable.contains("token=[redacted]"));
+    assert!(!durable.contains("super-secret"));
+    Ok(())
+}
+
+#[test]
 fn interaction_contract_distinguishes_noninteractive_and_external_surfaces() {
     assert_eq!(
         ApplicationRunInteraction::NonInteractive.kernel_mode(),
         sigil_kernel::InteractionMode::Headless
+    );
+    assert_eq!(
+        ApplicationRunInteraction::AdapterManaged.kernel_mode(),
+        sigil_kernel::InteractionMode::Interactive
     );
     assert_eq!(
         ApplicationRunInteraction::ExternallyInteractive.kernel_mode(),
@@ -133,6 +207,22 @@ impl ApprovalHandler for ExplicitApprovalHandler {
 
 #[test]
 fn externally_interactive_runs_reject_automated_approval_handlers() {
+    assert!(
+        validate_execution_contract(
+            ApplicationRunInteraction::AdapterManaged,
+            &AutoApproveHandler,
+            true,
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_execution_contract(
+            ApplicationRunInteraction::AdapterManaged,
+            &AutoApproveHandler,
+            false,
+        )
+        .is_err()
+    );
     assert!(
         validate_execution_contract(
             ApplicationRunInteraction::ExternallyInteractive,
@@ -243,6 +333,51 @@ fn public_event_sequence_seals_after_root_terminal() -> Result<()> {
             .is_err()
     );
     assert_eq!(recorder.0.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn failed_terminal_delivery_does_not_seal_the_public_event_sequence() -> Result<()> {
+    struct FailFirstTerminal {
+        failed: bool,
+        events: Vec<PublicRunEvent>,
+    }
+
+    impl ApplicationRunEventHandler for FailFirstTerminal {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            if !self.failed && matches!(event.event, PublicRunEventKind::RunFailed { .. }) {
+                self.failed = true;
+                anyhow::bail!("durable publication failed");
+            }
+            self.events.push(event);
+            Ok(())
+        }
+    }
+
+    let sequence = ApplicationRunEventSequence::new("session-1".to_owned(), "run-1".to_owned());
+    let mut handler = FailFirstTerminal {
+        failed: false,
+        events: Vec::new(),
+    };
+    assert!(
+        sequence
+            .emit(
+                &mut handler,
+                PublicRunEventKind::RunFailed {
+                    error: "first terminal".to_owned(),
+                },
+            )
+            .is_err()
+    );
+    sequence.emit(
+        &mut handler,
+        PublicRunEventKind::RunFailed {
+            error: "retry terminal".to_owned(),
+        },
+    )?;
+
+    assert_eq!(handler.events.len(), 1);
+    assert_eq!(handler.events[0].sequence, 1);
     Ok(())
 }
 

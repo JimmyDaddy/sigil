@@ -14,7 +14,7 @@ use sigil_kernel::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
     RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, Session,
-    WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
+    WorkspaceTrust, resolve_workspace_root, safe_persistence_text, workspace_trust_from_entries,
 };
 
 use crate::{
@@ -100,6 +100,8 @@ impl ApplicationRunPrepareError {
 pub enum ApplicationRunInteraction {
     /// The adapter cannot wait for a later explicit user decision.
     NonInteractive,
+    /// The adapter resolves approval policy synchronously without waiting for later user input.
+    AdapterManaged,
     /// The adapter has an external approval surface and an owned blocking run context.
     ExternallyInteractive,
 }
@@ -108,9 +110,19 @@ impl ApplicationRunInteraction {
     fn kernel_mode(self) -> InteractionMode {
         match self {
             Self::NonInteractive => InteractionMode::Headless,
+            Self::AdapterManaged => InteractionMode::Interactive,
             Self::ExternallyInteractive => InteractionMode::Interactive,
         }
     }
+}
+
+/// Durable V2 session identity established for an adapter-owned routing session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationSessionBinding {
+    /// Durable scope derived from the canonical JSONL path.
+    pub session_scope_id: String,
+    /// Canonical durable JSONL path.
+    pub session_log_path: PathBuf,
 }
 
 /// Input required to prepare one application run.
@@ -307,6 +319,18 @@ impl ApplicationRunControl {
         self.owner.handle()
     }
 
+    /// Returns whether the adapter event handler accepted a terminal public event for this run.
+    ///
+    /// Adapters that require durable delivery must only return success from their handler after
+    /// the corresponding append is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the shared sequence state is unavailable.
+    pub fn terminal_was_delivered(&self) -> Result<bool> {
+        self.events.terminal_was_delivered()
+    }
+
     /// Durably requests cancellation, activates it, and unblocks adapter-owned approval waits.
     ///
     /// # Errors
@@ -335,11 +359,12 @@ impl ApplicationRunControl {
         };
         let deadline = requested_at + timeout;
         let requested_at_ms = current_unix_time_ms();
+        let reason = reason.into();
         let request = RunCancellationRequestedEntry {
             request_id: format!("cancel-{}", self.owner.handle().scope_id()),
             run_scope_id: self.owner.handle().scope_id().to_owned(),
             target: RunCancellationTarget::Run,
-            reason: reason.into(),
+            reason: safe_persistence_text(&reason),
             requested_at_ms,
             quiescence_deadline_ms: requested_at_ms
                 .saturating_add(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
@@ -789,6 +814,106 @@ pub async fn prepare_application_run(
     })
 }
 
+/// Creates or reopens the durable V2 session used by an adapter routing handle.
+///
+/// This operation establishes the session envelope and recovery state without assembling a
+/// provider or starting an agent run. Foreground exclusivity remains owned by
+/// `prepare_application_run` and its shared lease manager.
+///
+/// # Errors
+///
+/// Returns a typed preparation error when configuration or durable session recovery fails.
+pub fn bind_application_session(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: Option<&Path>,
+) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    let root_config =
+        RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)?;
+    let workspace_root =
+        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    let sigil_paths =
+        resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    let requested_path = session_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
+    let canonical_path = canonical_session_lease_path(&requested_path)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let store =
+        JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
+    let session =
+        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)
+            .map_err(ApplicationRunPrepareError::execution)?;
+    Ok(ApplicationSessionBinding {
+        session_scope_id: session.session_scope_id().to_owned(),
+        session_log_path: canonical_path,
+    })
+}
+
+/// Durably records a cancellation that won the race with application-run preparation.
+///
+/// This path proves that no agent execution was admitted, so the terminal cleanup evidence is
+/// immediately complete. The request/finalized pair remains append-only and idempotent across a
+/// retry with the same run id.
+///
+/// # Errors
+///
+/// Returns a typed preparation error when configuration, session recovery, or either durable
+/// cancellation append fails.
+pub fn record_application_preparation_cancellation(
+    config_path: &Path,
+    session_path: &Path,
+    run_id: &str,
+    reason: &str,
+) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    if run_id.trim().is_empty() || safe_persistence_text(run_id) != run_id {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "run id must be non-empty and persistence-safe".to_owned(),
+        });
+    }
+    let root_config =
+        RootConfig::load(config_path).map_err(ApplicationRunPrepareError::configuration)?;
+    let canonical_path = canonical_session_lease_path(session_path)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let store =
+        JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
+    let session =
+        Session::load_from_store(root_config.agent.provider, root_config.agent.model, store)
+            .map_err(ApplicationRunPrepareError::execution)?;
+    let recorder = session
+        .run_cancellation_recorder()
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let recorded_at_ms = current_unix_time_ms();
+    let request_id = format!("cancel-preparation-{run_id}");
+    let run_scope_id = format!("application-preparation-{run_id}");
+    recorder
+        .append_requested(&RunCancellationRequestedEntry {
+            request_id: request_id.clone(),
+            run_scope_id: run_scope_id.clone(),
+            target: RunCancellationTarget::Run,
+            reason: safe_persistence_text(reason),
+            requested_at_ms: recorded_at_ms,
+            quiescence_deadline_ms: recorded_at_ms,
+        })
+        .map_err(ApplicationRunPrepareError::execution)?;
+    recorder
+        .append_finalized(&RunCancellationFinalizedEntry {
+            request_id,
+            run_scope_id,
+            outcome: RunCancellationTerminalOutcome::Cancelled,
+            cleanup_complete: true,
+            active_effects: 0,
+            active_tasks: 0,
+            reason: "application preparation was cancelled before agent execution".to_owned(),
+            finalized_at_ms: current_unix_time_ms(),
+        })
+        .map_err(ApplicationRunPrepareError::execution)?;
+    Ok(ApplicationSessionBinding {
+        session_scope_id: session.session_scope_id().to_owned(),
+        session_log_path: canonical_path,
+    })
+}
+
 /// Creates the default durable V2 JSONL path for one new application session.
 #[must_use]
 pub fn default_application_session_path(session_log_dir: &Path) -> PathBuf {
@@ -969,20 +1094,29 @@ impl ApplicationRunEventSequence {
         if state.terminal {
             bail!("application run event stream is already terminal");
         }
-        state.sequence = state
+        let sequence = state
             .sequence
             .checked_add(1)
             .context("application run event sequence exhausted")?;
         let terminal = is_terminal_public_run_event(&event);
-        if terminal {
-            state.terminal = true;
-        }
         handler.handle_public_event(PublicRunEvent::new(
             self.session_id.clone(),
             self.run_id.clone(),
-            state.sequence,
+            sequence,
             event,
-        ))
+        ))?;
+        state.sequence = sequence;
+        if terminal {
+            state.terminal = true;
+        }
+        Ok(())
+    }
+
+    fn terminal_was_delivered(&self) -> Result<bool> {
+        self.state
+            .lock()
+            .map(|state| state.terminal)
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))
     }
 }
 
@@ -1027,13 +1161,21 @@ fn validate_execution_contract(
     approval_handler: &impl ApprovalHandler,
     owned_blocking_worker: bool,
 ) -> Result<()> {
-    if interaction == ApplicationRunInteraction::ExternallyInteractive {
-        if !owned_blocking_worker {
+    match interaction {
+        ApplicationRunInteraction::NonInteractive => {}
+        ApplicationRunInteraction::AdapterManaged if !owned_blocking_worker => {
+            bail!("adapter-managed runs require an owned blocking execution worker");
+        }
+        ApplicationRunInteraction::AdapterManaged => {}
+        ApplicationRunInteraction::ExternallyInteractive if !owned_blocking_worker => {
             bail!("externally interactive runs require an owned blocking execution worker");
         }
-        if !approval_handler.approval_is_explicit_user_action() {
+        ApplicationRunInteraction::ExternallyInteractive
+            if !approval_handler.approval_is_explicit_user_action() =>
+        {
             bail!("externally interactive runs require an explicit-user-action approval handler");
         }
+        ApplicationRunInteraction::ExternallyInteractive => {}
     }
     Ok(())
 }

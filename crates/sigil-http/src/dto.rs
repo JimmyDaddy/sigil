@@ -1,6 +1,9 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+/// Policy identity bound to every V1 HTTP approval request.
+pub const HTTP_APPROVAL_POLICY_VERSION: &str = "sigil-http-approval-v1";
 use sigil_kernel::ToolApprovalUserDecision;
 
 /// Request body for creating one HTTP adapter session.

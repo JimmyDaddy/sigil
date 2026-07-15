@@ -302,7 +302,15 @@ fn run_events_response(
         Ok(run) => run,
         Err(error) => return registry_error_response(error),
     };
-    let events = match event_bus.replay_run_after(&run.session_id, run_id, last_event_id) {
+    let session = match registry.get_session(&run.session_id) {
+        Ok(session) => session,
+        Err(error) => return registry_error_response(error),
+    };
+    let events = match event_bus.replay_run_after(
+        &session.durable_session_scope_id,
+        run_id,
+        last_event_id,
+    ) {
         Ok(events) => events,
         Err(error) => return http_error_response(409, "replay_error", error.to_string()),
     };

@@ -589,7 +589,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
 
     event_bus
         .publish_run_event(PublicRunEvent::new(
-            "http-session-1",
+            "scope-http-session-1",
             "http-run-1",
             1,
             PublicRunEventKind::RunStarted {
@@ -599,7 +599,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         .expect("durable start event should publish");
     event_bus
         .publish_run_event(PublicRunEvent::new(
-            "http-session-1",
+            "scope-http-session-1",
             "http-run-1",
             2,
             PublicRunEventKind::TextDelta {
@@ -609,7 +609,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         .expect("transient event should publish");
     event_bus
         .publish_run_event(PublicRunEvent::new(
-            "http-session-1",
+            "scope-http-session-1",
             "http-run-1",
             3,
             PublicRunEventKind::RunFinished {
@@ -625,8 +625,8 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
     .await;
     assert_eq!(event_status, 200);
     assert_eq!(event_content_type, "text/event-stream");
-    assert!(event_body.contains("id: sigil-http-run-v1:http-session-1:http-run-1:1"));
-    assert!(event_body.contains("id: sigil-http-run-v1:http-session-1:http-run-1:3"));
+    assert!(event_body.contains("id: sigil-http-run-v1:scope-http-session-1:http-run-1:1"));
+    assert!(event_body.contains("id: sigil-http-run-v1:scope-http-session-1:http-run-1:3"));
     assert!(event_body.contains("\"type\":\"run_started\""));
     assert!(event_body.contains("\"type\":\"run_finished\""));
     assert!(!event_body.contains("\"type\":\"text_delta\""));
@@ -636,7 +636,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         http_get(
             "/runs/http-run-1/events",
             Some("secret-token"),
-            Some("sigil-http-run-v1:http-session-1:http-run-1:1"),
+            Some("sigil-http-run-v1:scope-http-session-1:http-run-1:1"),
         ),
     )
     .await;
@@ -675,6 +675,10 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
     assert_eq!(cancel_receipt["run"]["status"], "cancel_requested");
     assert_eq!(cancel_receipt["replayed"], false);
     assert_eq!(driver.cancels().len(), 1);
+    assert_eq!(
+        driver.cancels()[0].reason.as_deref(),
+        Some("smoke complete")
+    );
 
     let (status, replayed_cancel) = http_raw_request(address, cancel_request).await;
     assert_eq!(status, 200);
@@ -1763,6 +1767,7 @@ fn cancel_routes_to_driver_and_is_idempotent() {
         vec![HttpRunDriverCancel {
             session_id: session.id,
             run_id: run.id,
+            reason: None,
         }]
     );
     assert_eq!(

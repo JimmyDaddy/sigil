@@ -221,6 +221,25 @@ fn safe_persistence_preserves_exact_whitespace_while_redacting_carriers() {
 }
 
 #[test]
+fn safe_persistence_json_recursively_redacts_secret_keys_and_url_queries() {
+    let safe = safe_persistence_json_value(serde_json::json!({
+        "nested": [{
+            "api_key": "super-secret",
+            "destination": "https://example.test/path?token=super-secret",
+        }],
+        "ordinary": true,
+    }));
+
+    assert_eq!(safe["nested"][0]["api_key"], "[redacted]");
+    assert!(
+        safe["nested"][0]["destination"]
+            .as_str()
+            .is_some_and(|value| !value.contains("super-secret") && !value.contains("?token="))
+    );
+    assert_eq!(safe["ordinary"], true);
+}
+
+#[test]
 fn safe_persistence_one_shot_tool_call_complete_is_capped() {
     let error = project_tool_call_for_persistence(ToolCall {
         id: "call-large".to_owned(),

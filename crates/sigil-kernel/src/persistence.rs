@@ -703,6 +703,17 @@ pub fn safe_persistence_text(value: &str) -> String {
     redact_secret_carriers(&url_safe)
 }
 
+/// Recursively projects JSON strings and secret-shaped fields for durable storage.
+///
+/// Object structure, arrays, booleans, numbers, and null values are preserved. String values use
+/// the same URL/secret-carrier policy as [`safe_persistence_text`], while values under
+/// secret-shaped keys are replaced entirely.
+#[must_use]
+pub fn safe_persistence_json_value(mut value: Value) -> Value {
+    sanitize_json_value(&mut value);
+    value
+}
+
 fn validate_tool_call_identity(call: &ToolCall) -> std::result::Result<(), SafePersistenceError> {
     validate_tool_call_id(&call.id)?;
     validate_tool_call_name(&call.name)
