@@ -59,6 +59,7 @@ mod run_options; // shared run options and scoped tool registry views.
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;
+pub mod application_run;
 pub mod context;
 pub mod context_window;
 pub mod doctor;

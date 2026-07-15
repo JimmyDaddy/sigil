@@ -14,8 +14,9 @@ use sigil_kernel::{
     EventHandler, JsonlSessionStore, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess,
     ToolCall, ToolCategory, ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability,
     ToolProgressEvent, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
-    WorkspaceTrust,
+    WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
 };
+use sigil_runtime::application_run::{application_run_input, default_application_session_path};
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -24,10 +25,9 @@ use tokio::{
 
 use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, ServeOptions, ServeStartupPlan,
-    StdoutEventHandler, build_serve_startup_plan, default_session_path, drain_provider_stream,
-    load_session_with_workspace_trust, render_cli_doctor_report, render_doctor_report,
-    render_provider_chunk, render_run_event, render_serve_startup_plan, render_version,
-    resolve_workspace_root, run_input_with_repo_context, serve_command,
+    StdoutEventHandler, build_serve_startup_plan, drain_provider_stream, render_cli_doctor_report,
+    render_doctor_report, render_provider_chunk, render_run_event, render_serve_startup_plan,
+    render_version, serve_command,
 };
 
 fn boxed_chunk_stream(
@@ -70,7 +70,7 @@ fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
 fn default_session_path_uses_configured_log_dir_and_jsonl_suffix() {
     let workspace_root = std::env::temp_dir().join("sigil-workspace");
     let session_dir = workspace_root.join("state/sessions");
-    let session_path = default_session_path(&session_dir);
+    let session_path = default_application_session_path(&session_dir);
 
     assert!(session_path.starts_with(session_dir));
     assert_eq!(
@@ -90,8 +90,8 @@ fn fresh_cli_session_projects_unknown_workspace_trust() -> Result<()> {
     let workspace = unique_temp_workspace("sigil-cli-workspace-trust")?;
     let store = JsonlSessionStore::new(workspace.join("session.jsonl"))?;
 
-    let (_session, trust) =
-        load_session_with_workspace_trust("deepseek", "deepseek-test", store, &workspace)?;
+    let session = sigil_kernel::Session::load_from_store("deepseek", "deepseek-test", store)?;
+    let trust = workspace_trust_from_entries(session.entries(), &workspace)?;
 
     assert_eq!(trust, WorkspaceTrust::Unknown);
     Ok(())
@@ -105,7 +105,7 @@ fn run_input_with_repo_context_attaches_repository_candidates() -> Result<()> {
         "Sigil is a TUI-first Rust coding agent.",
     )?;
 
-    let input = run_input_with_repo_context(&workspace, "summarize README.md".to_owned());
+    let input = application_run_input(&workspace, "summarize README.md".to_owned());
 
     assert!(input.runtime_context.items.iter().any(|item| {
         item.id == "repo-file:README.md"
@@ -913,6 +913,16 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     assert!(session_contents.contains("Say hi"));
     assert!(session_contents.contains("hello from agent"));
     assert!(session_contents.contains("\"event_type\":\"session_entry_recorded\""));
+    let provider_attempt = session_contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["event_type"] == "provider_physical_attempt_started")
+        .expect("run should persist a provider physical-attempt start");
+    let logical_run_id = provider_attempt["payload"]["logical_run_id"]
+        .as_str()
+        .expect("provider attempt should carry the application run id");
+    assert!(uuid::Uuid::parse_str(logical_run_id).is_ok());
+    assert!(!logical_run_id.starts_with("agent-run-"));
     Ok(())
 }
 

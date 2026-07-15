@@ -9,6 +9,11 @@ use std::{
 
 use tokio::sync::Notify;
 
+const RUN_PHASE_OPEN: u8 = 0;
+const RUN_PHASE_CANCEL_RESERVED: u8 = 1;
+const RUN_PHASE_CANCEL_ACTIVATED: u8 = 2;
+const RUN_PHASE_NATURALLY_FINALIZED: u8 = 3;
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -188,7 +193,12 @@ impl RunCancellationHandle {
     fn reserve_cancel(&self) -> bool {
         self.state
             .phase
-            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(
+                RUN_PHASE_OPEN,
+                RUN_PHASE_CANCEL_RESERVED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
             .is_ok()
     }
 
@@ -196,7 +206,12 @@ impl RunCancellationHandle {
         let activated = self
             .state
             .phase
-            .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(
+                RUN_PHASE_CANCEL_RESERVED,
+                RUN_PHASE_CANCEL_ACTIVATED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
             .is_ok();
         if activated {
             self.state.changed.notify_waiters();
@@ -211,19 +226,27 @@ impl RunCancellationHandle {
 
     #[must_use]
     pub fn is_cancel_requested(&self) -> bool {
-        matches!(self.state.phase.load(Ordering::SeqCst), 1 | 2)
+        matches!(
+            self.state.phase.load(Ordering::SeqCst),
+            RUN_PHASE_CANCEL_RESERVED | RUN_PHASE_CANCEL_ACTIVATED
+        )
     }
 
     #[must_use]
     pub fn can_request_cancel(&self) -> bool {
-        self.state.phase.load(Ordering::SeqCst) == 0
+        self.state.phase.load(Ordering::SeqCst) == RUN_PHASE_OPEN
     }
 
     /// Atomically gives natural run completion precedence over a later cancellation request.
     pub fn try_finalize_naturally(&self) -> bool {
         self.state
             .phase
-            .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(
+                RUN_PHASE_OPEN,
+                RUN_PHASE_NATURALLY_FINALIZED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
             .is_ok()
     }
 
@@ -241,7 +264,7 @@ impl RunCancellationHandle {
     pub async fn cancelled(&self) {
         loop {
             let changed = self.state.changed.notified();
-            if self.state.phase.load(Ordering::SeqCst) == 2 {
+            if self.state.phase.load(Ordering::SeqCst) == RUN_PHASE_CANCEL_ACTIVATED {
                 return;
             }
             changed.await;

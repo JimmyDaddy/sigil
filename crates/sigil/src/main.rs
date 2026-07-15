@@ -12,17 +12,20 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
-#[cfg(not(test))]
-use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
-    Agent, EventHandler, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MutationEventRecorder, ProviderChunk, RootConfig, RunEvent, Session, UsageStats,
-    WorkspaceTrust, resolve_workspace_root, workspace_trust_from_entries,
+    AutoApproveHandler, EventHandler, ProviderChunk, PublicRunEvent, PublicRunEventKind,
+    RootConfig, RunEvent, UsageStats,
 };
+#[cfg(not(test))]
+use sigil_kernel::{preferred_config_path, resolve_workspace_root};
 use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
 use sigil_runtime::{
-    DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest, stream_deepseek_fim_debug,
-    stream_deepseek_prefix_debug,
+    DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest,
+    application_run::{
+        ApplicationRunEventHandler, ApplicationRunRequest, ApplicationRunServices,
+        prepare_application_run,
+    },
+    stream_deepseek_fim_debug, stream_deepseek_prefix_debug,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,123 +308,30 @@ fn render_serve_startup_plan(plan: &ServeStartupPlan) -> String {
 }
 
 async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> Result<()> {
-    let root_config = RootConfig::load(config_path)?;
-    let workspace_root =
-        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
-    let sigil_paths = sigil_runtime::resolve_sigil_paths(
-        &root_config.storage,
-        &root_config.session,
-        &workspace_root,
-    );
-    let session_store = JsonlSessionStore::new(default_session_path(&sigil_paths.session_log_dir))?;
-    let mutation_recorder = MutationEventRecorder::new(session_store.clone());
-    let (mut session, workspace_trust) = load_session_with_workspace_trust(
-        root_config.agent.provider.clone(),
-        root_config.agent.model.clone(),
-        session_store,
-        &workspace_root,
-    )?;
-    sigil_runtime::attach_session_url_capability_store(&mut session)?;
-
-    let provider = sigil_runtime::build_provider(&root_config)?;
-    let options = sigil_runtime::build_run_options(
-        &root_config,
-        workspace_root.clone(),
-        InteractionMode::Headless,
-    );
-    let mut registry =
-        sigil_runtime::build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission(
-            &root_config,
-            &provider.capabilities(),
-            workspace_root.clone(),
-            mutation_recorder,
-            workspace_trust,
-            sigil_kernel::ExtensionProcessNetworkAdmission::new(
-                options.permission_context.network_policy,
-                false,
-            ),
-        )
-        .await?;
-    let elicitation_handler = sigil_runtime::unsupported_mcp_elicitation_handler();
-    let runtime_event_handler = sigil_runtime::unsupported_mcp_runtime_event_handler();
     let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
         std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
-    sigil_runtime::attach_remote_mcp_activation_presenter(
-        &mut registry,
-        &root_config,
-        &provider.capabilities(),
-        workspace_root.clone(),
-        std::sync::Arc::clone(&elicitation_handler),
-        runtime_event_handler,
-        std::sync::Arc::clone(&disclosure_presenter),
-    );
-    let eager_remote_servers = root_config
-        .mcp_servers
-        .iter()
-        .filter(|server| {
-            server.startup == McpServerStartup::Eager && server.streamable_http().is_some()
-        })
-        .map(|server| (server.name.clone(), server.required))
-        .collect::<Vec<_>>();
-    for (server_name, required) in eager_remote_servers {
-        let activation = sigil_runtime::activate_eager_remote_mcp_server(
-            &mut registry,
-            &root_config,
-            &server_name,
-            provider.capabilities().tool_name_max_chars,
-            workspace_root.clone(),
-            session.egress_audit_recorder()?,
-            std::sync::Arc::clone(&disclosure_presenter),
-            std::sync::Arc::clone(&elicitation_handler),
-        )
-        .await;
-        if let Err(error) = activation {
-            if required {
-                return Err(error);
-            }
-            eprintln!("optional eager MCP server {server_name} failed: {error:#}");
-        }
-    }
-    let agent = Agent::new(provider, registry);
-
+    let services = ApplicationRunServices::new(disclosure_presenter);
+    let prepared = prepare_application_run(
+        ApplicationRunRequest::non_interactive(
+            config_path,
+            launch_cwd,
+            prompt,
+            uuid::Uuid::new_v4().to_string(),
+        ),
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
     let mut handler = StdoutEventHandler;
-    let result = agent
-        .run_with_input(
-            &mut session,
-            run_input_with_repo_context(&workspace_root, prompt),
-            options,
-            &mut handler,
-        )
-        .await?
-        .result;
-    if !result.final_text.is_empty() {
+    let mut approval_handler = AutoApproveHandler;
+    let output = execution
+        .execute(&mut handler, &mut approval_handler)
+        .await?;
+    if !output.agent_output.result.final_text.is_empty() {
         println!();
     }
-    if let Some(path) = session.store_path() {
-        eprintln!("session log: {}", path.display());
-    }
+    eprintln!("session log: {}", output.session_log_path.display());
     Ok(())
-}
-
-fn load_session_with_workspace_trust(
-    provider_name: impl Into<String>,
-    model_name: impl Into<String>,
-    session_store: JsonlSessionStore,
-    workspace_root: &Path,
-) -> Result<(Session, WorkspaceTrust)> {
-    let session = Session::load_from_store(provider_name, model_name, session_store)?;
-    let workspace_trust = workspace_trust_from_entries(session.entries(), workspace_root)?;
-    Ok((session, workspace_trust))
-}
-
-fn run_input_with_repo_context(
-    workspace_root: &Path,
-    prompt: String,
-) -> sigil_kernel::AgentRunInput {
-    let runtime_context =
-        sigil_runtime::context_candidates_from_safe_sources(workspace_root, &prompt, None)
-            .unwrap_or_default();
-    sigil_kernel::AgentRunInput::user(prompt).with_runtime_context(runtime_context)
 }
 
 async fn prefix_command(
@@ -469,10 +379,6 @@ async fn fim_command(
     )
     .await?;
     drain_provider_stream(&mut stream).await
-}
-
-fn default_session_path(session_log_dir: &Path) -> PathBuf {
-    session_log_dir.join(format!("session-{}.jsonl", uuid::Uuid::new_v4()))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -529,24 +435,30 @@ fn render_provider_chunk(chunk: ProviderChunk) -> RenderedOutput {
 }
 
 fn render_run_event(event: RunEvent) -> RenderedOutput {
+    render_public_run_event(event.into())
+}
+
+fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
     match event {
-        RunEvent::TextDelta(delta) => render_stream_event(StreamRenderEvent::TextDelta(delta)),
-        RunEvent::ReasoningDelta(delta) => {
-            render_stream_event(StreamRenderEvent::ReasoningDelta(delta))
+        PublicRunEventKind::TextDelta { text } => {
+            render_stream_event(StreamRenderEvent::TextDelta(text))
         }
-        RunEvent::ToolCallStarted(call) => RenderedOutput {
+        PublicRunEventKind::ReasoningDelta { text } => {
+            render_stream_event(StreamRenderEvent::ReasoningDelta(text))
+        }
+        PublicRunEventKind::ToolCallStarted { call } => RenderedOutput {
             stderr: format!("\n[tool:start] {} ({})\n", call.name, call.id),
             ..RenderedOutput::default()
         },
-        RunEvent::ToolCallArgsDelta { id, delta } => RenderedOutput {
+        PublicRunEventKind::ToolCallArgsDelta { id, delta } => RenderedOutput {
             stderr: format!("[tool:args:{id}] {delta}\n"),
             ..RenderedOutput::default()
         },
-        RunEvent::ToolCallCompleted(call) => RenderedOutput {
+        PublicRunEventKind::ToolCallCompleted { call } => RenderedOutput {
             stderr: format!("[tool:complete] {} ({})\n", call.name, call.id),
             ..RenderedOutput::default()
         },
-        RunEvent::ToolApprovalRequested {
+        PublicRunEventKind::ApprovalRequested {
             call,
             spec,
             subjects,
@@ -558,6 +470,12 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
             preview,
             ..
         } => {
+            let local_policy_decision =
+                local_policy_decision.unwrap_or(sigil_kernel::ApprovalMode::Allow);
+            let network_policy_decision =
+                network_policy_decision.unwrap_or(sigil_kernel::ApprovalMode::Allow);
+            let source_policy_decision =
+                source_policy_decision.unwrap_or(sigil_kernel::ApprovalMode::Allow);
             let final_policy_decision = strictest_approval_mode([
                 local_policy_decision,
                 network_policy_decision,
@@ -570,7 +488,7 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
                 spec.category.as_str(),
                 spec.access.as_str(),
                 network_effect.map_or("none", sigil_kernel::NetworkEffect::as_str),
-                permission_risk_label(risk),
+                risk.map_or("unknown", permission_risk_label),
                 local_policy_decision.as_str(),
                 network_policy_decision.as_str(),
                 source_policy_decision.as_str(),
@@ -589,7 +507,7 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
                 ..RenderedOutput::default()
             }
         }
-        RunEvent::ToolApprovalResolved {
+        PublicRunEventKind::ApprovalResolved {
             call_id,
             approved,
             reason,
@@ -603,7 +521,7 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
             ),
             ..RenderedOutput::default()
         },
-        RunEvent::ToolResult(result) => RenderedOutput {
+        PublicRunEventKind::ToolResult { result } => RenderedOutput {
             stderr: format!(
                 "[tool:result] {} error={} {}\n",
                 result.tool_name,
@@ -612,7 +530,7 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
             ),
             ..RenderedOutput::default()
         },
-        RunEvent::ToolProgress(progress) => {
+        PublicRunEventKind::ToolProgress { progress } => {
             let mut stderr = format!(
                 "[tool:progress] {} ({}) {}\n",
                 progress.tool_name, progress.call_id, progress.status
@@ -628,14 +546,20 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
                 ..RenderedOutput::default()
             }
         }
-        RunEvent::Usage(usage) => render_stream_event(StreamRenderEvent::Usage(usage)),
-        RunEvent::Notice(note) => RenderedOutput {
-            stderr: format!("[notice] {note}\n"),
+        PublicRunEventKind::Usage { usage } => render_stream_event(StreamRenderEvent::Usage(usage)),
+        PublicRunEventKind::Notice { message } => RenderedOutput {
+            stderr: format!("[notice] {message}\n"),
             ..RenderedOutput::default()
         },
-        RunEvent::ContinuationState(_) | RunEvent::Control(_) | RunEvent::AssistantMessage(_) => {
-            RenderedOutput::default()
-        }
+        PublicRunEventKind::RunStarted { .. }
+        | PublicRunEventKind::TaskRunStarted { .. }
+        | PublicRunEventKind::RunFinished { .. }
+        | PublicRunEventKind::TaskRunFinished { .. }
+        | PublicRunEventKind::RunFailed { .. }
+        | PublicRunEventKind::RunCancelled
+        | PublicRunEventKind::ContinuationState { .. }
+        | PublicRunEventKind::Control { .. }
+        | PublicRunEventKind::AssistantMessage { .. } => RenderedOutput::default(),
     }
 }
 
@@ -689,6 +613,13 @@ struct StdoutEventHandler;
 impl EventHandler for StdoutEventHandler {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         emit_rendered_output(render_run_event(event));
+        Ok(())
+    }
+}
+
+impl ApplicationRunEventHandler for StdoutEventHandler {
+    fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+        emit_rendered_output(render_public_run_event(event.event));
         Ok(())
     }
 }

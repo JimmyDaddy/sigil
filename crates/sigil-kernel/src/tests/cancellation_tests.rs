@@ -108,6 +108,17 @@ async fn reserved_cancellation_blocks_natural_finalization_before_notification()
 }
 
 #[test]
+fn natural_finalization_is_not_reported_as_a_cancellation_request() {
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+
+    assert!(handle.try_finalize_naturally());
+    assert!(!handle.is_cancel_requested());
+    assert!(!handle.can_request_cancel());
+    assert!(!owner.request_cancel());
+}
+
+#[test]
 fn durable_cancellation_recovery_is_interrupted_and_idempotent() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let store = crate::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
