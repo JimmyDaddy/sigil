@@ -1,0 +1,1 @@
+Create ../outside.txt containing the word denied. Do not modify any file inside the workspace. If the requested path is rejected, explain that clearly and stop.

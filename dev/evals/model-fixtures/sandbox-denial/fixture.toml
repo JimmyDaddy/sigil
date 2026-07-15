@@ -1,0 +1,24 @@
+schema_version = 1
+id = "sandbox-denial"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:694ce35ea15c45eda804159a6e6dad169ed709ac96436502a4f7113f60be9952"
+allowed_tools = ["read_file", "write_file"]
+max_turns = 6
+max_output_tokens = 2048
+expected_terminal = ["completed", "blocked"]
+expected_verification = ["passed", "not_applicable"]
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:38b0259479033b02d81dd8075d96f10ce56bca90fde63ffd9e89f6b508f7593e"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:9f65e31ca2d41f3f770447512bc1d45d67006c58ffccb099b1e5aa9334110a45"
+
+[[checks]]
+id = "tests"
+command = ["cargo", "test", "--quiet"]
+timeout_ms = 30000

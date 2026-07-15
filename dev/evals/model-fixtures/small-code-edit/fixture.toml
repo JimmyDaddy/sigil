@@ -1,0 +1,24 @@
+schema_version = 1
+id = "small-code-edit"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:9c3ad1cf83525cf08147338754ba57ebff851581b697024fbbd37fca3387a42d"
+allowed_tools = ["read_file", "edit_file"]
+max_turns = 8
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:53dea6fd4015c8a5206d26c3ec63bf921dfbfdb4ccb05e9f36d641a756d63c16"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:75295bad247442e25c7624a20ab3aaaff30a654c00ff89a9fadc1fdef4125c77"
+
+[[checks]]
+id = "tests"
+command = ["cargo", "test", "--quiet"]
+timeout_ms = 30000

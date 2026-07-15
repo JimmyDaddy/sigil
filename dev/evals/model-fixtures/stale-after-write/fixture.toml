@@ -1,0 +1,34 @@
+schema_version = 1
+id = "stale-after-write"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:114394d300f6e13a4814b655f692c2db61f10b2842ec239882911185c637f107"
+allowed_tools = ["read_file", "edit_file"]
+max_turns = 8
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["stale"]
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:a16ef26cbf2d97054509cc2235d6dec7010da7330e489b7e9f845f7eff901012"
+
+[[files]]
+path = "README.md"
+source = "files/README.md"
+sha256 = "sha256:bf006aadd3a9f5ddd463d7b85bbb657ee163fa0e671bbc2c7ec82247391fe2da"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:49da4b8b1667b3c3bd92d29a81cae6bfef35aa151620ad8bd91090985a428fa4"
+
+[[checks]]
+id = "tests"
+command = ["cargo", "test", "--quiet"]
+timeout_ms = 30000
+
+[post_run_mutation]
+path = "README.md"
+old_text = "fixture_generation = 1"
+new_text = "fixture_generation = 2"

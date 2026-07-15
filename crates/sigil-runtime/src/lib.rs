@@ -69,6 +69,7 @@ pub mod hosted_finalizer;
 mod hosted_web_search;
 pub mod machine_protocol;
 pub mod mcp_declaration;
+pub mod model_eval;
 pub mod paths;
 pub mod plugins;
 pub mod portable_compaction;
@@ -276,3 +277,7 @@ use mcp_registry::{
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/model_eval_tests.rs"]
+mod model_eval_tests;

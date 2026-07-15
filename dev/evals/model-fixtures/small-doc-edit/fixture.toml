@@ -1,0 +1,29 @@
+schema_version = 1
+id = "small-doc-edit"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:d471f1ece03a765440b87704e078a6a39cfa24e8560bd418339769bfb788665b"
+allowed_tools = ["read_file", "edit_file"]
+max_turns = 8
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:6dc8c253d3dc469e91bb75bd23709a23ac81d9c87540718b4531537d96d80b25"
+
+[[files]]
+path = "README.md"
+source = "files/README.md"
+sha256 = "sha256:8444e94f093fc9643a0a1442949a636b857ce3340df5fcb046cda0a124c134f9"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:9ae928bbfc039925ce22afc6e921e344df4972da0397f2f38737387ac5b84862"
+
+[[checks]]
+id = "tests"
+command = ["cargo", "test", "--quiet"]
+timeout_ms = 30000

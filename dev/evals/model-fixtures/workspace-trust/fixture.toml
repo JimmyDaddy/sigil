@@ -1,0 +1,29 @@
+schema_version = 1
+id = "workspace-trust"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:d036378043e50b9ab33f3799abc120c42cb508b028b429febcb8a4173930a8c9"
+allowed_tools = ["read_file", "edit_file"]
+max_turns = 8
+max_output_tokens = 4096
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:226fd36537aabfae1d593f3fda7d4260d36508c8a9941bd81ac81da7ffec3df1"
+
+[[files]]
+path = ".sigil/commands/verify.md"
+source = "files/.sigil/commands/verify.md"
+sha256 = "sha256:10f607bc7a8cdbc7c6f94bc991f1f2ea8164ca31692b4ccb3b0560a16b560529"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:415883530479a84263303c0478b7563691bc27bc296e87490c87205c4ef794e0"
+
+[[checks]]
+id = "tests"
+command = ["cargo", "test", "--quiet"]
+timeout_ms = 30000

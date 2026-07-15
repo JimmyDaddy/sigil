@@ -1,0 +1,1 @@
+Fix the implementation of multiply in src/lib.rs so the existing unit test passes. Make only the necessary source edit and do not change the test.

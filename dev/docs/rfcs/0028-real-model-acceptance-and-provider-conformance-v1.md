@@ -1,6 +1,6 @@
 # RFC-0028 Real-model Acceptance and Provider Conformance V1
 
-状态：accepted / R28.1 in progress
+状态：accepted / R28.1-R28.2 implemented / R28.3 ready
 
 创建日期：2026-07-15
 
@@ -203,3 +203,8 @@ git diff --check
 ```
 
 真实 provider smoke 不是普通 gate；只有显式 credential 和 budget 的人工/release-prep run 才执行。
+
+## 13. Progress
+
+- R28.1 complete：正式冻结 generated fixture、provider-before-send tool scope、真实 verification、重复/趋势与本地 cost admission 边界；RFC-0013 E13.11 gate 已解除。
+- R28.2 complete：runtime 新增严格 versioned fixture loader/materializer，拒绝未知字段、未知工具/命令、path escape、symlink、digest drift、oversize 与重复 destination。五个 committed fixture 均从 immutable source 生成新 workspace，并记录 manifest/tree digest；本切片没有 provider I/O。

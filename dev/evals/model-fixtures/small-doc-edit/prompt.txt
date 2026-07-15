@@ -1,0 +1,1 @@
+Fix the spelling mistake in README.md. Make only the necessary edit. Do not change tests or Cargo metadata.
