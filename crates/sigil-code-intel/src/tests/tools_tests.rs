@@ -1099,7 +1099,7 @@ async fn approved_mutation_consumes_first_lsp_plan_without_second_request() {
     let mut registry = ToolRegistry::new();
     let service = register_trusted_code_intelligence_tools(
         &mut registry,
-        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        &fake_tool_lsp_config(&server_script, &scenario_path, 2_000),
         workspace.path().to_path_buf(),
     )
     .expect("code intelligence should register");
