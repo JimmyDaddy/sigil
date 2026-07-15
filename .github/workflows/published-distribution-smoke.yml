@@ -1,0 +1,214 @@
+name: Published Distribution Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  attestations: read
+  contents: read
+
+concurrency:
+  group: published-distribution-smoke
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_NO_ANALYTICS: "1"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+
+jobs:
+  resolve-release:
+    name: Resolve current alpha release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Resolve matching npm and GitHub prerelease
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(npm view @sigil-ai/sigil@alpha version --json | jq -er '.')"
+          tag="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=20" |
+              jq -er '[.[] | select(.prerelease == true and .draft == false)][0].tag_name'
+          )"
+          test -n "${version}"
+          test "${tag}" = "v${version}"
+          printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+
+  npm-install:
+    name: npm ${{ matrix.label }}
+    needs: resolve-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x64
+            os: ubuntu-latest
+          - label: Windows x64
+            os: windows-latest
+          - label: macOS arm64
+            os: macos-latest
+          - label: macOS Intel
+            os: macos-15-intel
+    steps:
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.22.0"
+
+      - name: Install current alpha in an isolated directory
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          work_dir="${RUNNER_TEMP}/sigil-npm-smoke"
+          rm -rf "${work_dir}"
+          mkdir -p "${work_dir}"
+          cd "${work_dir}"
+          npm init --yes >/dev/null
+          npm install --save-exact "@sigil-ai/sigil@${VERSION}"
+          npm ls "@sigil-ai/sigil@${VERSION}"
+
+      - name: Verify binary and doctor JSON
+        shell: bash
+        env:
+          SIGIL_CACHE_HOME: ${{ runner.temp }}/sigil-npm-cache
+          SIGIL_STATE_HOME: ${{ runner.temp }}/sigil-npm-state
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/sigil-npm-smoke"
+          npm exec -- sigil --version > version.txt
+          grep -Fq "sigil ${VERSION}" version.txt
+          npm exec -- sigil doctor --output json > doctor.json
+          node <<'NODE'
+          const fs = require("node:fs");
+          const report = JSON.parse(fs.readFileSync("doctor.json", "utf8"));
+          if (report.schema_version !== 1) throw new Error("unexpected doctor schema");
+          if (!report.build || report.build.version !== process.env.VERSION) {
+            throw new Error("doctor build version does not match npm alpha");
+          }
+          if (!report.privacy || report.privacy.review_before_sharing !== true) {
+            throw new Error("doctor privacy projection is missing");
+          }
+          NODE
+
+  github-release:
+    name: GitHub Release archives
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download current prerelease assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset_dir="${RUNNER_TEMP}/sigil-release-smoke"
+          rm -rf "${asset_dir}"
+          mkdir -p "${asset_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'checksums.txt' \
+            --pattern 'sigil-*.tar.gz' \
+            --dir "${asset_dir}"
+
+      - name: Verify aggregate checksums and expected platforms
+        shell: bash
+        env:
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset_dir="${RUNNER_TEMP}/sigil-release-smoke"
+          expected=(
+            "sigil-${VERSION}-aarch64-apple-darwin.tar.gz"
+            "sigil-${VERSION}-x86_64-apple-darwin.tar.gz"
+            "sigil-${VERSION}-x86_64-pc-windows-msvc.tar.gz"
+            "sigil-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          )
+          for archive in "${expected[@]}"; do
+            test -s "${asset_dir}/${archive}"
+          done
+          normalized="${asset_dir}/checksums.normalized.txt"
+          : > "${normalized}"
+          while read -r checksum path; do
+            path="${path#\*}"
+            printf '%s  %s\n' "${checksum}" "$(basename "${path}")" >> "${normalized}"
+          done < "${asset_dir}/checksums.txt"
+          test "$(wc -l < "${normalized}" | tr -d ' ')" = "${#expected[@]}"
+          (cd "${asset_dir}" && sha256sum --check "$(basename "${normalized}")")
+
+      - name: Verify GitHub artifact attestations
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset_dir="${RUNNER_TEMP}/sigil-release-smoke"
+          for archive in "${asset_dir}/sigil-${VERSION}-"*.tar.gz; do
+            gh attestation verify "${archive}" --repo "${GITHUB_REPOSITORY}"
+          done
+
+  homebrew-install:
+    name: Homebrew ${{ matrix.label }}
+    needs: resolve-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            os: macos-latest
+            architecture: arm64
+          - label: macOS Intel
+            os: macos-15-intel
+            architecture: x86_64
+    steps:
+      - name: Install from the public tap
+        shell: bash
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${EXPECTED_ARCHITECTURE}"
+          brew tap JimmyDaddy/sigil
+          brew install JimmyDaddy/sigil/sigil-ai
+          sigil --version > version.txt
+          grep -Fq "sigil ${VERSION}" version.txt
+          brew info --json=v2 JimmyDaddy/sigil/sigil-ai > brew-info.json
+          ruby -rjson -e '
+            info = JSON.parse(File.read(ARGV.fetch(0)))
+            actual = info.fetch("formulae").fetch(0).fetch("versions").fetch("stable")
+            abort "unexpected Homebrew version #{actual}" unless actual == ENV.fetch("VERSION")
+          ' brew-info.json
+
+      - name: Verify doctor JSON
+        shell: bash
+        env:
+          SIGIL_CACHE_HOME: ${{ runner.temp }}/sigil-brew-cache
+          SIGIL_STATE_HOME: ${{ runner.temp }}/sigil-brew-state
+          VERSION: ${{ needs.resolve-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          sigil doctor --output json > doctor.json
+          ruby -rjson -e '
+            report = JSON.parse(File.read(ARGV.fetch(0)))
+            abort "unexpected doctor schema" unless report.fetch("schema_version") == 1
+            version = report.fetch("build").fetch("version")
+            abort "unexpected doctor build version #{version}" unless version == ENV.fetch("VERSION")
+            abort "missing privacy review" unless report.fetch("privacy").fetch("review_before_sharing")
+          ' doctor.json
