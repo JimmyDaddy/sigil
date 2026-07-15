@@ -63,6 +63,13 @@ impl ConfigDraft {
             terminal_mouse_capture: root_config.terminal.mouse_capture,
             terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
             terminal_scroll_sensitivity: root_config.terminal.scroll_sensitivity.to_string(),
+            terminal_notifications_enabled: root_config.terminal.notifications.enabled,
+            terminal_notification_method: root_config.terminal.notifications.method,
+            terminal_notification_minimum_run_duration_ms: root_config
+                .terminal
+                .notifications
+                .minimum_run_duration_ms
+                .to_string(),
             appearance_theme: root_config.appearance.theme,
             appearance_syntax_theme: root_config.appearance.syntax_theme,
             appearance_usage_cost_currency: root_config.appearance.usage_cost_currency,
@@ -155,6 +162,15 @@ impl ConfigDraft {
         if terminal_scroll_sensitivity == 0 {
             bail!("scroll_sensitivity must be greater than 0");
         }
+        let terminal_notification_minimum_run_duration_ms = self
+            .terminal_notification_minimum_run_duration_ms
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| {
+                anyhow!(
+                    "terminal.notifications.minimum_run_duration_ms must be a positive integer: {error}"
+                )
+            })?;
 
         let mut root_config = self.base_root_config.clone();
         root_config.agent.provider = provider_name.to_owned();
@@ -175,6 +191,15 @@ impl ConfigDraft {
         root_config.terminal.mouse_capture = self.terminal_mouse_capture;
         root_config.terminal.osc52_clipboard = self.terminal_osc52_clipboard;
         root_config.terminal.scroll_sensitivity = terminal_scroll_sensitivity;
+        root_config.terminal.notifications.enabled = self.terminal_notifications_enabled;
+        root_config.terminal.notifications.method = self.terminal_notification_method;
+        root_config.terminal.notifications.minimum_run_duration_ms =
+            terminal_notification_minimum_run_duration_ms;
+        root_config
+            .terminal
+            .notifications
+            .validate()
+            .map_err(anyhow::Error::msg)?;
         root_config.appearance.theme = self.appearance_theme;
         root_config.appearance.syntax_theme = self.appearance_syntax_theme;
         root_config.appearance.usage_cost_currency = self.appearance_usage_cost_currency;

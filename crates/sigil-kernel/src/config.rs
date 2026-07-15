@@ -611,6 +611,9 @@ impl Default for CodeIntelligenceConfig {
 
 /// Terminal integration controls for interactive entrypoints.
 pub const DEFAULT_TERMINAL_SCROLL_SENSITIVITY: u16 = 3;
+pub const DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS: u64 = 10_000;
+pub const MIN_TERMINAL_NOTIFICATION_RUN_DURATION_MS: u64 = 1_000;
+pub const MAX_TERMINAL_NOTIFICATION_RUN_DURATION_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -623,6 +626,8 @@ pub struct TerminalConfig {
     pub osc52_clipboard: bool,
     #[serde(default = "default_terminal_scroll_sensitivity")]
     pub scroll_sensitivity: u16,
+    #[serde(default)]
+    pub notifications: TerminalNotificationConfig,
 }
 
 impl Default for TerminalConfig {
@@ -632,6 +637,104 @@ impl Default for TerminalConfig {
             mouse_capture: default_terminal_mouse_capture(),
             osc52_clipboard: default_terminal_osc52_clipboard(),
             scroll_sensitivity: default_terminal_scroll_sensitivity(),
+            notifications: TerminalNotificationConfig::default(),
+        }
+    }
+}
+
+/// Privacy-bounded terminal attention notification settings.
+///
+/// Notification payloads are selected by the interactive entrypoint from a fixed signal set;
+/// this config only controls whether and how those ephemeral terminal bytes may be emitted.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TerminalNotificationConfig {
+    pub enabled: bool,
+    pub method: TerminalNotificationMethod,
+    pub minimum_run_duration_ms: u64,
+}
+
+impl Default for TerminalNotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            method: TerminalNotificationMethod::Auto,
+            minimum_run_duration_ms: default_terminal_notification_minimum_run_duration_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+struct TerminalNotificationConfigWire {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    method: TerminalNotificationMethod,
+    #[serde(default = "default_terminal_notification_minimum_run_duration_ms")]
+    minimum_run_duration_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for TerminalNotificationConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = TerminalNotificationConfigWire::deserialize(deserializer)?;
+        let config = Self {
+            enabled: wire.enabled,
+            method: wire.method,
+            minimum_run_duration_ms: wire.minimum_run_duration_ms,
+        };
+        config
+            .validate()
+            .map_err(<D::Error as serde::de::Error>::custom)?;
+        Ok(config)
+    }
+}
+
+impl TerminalNotificationConfig {
+    /// Validates the bounded duration used to decide whether a completed run is long enough to
+    /// notify.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !(MIN_TERMINAL_NOTIFICATION_RUN_DURATION_MS..=MAX_TERMINAL_NOTIFICATION_RUN_DURATION_MS)
+            .contains(&self.minimum_run_duration_ms)
+        {
+            return Err(format!(
+                "terminal.notifications.minimum_run_duration_ms must be between {MIN_TERMINAL_NOTIFICATION_RUN_DURATION_MS} and {MAX_TERMINAL_NOTIFICATION_RUN_DURATION_MS}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Terminal protocol selected for ephemeral attention notifications.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalNotificationMethod {
+    #[default]
+    Auto,
+    Osc9,
+    Osc777,
+    Bell,
+}
+
+impl TerminalNotificationMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Osc9 => "osc9",
+            Self::Osc777 => "osc777",
+            Self::Bell => "bell",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Osc9,
+            Self::Osc9 => Self::Osc777,
+            Self::Osc777 => Self::Bell,
+            Self::Bell => Self::Auto,
         }
     }
 }
@@ -2214,6 +2317,10 @@ fn default_terminal_osc52_clipboard() -> bool {
 
 fn default_terminal_scroll_sensitivity() -> u16 {
     DEFAULT_TERMINAL_SCROLL_SENSITIVITY
+}
+
+fn default_terminal_notification_minimum_run_duration_ms() -> u64 {
+    DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS
 }
 
 fn default_lsp_trust_required() -> bool {

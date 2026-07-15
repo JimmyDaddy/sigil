@@ -129,4 +129,5 @@ git diff --check
 
 ## 13. Progress
 
-- R31.0 in progress：技术方案、正式 RFC、执行台账和 commit/gate 边界已起草。
+- R31.0 complete：技术方案、正式 RFC、执行台账和 commit/gate 边界已冻结于 commit `ce44f8bc`。
+- R31.1 complete：kernel 默认值与边界校验、TUI Terminal 配置入口、保存回读和 runtime doctor 投影已完成；受影响 crate 全量测试、Clippy、格式与 docs gate 通过。

@@ -1547,7 +1547,8 @@ fn terminal_checks_report_disabled_config_and_smoke_checklist() {
     assert_eq!(report.overall_status(), DoctorStatus::Ok);
     assert!(report.checks.iter().any(|check| {
         check.name == "terminal:config"
-            && check.message == "mouse_capture=false osc52_clipboard=false scroll_sensitivity=3"
+            && check.message
+                == "mouse_capture=false osc52_clipboard=false scroll_sensitivity=3 notifications=false notification_method=auto notification_minimum_run_duration_ms=10000"
     }));
     assert!(report.checks.iter().any(|check| {
         check.name == "terminal:mouse"

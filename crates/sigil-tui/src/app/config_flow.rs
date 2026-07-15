@@ -758,6 +758,20 @@ impl AppState {
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
+                        ConfigField::TerminalNotificationsEnabled => {
+                            config_state.draft.terminal_notifications_enabled =
+                                !config_state.draft.terminal_notifications_enabled;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::TerminalNotificationMethod => {
+                            config_state.draft.terminal_notification_method =
+                                config_state.draft.terminal_notification_method.next();
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
                         ConfigField::AppearanceTheme => {
                             config_state.draft.appearance_theme =
                                 config_state.draft.appearance_theme.next();

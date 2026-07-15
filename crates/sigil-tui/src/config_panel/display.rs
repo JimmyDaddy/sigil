@@ -30,6 +30,9 @@ impl ConfigState {
             }
             ConfigField::CompactionTailMessages => Some(&self.draft.compaction_tail_messages),
             ConfigField::TerminalScrollSensitivity => Some(&self.draft.terminal_scroll_sensitivity),
+            ConfigField::TerminalNotificationMinimumRunDurationMs => {
+                Some(&self.draft.terminal_notification_minimum_run_duration_ms)
+            }
             ConfigField::SkillId if self.selected_section == ConfigSection::Agents => {
                 self.selected_agent().map(|agent| agent.profile.id.as_str())
             }
@@ -63,6 +66,8 @@ impl ConfigState {
             | ConfigField::CodeIntelReportMissing
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
+            | ConfigField::TerminalNotificationsEnabled
+            | ConfigField::TerminalNotificationMethod
             | ConfigField::AppearanceTheme
             | ConfigField::AppearanceSyntaxTheme
             | ConfigField::AppearanceUsageCostCurrency
@@ -98,6 +103,9 @@ impl ConfigState {
             ConfigField::TerminalScrollSensitivity => {
                 Some(&mut self.draft.terminal_scroll_sensitivity)
             }
+            ConfigField::TerminalNotificationMinimumRunDurationMs => {
+                Some(&mut self.draft.terminal_notification_minimum_run_duration_ms)
+            }
             ConfigField::SkillId | ConfigField::PluginId => None,
             ConfigField::McpName => self
                 .selected_mcp_server_mut()
@@ -125,6 +133,8 @@ impl ConfigState {
             | ConfigField::CodeIntelReportMissing
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
+            | ConfigField::TerminalNotificationsEnabled
+            | ConfigField::TerminalNotificationMethod
             | ConfigField::AppearanceTheme
             | ConfigField::AppearanceSyntaxTheme => None,
             ConfigField::AppearanceUsageCostCurrency => None,
@@ -217,6 +227,12 @@ impl ConfigState {
             ConfigField::TerminalOsc52Clipboard => {
                 return bool_label(self.draft.terminal_osc52_clipboard).to_owned();
             }
+            ConfigField::TerminalNotificationsEnabled => {
+                return bool_label(self.draft.terminal_notifications_enabled).to_owned();
+            }
+            ConfigField::TerminalNotificationMethod => {
+                return self.draft.terminal_notification_method.as_str().to_owned();
+            }
             ConfigField::AppearanceTheme => {
                 return self.draft.appearance_theme.as_str().to_owned();
             }
@@ -251,6 +267,9 @@ impl ConfigState {
             | ConfigField::ModelRequestStreamIdleTimeoutSecs
             | ConfigField::McpStartupTimeoutSecs => format!("{text_value} seconds"),
             ConfigField::TerminalScrollSensitivity => format!("{text_value} rows"),
+            ConfigField::TerminalNotificationMinimumRunDurationMs => {
+                format!("{text_value} ms")
+            }
             ConfigField::McpArgsCsv if text_value.trim().is_empty() => "none".to_owned(),
             ConfigField::CompactionContextWindowTokens if text_value.trim().is_empty() => {
                 "provider/model metadata".to_owned()
@@ -297,6 +316,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::ModelRequestTimeoutSecs
         | ConfigField::ModelRequestStreamIdleTimeoutSecs
         | ConfigField::TerminalScrollSensitivity
+        | ConfigField::TerminalNotificationMinimumRunDurationMs
         | ConfigField::McpStartupTimeoutSecs => character.is_ascii_digit(),
         ConfigField::CompactionSoftThresholdRatio | ConfigField::CompactionHardThresholdRatio => {
             character.is_ascii_digit() || character == '.'
@@ -324,6 +344,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::CodeIntelReportMissing
         | ConfigField::TerminalMouseCapture
         | ConfigField::TerminalOsc52Clipboard
+        | ConfigField::TerminalNotificationsEnabled
+        | ConfigField::TerminalNotificationMethod
         | ConfigField::AppearanceTheme
         | ConfigField::AppearanceSyntaxTheme
         | ConfigField::McpName => false,

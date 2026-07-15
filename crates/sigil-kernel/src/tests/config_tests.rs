@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, env, path::Path, sync::Mutex, time::Duration};
 
 use super::{
-    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, ConfigPlatform, McpServerConfig,
-    McpServerStartup, McpTrustClass, ModelRequestConfig, RootConfig,
-    SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
-    SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SyntaxThemeId, TerminalKeyboardEnhancement, ThemeId,
+    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, ConfigPlatform,
+    DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS, McpServerConfig, McpServerStartup,
+    McpTrustClass, ModelRequestConfig, RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV,
+    SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV,
+    SyntaxThemeId, TerminalKeyboardEnhancement, TerminalNotificationMethod, ThemeId,
     UsageCostCurrency, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchRoute,
     default_user_config_dir, default_user_config_path, preferred_config_path,
     preferred_config_path_for_known_paths, resolve_workspace_root, user_home_dir_from_env,
@@ -1048,6 +1049,11 @@ keyboard_enhancement = "on"
 mouse_capture = false
 osc52_clipboard = false
 scroll_sensitivity = 5
+
+[terminal.notifications]
+enabled = true
+method = "osc777"
+minimum_run_duration_ms = 25000
 "#,
     )
     .expect("terminal config should parse");
@@ -1059,6 +1065,15 @@ scroll_sensitivity = 5
     assert!(!config.terminal.mouse_capture);
     assert!(!config.terminal.osc52_clipboard);
     assert_eq!(config.terminal.scroll_sensitivity, 5);
+    assert!(config.terminal.notifications.enabled);
+    assert_eq!(
+        config.terminal.notifications.method,
+        TerminalNotificationMethod::Osc777
+    );
+    assert_eq!(
+        config.terminal.notifications.minimum_run_duration_ms,
+        25_000
+    );
 }
 
 #[test]
@@ -1079,6 +1094,76 @@ model = "deepseek-v4-flash"
     assert!(config.terminal.mouse_capture);
     assert!(config.terminal.osc52_clipboard);
     assert_eq!(config.terminal.scroll_sensitivity, 3);
+    assert!(!config.terminal.notifications.enabled);
+    assert_eq!(
+        config.terminal.notifications.method,
+        TerminalNotificationMethod::Auto
+    );
+    assert_eq!(
+        config.terminal.notifications.minimum_run_duration_ms,
+        DEFAULT_TERMINAL_NOTIFICATION_MINIMUM_RUN_DURATION_MS
+    );
+}
+
+#[test]
+fn root_config_rejects_invalid_terminal_notification_method() {
+    let error = toml::from_str::<RootConfig>(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[terminal.notifications]
+method = "native"
+"#,
+    )
+    .expect_err("unsupported notification method should be rejected");
+
+    assert!(error.to_string().contains("method"));
+}
+
+#[test]
+fn root_config_rejects_out_of_range_terminal_notification_duration() {
+    for duration in [999_u64, 3_600_001] {
+        let raw = format!(
+            r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[terminal.notifications]
+minimum_run_duration_ms = {duration}
+"#
+        );
+        let error = toml::from_str::<RootConfig>(&raw)
+            .expect_err("out-of-range notification duration should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("terminal.notifications.minimum_run_duration_ms")
+        );
+    }
+}
+
+#[test]
+fn terminal_notification_method_cycles_through_supported_protocols() {
+    assert_eq!(
+        TerminalNotificationMethod::Auto.next(),
+        TerminalNotificationMethod::Osc9
+    );
+    assert_eq!(
+        TerminalNotificationMethod::Osc9.next(),
+        TerminalNotificationMethod::Osc777
+    );
+    assert_eq!(
+        TerminalNotificationMethod::Osc777.next(),
+        TerminalNotificationMethod::Bell
+    );
+    assert_eq!(
+        TerminalNotificationMethod::Bell.next(),
+        TerminalNotificationMethod::Auto
+    );
 }
 
 #[test]

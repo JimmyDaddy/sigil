@@ -497,7 +497,11 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Terminal),
-        &[]
+        &[
+            ConfigField::TerminalNotificationsEnabled,
+            ConfigField::TerminalNotificationMethod,
+            ConfigField::TerminalNotificationMinimumRunDurationMs,
+        ]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Appearance),
@@ -538,6 +542,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::TerminalScrollSensitivity.label(),
         "scroll_sensitivity"
     );
+    assert_eq!(
+        ConfigField::TerminalNotificationMethod.label(),
+        "notification_method"
+    );
     assert_eq!(ConfigField::AppearanceTheme.label(), "theme");
     assert_eq!(ConfigField::AppearanceSyntaxTheme.label(), "syntax_theme");
     assert_eq!(
@@ -567,6 +575,14 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(
         ConfigField::TerminalScrollSensitivity.action_label(),
         "Enter input"
+    );
+    assert_eq!(
+        ConfigField::TerminalNotificationsEnabled.action_label(),
+        "Enter toggle"
+    );
+    assert_eq!(
+        ConfigField::TerminalNotificationMethod.action_label(),
+        "Enter cycle"
     );
     assert_eq!(ConfigField::AppearanceTheme.action_label(), "Enter cycle");
     assert_eq!(
@@ -667,6 +683,11 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::TerminalOsc52Clipboard
             .help_text()
             .contains("OSC52")
+    );
+    assert!(
+        ConfigField::TerminalNotificationsEnabled
+            .help_text()
+            .contains("Disabled by default")
     );
     assert!(
         ConfigField::AppearanceTheme
@@ -1474,6 +1495,14 @@ fn config_draft_validates_provider_and_compaction_values() {
             draft.terminal_scroll_sensitivity = "0".to_owned();
             (draft, "scroll_sensitivity must be greater than 0")
         },
+        {
+            let mut draft = base.clone();
+            draft.terminal_notification_minimum_run_duration_ms = "999".to_owned();
+            (
+                draft,
+                "terminal.notifications.minimum_run_duration_ms must be between 1000 and 3600000",
+            )
+        },
     ] {
         let error = draft.to_root_config().expect_err(expected);
         assert!(
@@ -1602,6 +1631,14 @@ fn config_field_character_filter_matches_field_kind() {
         ConfigField::TerminalScrollSensitivity,
         '.'
     ));
+    assert!(config_field_accepts_char(
+        ConfigField::TerminalNotificationMinimumRunDurationMs,
+        '7'
+    ));
+    assert!(!config_field_accepts_char(
+        ConfigField::TerminalNotificationMinimumRunDurationMs,
+        '.'
+    ));
     assert!(!config_field_accepts_char(
         ConfigField::CompactionContextWindowTokens,
         '.'
@@ -1660,6 +1697,18 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
         state.display_value(ConfigField::TerminalScrollSensitivity),
         "3 rows"
     );
+    assert_eq!(
+        state.display_value(ConfigField::TerminalNotificationsEnabled),
+        "no"
+    );
+    assert_eq!(
+        state.display_value(ConfigField::TerminalNotificationMethod),
+        "auto"
+    );
+    assert_eq!(
+        state.display_value(ConfigField::TerminalNotificationMinimumRunDurationMs),
+        "10000 ms"
+    );
     *state
         .field_text_value_mut(ConfigField::TerminalScrollSensitivity)
         .expect("terminal scroll sensitivity should be mutable") = "9".to_owned();
@@ -1672,10 +1721,22 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
     draft.terminal_mouse_capture = false;
     draft.terminal_osc52_clipboard = false;
     draft.terminal_scroll_sensitivity = "7".to_owned();
+    draft.terminal_notifications_enabled = true;
+    draft.terminal_notification_method = sigil_kernel::TerminalNotificationMethod::Bell;
+    draft.terminal_notification_minimum_run_duration_ms = "12000".to_owned();
     let root_config = draft.to_root_config()?;
     assert!(!root_config.terminal.mouse_capture);
     assert!(!root_config.terminal.osc52_clipboard);
     assert_eq!(root_config.terminal.scroll_sensitivity, 7);
+    assert!(root_config.terminal.notifications.enabled);
+    assert_eq!(
+        root_config.terminal.notifications.method,
+        sigil_kernel::TerminalNotificationMethod::Bell
+    );
+    assert_eq!(
+        root_config.terminal.notifications.minimum_run_duration_ms,
+        12_000
+    );
 
     assert_eq!(display_ratio("not-a-number"), "not-a-number");
     Ok(())

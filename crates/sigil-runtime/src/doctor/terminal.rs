@@ -41,8 +41,13 @@ pub(super) fn check_terminal_with_env(
             DoctorStatus::Ok,
             "terminal:config",
             format!(
-                "mouse_capture={} osc52_clipboard={} scroll_sensitivity={}",
-                config.mouse_capture, config.osc52_clipboard, config.scroll_sensitivity
+                "mouse_capture={} osc52_clipboard={} scroll_sensitivity={} notifications={} notification_method={} notification_minimum_run_duration_ms={}",
+                config.mouse_capture,
+                config.osc52_clipboard,
+                config.scroll_sensitivity,
+                config.notifications.enabled,
+                config.notifications.method.as_str(),
+                config.notifications.minimum_run_duration_ms
             ),
         );
         check_terminal_mouse(report, config, environment);

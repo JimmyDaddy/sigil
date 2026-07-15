@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use sigil_kernel::{
     CodeIntelStartup, PermissionMode, PluginManifestSnapshot, RootConfig, SkillDescriptor,
-    SyntaxThemeId, TerminalKeyboardEnhancement, ThemeId, UsageCostCurrency,
-    VerificationAutoRunPolicy,
+    SyntaxThemeId, TerminalKeyboardEnhancement, TerminalNotificationMethod, ThemeId,
+    UsageCostCurrency, VerificationAutoRunPolicy,
 };
 #[cfg(test)]
 pub(crate) use sigil_runtime::{
@@ -89,6 +89,9 @@ pub(crate) struct ConfigDraft {
     pub(crate) terminal_mouse_capture: bool,
     pub(crate) terminal_osc52_clipboard: bool,
     pub(crate) terminal_scroll_sensitivity: String,
+    pub(crate) terminal_notifications_enabled: bool,
+    pub(crate) terminal_notification_method: TerminalNotificationMethod,
+    pub(crate) terminal_notification_minimum_run_duration_ms: String,
     pub(crate) appearance_theme: ThemeId,
     pub(crate) appearance_syntax_theme: SyntaxThemeId,
     pub(crate) appearance_usage_cost_currency: UsageCostCurrency,

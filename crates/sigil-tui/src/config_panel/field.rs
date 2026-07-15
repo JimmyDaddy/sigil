@@ -44,6 +44,9 @@ pub(crate) enum ConfigField {
     TerminalOsc52Clipboard,
     #[allow(dead_code)]
     TerminalScrollSensitivity,
+    TerminalNotificationsEnabled,
+    TerminalNotificationMethod,
+    TerminalNotificationMinimumRunDurationMs,
     AppearanceTheme,
     AppearanceSyntaxTheme,
     AppearanceUsageCostCurrency,
@@ -94,7 +97,11 @@ impl ConfigField {
     ];
     const CODE_INTELLIGENCE_FIELDS: [Self; 2] =
         [Self::CodeIntelEnabled, Self::CodeIntelServerStartup];
-    const TERMINAL_FIELDS: [Self; 0] = [];
+    const TERMINAL_FIELDS: [Self; 3] = [
+        Self::TerminalNotificationsEnabled,
+        Self::TerminalNotificationMethod,
+        Self::TerminalNotificationMinimumRunDurationMs,
+    ];
     const APPEARANCE_FIELDS: [Self; 3] = [
         Self::AppearanceTheme,
         Self::AppearanceSyntaxTheme,
@@ -154,6 +161,9 @@ impl ConfigField {
             Self::TerminalMouseCapture => "mouse_capture",
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
+            Self::TerminalNotificationsEnabled => "notifications_enabled",
+            Self::TerminalNotificationMethod => "notification_method",
+            Self::TerminalNotificationMinimumRunDurationMs => "minimum_run_duration_ms",
             Self::AppearanceTheme => "theme",
             Self::AppearanceSyntaxTheme => "syntax_theme",
             Self::AppearanceUsageCostCurrency => "usage_cost_currency",
@@ -197,6 +207,9 @@ impl ConfigField {
             Self::TerminalMouseCapture => "Mouse capture",
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
+            Self::TerminalNotificationsEnabled => "Attention notifications",
+            Self::TerminalNotificationMethod => "Notification method",
+            Self::TerminalNotificationMinimumRunDurationMs => "Long-run threshold",
             Self::AppearanceTheme => "Theme",
             Self::AppearanceSyntaxTheme => "Syntax theme",
             Self::AppearanceUsageCostCurrency => "Cost currency",
@@ -290,6 +303,15 @@ impl ConfigField {
             Self::TerminalScrollSensitivity => {
                 "Mouse wheel rows per tick for transcript and approval diff scrolling."
             }
+            Self::TerminalNotificationsEnabled => {
+                "Emits privacy-bounded terminal attention signals for long runs and input-required states. Disabled by default."
+            }
+            Self::TerminalNotificationMethod => {
+                "Selects automatic terminal detection, OSC 9, OSC 777, or an audible terminal bell."
+            }
+            Self::TerminalNotificationMinimumRunDurationMs => {
+                "Completed runs notify only after this duration. Input-required and failure signals do not use this threshold."
+            }
             Self::AppearanceTheme => {
                 "Color palette for the TUI. Draft themes preview immediately; saving persists the choice and does not affect session history."
             }
@@ -336,6 +358,7 @@ impl ConfigField {
                 | Self::CompactionContextWindowTokens
                 | Self::CompactionTailMessages
                 | Self::TerminalScrollSensitivity
+                | Self::TerminalNotificationMinimumRunDurationMs
                 | Self::AppearanceColorOverride
                 | Self::McpCommand
                 | Self::McpArgsCsv
@@ -353,6 +376,7 @@ impl ConfigField {
             | Self::WebSearchRoute
             | Self::VerificationAutoRun
             | Self::CodeIntelServerStartup
+            | Self::TerminalNotificationMethod
             | Self::AppearanceTheme
             | Self::AppearanceSyntaxTheme => "Enter cycle",
             Self::AppearanceUsageCostCurrency => "Enter cycle",
@@ -366,8 +390,11 @@ impl ConfigField {
             | Self::CodeIntelAutoDiscover
             | Self::CodeIntelReportMissing
             | Self::TerminalMouseCapture
-            | Self::TerminalOsc52Clipboard => "Enter toggle",
-            Self::TerminalScrollSensitivity => "Enter input",
+            | Self::TerminalOsc52Clipboard
+            | Self::TerminalNotificationsEnabled => "Enter toggle",
+            Self::TerminalScrollSensitivity | Self::TerminalNotificationMinimumRunDurationMs => {
+                "Enter input"
+            }
             Self::AppearanceColorOverride => "Enter input",
             Self::SkillId | Self::PluginId => "",
             _ if self.accepts_text_input() => "Enter input",

@@ -1287,6 +1287,10 @@ fn config_terminal_step_shows_controls_and_compatibility() {
     let detail = app.config_detail_lines().join("\n");
 
     assert!(detail.contains("Terminal 8/13 · terminal integration"));
+    assert!(detail.contains("[attention signals]"));
+    assert!(detail.contains("> Attention notifications: no  [Enter toggle]"));
+    assert!(detail.contains("Notification method: auto"));
+    assert!(detail.contains("Long-run threshold: 10000 ms"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("- Keyboard enhancement: auto"));
     assert!(detail.contains("- Mouse capture: yes"));
@@ -3069,6 +3073,9 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.terminal_mouse_capture = false;
     state.draft.terminal_osc52_clipboard = false;
     state.draft.terminal_scroll_sensitivity = "6".to_owned();
+    state.draft.terminal_notifications_enabled = true;
+    state.draft.terminal_notification_method = sigil_kernel::TerminalNotificationMethod::Osc9;
+    state.draft.terminal_notification_minimum_run_duration_ms = "15000".to_owned();
     state.dirty = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
@@ -3095,6 +3102,15 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert!(!root_config.terminal.mouse_capture);
     assert!(!root_config.terminal.osc52_clipboard);
     assert_eq!(root_config.terminal.scroll_sensitivity, 6);
+    assert!(root_config.terminal.notifications.enabled);
+    assert_eq!(
+        root_config.terminal.notifications.method,
+        sigil_kernel::TerminalNotificationMethod::Osc9
+    );
+    assert_eq!(
+        root_config.terminal.notifications.minimum_run_duration_ms,
+        15_000
+    );
     assert!(!app.config_is_dirty());
     assert_eq!(app.runtime.permission_mode, "auto-edit");
     assert!(!app.runtime.memory_enabled);
@@ -3119,6 +3135,12 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert!(!saved.terminal.mouse_capture);
     assert!(!saved.terminal.osc52_clipboard);
     assert_eq!(saved.terminal.scroll_sensitivity, 6);
+    assert!(saved.terminal.notifications.enabled);
+    assert_eq!(
+        saved.terminal.notifications.method,
+        sigil_kernel::TerminalNotificationMethod::Osc9
+    );
+    assert_eq!(saved.terminal.notifications.minimum_run_duration_ms, 15_000);
     let saved_raw = std::fs::read_to_string(&config_path)?;
     assert!(saved_raw.contains("fallback_context_window_tokens = 64000"));
     assert!(
@@ -4202,11 +4224,34 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Terminal);
-        assert_eq!(state.selected_field, None);
+        assert_eq!(
+            state.selected_field,
+            Some(ConfigField::TerminalNotificationsEnabled)
+        );
         assert!(!state.focus_field(ConfigField::TerminalMouseCapture));
         assert!(!state.focus_field(ConfigField::TerminalOsc52Clipboard));
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .terminal_notifications_enabled
+    );
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::TerminalNotificationMethod);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .terminal_notification_method,
+        sigil_kernel::TerminalNotificationMethod::Osc9
+    );
     assert!(
         app.config_state
             .as_ref()
