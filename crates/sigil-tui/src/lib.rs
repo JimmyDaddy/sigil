@@ -16,6 +16,7 @@ pub(crate) mod agent_display;
 pub mod app;
 pub mod appearance_diagnostics;
 pub(crate) mod approval;
+pub(crate) mod attention;
 pub(crate) mod commands;
 pub(crate) mod config_panel;
 pub(crate) mod input;

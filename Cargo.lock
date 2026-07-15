@@ -2947,6 +2947,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
  "two-face",
  "unicode-segmentation",
  "unicode-width",

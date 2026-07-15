@@ -1,0 +1,289 @@
+use std::{io, time::Duration, time::Instant};
+
+#[cfg(not(test))]
+use std::env;
+
+use sigil_kernel::{
+    RunEvent, TaskRunStatus, TerminalNotificationConfig, TerminalNotificationMethod,
+};
+
+use crate::runner::WorkerMessage;
+
+const ATTENTION_COOLDOWN: Duration = Duration::from_secs(20);
+const OSC_ST: &str = "\x1b\\";
+
+/// Fixed, privacy-safe attention categories. Dynamic event fields are intentionally absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttentionSignal {
+    LongRunComplete,
+    ApprovalRequired,
+    RunFailed,
+    InputRequired,
+}
+
+impl AttentionSignal {
+    const fn index(self) -> usize {
+        match self {
+            Self::LongRunComplete => 0,
+            Self::ApprovalRequired => 1,
+            Self::RunFailed => 2,
+            Self::InputRequired => 3,
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::LongRunComplete => "Sigil session complete",
+            Self::ApprovalRequired | Self::InputRequired => "Sigil needs your attention",
+            Self::RunFailed => "Sigil run failed",
+        }
+    }
+
+    const fn body(self) -> &'static str {
+        match self {
+            Self::LongRunComplete => "Long run finished.",
+            Self::ApprovalRequired => "Tool approval required.",
+            Self::RunFailed => "Open Sigil for details.",
+            Self::InputRequired => "Input required to continue.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TerminalNotificationEnvironment {
+    term_program: Option<String>,
+    term: Option<String>,
+    has_vte: bool,
+    has_wezterm: bool,
+    has_kitty: bool,
+    tmux: bool,
+    screen: bool,
+}
+
+impl TerminalNotificationEnvironment {
+    #[cfg(not(test))]
+    fn from_current_process() -> Self {
+        Self {
+            term_program: non_empty_env("TERM_PROGRAM"),
+            term: non_empty_env("TERM"),
+            has_vte: non_empty_env("VTE_VERSION").is_some(),
+            has_wezterm: non_empty_env("WEZTERM_PANE").is_some(),
+            has_kitty: non_empty_env("KITTY_WINDOW_ID").is_some(),
+            tmux: non_empty_env("TMUX").is_some(),
+            screen: non_empty_env("STY").is_some(),
+        }
+    }
+
+    fn resolve_method(&self, configured: TerminalNotificationMethod) -> TerminalNotificationMethod {
+        if configured != TerminalNotificationMethod::Auto {
+            return configured;
+        }
+
+        let term_program = self.term_program.as_deref().unwrap_or_default();
+        let term = self.term.as_deref().unwrap_or_default();
+        if matches!(term_program, "iTerm.app" | "WezTerm")
+            || self.has_wezterm
+            || self.has_kitty
+            || term.contains("kitty")
+        {
+            TerminalNotificationMethod::Osc9
+        } else if self.has_vte || term.contains("rxvt") {
+            TerminalNotificationMethod::Osc777
+        } else {
+            TerminalNotificationMethod::Bell
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn non_empty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) struct AttentionController {
+    config: TerminalNotificationConfig,
+    environment: TerminalNotificationEnvironment,
+    focused: Option<bool>,
+    active_run_started_at: Option<Instant>,
+    last_emitted: [Option<Instant>; 4],
+    pending: Vec<AttentionSignal>,
+}
+
+impl AttentionController {
+    #[cfg(not(test))]
+    pub(crate) fn from_current_process(config: TerminalNotificationConfig) -> Self {
+        Self::new(
+            config,
+            TerminalNotificationEnvironment::from_current_process(),
+        )
+    }
+
+    pub(crate) fn new(
+        config: TerminalNotificationConfig,
+        environment: TerminalNotificationEnvironment,
+    ) -> Self {
+        Self {
+            config,
+            environment,
+            focused: None,
+            active_run_started_at: None,
+            last_emitted: [None; 4],
+            pending: Vec::new(),
+        }
+    }
+
+    pub(crate) fn update_config(&mut self, config: TerminalNotificationConfig) {
+        if !self.config.enabled && config.enabled {
+            self.focused = None;
+            self.last_emitted = [None; 4];
+        }
+        self.config = config;
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn reset_focus_reliability(&mut self) {
+        self.focused = None;
+    }
+
+    pub(crate) fn observe_focus(&mut self, focused: bool) {
+        self.focused = Some(focused);
+    }
+
+    pub(crate) fn observe(&mut self, message: &WorkerMessage, now: Instant) {
+        match message {
+            WorkerMessage::RunStarted { .. }
+            | WorkerMessage::SkillRunStarted { .. }
+            | WorkerMessage::PlanRunStarted { .. }
+            | WorkerMessage::TaskRunStarted { .. } => {
+                self.active_run_started_at.get_or_insert(now);
+            }
+            WorkerMessage::RunFinished { .. } | WorkerMessage::PlanRunFinished { .. } => {
+                self.finish_run(now, AttentionSignal::LongRunComplete);
+            }
+            WorkerMessage::TaskRunFinished { status, .. } => match status {
+                TaskRunStatus::Completed => {
+                    self.finish_run(now, AttentionSignal::LongRunComplete);
+                }
+                TaskRunStatus::Failed | TaskRunStatus::Interrupted => {
+                    self.finish_run(now, AttentionSignal::RunFailed);
+                }
+                TaskRunStatus::Cancelled => {
+                    self.active_run_started_at = None;
+                }
+                TaskRunStatus::Started | TaskRunStatus::Running | TaskRunStatus::Paused => {}
+            },
+            WorkerMessage::RunFailed(_) | WorkerMessage::RunInterrupted { .. } => {
+                self.finish_run(now, AttentionSignal::RunFailed);
+            }
+            WorkerMessage::RunCancelled { .. } => {
+                self.active_run_started_at = None;
+            }
+            WorkerMessage::Event(event) | WorkerMessage::AgentThreadEvent { event, .. } => {
+                if matches!(event.as_ref(), RunEvent::ToolApprovalRequested { .. }) {
+                    self.queue_signal(AttentionSignal::ApprovalRequired, now);
+                }
+            }
+            WorkerMessage::McpElicitationRequest { .. } => {
+                self.queue_signal(AttentionSignal::InputRequired, now);
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_run(&mut self, now: Instant, signal: AttentionSignal) {
+        let Some(started_at) = self.active_run_started_at.take() else {
+            return;
+        };
+        if signal != AttentionSignal::LongRunComplete
+            || now.saturating_duration_since(started_at)
+                >= Duration::from_millis(self.config.minimum_run_duration_ms)
+        {
+            self.queue_signal(signal, now);
+        }
+    }
+
+    fn queue_signal(&mut self, signal: AttentionSignal, now: Instant) {
+        if !self.config.enabled || self.focused == Some(true) {
+            return;
+        }
+        let last_emitted = &mut self.last_emitted[signal.index()];
+        if last_emitted.is_some_and(|last| now.saturating_duration_since(last) < ATTENTION_COOLDOWN)
+        {
+            return;
+        }
+        *last_emitted = Some(now);
+        self.pending.push(signal);
+    }
+
+    pub(crate) fn emit_pending<W: io::Write>(&mut self, writer: &mut W) -> io::Result<usize> {
+        let pending = std::mem::take(&mut self.pending);
+        for signal in pending.iter().copied() {
+            let sequence = encode_notification(
+                signal,
+                self.environment.resolve_method(self.config.method),
+                &self.environment,
+            );
+            writer.write_all(&sequence)?;
+        }
+        if !pending.is_empty() {
+            writer.flush()?;
+        }
+        Ok(pending.len())
+    }
+
+    pub(crate) fn emit_pending_nonfatal<W: io::Write>(&mut self, writer: &mut W) -> usize {
+        match self.emit_pending(writer) {
+            Ok(emitted) => emitted,
+            Err(error) => {
+                tracing::debug!(%error, "failed to emit terminal attention notification");
+                0
+            }
+        }
+    }
+}
+
+fn encode_notification(
+    signal: AttentionSignal,
+    method: TerminalNotificationMethod,
+    environment: &TerminalNotificationEnvironment,
+) -> Vec<u8> {
+    if method == TerminalNotificationMethod::Bell {
+        return vec![b'\x07'];
+    }
+
+    let sequence = match method {
+        TerminalNotificationMethod::Osc9 => {
+            format!("\x1b]9;{} | {}{OSC_ST}", signal.title(), signal.body())
+        }
+        TerminalNotificationMethod::Osc777 => format!(
+            "\x1b]777;notify;{};{}{OSC_ST}",
+            signal.title(),
+            signal.body()
+        ),
+        TerminalNotificationMethod::Auto | TerminalNotificationMethod::Bell => unreachable!(
+            "auto notification methods must be resolved and bell returns before OSC encoding"
+        ),
+    };
+
+    wrap_with_passthrough(sequence, environment).into_bytes()
+}
+
+fn wrap_with_passthrough(
+    sequence: String,
+    environment: &TerminalNotificationEnvironment,
+) -> String {
+    if environment.tmux {
+        format!("\x1bPtmux;{}\x1b\\", sequence.replace('\x1b', "\x1b\x1b"))
+    } else if environment.screen {
+        format!("\x1bP{sequence}\x1b\\")
+    } else {
+        sequence
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/attention_tests.rs"]
+mod tests;

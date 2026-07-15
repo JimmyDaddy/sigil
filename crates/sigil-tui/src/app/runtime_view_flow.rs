@@ -60,6 +60,14 @@ impl AppState {
             .max(1)
     }
 
+    #[cfg(not(test))]
+    pub(crate) fn terminal_notification_config(&self) -> sigil_kernel::TerminalNotificationConfig {
+        self.config_snapshot
+            .as_ref()
+            .map(|config| config.terminal.notifications.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn root_config_snapshot(&self) -> Option<&RootConfig> {
         self.config_snapshot.as_ref()
     }

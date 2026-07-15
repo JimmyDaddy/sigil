@@ -1,7 +1,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(not(test))]
@@ -10,7 +10,7 @@ use std::{
     panic::{self, AssertUnwindSafe},
     process::{Command, Stdio},
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(not(test))]
@@ -20,9 +20,9 @@ use anyhow::Result;
 use crossterm::{
     cursor::Show,
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as CrosstermEvent, KeyEventKind, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event as CrosstermEvent, KeyEventKind,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
@@ -47,6 +47,7 @@ use sigil_runtime::support::SupportBuildInfo;
 use crate::ui;
 use crate::{
     app::{AppAction, AppState},
+    attention::AttentionController,
     mouse::AppMouseOutcome,
     runner::{self, WorkerCommand, WorkerMessage},
     ui::{LayoutSnapshot, theme},
@@ -132,6 +133,18 @@ fn run_tui_with_initial_session(
     cleanup.keyboard_enhancement_enabled = keyboard_enhancement_enabled;
     let bracketed_paste_enabled = enable_bracketed_paste(&mut stdout)?;
     cleanup.bracketed_paste_enabled = bracketed_paste_enabled;
+    let mut focus_change_active = false;
+    if app.terminal_notification_config().enabled {
+        match execute!(stdout, EnableFocusChange) {
+            Ok(()) => {
+                focus_change_active = true;
+                cleanup.focus_change_active = true;
+            }
+            Err(error) => {
+                tracing::debug!(%error, "terminal focus reporting unavailable");
+            }
+        }
+    }
     let mut mouse_capture_active = app.terminal_mouse_capture_enabled();
     if mouse_capture_active {
         execute!(stdout, EnableMouseCapture)?;
@@ -144,9 +157,11 @@ fn run_tui_with_initial_session(
             &mut app,
             &mut worker,
             &mut mouse_capture_active,
+            &mut focus_change_active,
         )
     }));
     cleanup.mouse_capture_active = mouse_capture_active;
+    cleanup.focus_change_active = focus_change_active;
     let cleanup_result = cleanup.restore();
     panic_hook.restore();
     let result = match result {
@@ -171,6 +186,7 @@ struct TerminalCleanupGuard {
     keyboard_enhancement_enabled: bool,
     bracketed_paste_enabled: bool,
     mouse_capture_active: bool,
+    focus_change_active: bool,
 }
 
 #[cfg(not(test))]
@@ -181,6 +197,7 @@ impl TerminalCleanupGuard {
             keyboard_enhancement_enabled: false,
             bracketed_paste_enabled: false,
             mouse_capture_active: false,
+            focus_change_active: false,
         }
     }
 
@@ -197,6 +214,10 @@ impl TerminalCleanupGuard {
         if self.bracketed_paste_enabled {
             remember_cleanup_error(execute!(stdout, DisableBracketedPaste), &mut first_error);
             self.bracketed_paste_enabled = false;
+        }
+        if self.focus_change_active {
+            remember_cleanup_error(execute!(stdout, DisableFocusChange), &mut first_error);
+            self.focus_change_active = false;
         }
         if self.mouse_capture_active {
             remember_cleanup_error(execute!(stdout, DisableMouseCapture), &mut first_error);
@@ -273,6 +294,7 @@ fn restore_terminal_escape_state() {
     let mut stdout = io::stdout();
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     let _ = execute!(stdout, DisableBracketedPaste);
+    let _ = execute!(stdout, DisableFocusChange);
     let _ = execute!(stdout, DisableMouseCapture);
     let _ = execute!(stdout, Show);
     let _ = disable_raw_mode();
@@ -347,15 +369,20 @@ fn run_app(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     mouse_capture_active: &mut bool,
+    focus_change_active: &mut bool,
 ) -> Result<()> {
     let mut scrollback = ScrollbackSyncState::default();
     let mut needs_render = true;
     let mut last_spinner_tick = live_spinner_tick();
     let mut latest_frame_area = Rect::default();
+    let mut attention =
+        AttentionController::from_current_process(app.terminal_notification_config());
 
     loop {
+        attention.update_config(app.terminal_notification_config());
         let mut dirty = needs_render;
-        dirty |= drain_worker_messages(app, worker)?;
+        dirty |= drain_worker_messages_with_attention(app, worker, &mut attention)?;
+        attention.emit_pending_nonfatal(terminal.backend_mut());
         dirty |= app.poll_background_tasks();
         dirty |= expire_unready_worker(app, worker)?;
         dirty |= flush_pending_worker_commands(app, worker)?;
@@ -369,6 +396,27 @@ fn run_app(
             }
             *mouse_capture_active = enable;
             dirty = true;
+        }
+        let focus_change_desired = app.terminal_notification_config().enabled;
+        if *focus_change_active != focus_change_desired {
+            let action = if focus_change_desired {
+                execute!(terminal.backend_mut(), EnableFocusChange)
+            } else {
+                execute!(terminal.backend_mut(), DisableFocusChange)
+            };
+            match action {
+                Ok(()) => {
+                    *focus_change_active = focus_change_desired;
+                    attention.reset_focus_reliability();
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        enabled = focus_change_desired,
+                        "failed to update terminal focus reporting"
+                    );
+                }
+            }
         }
 
         let size = terminal.size()?;
@@ -410,6 +458,7 @@ fn run_app(
                     latest_frame_area,
                     size.into(),
                     crossterm_event,
+                    &mut attention,
                     spawn_worker,
                 )?;
                 processed_events += 1;
@@ -435,6 +484,7 @@ fn process_terminal_event<F>(
     latest_frame_area: Rect,
     terminal_size: Rect,
     crossterm_event: CrosstermEvent,
+    attention: &mut AttentionController,
     spawn_worker: F,
 ) -> Result<bool>
 where
@@ -455,6 +505,14 @@ where
         CrosstermEvent::Paste(text) => {
             app.handle_paste_text(&text);
             *needs_render = true;
+            Ok(false)
+        }
+        CrosstermEvent::FocusGained => {
+            attention.observe_focus(true);
+            Ok(false)
+        }
+        CrosstermEvent::FocusLost => {
+            attention.observe_focus(false);
             Ok(false)
         }
         CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
@@ -799,7 +857,25 @@ fn live_spinner_tick() -> u128 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn drain_worker_messages(app: &mut AppState, worker: &mut Option<WorkerRuntime>) -> Result<bool> {
+    drain_worker_messages_inner(app, worker, None)
+}
+
+#[cfg(not(test))]
+fn drain_worker_messages_with_attention(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    attention: &mut AttentionController,
+) -> Result<bool> {
+    drain_worker_messages_inner(app, worker, Some(attention))
+}
+
+fn drain_worker_messages_inner(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    mut attention: Option<&mut AttentionController>,
+) -> Result<bool> {
     let Some(runtime) = worker.as_mut() else {
         return Ok(false);
     };
@@ -808,6 +884,9 @@ fn drain_worker_messages(app: &mut AppState, worker: &mut Option<WorkerRuntime>)
     while let Ok(message) = runtime.worker_rx.try_recv() {
         if matches!(message, WorkerMessage::WorkerReady) {
             runtime.ready = true;
+        }
+        if let Some(attention) = attention.as_deref_mut() {
+            attention.observe(&message, Instant::now());
         }
         app.handle_worker_message(message)?;
         dirty = true;
