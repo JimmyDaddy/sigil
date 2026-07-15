@@ -26,6 +26,7 @@ This page collects user-facing commands, keys, paths, shared config sections, ap
 | Move between activities | `Alt-J` / `Alt-K` |
 | Focus task verification | `Alt-V`; then `Enter` runs the exact action, `I` inspects evidence |
 | Open latest checkpoint restore | `Ctrl-R` opens and loads the reverse-diff dialog; `Enter` restores controlled files, `F` forks conversation without changing files, `Esc` closes |
+| Open actions for a saved session | Select a `/resume` candidate, then press `Ctrl-O` or right-click it |
 | Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A` |
 | Expand or collapse thinking / activity | `Ctrl-T` |
 | Run code diagnostics for changed source files | `Alt-D` |
@@ -41,7 +42,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/config` | Open the TUI config panel |
 | `/doctor` | Run local setup diagnostics inside the transcript |
 | `/new` | Start a fresh session with the current provider and model |
-| `/resume` | Select and restore a previous session |
+| `/resume` | Select and restore a previous session; `Ctrl-O` or right-click opens its lifecycle actions |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
 | `/agent cancel <child-id|current>` | Cancel a running background child agent that still has a live runtime handle |
@@ -169,5 +170,7 @@ Both tools are `Read` operations with an independent `NetworkRead` effect. `[web
 - Restore does not silently replay unfinished tools.
 - `/new` starts a fresh append-only session log.
 - `/resume` selects older sessions.
+- A selected `/resume` row exposes resume, finalized-turn fork, safe export, pin/unpin, and exact delete preview through `Ctrl-O` or right-click. The modal keeps exclusive keyboard focus.
+- The `Storage` section in `/config` exposes retention as an explicit preview and confirmation. Normal startup, runs, resume, and `sigil serve` never apply it automatically.
 - Exiting the TUI prints the current session id and a `sigil resume <session-id>` command.
 - `/task continue` continues the latest unfinished planned task when one exists.

@@ -6,7 +6,10 @@ use sigil_kernel::{
     Agent, AssistantMessageKind, ControlEntry, DurableEventType, EventClass, JsonlSessionStore,
     ModelMessage, Session, StorageRoot, ToolRegistry,
 };
-use sigil_runtime::{SessionRetentionPolicy, resolve_sigil_paths};
+use sigil_runtime::{
+    LocalSessionLifecycleOperationKind, LocalSessionLifecycleRecoveryStatus,
+    LocalSessionLifecycleService, SessionExportV1, SessionRetentionPolicy, resolve_sigil_paths,
+};
 use tempfile::tempdir;
 
 use super::{
@@ -51,8 +54,10 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
     fs::create_dir(&session_dir)?;
     let current_path = session_dir.join("current.jsonl");
     let target_path = session_dir.join("target.jsonl");
+    let retention_path = session_dir.join("retention.jsonl");
     write_finalized_session(&current_path, "current")?;
     write_finalized_session(&target_path, "target")?;
+    write_finalized_session(&retention_path, "retention")?;
 
     let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
     root_config.session.log_dir = Some(session_dir.display().to_string());
@@ -89,6 +94,9 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
     };
     assert!(export_path.starts_with(&paths.session_exports_root));
     assert!(export_path.is_file());
+    let export: SessionExportV1 = serde_json::from_slice(&fs::read(&export_path)?)?;
+    export.validate_digest()?;
+    assert_eq!(export.payload.messages.len(), 2);
 
     worker.send(WorkerCommand::SetLocalSessionPin {
         request_id: 13,
@@ -113,34 +121,72 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         request_id: 15,
         source_path: target_path.clone(),
     })?;
+    let delete_preview = match worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::LocalSessionDeletePreviewed { request_id: 15, .. }
+        )
+    })? {
+        WorkerMessage::LocalSessionDeletePreviewed { preview, .. } => preview,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        delete_preview.source_session_ref.as_path(),
+        Path::new("target.jsonl")
+    );
+    worker.send(WorkerCommand::ApplyLocalSessionDelete {
+        request_id: 16,
+        preview: delete_preview,
+    })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionDeletePreviewed { request_id: 15, .. }))?,
-        WorkerMessage::LocalSessionDeletePreviewed { preview, .. }
-            if preview.source_session_ref.as_path() == Path::new("target.jsonl")
+        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionDeleted { request_id: 16, .. }))?,
+        WorkerMessage::LocalSessionDeleted { output, .. }
+            if output.source_session_ref.as_path() == Path::new("target.jsonl")
     ));
+    assert!(!target_path.exists());
 
     worker.send(WorkerCommand::PreviewSessionRetention {
-        request_id: 16,
+        request_id: 17,
         policy: SessionRetentionPolicy {
             max_sessions: Some(1),
             max_bytes: None,
             expire_older_than_ms: None,
         },
     })?;
-    assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::SessionRetentionPreviewed { request_id: 16, .. }))?,
-        WorkerMessage::SessionRetentionPreviewed { preview, .. }
-            if preview.candidates.len() == 1
-                && preview.candidates[0].delete_preview.source_session_ref.as_path()
-                    == Path::new("target.jsonl")
-    ));
-
-    worker.send(WorkerCommand::ForkLocalSession {
-        request_id: 17,
-        source_path: target_path,
+    let retention_preview = match worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::SessionRetentionPreviewed { request_id: 17, .. }
+        )
+    })? {
+        WorkerMessage::SessionRetentionPreviewed { preview, .. } => preview,
+        _ => unreachable!(),
+    };
+    assert_eq!(retention_preview.candidates.len(), 1);
+    assert_eq!(
+        retention_preview.candidates[0]
+            .delete_preview
+            .source_session_ref
+            .as_path(),
+        Path::new("retention.jsonl")
+    );
+    worker.send(WorkerCommand::ApplySessionRetention {
+        request_id: 18,
+        preview: retention_preview,
     })?;
     assert!(matches!(
-        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionForked { request_id: 17, .. }))?,
+        worker.recv_until(|message| matches!(message, WorkerMessage::SessionRetentionApplied { request_id: 18, .. }))?,
+        WorkerMessage::SessionRetentionApplied { output, .. }
+            if output.deleted_sessions == 1
+    ));
+    assert!(!retention_path.exists());
+
+    worker.send(WorkerCommand::ForkLocalSession {
+        request_id: 19,
+        source_path: current_path,
+    })?;
+    assert!(matches!(
+        worker.recv_until(|message| matches!(message, WorkerMessage::LocalSessionForked { request_id: 19, .. }))?,
         WorkerMessage::LocalSessionForked {
             session_log_path,
             copied_message_count: 2,
@@ -149,5 +195,24 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
     ));
 
     worker.shutdown()?;
+    let service = LocalSessionLifecycleService::new(
+        paths.workspace_id,
+        paths.session_log_dir,
+        paths.session_exports_root,
+    )
+    .with_lifecycle_journal_path(paths.session_lifecycle_journal);
+    let recovery = service.lifecycle_recovery()?;
+    assert!(recovery.iter().any(|entry| {
+        entry.kind == LocalSessionLifecycleOperationKind::Export
+            && entry.status == LocalSessionLifecycleRecoveryStatus::Completed
+    }));
+    assert!(recovery.iter().any(|entry| {
+        entry.kind == LocalSessionLifecycleOperationKind::Delete
+            && entry.status == LocalSessionLifecycleRecoveryStatus::Completed
+    }));
+    assert!(recovery.iter().any(|entry| {
+        entry.kind == LocalSessionLifecycleOperationKind::Retention
+            && entry.status == LocalSessionLifecycleRecoveryStatus::Completed
+    }));
     Ok(())
 }

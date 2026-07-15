@@ -35,8 +35,9 @@ Confirm `/doctor` reports `mouse_capture=true` (or remove an explicit `false` ov
 2. Open `/`, click a slash command candidate, then press `Esc`.
 3. Scroll the transcript with the mouse wheel.
 4. Open `/config`, click a section, click a boolean field, and confirm the focus changes.
-5. Open `/resume` when sessions exist, click a candidate once to select it and again to confirm.
-6. When an approval modal appears, click file rows, diff controls, and allow/deny actions.
+5. Open `/resume` when sessions exist. Click a candidate once to select it, then right-click it to open Session Actions. Close the dialog, select it again, and press `Ctrl-O` to verify the keyboard path reaches the same exclusive dialog.
+6. In Session Actions, use a harmless action such as safe export and confirm that typing does not reach the composer until the dialog closes.
+7. When an approval modal appears, click file rows, diff controls, and allow/deny actions.
 
 Expected result: clicks and wheel events affect only the focused TUI surface. Keyboard controls still work at every step.
 

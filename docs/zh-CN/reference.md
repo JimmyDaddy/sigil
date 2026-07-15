@@ -26,6 +26,7 @@
 | 在 activities 间移动 | `Alt-J` / `Alt-K` |
 | 聚焦 task verification | `Alt-V`；随后用 `Enter` 执行精确 action，`I` 查看证据 |
 | 打开最新 checkpoint 恢复 | `Ctrl-R` 打开并加载反向 diff 弹窗；`Enter` 恢复受控文件，`F` 在不改文件的情况下 fork 会话，`Esc` 关闭 |
+| 打开已保存 session 的 actions | 选中 `/resume` 候选后按 `Ctrl-O`，或右键单击该候选 |
 | 切换可见 agent transcript | composer agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A` |
 | 展开或折叠 thinking / activity | `Ctrl-T` |
 | 对 changed source files 运行 code diagnostics | `Alt-D` |
@@ -41,7 +42,7 @@
 | `/config` | 打开 TUI config panel |
 | `/doctor` | 在 transcript 中运行本地 setup diagnostics |
 | `/new` | 使用当前 provider 和 model 开始新 session |
-| `/resume` | 选择并恢复历史 session |
+| `/resume` | 选择并恢复历史 session；`Ctrl-O` 或右键打开 lifecycle actions |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
 | `/agent cancel <child-id|current>` | 取消仍有 live runtime handle 的运行中后台 child agent |
@@ -169,5 +170,7 @@ Provider 与 model 选择、`[providers.*]` block 和认证环境变量统一由
 - 恢复不会静默重放未完成工具。
 - `/new` 会开始一条新的 append-only session log。
 - `/resume` 选择历史 session。
+- 选中的 `/resume` 行可以通过 `Ctrl-O` 或右键打开 resume、从已完成 turn fork、安全导出、pin/unpin 和精确 delete preview；弹窗会独占键盘焦点。
+- `/config` 的 `Storage` 区块只通过显式 preview 与确认执行 retention；普通启动、run、resume 和 `sigil serve` 都不会自动应用。
 - 退出 TUI 会打印当前 session id 和 `sigil resume <session-id>` 恢复命令。
 - 存在未完成 planned task 时，`/task continue` 会继续最新任务。

@@ -161,6 +161,18 @@ Sigil stores session and control state as append-only JSONL. For users, this mea
 - Before prompts, queued follow-ups, tool arguments, task controls, or external URLs are kept in session records, Sigil stores a redacted, size-limited description. Sensitive exact values remain only for active use and are not reconstructed after restart; if exact information is required again, Sigil asks you to retry the action.
 - External material remains explicitly untrusted through compaction and recovery. Source records and claim citations are stored separately, and citations bind only to the final safe assistant text they support.
 
+### Manage saved sessions
+
+Open `/resume` to browse saved sessions. `Up/Down` changes the selected row and `Enter` resumes it. With a row selected, press `Ctrl-O` or right-click the row to open the exclusive Session Actions dialog. The dialog keeps the composer draft unchanged and owns keyboard focus until it closes.
+
+- `Enter` resumes the selected session.
+- `F` forks its latest finalized turn and switches to the new conversation. Files and other side effects remain shared.
+- `E` exports a safe JSON transcript under the workspace state directory's `session-exports/` folder. The export contains safe conversation messages, not internal control state, tool arguments, credentials, or private continuation data.
+- `P` pins or unpins the session. A pinned session is excluded from explicit cleanup.
+- `D` opens an exact delete preview. A second `Enter` deletes only the reviewed file if it is still unchanged and inactive. The current session cannot be deleted.
+
+For batch cleanup, open `/config`, choose `Storage`, move to the footer action named `sessions`, and press `Enter`. Sigil shows the configured retention limits, protected counts, candidates, and estimated released bytes before a second explicit confirmation. Normal startup, runs, resume, and `sigil serve` never apply retention automatically. Configure the limits in [`[session.retention]`](configuration.md#storage-and-session-paths).
+
 ### Controlled checkpoints and conversation forks
 
 When the latest completed turn contains controlled ordinary-file edits, press `Ctrl-R` to open its

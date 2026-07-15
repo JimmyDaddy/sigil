@@ -97,7 +97,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Move a foreground child agent to background | Press `Ctrl-B` while Sigil is waiting for that agent |
 | Switch or rename visible parent/child agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A`, `/agent`, or `/agent rename <child-id|current> <name>` |
 | Inspect long child-agent results | Switch to the child transcript, or let `read_agent_result` explicitly page through the child final answer when extra detail is needed |
-| Start or switch sessions | `/new`, `/resume`, or `sigil resume <session-id>` after exit |
+| Start, switch, or maintain sessions | `/new`, `/resume`, or `sigil resume <session-id>` after exit; use `Ctrl-O` or right-click on a `/resume` row for safe export, fork, pin, or exact delete review |
 | Change common settings | `/config` |
 | Diagnose setup/auth/MCP/LSP | `/doctor` |
 | Toggle the right info rail between compact and detail | `F2` |

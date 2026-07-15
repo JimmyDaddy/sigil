@@ -149,13 +149,14 @@ Real TUI mouse smoke steps:
 3. Open /, click a slash command candidate, then close the selector.
 4. Scroll transcript with the mouse wheel.
 5. Open /config, click section rows and boolean/value fields.
-6. Open /resume when sessions exist; click once to select and again to confirm.
-7. Trigger an approval modal; click file rows, diff controls, allow, and deny.
-8. Click tool activity body to focus it, then click its header to expand/collapse.
-9. Move across clickable surfaces and check hover visual state.
-10. Drag transcript text by displayed columns, including wide text when available.
-11. Press Ctrl-C and paste elsewhere to verify OSC52 copy status.
-12. Adjust Terminal scroll sensitivity if the wheel feels too fast or too slow.
+6. Open /resume when sessions exist; select a row, then use right-click and Ctrl-O to open Session Actions.
+7. Run safe export in Session Actions and confirm its exclusive focus keeps input out of the composer.
+8. Trigger an approval modal; click file rows, diff controls, allow, and deny.
+9. Click tool activity body to focus it, then click its header to expand/collapse.
+10. Move across clickable surfaces and check hover visual state.
+11. Drag transcript text by displayed columns, including wide text when available.
+12. Press Ctrl-C and paste elsewhere to verify OSC52 copy status.
+13. Adjust Terminal scroll sensitivity if the wheel feels too fast or too slow.
 
 Exit the TUI when finished; the script will ask for results.
 
@@ -178,7 +179,8 @@ check_labels=(
   "Slash candidate click"
   "Transcript wheel scroll"
   "Config/setup row click"
-  "Session selector click/confirm"
+  "Session actions right-click/Ctrl-O"
+  "Session actions exclusive focus/export"
   "Approval modal controls"
   "Tool activity body focus"
   "Tool card header expand/collapse"

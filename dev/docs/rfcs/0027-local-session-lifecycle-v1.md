@@ -1,6 +1,6 @@
 # RFC-0027 Local Session Lifecycle V1
 
-状态：accepted / P27.1-P27.5 implemented / P27.6 planned
+状态：implemented / P27.1-P27.6 complete
 
 创建日期：2026-07-15
 
@@ -118,3 +118,4 @@ Retention 放在 `/config` Storage maintenance 中，先显示 policy、protecte
 - P27.3 complete：新增 workspace-scoped strict-sequence/hash-chain lifecycle journal，export 与 delete 均使用 exact planned/completed binding。delete preview 绑定 session ref/id、bytes、mtime、content hash 与 digest；apply 保护 current/protected path、拒绝 symlink/越界/drift，并在取得 non-blocking session writer lease 后才写 plan 和删除。recovery 只投影 completed/not-applied/uncertain，不自动重试；journal 拒绝 tamper、blank/incomplete tail、重复 plan 与不匹配 completion。
 - P27.4 complete：新增显式 session retention 配置与 runtime policy，支持 age/count/bytes 的确定性 preview、identity-bound pin、current/protected/active writer 排除及不可满足约束提示。batch apply 在首个删除前验证完整 preview、pin、path、writer lease 与 content binding；随后为 batch 和每个 delete 写入可恢复 lifecycle audit。普通 startup、run、resume 与 serve 均未接入自动 cleanup。
 - P27.5 complete：`/resume` selector 新增 `Ctrl-O`/右键 Session Actions，键盘和鼠标均可完成 resume、finalized-turn fork、safe export、pin/unpin 与 exact delete preview/apply；Config Storage 新增显式 retention preview/confirm。所有 lifecycle I/O 都经 worker request id 路由，弹窗独占输入，关闭后的迟到回包只记录为 stale，不会作用到 composer 或新目标。
+- P27.6 complete：新增真实 PTY process fixture，覆盖 `sigil` 启动、`/resume`、`Ctrl-O`、独占 Session Actions 与 safe export artifact 落盘；worker fixture 串联 export、pin、delete apply、retention apply、fork 和 completed recovery。EN/ZH 用户指南、参考、配置与 terminal smoke 已同步，并通过 full audit。

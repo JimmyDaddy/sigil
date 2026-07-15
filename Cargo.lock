@@ -2687,6 +2687,7 @@ dependencies = [
  "clap",
  "futures",
  "libc",
+ "portable-pty",
  "serde_json",
  "sigil-http",
  "sigil-kernel",

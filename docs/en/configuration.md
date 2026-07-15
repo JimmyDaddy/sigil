@@ -87,7 +87,7 @@ expire_older_than_ms = 15552000000 # 180 days
 
 `state_root` holds durable per-user Sigil state such as session-adjacent records and artifacts. `cache_root` holds rebuildable scratch data. `session.log_dir` changes only session-log placement for the current workspace; it does not replace the state root.
 
-Session retention is a policy for an explicit maintenance preview and confirmation. Normal startup, runs, resume, and `sigil serve` never apply it automatically. Current, active, pinned, unsupported, and drifting sessions are protected.
+Session retention is a policy for an explicit maintenance preview and confirmation. Normal startup, runs, resume, and `sigil serve` never apply it automatically. Current, active, pinned, unsupported, and drifting sessions are protected. See [Manage saved sessions](user-guide.md#manage-saved-sessions) for the TUI flow.
 
 `SIGIL_STATE_HOME` and `SIGIL_CACHE_HOME` override their corresponding roots. Prefer an absolute path for an override in `sigil.toml`. Repository-local reusable resources stay under the fixed `.sigil/` directory; use [Advanced configuration](advanced-configuration.md#memory-skills-and-agents) for those resources.
 

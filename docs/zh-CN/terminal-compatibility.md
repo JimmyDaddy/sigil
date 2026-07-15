@@ -35,8 +35,9 @@ scripts/tui-mouse-smoke.sh
 2. 打开 `/`，点击一个 slash command 候选，然后按 `Esc`。
 3. 用鼠标滚轮滚动 transcript。
 4. 打开 `/config`，点击 section，点击 boolean 字段，确认焦点变化。
-5. 有历史 session 时打开 `/resume`，单击候选表示选中，再单击表示确认。
-6. 出现 approval modal 时，点击 file rows、diff controls 和 allow/deny actions。
+5. 有历史 session 时打开 `/resume`。单击候选表示选中，再右键单击打开 Session Actions；关闭弹窗、重新选中后按 `Ctrl-O`，确认键盘路径会打开同一个独占弹窗。
+6. 在 Session Actions 中执行 safe export 之类的无破坏操作，确认弹窗关闭前输入不会进入 composer。
+7. 出现 approval modal 时，点击 file rows、diff controls 和 allow/deny actions。
 
 预期结果：点击和滚轮只影响当前聚焦的 TUI 表面。每一步键盘操作仍然可用。
 
