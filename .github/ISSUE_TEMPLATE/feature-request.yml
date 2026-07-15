@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a user-facing Sigil capability or workflow improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem before prescribing an implementation. Sigil is TUI-first, so explain how the capability should fit the interactive workflow.
+
+  - type: checkboxes
+    id: existing
+    attributes:
+      label: Existing request check
+      options:
+        - label: I searched existing issues and did not find the same request.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What task is difficult or impossible today, and who encounters it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable result and how a user would know it worked.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tui_flow
+    attributes:
+      label: TUI workflow
+      description: Where should this appear in the TUI? Include commands, keys, focus, preview, confirmation, and failure behavior when relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workaround or competing tool behavior have you tried?
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Permission, privacy, or recovery considerations
+      description: Note any file mutation, shell, network, credential, session, or rollback implications.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Mockups, competitor links, or example workflows are welcome. Remove private data before posting.
+

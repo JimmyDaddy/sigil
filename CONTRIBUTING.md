@@ -6,7 +6,9 @@ kernel contracts, and auditable session and tool behavior.
 
 ## Before You Start
 
-- Use a public issue for bugs, feature proposals, and behavior discussions.
+- Use the [structured issue forms](https://github.com/JimmyDaddy/sigil/issues/new/choose)
+  for bugs, feature proposals, and documentation problems. For bugs, attach
+  reviewed `sigil doctor --output json` output when available.
 - For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of
   opening a public issue.
 - Read the [developer documentation index](dev/docs/index.md), especially the

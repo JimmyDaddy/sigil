@@ -1,0 +1,106 @@
+name: Bug report
+description: Report a reproducible problem in the Sigil TUI, CLI, tools, or installation
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Sigil. Search existing issues first and use the private route in `SECURITY.md` for suspected vulnerabilities.
+
+        If Sigil starts, run `sigil doctor --output json`. The report is designed to remove credential values, terminal environment values, private endpoints, and local absolute paths, but you must still review everything before sharing it.
+
+  - type: checkboxes
+    id: existing
+    attributes:
+      label: Existing issue check
+      options:
+        - label: I searched the existing issues and did not find the same problem.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Sigil version
+      description: Paste the complete output of `sigil --version`.
+      placeholder: sigil 0.0.1-alpha.3, commit, target, and profile
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - npm
+        - Homebrew
+        - GitHub Release archive
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS 15 arm64, Ubuntu 24.04 x86_64, or Windows 11 x86_64
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal environment
+      description: Include the terminal and any tmux, zellij, screen, SSH, or IDE terminal layer. Do not paste environment variable values.
+      placeholder: iTerm2 with tmux, VS Code terminal, Windows Terminal with PowerShell
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Include the exact visible error and where it appeared. Replace private repository, account, host, and credential details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest reliable sequence, including TUI commands or keys where relevant.
+      placeholder: |
+        1. Start Sigil with ...
+        2. Run /...
+        3. Press ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reviewed diagnostics (optional)
+      description: Paste reviewed `sigil doctor --output json` output or drag a reviewed `/feedback` support JSON file here. If Sigil cannot start, write what failed instead. Never attach session logs or configuration files.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I reviewed every pasted or attached item and removed credentials, private source content, personal data, and other information I do not want published.
+          required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, logs, or related links are optional. Prefer text and keep the same privacy boundary.
+

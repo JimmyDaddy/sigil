@@ -1,0 +1,63 @@
+name: Documentation issue
+description: Report unclear, incorrect, missing, or inaccessible public documentation
+title: "[Docs]: "
+labels:
+  - documentation
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page or link
+      description: Paste the public documentation or site URL, or name the missing topic.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - English
+        - 简体中文
+        - Both English and 简体中文
+        - Not language-specific
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue_type
+    attributes:
+      label: Issue type
+      options:
+        - Incorrect or outdated
+        - Unclear or too technical
+        - Missing content
+        - Broken link or command
+        - Accessibility or mobile usability
+        - Translation mismatch
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong?
+      description: Explain what a user tried to understand or do and where the page failed them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: A proposed rewrite or information structure is welcome but not required.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed credentials, private repository content, and personal data from this report.
+          required: true
+
