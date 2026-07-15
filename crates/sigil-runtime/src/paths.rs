@@ -16,6 +16,7 @@ pub const LOCALAPPDATA_ENV: &str = "LOCALAPPDATA";
 pub const INPUT_HISTORY_FILE: &str = "input-history.jsonl";
 pub const DEFAULT_SESSIONS_DIR: &str = "sessions";
 pub const DEFAULT_SESSION_EXPORTS_DIR: &str = "session-exports";
+pub const DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE: &str = "session-lifecycle-v1.jsonl";
 pub const DEFAULT_ARTIFACTS_DIR: &str = "artifacts";
 pub const DEFAULT_CHANGESETS_DIR: &str = "changesets";
 pub const DEFAULT_TERMINAL_TASKS_DIR: &str = "tasks";
@@ -36,6 +37,7 @@ pub struct SigilPaths {
     pub workspace_cache_root: PathBuf,
     pub session_log_dir: PathBuf,
     pub session_exports_root: PathBuf,
+    pub session_lifecycle_journal: PathBuf,
     pub input_history_file: PathBuf,
     pub artifacts_root: PathBuf,
     pub changesets_root: PathBuf,
@@ -117,6 +119,8 @@ pub fn resolve_sigil_paths_with_env(
     let workspace_cache_root = cache_root.join("workspaces").join(&workspace_id);
     let session_log_dir = resolve_session_log_dir(session, &workspace_state_root);
     let session_exports_root = workspace_state_root.join(DEFAULT_SESSION_EXPORTS_DIR);
+    let session_lifecycle_journal =
+        workspace_state_root.join(DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE);
     let input_history_file = workspace_state_root.join(INPUT_HISTORY_FILE);
     let artifacts_root = workspace_state_root.join(DEFAULT_ARTIFACTS_DIR);
     let changesets_root = artifacts_root.join(DEFAULT_CHANGESETS_DIR);
@@ -132,6 +136,7 @@ pub fn resolve_sigil_paths_with_env(
         workspace_cache_root,
         session_log_dir,
         session_exports_root,
+        session_lifecycle_journal,
         input_history_file,
         artifacts_root,
         changesets_root,

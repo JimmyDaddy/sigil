@@ -15,6 +15,15 @@ use sigil_kernel::{
     SessionStreamCompatibilityError, SessionStreamRecord, safe_persistence_text,
 };
 
+mod journal;
+
+pub use journal::{
+    LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION, LocalSessionDeleteJournalBinding,
+    LocalSessionExportJournalBinding, LocalSessionLifecycleEvent, LocalSessionLifecycleRecord,
+};
+
+use journal::LocalSessionLifecycleJournal;
+
 pub const SESSION_EXPORT_SCHEMA_VERSION: u16 = 1;
 pub const DEFAULT_SESSION_CATALOG_MAX_ENTRIES: usize = 4_096;
 pub const DEFAULT_SESSION_CATALOG_MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
@@ -146,9 +155,57 @@ impl SessionExportV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionExportOutput {
     pub path: PathBuf,
+    pub operation_id: String,
     pub source_session_id: String,
     pub payload_sha256: String,
     pub message_count: usize,
+    pub journal_sequence: u64,
+}
+
+/// Exact read-only delete preview. Apply must revalidate every field and the digest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionDeletePreview {
+    pub source_path: PathBuf,
+    pub source_session_ref: SessionRef,
+    pub source_session_id: String,
+    pub source_content_sha256: String,
+    pub source_bytes: u64,
+    pub source_modified_at_unix_ms: u64,
+    pub preview_digest: String,
+}
+
+/// Successful audited session deletion receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionDeleteOutput {
+    pub operation_id: String,
+    pub source_session_ref: SessionRef,
+    pub deleted_bytes: u64,
+    pub journal_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalSessionLifecycleOperationKind {
+    Export,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalSessionLifecycleRecoveryStatus {
+    Completed,
+    NotApplied,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct LocalSessionLifecycleRecoveryEntry {
+    pub operation_id: String,
+    pub kind: LocalSessionLifecycleOperationKind,
+    pub status: LocalSessionLifecycleRecoveryStatus,
 }
 
 /// Workspace-bound local session lifecycle service.
@@ -157,6 +214,7 @@ pub struct LocalSessionLifecycleService {
     workspace_id: String,
     session_dir: PathBuf,
     export_dir: PathBuf,
+    lifecycle_journal_path: PathBuf,
     limits: LocalSessionLifecycleLimits,
 }
 
@@ -167,10 +225,16 @@ impl LocalSessionLifecycleService {
         session_dir: impl Into<PathBuf>,
         export_dir: impl Into<PathBuf>,
     ) -> Self {
+        let export_dir = export_dir.into();
+        let lifecycle_journal_path = export_dir
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("session-lifecycle-v1.jsonl");
         Self {
             workspace_id: workspace_id.into(),
             session_dir: session_dir.into(),
-            export_dir: export_dir.into(),
+            export_dir,
+            lifecycle_journal_path,
             limits: LocalSessionLifecycleLimits::default(),
         }
     }
@@ -179,6 +243,68 @@ impl LocalSessionLifecycleService {
     pub fn with_limits(mut self, limits: LocalSessionLifecycleLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    #[must_use]
+    pub fn with_lifecycle_journal_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.lifecycle_journal_path = path.into();
+        self
+    }
+
+    /// Reads and validates the workspace lifecycle hash chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the journal is oversized, busy, malformed, or tampered.
+    pub fn lifecycle_records(&self) -> Result<Vec<LocalSessionLifecycleRecord>> {
+        self.lifecycle_journal().read_records()
+    }
+
+    /// Projects incomplete lifecycle operations without retrying any side effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the journal or a candidate source needed for recovery is unreadable.
+    pub fn lifecycle_recovery(&self) -> Result<Vec<LocalSessionLifecycleRecoveryEntry>> {
+        let records = self.lifecycle_records()?;
+        let mut operations = BTreeMap::<String, Vec<LocalSessionLifecycleEvent>>::new();
+        for record in records {
+            operations
+                .entry(record.operation_id)
+                .or_default()
+                .push(record.event);
+        }
+        operations
+            .into_iter()
+            .map(|(operation_id, events)| {
+                let last = events
+                    .last()
+                    .ok_or_else(|| anyhow!("lifecycle operation has no events"))?;
+                let (kind, status) = match last {
+                    LocalSessionLifecycleEvent::ExportCompleted(_) => (
+                        LocalSessionLifecycleOperationKind::Export,
+                        LocalSessionLifecycleRecoveryStatus::Completed,
+                    ),
+                    LocalSessionLifecycleEvent::ExportPlanned(_) => (
+                        LocalSessionLifecycleOperationKind::Export,
+                        LocalSessionLifecycleRecoveryStatus::Uncertain,
+                    ),
+                    LocalSessionLifecycleEvent::DeleteCompleted(_) => (
+                        LocalSessionLifecycleOperationKind::Delete,
+                        LocalSessionLifecycleRecoveryStatus::Completed,
+                    ),
+                    LocalSessionLifecycleEvent::DeletePlanned(binding) => (
+                        LocalSessionLifecycleOperationKind::Delete,
+                        self.recover_incomplete_delete(binding),
+                    ),
+                };
+                Ok(LocalSessionLifecycleRecoveryEntry {
+                    operation_id,
+                    kind,
+                    status,
+                })
+            })
+            .collect()
     }
 
     /// Scans direct JSONL children in deterministic modified-time order.
@@ -209,6 +335,9 @@ impl LocalSessionLifecycleService {
             )
         })?;
         let mut candidates = direct_jsonl_candidates(&session_dir)?;
+        if let Ok(journal_path) = fs::canonicalize(&self.lifecycle_journal_path) {
+            candidates.retain(|candidate| candidate.path != journal_path);
+        }
         candidates.sort_by(|left, right| {
             right
                 .modified_at_unix_ms
@@ -298,12 +427,149 @@ impl LocalSessionLifecycleService {
             Some(path) => path.to_path_buf(),
             None => self.allocate_export_path(&source.path, exported_at_unix_ms)?,
         };
+        let canonical_destination = canonical_destination_candidate(&output_path)?;
+        let binding = LocalSessionExportJournalBinding {
+            source_session_ref: artifact.payload.source_session_ref.clone(),
+            source_session_id: source_session_id.clone(),
+            source_content_sha256: artifact.payload.source_content_sha256.clone(),
+            destination_file_name: canonical_destination
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(safe_persistence_text)
+                .map(|value| truncate_utf8(&value, SESSION_TITLE_MAX_BYTES))
+                .unwrap_or_else(|| "session-export.json".to_owned()),
+            destination_path_sha256: digest_serializable(&canonical_destination.to_string_lossy())?,
+            artifact_payload_sha256: payload_sha256.clone(),
+            message_count: artifact.payload.messages.len(),
+        };
+        let operation_id = format!("session-export:{}", uuid::Uuid::new_v4());
+        self.lifecycle_journal().append(
+            &operation_id,
+            exported_at_unix_ms,
+            LocalSessionLifecycleEvent::ExportPlanned(binding.clone()),
+        )?;
         write_atomic_create_new(&output_path, &bytes)?;
+        let completed = self.lifecycle_journal().append(
+            &operation_id,
+            exported_at_unix_ms,
+            LocalSessionLifecycleEvent::ExportCompleted(binding),
+        )?;
         Ok(SessionExportOutput {
             path: output_path,
+            operation_id,
             source_session_id,
             payload_sha256,
             message_count: artifact.payload.messages.len(),
+            journal_sequence: completed.sequence,
+        })
+    }
+
+    /// Builds a read-only, content-bound preview for deleting one inactive local session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for current/protected, invalid, unsupported, symlinked, or drifting
+    /// sources.
+    pub fn preview_delete(
+        &self,
+        source_path: &Path,
+        protected_paths: &[PathBuf],
+    ) -> Result<SessionDeletePreview> {
+        let source = self.resolve_ready_source(source_path)?;
+        ensure_not_protected(&source.path, protected_paths)?;
+        let source_content_sha256 = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
+        let metadata = fs::metadata(&source.path)
+            .with_context(|| format!("failed to inspect {}", source.path.display()))?;
+        let source_bytes = metadata.len();
+        let source_modified_at_unix_ms = modified_at_unix_ms(&metadata);
+        if source_bytes != source.bytes || source_modified_at_unix_ms != source.modified_at_unix_ms
+        {
+            bail!("source session changed while delete preview was being prepared");
+        }
+        let source_session_id = source
+            .session_id
+            .ok_or_else(|| anyhow!("source session has no durable identity"))?;
+        let preview_digest = delete_preview_digest(
+            &self.workspace_id,
+            &source.session_ref,
+            &source_session_id,
+            &source_content_sha256,
+            source_bytes,
+            source_modified_at_unix_ms,
+        )?;
+        Ok(SessionDeletePreview {
+            source_path: source.path,
+            source_session_ref: source.session_ref,
+            source_session_id,
+            source_content_sha256,
+            source_bytes,
+            source_modified_at_unix_ms,
+            preview_digest,
+        })
+    }
+
+    /// Applies one exact delete preview after acquiring the source writer lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns before deleting when the preview is stale, the source is protected, or another
+    /// process owns the session writer lease. Once a planned record is durable, later failures are
+    /// recoverable as uncertain rather than silently retried.
+    pub fn apply_delete(
+        &self,
+        preview: &SessionDeletePreview,
+        protected_paths: &[PathBuf],
+        applied_at_unix_ms: u64,
+    ) -> Result<SessionDeleteOutput> {
+        validate_delete_preview(&self.workspace_id, preview)?;
+        reject_source_symlink_and_escape(
+            &self.session_dir,
+            &preview.source_path,
+            &preview.source_session_ref,
+        )?;
+        ensure_not_protected(&preview.source_path, protected_paths)?;
+        let lease = acquire_session_writer_lease(&preview.source_path)?;
+        let metadata = fs::metadata(&preview.source_path)
+            .with_context(|| format!("failed to inspect {}", preview.source_path.display()))?;
+        let observed_hash = hash_file_bounded(&preview.source_path, self.limits.max_stream_bytes)?;
+        if metadata.len() != preview.source_bytes
+            || modified_at_unix_ms(&metadata) != preview.source_modified_at_unix_ms
+            || observed_hash != preview.source_content_sha256
+        {
+            bail!("source session changed after delete preview");
+        }
+        let binding = LocalSessionDeleteJournalBinding {
+            source_session_ref: preview.source_session_ref.clone(),
+            source_session_id: preview.source_session_id.clone(),
+            source_content_sha256: preview.source_content_sha256.clone(),
+            source_bytes: preview.source_bytes,
+            source_modified_at_unix_ms: preview.source_modified_at_unix_ms,
+            preview_digest: preview.preview_digest.clone(),
+        };
+        let operation_id = format!("session-delete:{}", uuid::Uuid::new_v4());
+        self.lifecycle_journal().append(
+            &operation_id,
+            applied_at_unix_ms,
+            LocalSessionLifecycleEvent::DeletePlanned(binding.clone()),
+        )?;
+        fs::remove_file(&preview.source_path)
+            .with_context(|| format!("failed to delete {}", preview.source_path.display()))?;
+        let session_parent = preview
+            .source_path
+            .parent()
+            .ok_or_else(|| anyhow!("source session has no parent directory"))?;
+        sync_directory(session_parent)?;
+        drop(lease);
+        let completed = self.lifecycle_journal().append(
+            &operation_id,
+            applied_at_unix_ms,
+            LocalSessionLifecycleEvent::DeleteCompleted(binding),
+        )?;
+        Ok(SessionDeleteOutput {
+            operation_id,
+            source_session_ref: preview.source_session_ref.clone(),
+            deleted_bytes: preview.source_bytes,
+            journal_sequence: completed.sequence,
         })
     }
 
@@ -418,6 +684,32 @@ impl LocalSessionLifecycleService {
             }
         }
         bail!("failed to allocate a unique session export path")
+    }
+
+    fn lifecycle_journal(&self) -> LocalSessionLifecycleJournal {
+        LocalSessionLifecycleJournal::new(self.lifecycle_journal_path.clone())
+    }
+
+    fn recover_incomplete_delete(
+        &self,
+        binding: &LocalSessionDeleteJournalBinding,
+    ) -> LocalSessionLifecycleRecoveryStatus {
+        let path = binding.source_session_ref.resolve(&self.session_dir);
+        if !path.exists() {
+            return LocalSessionLifecycleRecoveryStatus::Uncertain;
+        }
+        if fs::symlink_metadata(&path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return LocalSessionLifecycleRecoveryStatus::Uncertain;
+        }
+        match hash_file_bounded(&path, self.limits.max_stream_bytes) {
+            Ok(hash) if hash == binding.source_content_sha256 => {
+                LocalSessionLifecycleRecoveryStatus::NotApplied
+            }
+            Ok(_) | Err(_) => LocalSessionLifecycleRecoveryStatus::Uncertain,
+        }
     }
 }
 
@@ -589,6 +881,113 @@ fn validate_export_provenance(
     Ok(())
 }
 
+fn delete_preview_digest(
+    workspace_id: &str,
+    source_session_ref: &SessionRef,
+    source_session_id: &str,
+    source_content_sha256: &str,
+    source_bytes: u64,
+    source_modified_at_unix_ms: u64,
+) -> Result<String> {
+    digest_serializable(&(
+        workspace_id,
+        source_session_ref,
+        source_session_id,
+        source_content_sha256,
+        source_bytes,
+        source_modified_at_unix_ms,
+    ))
+}
+
+fn validate_delete_preview(workspace_id: &str, preview: &SessionDeletePreview) -> Result<()> {
+    let expected = delete_preview_digest(
+        workspace_id,
+        &preview.source_session_ref,
+        &preview.source_session_id,
+        &preview.source_content_sha256,
+        preview.source_bytes,
+        preview.source_modified_at_unix_ms,
+    )?;
+    if expected != preview.preview_digest {
+        bail!("session delete preview digest does not match");
+    }
+    Ok(())
+}
+
+fn ensure_not_protected(source_path: &Path, protected_paths: &[PathBuf]) -> Result<()> {
+    let source = fs::canonicalize(source_path)
+        .with_context(|| format!("failed to canonicalize {}", source_path.display()))?;
+    for protected in protected_paths {
+        if fs::canonicalize(protected).ok().as_deref() == Some(source.as_path()) {
+            bail!("current or protected session cannot be deleted");
+        }
+    }
+    Ok(())
+}
+
+fn reject_source_symlink_and_escape(
+    session_dir: &Path,
+    source_path: &Path,
+    source_session_ref: &SessionRef,
+) -> Result<()> {
+    if fs::symlink_metadata(source_path)
+        .with_context(|| format!("failed to inspect {}", source_path.display()))?
+        .file_type()
+        .is_symlink()
+    {
+        bail!("source session must not be a symlink");
+    }
+    if fs::symlink_metadata(session_dir)
+        .with_context(|| format!("failed to inspect {}", session_dir.display()))?
+        .file_type()
+        .is_symlink()
+    {
+        bail!("configured session directory must not be a symlink");
+    }
+    let canonical_dir = fs::canonicalize(session_dir)
+        .with_context(|| format!("failed to canonicalize {}", session_dir.display()))?;
+    let canonical_source = fs::canonicalize(source_path)
+        .with_context(|| format!("failed to canonicalize {}", source_path.display()))?;
+    if canonical_source.parent() != Some(canonical_dir.as_path()) {
+        bail!("source session is not a direct child of the configured directory");
+    }
+    let referenced = source_session_ref.resolve(&canonical_dir);
+    if fs::canonicalize(&referenced).ok().as_deref() != Some(canonical_source.as_path()) {
+        bail!("source session reference does not match the delete target");
+    }
+    Ok(())
+}
+
+fn acquire_session_writer_lease(source_path: &Path) -> Result<File> {
+    let file_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow!("source session file name is invalid"))?;
+    let lease_path = source_path.with_file_name(format!("{file_name}.writer-lock"));
+    if lease_path.exists()
+        && fs::symlink_metadata(&lease_path)
+            .with_context(|| format!("failed to inspect {}", lease_path.display()))?
+            .file_type()
+            .is_symlink()
+    {
+        bail!("session writer lease must not be a symlink");
+    }
+    let lease = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lease_path)
+        .with_context(|| format!("failed to open {}", lease_path.display()))?;
+    lease.try_lock().with_context(|| {
+        format!(
+            "session is active or its writer lease is busy: {}",
+            source_path.display()
+        )
+    })?;
+    Ok(lease)
+}
+
 fn hash_file_bounded(path: &Path, max_bytes: u64) -> Result<String> {
     let metadata =
         fs::metadata(path).with_context(|| format!("failed to inspect {}", path.display()))?;
@@ -679,6 +1078,31 @@ fn write_atomic_create_new(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn canonical_destination_candidate(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("session export destination has no parent directory"))?;
+    let metadata = fs::symlink_metadata(parent).with_context(|| {
+        format!(
+            "failed to inspect session export directory {}",
+            parent.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("session export destination parent must be a real directory");
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("session export destination has no file name"))?;
+    let destination = fs::canonicalize(parent)
+        .with_context(|| format!("failed to canonicalize {}", parent.display()))?
+        .join(file_name);
+    if fs::symlink_metadata(&destination).is_ok() {
+        bail!("session export destination already exists");
+    }
+    Ok(destination)
 }
 
 #[cfg(unix)]

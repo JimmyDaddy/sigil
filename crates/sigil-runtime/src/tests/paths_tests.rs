@@ -35,6 +35,12 @@ fn resolves_linux_defaults_under_user_state_and_cache() {
         paths.session_exports_root,
         paths.workspace_state_root.join(DEFAULT_SESSION_EXPORTS_DIR)
     );
+    assert_eq!(
+        paths.session_lifecycle_journal,
+        paths
+            .workspace_state_root
+            .join(DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE)
+    );
     assert!(paths.input_history_file.ends_with(INPUT_HISTORY_FILE));
     assert_eq!(
         paths.project_assets_root,

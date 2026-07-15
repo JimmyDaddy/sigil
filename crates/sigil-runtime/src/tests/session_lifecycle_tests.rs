@@ -194,6 +194,31 @@ fn safe_session_export_redacts_text_omits_tool_calls_and_is_content_bound() -> R
     assert_eq!(artifact.payload.source_content_sha256.len(), 64);
     assert_eq!(artifact.payload_sha256, output.payload_sha256);
     assert_eq!(artifact.payload.messages.len(), 2);
+    let records = service.lifecycle_records()?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].sequence, 1);
+    assert_eq!(records[1].sequence, 2);
+    assert_eq!(
+        records[1].previous_record_sha256.as_deref(),
+        Some(records[0].record_sha256.as_str())
+    );
+    assert!(matches!(
+        records[0].event,
+        LocalSessionLifecycleEvent::ExportPlanned(_)
+    ));
+    assert!(matches!(
+        records[1].event,
+        LocalSessionLifecycleEvent::ExportCompleted(_)
+    ));
+    assert_eq!(output.journal_sequence, 2);
+    assert_eq!(
+        service.lifecycle_recovery()?,
+        vec![LocalSessionLifecycleRecoveryEntry {
+            operation_id: output.operation_id,
+            kind: LocalSessionLifecycleOperationKind::Export,
+            status: LocalSessionLifecycleRecoveryStatus::Completed,
+        }]
+    );
     Ok(())
 }
 
@@ -242,5 +267,189 @@ fn safe_session_export_rejects_message_and_artifact_limits_without_output() -> R
 
     assert!(error.to_string().contains("message limit"));
     assert!(!destination.exists());
+    Ok(())
+}
+
+#[test]
+fn session_delete_preview_protects_current_and_apply_is_exact_and_audited() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "delete me")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    let error = service
+        .preview_delete(&source, std::slice::from_ref(&source))
+        .expect_err("current session must be protected");
+    assert!(error.to_string().contains("protected"));
+    assert!(service.lifecycle_records()?.is_empty());
+    let preview = service.preview_delete(&source, &[])?;
+    assert_eq!(preview.source_bytes, fs::metadata(&source)?.len());
+    assert_eq!(preview.source_content_sha256.len(), 64);
+
+    let output = service.apply_delete(&preview, &[], 5678)?;
+
+    assert!(!source.exists());
+    assert_eq!(output.deleted_bytes, preview.source_bytes);
+    let records = service.lifecycle_records()?;
+    assert_eq!(records.len(), 2);
+    assert!(matches!(
+        records[0].event,
+        LocalSessionLifecycleEvent::DeletePlanned(_)
+    ));
+    assert!(matches!(
+        records[1].event,
+        LocalSessionLifecycleEvent::DeleteCompleted(_)
+    ));
+    assert_eq!(
+        service.lifecycle_recovery()?,
+        vec![LocalSessionLifecycleRecoveryEntry {
+            operation_id: output.operation_id,
+            kind: LocalSessionLifecycleOperationKind::Delete,
+            status: LocalSessionLifecycleRecoveryStatus::Completed,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn session_delete_rejects_preview_tamper_and_source_drift_before_journal_or_remove() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "keep me")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let preview = service.preview_delete(&source, &[])?;
+    let mut tampered = preview.clone();
+    tampered.source_bytes = tampered.source_bytes.saturating_add(1);
+
+    let error = service
+        .apply_delete(&tampered, &[], 5678)
+        .expect_err("tampered preview must fail");
+    assert!(error.to_string().contains("digest"));
+    assert!(source.exists());
+    assert!(service.lifecycle_records()?.is_empty());
+
+    let store = JsonlSessionStore::new(&source)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("late append")))?;
+    drop(store);
+    let error = service
+        .apply_delete(&preview, &[], 5678)
+        .expect_err("source drift must fail");
+    assert!(error.to_string().contains("changed"));
+    assert!(source.exists());
+    assert!(service.lifecycle_records()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn session_delete_rejects_an_active_writer_lease_before_planned_record() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "active")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let preview = service.preview_delete(&source, &[])?;
+    let active_store = JsonlSessionStore::new(&source)?;
+    active_store.append(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
+        Default::default(),
+    )))?;
+    let refreshed = service.preview_delete(&source, &[])?;
+
+    let error = service
+        .apply_delete(&refreshed, &[], 5678)
+        .expect_err("active writer must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("active or its writer lease is busy")
+    );
+    assert!(source.exists());
+    assert!(service.lifecycle_records()?.is_empty());
+    drop(active_store);
+    assert_ne!(preview.preview_digest, refreshed.preview_digest);
+    Ok(())
+}
+
+#[test]
+fn lifecycle_recovery_distinguishes_not_applied_from_uncertain_delete() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "recover")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let preview = service.preview_delete(&source, &[])?;
+    let binding = LocalSessionDeleteJournalBinding {
+        source_session_ref: preview.source_session_ref.clone(),
+        source_session_id: preview.source_session_id.clone(),
+        source_content_sha256: preview.source_content_sha256.clone(),
+        source_bytes: preview.source_bytes,
+        source_modified_at_unix_ms: preview.source_modified_at_unix_ms,
+        preview_digest: preview.preview_digest.clone(),
+    };
+    service.lifecycle_journal().append(
+        "session-delete:incomplete",
+        5678,
+        LocalSessionLifecycleEvent::DeletePlanned(binding.clone()),
+    )?;
+    let mut mismatched = binding;
+    mismatched.source_bytes = mismatched.source_bytes.saturating_add(1);
+    let error = service
+        .lifecycle_journal()
+        .append(
+            "session-delete:incomplete",
+            5679,
+            LocalSessionLifecycleEvent::DeleteCompleted(mismatched),
+        )
+        .expect_err("completion must match its exact plan");
+    assert!(error.to_string().contains("exact planned binding"));
+
+    assert_eq!(
+        service.lifecycle_recovery()?,
+        vec![LocalSessionLifecycleRecoveryEntry {
+            operation_id: "session-delete:incomplete".to_owned(),
+            kind: LocalSessionLifecycleOperationKind::Delete,
+            status: LocalSessionLifecycleRecoveryStatus::NotApplied,
+        }]
+    );
+    fs::remove_file(&source)?;
+    assert_eq!(
+        service.lifecycle_recovery()?[0].status,
+        LocalSessionLifecycleRecoveryStatus::Uncertain
+    );
+    Ok(())
+}
+
+#[test]
+fn lifecycle_journal_hash_chain_rejects_tampering() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "export")?;
+    let exports = temp.path().join("exports");
+    let journal = temp.path().join("lifecycle.jsonl");
+    let service = LocalSessionLifecycleService::new("workspace-1", &sessions, &exports)
+        .with_lifecycle_journal_path(&journal);
+    service.export_session(&source, None, 1234)?;
+    let bytes = fs::read_to_string(&journal)?;
+    let tampered = bytes.replacen("\"message_count\":2", "\"message_count\":3", 1);
+    assert_ne!(tampered, bytes);
+    fs::write(&journal, tampered)?;
+
+    let error = service
+        .lifecycle_records()
+        .expect_err("tampered hash chain must fail");
+
+    assert!(error.to_string().contains("record hash does not match"));
     Ok(())
 }
