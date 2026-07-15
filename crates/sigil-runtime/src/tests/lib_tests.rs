@@ -77,6 +77,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         storage: Default::default(),
         session: SessionConfig {
             log_dir: Some(".sigil/sessions".to_owned()),
+            retention: Default::default(),
         },
         agent: AgentConfig {
             provider: provider.to_owned(),

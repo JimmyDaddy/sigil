@@ -78,9 +78,16 @@ cache_root = "auto"
 
 [session]
 # log_dir = "sessions"
+
+[session.retention]
+max_sessions = 500
+max_bytes = 2147483648
+expire_older_than_ms = 15552000000 # 180 天
 ```
 
 `state_root` 保存持久的每用户 Sigil state，例如 session 相关记录和 artifact。`cache_root` 保存可重建的 scratch data。`session.log_dir` 只修改当前 workspace 的 session log 位置，不会取代 state root。
+
+Session retention 只为显式 maintenance preview 与确认提供 policy；普通启动、run、resume 和 `sigil serve` 都不会自动应用。current、active、pinned、unsupported 或发生 drift 的 session 会受保护。
 
 `SIGIL_STATE_HOME` 与 `SIGIL_CACHE_HOME` 可覆盖对应 root。在 `sigil.toml` 中覆盖时，优先使用绝对路径。仓库内可复用资源固定放在 `.sigil/` 下；这些资源见[高级配置](advanced-configuration.md#memoryskills-与-agents)。
 

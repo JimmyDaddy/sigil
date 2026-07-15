@@ -17,6 +17,7 @@ fn test_config() -> RootConfig {
         storage: Default::default(),
         session: SessionConfig {
             log_dir: Some(".sigil/sessions".to_owned()),
+            retention: Default::default(),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),

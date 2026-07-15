@@ -189,6 +189,7 @@ fn env_overrides_win_over_configured_roots() {
 fn relative_session_override_resolves_under_workspace_state_root() {
     let session = SessionConfig {
         log_dir: Some("custom-sessions".to_owned()),
+        retention: Default::default(),
     };
     let paths = resolve_sigil_paths_with_env(
         &StorageConfig::default(),

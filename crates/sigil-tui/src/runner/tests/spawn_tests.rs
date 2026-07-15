@@ -25,6 +25,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         storage: Default::default(),
         session: SessionConfig {
             log_dir: Some(".sigil/sessions".to_owned()),
+            retention: Default::default(),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),

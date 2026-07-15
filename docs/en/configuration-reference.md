@@ -12,8 +12,11 @@ This page is a lookup reference for the public `sigil.toml` surface. Start with 
 | `[storage].state_root` | `"auto"` | Per-user durable Sigil state. `SIGIL_STATE_HOME` overrides it. |
 | `[storage].cache_root` | `"auto"` | Rebuildable per-user cache. `SIGIL_CACHE_HOME` overrides it. |
 | `[session].log_dir` | workspace state `sessions` child | Session-log location. A relative value resolves under workspace state. |
+| `[session.retention].max_sessions` | `500` | Maximum retained ready sessions after an explicit cleanup. |
+| `[session.retention].max_bytes` | `2147483648` | Maximum bytes retained across ready sessions after explicit cleanup. |
+| `[session.retention].expire_older_than_ms` | `15552000000` | Select unprotected sessions older than 180 days during explicit cleanup. |
 
-Use [Configuration](configuration.md#storage-and-session-paths) for path choices.
+Use [Configuration](configuration.md#storage-and-session-paths) for path choices and the explicit-only retention boundary.
 
 ## Agent And Providers
 

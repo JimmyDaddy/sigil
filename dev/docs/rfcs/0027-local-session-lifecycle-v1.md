@@ -1,6 +1,6 @@
 # RFC-0027 Local Session Lifecycle V1
 
-状态：accepted / P27.1-P27.3 implemented / P27.4-P27.6 planned
+状态：accepted / P27.1-P27.4 implemented / P27.5-P27.6 planned
 
 创建日期：2026-07-15
 
@@ -61,7 +61,7 @@ delete preview 绑定 source canonical path、session id、bytes、mtime、conte
 
 1. 拒绝 current/protected path；
 2. 重新 canonicalize 并确认仍是 catalog direct child；
-3. 对 `.writer-lock` 和 data file 获取非等待独占 lease；
+3. 对 `.writer-lock` 获取非等待独占 lease，并在持有 lease 时重新验证 data file；
 4. 重新验证 source binding 与 preview digest；
 5. append `delete_planned` 并 fsync journal；
 6. remove data file 并 sync session directory；稳定的空 writer-lock sidecar 继续作为同名 session 的协调 inode 保留，catalog 不展示它，也不在释放 lease 时制造新旧 inode 竞态；
@@ -115,3 +115,4 @@ Retention 放在 `/config` Storage maintenance 中，先显示 policy、protecte
 - P27.1 complete：新增 finalized-turn projection/digest 与通用 turn fork；不再依赖 controlled mutation checkpoint。原 checkpoint workflow 保留并复用同一 safe-prefix creator，fork provenance 明确区分 turn binding 与可选 checkpoint binding。
 - P27.2 complete：runtime 新增 bounded local V2 catalog、legacy/invalid/oversize/scan-budget 状态、workspace `session-exports` 路径与 content-bound `SessionExportV1`。导出再次应用 SafePersist、验证 external provenance、完全省略 tool calls 和 control envelope，并使用 create-new hard-link publication 防止覆盖；`export_completed` journal 接线随 P27.3 的 journal writer 一并完成。
 - P27.3 complete：新增 workspace-scoped strict-sequence/hash-chain lifecycle journal，export 与 delete 均使用 exact planned/completed binding。delete preview 绑定 session ref/id、bytes、mtime、content hash 与 digest；apply 保护 current/protected path、拒绝 symlink/越界/drift，并在取得 non-blocking session writer lease 后才写 plan 和删除。recovery 只投影 completed/not-applied/uncertain，不自动重试；journal 拒绝 tamper、blank/incomplete tail、重复 plan 与不匹配 completion。
+- P27.4 complete：新增显式 session retention 配置与 runtime policy，支持 age/count/bytes 的确定性 preview、identity-bound pin、current/protected/active writer 排除及不可满足约束提示。batch apply 在首个删除前验证完整 preview、pin、path、writer lease 与 content binding；随后为 batch 和每个 delete 写入可恢复 lifecycle audit。普通 startup、run、resume 与 serve 均未接入自动 cleanup。

@@ -453,3 +453,355 @@ fn lifecycle_journal_hash_chain_rejects_tampering() -> Result<()> {
     assert!(error.to_string().contains("record hash does not match"));
     Ok(())
 }
+
+#[test]
+fn session_pin_is_identity_bound_and_blocks_direct_delete_until_unpinned() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "pin me")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    service.set_session_pin(&source, true, 100)?;
+    let catalog = service.catalog()?;
+    assert!(catalog.entries[0].pinned);
+    let error = service
+        .preview_delete(&source, &[])
+        .expect_err("pinned session must not preview delete");
+    assert!(error.to_string().contains("pinned"));
+
+    service.set_session_pin(&source, false, 101)?;
+    assert!(!service.catalog()?.entries[0].pinned);
+    service.preview_delete(&source, &[])?;
+    Ok(())
+}
+
+#[test]
+fn session_pin_projection_requires_the_recorded_stream_identity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "identity")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let entry = service.catalog()?.entries.remove(0);
+    let session_id = entry.session_id.clone().expect("stream identity");
+    service.lifecycle_journal().append(
+        "session-pin:mismatched",
+        100,
+        LocalSessionLifecycleEvent::PinChanged(LocalSessionPinJournalBinding {
+            source_session_ref: entry.session_ref,
+            source_session_id: format!("{session_id}-different"),
+            pinned: true,
+        }),
+    )?;
+
+    assert!(!service.catalog()?.entries[0].pinned);
+    service.preview_delete(&source, &[])?;
+    Ok(())
+}
+
+#[test]
+fn retention_preview_is_read_only_deterministic_and_respects_pin_and_protection() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let alpha = sessions.join("session-alpha.jsonl");
+    let beta = sessions.join("session-beta.jsonl");
+    let gamma = sessions.join("session-gamma.jsonl");
+    let current = sessions.join("session-current.jsonl");
+    finalized_session(&alpha, "alpha")?;
+    finalized_session(&beta, "beta")?;
+    finalized_session(&gamma, "gamma")?;
+    finalized_session(&current, "current")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    service.set_session_pin(&beta, true, 100)?;
+    let journal_before = service.lifecycle_records()?;
+    let policy = SessionRetentionPolicy {
+        max_sessions: Some(2),
+        max_bytes: None,
+        expire_older_than_ms: None,
+    };
+
+    let first = service.preview_retention(
+        policy.clone(),
+        std::slice::from_ref(&current),
+        1_000_000_000_000_000,
+    )?;
+    let second = service.preview_retention(
+        policy,
+        std::slice::from_ref(&current),
+        1_000_000_000_000_000,
+    )?;
+
+    assert_eq!(first, second);
+    assert_eq!(service.lifecycle_records()?, journal_before);
+    assert_eq!(first.total_ready_sessions, 4);
+    assert_eq!(first.protected_sessions, 1);
+    assert_eq!(first.pinned_sessions, 1);
+    assert_eq!(first.candidates.len(), 2);
+    assert!(first.constraints_satisfied);
+    assert!(first.candidates.iter().all(|candidate| {
+        candidate.reasons == vec![SessionRetentionReason::Count]
+            && candidate.delete_preview.source_path != beta
+            && candidate.delete_preview.source_path != current
+    }));
+    Ok(())
+}
+
+#[test]
+fn retention_preview_selects_age_and_bytes_candidates_with_explicit_reasons() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let alpha = sessions.join("session-alpha.jsonl");
+    let beta = sessions.join("session-beta.jsonl");
+    finalized_session(&alpha, "alpha")?;
+    finalized_session(&beta, "beta")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let catalog = service.catalog()?;
+    let generated_at = catalog
+        .entries
+        .iter()
+        .map(|entry| entry.modified_at_unix_ms)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    let age = service.preview_retention(
+        SessionRetentionPolicy {
+            max_sessions: None,
+            max_bytes: None,
+            expire_older_than_ms: Some(0),
+        },
+        &[],
+        generated_at,
+    )?;
+    assert_eq!(age.candidates.len(), 2);
+    assert!(age.constraints_satisfied);
+    assert!(
+        age.candidates
+            .iter()
+            .all(|candidate| { candidate.reasons == vec![SessionRetentionReason::Age] })
+    );
+
+    let bytes = service.preview_retention(
+        SessionRetentionPolicy {
+            max_sessions: None,
+            max_bytes: Some(0),
+            expire_older_than_ms: None,
+        },
+        &[],
+        generated_at,
+    )?;
+    assert_eq!(bytes.candidates.len(), 2);
+    assert!(bytes.constraints_satisfied);
+    assert!(
+        bytes
+            .candidates
+            .iter()
+            .all(|candidate| { candidate.reasons == vec![SessionRetentionReason::Bytes] })
+    );
+    Ok(())
+}
+
+#[test]
+fn retention_apply_preflights_the_whole_batch_then_audits_each_delete() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let alpha = sessions.join("session-alpha.jsonl");
+    let beta = sessions.join("session-beta.jsonl");
+    let current = sessions.join("session-current.jsonl");
+    finalized_session(&alpha, "alpha")?;
+    finalized_session(&beta, "beta")?;
+    finalized_session(&current, "current")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let preview = service.preview_retention(
+        SessionRetentionPolicy {
+            max_sessions: Some(1),
+            max_bytes: None,
+            expire_older_than_ms: None,
+        },
+        std::slice::from_ref(&current),
+        1_000_000_000_000_000,
+    )?;
+
+    let output = service.apply_retention(&preview, std::slice::from_ref(&current), 5678)?;
+
+    assert_eq!(output.deleted_sessions, 2);
+    assert_eq!(output.deleted_bytes, preview.selected_bytes);
+    assert!(!alpha.exists());
+    assert!(!beta.exists());
+    assert!(current.exists());
+    let records = service.lifecycle_records()?;
+    assert!(matches!(
+        records.first().map(|record| &record.event),
+        Some(LocalSessionLifecycleEvent::RetentionBatchPlanned(_))
+    ));
+    assert!(matches!(
+        records.last().map(|record| &record.event),
+        Some(LocalSessionLifecycleEvent::RetentionBatchCompleted(_))
+    ));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record.event, LocalSessionLifecycleEvent::DeleteCompleted(_)))
+            .count(),
+        2
+    );
+    let recovery = service.lifecycle_recovery()?;
+    assert!(recovery.iter().any(|entry| {
+        entry.operation_id == output.operation_id
+            && entry.kind == LocalSessionLifecycleOperationKind::Retention
+            && entry.status == LocalSessionLifecycleRecoveryStatus::Completed
+    }));
+    Ok(())
+}
+
+#[test]
+fn retention_apply_detects_late_candidate_drift_before_deleting_any_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let alpha = sessions.join("session-alpha.jsonl");
+    let beta = sessions.join("session-beta.jsonl");
+    finalized_session(&alpha, "alpha")?;
+    finalized_session(&beta, "beta")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let preview = service.preview_retention(
+        SessionRetentionPolicy {
+            max_sessions: Some(0),
+            max_bytes: None,
+            expire_older_than_ms: None,
+        },
+        &[],
+        1_000_000_000_000_000,
+    )?;
+    let drifted = preview
+        .candidates
+        .last()
+        .expect("two candidates")
+        .delete_preview
+        .source_path
+        .clone();
+    let store = JsonlSessionStore::new(&drifted)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("late")))?;
+    drop(store);
+
+    let error = service
+        .apply_retention(&preview, &[], 5678)
+        .expect_err("batch drift must fail before delete");
+
+    assert!(error.to_string().contains("changed"));
+    assert!(alpha.exists());
+    assert!(beta.exists());
+    assert!(service.lifecycle_records()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn retention_apply_rejects_a_tampered_batch_preview_before_journal_or_delete() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let source = sessions.join("session-source.jsonl");
+    finalized_session(&source, "keep")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    let mut preview = service.preview_retention(
+        SessionRetentionPolicy {
+            max_sessions: Some(0),
+            max_bytes: None,
+            expire_older_than_ms: None,
+        },
+        &[],
+        1_000_000_000_000_000,
+    )?;
+    preview.selected_bytes = preview.selected_bytes.saturating_add(1);
+
+    let error = service
+        .apply_retention(&preview, &[], 5678)
+        .expect_err("tampered batch preview must fail");
+
+    assert!(error.to_string().contains("digest"));
+    assert!(source.exists());
+    assert!(service.lifecycle_records()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn retention_preview_reports_unsatisfied_quota_when_every_session_is_protected_or_pinned()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let pinned = sessions.join("session-pinned.jsonl");
+    let current = sessions.join("session-current.jsonl");
+    finalized_session(&pinned, "pinned")?;
+    finalized_session(&current, "current")?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+    service.set_session_pin(&pinned, true, 100)?;
+
+    let preview = service.preview_retention(
+        SessionRetentionPolicy {
+            max_sessions: Some(0),
+            max_bytes: Some(0),
+            expire_older_than_ms: Some(0),
+        },
+        std::slice::from_ref(&current),
+        1_000_000_000_000_000,
+    )?;
+
+    assert!(preview.candidates.is_empty());
+    assert!(!preview.constraints_satisfied);
+    assert_eq!(preview.pinned_sessions, 1);
+    assert_eq!(preview.protected_sessions, 1);
+    Ok(())
+}
+
+#[test]
+fn retention_preview_excludes_a_session_with_an_active_writer_lease() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions)?;
+    let active = sessions.join("session-active.jsonl");
+    let inactive = sessions.join("session-inactive.jsonl");
+    finalized_session(&active, "active")?;
+    finalized_session(&inactive, "inactive")?;
+    let active_store = JsonlSessionStore::new(&active)?;
+    active_store.append(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
+        Default::default(),
+    )))?;
+    let service =
+        LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"));
+
+    let preview = service.preview_retention(
+        SessionRetentionPolicy {
+            max_sessions: Some(0),
+            max_bytes: None,
+            expire_older_than_ms: None,
+        },
+        &[],
+        1_000_000_000_000_000,
+    )?;
+
+    assert_eq!(preview.protected_sessions, 1);
+    assert_eq!(preview.candidates.len(), 1);
+    assert_eq!(
+        preview.candidates[0].delete_preview.source_path,
+        fs::canonicalize(&inactive)?
+    );
+    assert!(!preview.constraints_satisfied);
+    assert!(active.exists());
+    drop(active_store);
+    Ok(())
+}

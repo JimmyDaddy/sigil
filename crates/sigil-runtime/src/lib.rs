@@ -186,8 +186,11 @@ pub use session_lifecycle::{
     LocalSessionLifecycleEvent, LocalSessionLifecycleLimits, LocalSessionLifecycleOperationKind,
     LocalSessionLifecycleRecord, LocalSessionLifecycleRecoveryEntry,
     LocalSessionLifecycleRecoveryStatus, LocalSessionLifecycleService,
+    LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
     SESSION_EXPORT_SCHEMA_VERSION, SessionDeleteOutput, SessionDeletePreview,
     SessionExportMessageV1, SessionExportOutput, SessionExportPayloadV1, SessionExportV1,
+    SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
+    SessionRetentionPreview, SessionRetentionReason,
 };
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,

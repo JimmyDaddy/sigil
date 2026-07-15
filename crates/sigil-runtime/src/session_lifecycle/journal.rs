@@ -38,6 +38,22 @@ pub struct LocalSessionDeleteJournalBinding {
     pub preview_digest: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct LocalSessionPinJournalBinding {
+    pub source_session_ref: sigil_kernel::SessionRef,
+    pub source_session_id: String,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct LocalSessionRetentionJournalBinding {
+    pub preview_digest: String,
+    pub candidate_count: usize,
+    pub candidate_bytes: u64,
+}
+
 /// Typed append-only lifecycle event. Payloads never contain transcript text or raw external
 /// destination paths.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +63,9 @@ pub enum LocalSessionLifecycleEvent {
     ExportCompleted(LocalSessionExportJournalBinding),
     DeletePlanned(LocalSessionDeleteJournalBinding),
     DeleteCompleted(LocalSessionDeleteJournalBinding),
+    PinChanged(LocalSessionPinJournalBinding),
+    RetentionBatchPlanned(LocalSessionRetentionJournalBinding),
+    RetentionBatchCompleted(LocalSessionRetentionJournalBinding),
 }
 
 /// One strict-sequence, previous-hash-linked workspace lifecycle record.
@@ -283,7 +302,9 @@ fn validate_operation_transition(
         .collect::<Vec<_>>();
     match event {
         LocalSessionLifecycleEvent::ExportPlanned(_)
-        | LocalSessionLifecycleEvent::DeletePlanned(_) => {
+        | LocalSessionLifecycleEvent::DeletePlanned(_)
+        | LocalSessionLifecycleEvent::PinChanged(_)
+        | LocalSessionLifecycleEvent::RetentionBatchPlanned(_) => {
             if !prior.is_empty() {
                 bail!("local session lifecycle operation is already recorded");
             }
@@ -303,6 +324,15 @@ fn validate_operation_transition(
                     LocalSessionLifecycleEvent::DeletePlanned(planned) if planned == binding
                 ) => {}
             _ => bail!("delete completion requires one exact planned binding"),
+        },
+        LocalSessionLifecycleEvent::RetentionBatchCompleted(binding) => match prior.as_slice() {
+            [record]
+                if matches!(
+                    &record.event,
+                    LocalSessionLifecycleEvent::RetentionBatchPlanned(planned)
+                        if planned == binding
+                ) => {}
+            _ => bail!("retention completion requires one exact planned binding"),
         },
     }
     Ok(())

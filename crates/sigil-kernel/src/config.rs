@@ -1156,6 +1156,48 @@ impl Default for WorkspaceConfig {
 pub struct SessionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_dir: Option<String>,
+    #[serde(default)]
+    pub retention: SessionRetentionConfig,
+}
+
+pub const DEFAULT_SESSION_RETENTION_MAX_SESSIONS: usize = 500;
+pub const DEFAULT_SESSION_RETENTION_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS: u64 = 180 * 24 * 60 * 60 * 1000;
+
+/// Policy used only by explicit local session maintenance actions.
+///
+/// Ordinary run, resume, startup, and serve paths do not apply this policy implicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionRetentionConfig {
+    #[serde(default = "default_session_retention_max_sessions")]
+    pub max_sessions: Option<usize>,
+    #[serde(default = "default_session_retention_max_bytes")]
+    pub max_bytes: Option<u64>,
+    #[serde(default = "default_session_retention_expire_older_than_ms")]
+    pub expire_older_than_ms: Option<u64>,
+}
+
+impl Default for SessionRetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions: default_session_retention_max_sessions(),
+            max_bytes: default_session_retention_max_bytes(),
+            expire_older_than_ms: default_session_retention_expire_older_than_ms(),
+        }
+    }
+}
+
+fn default_session_retention_max_sessions() -> Option<usize> {
+    Some(DEFAULT_SESSION_RETENTION_MAX_SESSIONS)
+}
+
+fn default_session_retention_max_bytes() -> Option<u64> {
+    Some(DEFAULT_SESSION_RETENTION_MAX_BYTES)
+}
+
+fn default_session_retention_expire_older_than_ms() -> Option<u64> {
+    Some(DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS)
 }
 
 /// User-local storage root configuration.

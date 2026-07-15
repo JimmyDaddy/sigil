@@ -81,6 +81,7 @@ fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -
         },
         session: SessionConfig {
             log_dir: Some(workspace_root.join("sessions").display().to_string()),
+            retention: Default::default(),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),

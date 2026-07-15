@@ -10,10 +10,12 @@ use super::{
     preferred_config_path_for_known_paths, resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
-    AgentConfig, AgentRole, ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind,
-    ExecutionCapability, ExecutionIsolationPolicy, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, McpRemoteClientCapability, MultiAgentMode, SkillConfig, StorageConfig,
-    StorageRoot, TaskConfig, TaskMode, WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS,
+    DEFAULT_SESSION_RETENTION_MAX_BYTES, DEFAULT_SESSION_RETENTION_MAX_SESSIONS,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCapability,
+    ExecutionIsolationPolicy, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    McpRemoteClientCapability, MultiAgentMode, SkillConfig, StorageConfig, StorageRoot, TaskConfig,
+    TaskMode, WorkspaceConfig,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -625,6 +627,18 @@ model = "deepseek-v4-flash"
 
     assert_eq!(config.workspace.root, ".");
     assert_eq!(config.session.log_dir, None);
+    assert_eq!(
+        config.session.retention.max_sessions,
+        Some(DEFAULT_SESSION_RETENTION_MAX_SESSIONS)
+    );
+    assert_eq!(
+        config.session.retention.max_bytes,
+        Some(DEFAULT_SESSION_RETENTION_MAX_BYTES)
+    );
+    assert_eq!(
+        config.session.retention.expire_older_than_ms,
+        Some(DEFAULT_SESSION_RETENTION_EXPIRE_OLDER_THAN_MS)
+    );
     assert_eq!(config.storage, Default::default());
     assert_eq!(config.agent.tool_timeout_secs, 30);
     assert_eq!(config.memory, Default::default());
@@ -638,6 +652,32 @@ model = "deepseek-v4-flash"
     );
     assert!(config.appearance.colors.is_empty());
     assert_eq!(config.task.default_mode, TaskMode::Chat);
+}
+
+#[test]
+fn session_retention_config_has_explicit_overrides_without_implicit_cleanup() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[session.retention]
+max_sessions = 42
+max_bytes = 123456
+expire_older_than_ms = 789
+"#,
+    )
+    .expect("session retention overrides should parse");
+
+    assert_eq!(config.session.retention.max_sessions, Some(42));
+    assert_eq!(config.session.retention.max_bytes, Some(123456));
+    assert_eq!(config.session.retention.expire_older_than_ms, Some(789));
+    let encoded = toml::to_string(&config.session.retention)
+        .expect("session retention overrides should serialize");
+    let decoded: crate::SessionRetentionConfig =
+        toml::from_str(&encoded).expect("session retention overrides should round-trip");
+    assert_eq!(decoded, config.session.retention);
 }
 
 #[test]

@@ -12,8 +12,11 @@
 | `[storage].state_root` | `"auto"` | 每用户的持久 Sigil state。`SIGIL_STATE_HOME` 可覆盖。 |
 | `[storage].cache_root` | `"auto"` | 可重建的每用户 cache。`SIGIL_CACHE_HOME` 可覆盖。 |
 | `[session].log_dir` | workspace state 下的 `sessions` | session log 位置。相对值在 workspace state 下解析。 |
+| `[session.retention].max_sessions` | `500` | 显式 cleanup 后最多保留的 ready session 数。 |
+| `[session.retention].max_bytes` | `2147483648` | 显式 cleanup 后 ready session 的最大总字节数。 |
+| `[session.retention].expire_older_than_ms` | `15552000000` | 显式 cleanup 时选择早于 180 天且未受保护的 session。 |
 
-路径选择见[配置指南](configuration.md#storage-与-session-路径)。
+路径选择与 retention 只允许显式执行的边界见[配置指南](configuration.md#storage-与-session-路径)。
 
 ## Agent 与 Providers
 

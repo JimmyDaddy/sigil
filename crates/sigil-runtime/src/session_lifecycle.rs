@@ -6,6 +6,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,13 +19,19 @@ use sigil_kernel::{
 };
 
 mod journal;
+mod retention;
 
 pub use journal::{
     LOCAL_SESSION_LIFECYCLE_JOURNAL_SCHEMA_VERSION, LocalSessionDeleteJournalBinding,
     LocalSessionExportJournalBinding, LocalSessionLifecycleEvent, LocalSessionLifecycleRecord,
+    LocalSessionPinJournalBinding, LocalSessionRetentionJournalBinding,
 };
 
 use journal::LocalSessionLifecycleJournal;
+pub use retention::{
+    SessionRetentionCandidate, SessionRetentionOutput, SessionRetentionPolicy,
+    SessionRetentionPreview, SessionRetentionReason,
+};
 
 pub const SESSION_EXPORT_SCHEMA_VERSION: u16 = 1;
 pub const DEFAULT_SESSION_CATALOG_MAX_ENTRIES: usize = 4_096;
@@ -84,6 +93,8 @@ pub struct LocalSessionCatalogEntry {
     pub title: Option<String>,
     pub transcript_message_count: usize,
     pub finalized_turn_count: usize,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Deterministically ordered view of local V2 session files.
@@ -190,6 +201,7 @@ pub struct SessionDeleteOutput {
 pub enum LocalSessionLifecycleOperationKind {
     Export,
     Delete,
+    Retention,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -269,6 +281,9 @@ impl LocalSessionLifecycleService {
         let records = self.lifecycle_records()?;
         let mut operations = BTreeMap::<String, Vec<LocalSessionLifecycleEvent>>::new();
         for record in records {
+            if matches!(record.event, LocalSessionLifecycleEvent::PinChanged(_)) {
+                continue;
+            }
             operations
                 .entry(record.operation_id)
                 .or_default()
@@ -296,6 +311,17 @@ impl LocalSessionLifecycleService {
                     LocalSessionLifecycleEvent::DeletePlanned(binding) => (
                         LocalSessionLifecycleOperationKind::Delete,
                         self.recover_incomplete_delete(binding),
+                    ),
+                    LocalSessionLifecycleEvent::PinChanged(_) => {
+                        return Err(anyhow!("pin event entered operation recovery"));
+                    }
+                    LocalSessionLifecycleEvent::RetentionBatchCompleted(_) => (
+                        LocalSessionLifecycleOperationKind::Retention,
+                        LocalSessionLifecycleRecoveryStatus::Completed,
+                    ),
+                    LocalSessionLifecycleEvent::RetentionBatchPlanned(_) => (
+                        LocalSessionLifecycleOperationKind::Retention,
+                        LocalSessionLifecycleRecoveryStatus::Uncertain,
                     ),
                 };
                 Ok(LocalSessionLifecycleRecoveryEntry {
@@ -350,6 +376,7 @@ impl LocalSessionLifecycleService {
         candidates.truncate(self.limits.max_catalog_entries);
 
         let mut validated_bytes = 0_u64;
+        let pins = self.session_pin_projection()?;
         let mut entries = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let state = if candidate.symlink_or_non_file {
@@ -364,7 +391,14 @@ impl LocalSessionLifecycleService {
                 validated_bytes = validated_bytes.saturating_add(candidate.bytes);
                 LocalSessionCatalogState::Ready
             };
-            entries.push(self.catalog_entry(candidate, state));
+            let mut entry = self.catalog_entry(candidate, state);
+            entry.pinned = entry.session_id.as_deref().is_some_and(|session_id| {
+                pins.get(&entry.session_ref)
+                    .is_some_and(|(pinned_session_id, pinned)| {
+                        pinned_session_id == session_id && *pinned
+                    })
+            });
+            entries.push(entry);
         }
         Ok(LocalSessionCatalog {
             entries,
@@ -464,6 +498,36 @@ impl LocalSessionLifecycleService {
         })
     }
 
+    /// Appends a durable pin/unpin decision for one exact session identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source is not a ready direct V2 session or the lifecycle journal
+    /// cannot durably append the decision.
+    pub fn set_session_pin(
+        &self,
+        source_path: &Path,
+        pinned: bool,
+        recorded_at_unix_ms: u64,
+    ) -> Result<LocalSessionLifecycleRecord> {
+        let _maintenance = self.acquire_maintenance_lease()?;
+        let source = self.resolve_ready_source(source_path)?;
+        let source_session_id = source
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow!("source session has no durable identity"))?;
+        let operation_id = format!("session-pin:{}", uuid::Uuid::new_v4());
+        self.lifecycle_journal().append(
+            &operation_id,
+            recorded_at_unix_ms,
+            LocalSessionLifecycleEvent::PinChanged(LocalSessionPinJournalBinding {
+                source_session_ref: source.session_ref,
+                source_session_id,
+                pinned,
+            }),
+        )
+    }
+
     /// Builds a read-only, content-bound preview for deleting one inactive local session.
     ///
     /// # Errors
@@ -476,6 +540,17 @@ impl LocalSessionLifecycleService {
         protected_paths: &[PathBuf],
     ) -> Result<SessionDeletePreview> {
         let source = self.resolve_ready_source(source_path)?;
+        self.preview_delete_entry(&source, protected_paths)
+    }
+
+    fn preview_delete_entry(
+        &self,
+        source: &LocalSessionCatalogEntry,
+        protected_paths: &[PathBuf],
+    ) -> Result<SessionDeletePreview> {
+        if source.pinned {
+            bail!("pinned session cannot be deleted");
+        }
         ensure_not_protected(&source.path, protected_paths)?;
         let source_content_sha256 = hash_file_bounded(&source.path, self.limits.max_stream_bytes)?;
         let metadata = fs::metadata(&source.path)
@@ -488,6 +563,7 @@ impl LocalSessionLifecycleService {
         }
         let source_session_id = source
             .session_id
+            .clone()
             .ok_or_else(|| anyhow!("source session has no durable identity"))?;
         let preview_digest = delete_preview_digest(
             &self.workspace_id,
@@ -498,8 +574,8 @@ impl LocalSessionLifecycleService {
             source_modified_at_unix_ms,
         )?;
         Ok(SessionDeletePreview {
-            source_path: source.path,
-            source_session_ref: source.session_ref,
+            source_path: source.path.clone(),
+            source_session_ref: source.session_ref.clone(),
             source_session_id,
             source_content_sha256,
             source_bytes,
@@ -521,6 +597,19 @@ impl LocalSessionLifecycleService {
         protected_paths: &[PathBuf],
         applied_at_unix_ms: u64,
     ) -> Result<SessionDeleteOutput> {
+        let _maintenance = self.acquire_maintenance_lease()?;
+        if self.is_session_pinned(&preview.source_session_ref, &preview.source_session_id)? {
+            bail!("pinned session cannot be deleted");
+        }
+        let lease = self.preflight_delete(preview, protected_paths)?;
+        self.apply_delete_after_preflight(preview, lease, applied_at_unix_ms)
+    }
+
+    fn preflight_delete(
+        &self,
+        preview: &SessionDeletePreview,
+        protected_paths: &[PathBuf],
+    ) -> Result<File> {
         validate_delete_preview(&self.workspace_id, preview)?;
         reject_source_symlink_and_escape(
             &self.session_dir,
@@ -538,6 +627,15 @@ impl LocalSessionLifecycleService {
         {
             bail!("source session changed after delete preview");
         }
+        Ok(lease)
+    }
+
+    fn apply_delete_after_preflight(
+        &self,
+        preview: &SessionDeletePreview,
+        lease: File,
+        applied_at_unix_ms: u64,
+    ) -> Result<SessionDeleteOutput> {
         let binding = LocalSessionDeleteJournalBinding {
             source_session_ref: preview.source_session_ref.clone(),
             source_session_id: preview.source_session_id.clone(),
@@ -591,6 +689,7 @@ impl LocalSessionLifecycleService {
             title: None,
             transcript_message_count: 0,
             finalized_turn_count: 0,
+            pinned: false,
         };
         if initial_state != LocalSessionCatalogState::Ready {
             return entry;
@@ -688,6 +787,76 @@ impl LocalSessionLifecycleService {
 
     fn lifecycle_journal(&self) -> LocalSessionLifecycleJournal {
         LocalSessionLifecycleJournal::new(self.lifecycle_journal_path.clone())
+    }
+
+    fn session_pin_projection(&self) -> Result<BTreeMap<SessionRef, (String, bool)>> {
+        let mut pins = BTreeMap::new();
+        for record in self.lifecycle_records()? {
+            if let LocalSessionLifecycleEvent::PinChanged(binding) = record.event {
+                pins.insert(
+                    binding.source_session_ref,
+                    (binding.source_session_id, binding.pinned),
+                );
+            }
+        }
+        Ok(pins)
+    }
+
+    fn is_session_pinned(&self, session_ref: &SessionRef, session_id: &str) -> Result<bool> {
+        Ok(self
+            .session_pin_projection()?
+            .get(session_ref)
+            .is_some_and(|(pinned_session_id, pinned)| pinned_session_id == session_id && *pinned))
+    }
+
+    fn acquire_maintenance_lease(&self) -> Result<File> {
+        let name = self
+            .lifecycle_journal_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("session-lifecycle-v1.jsonl");
+        let path = self
+            .lifecycle_journal_path
+            .with_file_name(format!("{name}.maintenance-lock"));
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("session maintenance lease has no parent"))?;
+        if parent.exists() {
+            let metadata = fs::symlink_metadata(parent)
+                .with_context(|| format!("failed to inspect {}", parent.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("session maintenance lease parent must be a real directory");
+            }
+        } else {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        if path.exists()
+            && fs::symlink_metadata(&path)
+                .with_context(|| format!("failed to inspect {}", path.display()))?
+                .file_type()
+                .is_symlink()
+        {
+            bail!("session maintenance lease must not be a symlink");
+        }
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        let lease = options
+            .open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        if !lease
+            .metadata()
+            .with_context(|| format!("failed to inspect {}", path.display()))?
+            .is_file()
+        {
+            bail!("session maintenance lease must be a regular file");
+        }
+        lease
+            .try_lock()
+            .context("another local session maintenance operation is active")?;
+        Ok(lease)
     }
 
     fn recover_incomplete_delete(
@@ -972,13 +1141,20 @@ fn acquire_session_writer_lease(source_path: &Path) -> Result<File> {
     {
         bail!("session writer lease must not be a symlink");
     }
-    let lease = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let lease = options
         .open(&lease_path)
         .with_context(|| format!("failed to open {}", lease_path.display()))?;
+    if !lease
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", lease_path.display()))?
+        .is_file()
+    {
+        bail!("session writer lease must be a regular file");
+    }
     lease.try_lock().with_context(|| {
         format!(
             "session is active or its writer lease is busy: {}",
@@ -986,6 +1162,46 @@ fn acquire_session_writer_lease(source_path: &Path) -> Result<File> {
         )
     })?;
     Ok(lease)
+}
+
+fn session_writer_is_inactive(source_path: &Path) -> Result<bool> {
+    let file_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow!("source session file name is invalid"))?;
+    let lease_path = source_path.with_file_name(format!("{file_name}.writer-lock"));
+    if !lease_path.exists() {
+        return Ok(true);
+    }
+    let metadata = fs::symlink_metadata(&lease_path)
+        .with_context(|| format!("failed to inspect {}", lease_path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("session writer lease must be a regular file");
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let lease = options
+        .open(&lease_path)
+        .with_context(|| format!("failed to open {}", lease_path.display()))?;
+    if !lease
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", lease_path.display()))?
+        .is_file()
+    {
+        bail!("session writer lease must be a regular file");
+    }
+    match lease.try_lock() {
+        Ok(()) => Ok(true),
+        Err(fs::TryLockError::WouldBlock) => Ok(false),
+        Err(fs::TryLockError::Error(error)) => Err(error).with_context(|| {
+            format!(
+                "failed to inspect session writer activity: {}",
+                source_path.display()
+            )
+        }),
+    }
 }
 
 fn hash_file_bounded(path: &Path, max_bytes: u64) -> Result<String> {
