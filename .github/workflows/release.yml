@@ -6,9 +6,14 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Existing tag to publish, for example v0.1.0"
+      publish:
+        description: "Publish npm, GitHub Release, and Homebrew after all builds pass"
         required: true
+        default: false
+        type: boolean
+      tag:
+        description: "Existing tag to publish; ignored when publish is false"
+        required: false
         type: string
 
 permissions:
@@ -20,8 +25,27 @@ env:
   RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
+  validate-mode:
+    name: Validate release mode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate manual publish inputs
+        shell: bash
+        env:
+          PUBLISH: ${{ inputs.publish }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${PUBLISH}" == "true" ]]; then
+            if [[ -z "${RELEASE_TAG}" || "${RELEASE_TAG}" != v* ]]; then
+              echo "manual publish requires an existing v-prefixed tag" >&2
+              exit 1
+            fi
+          fi
+
   build:
     name: Build ${{ matrix.os }}
+    needs: validate-mode
     runs-on: ${{ matrix.os }}
     permissions:
       attestations: write
@@ -40,6 +64,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && inputs.tag || github.ref }}
 
       - name: Install Rust
         shell: bash
@@ -67,6 +92,7 @@ jobs:
   publish:
     name: Publish release
     needs: build
+    if: ${{ github.event_name == 'push' || inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -79,6 +105,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Download release artifacts
         uses: actions/download-artifact@v8
@@ -178,6 +205,7 @@ jobs:
   sync-homebrew:
     name: Sync Homebrew tap
     needs: publish
+    if: ${{ github.event_name == 'push' || inputs.publish }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

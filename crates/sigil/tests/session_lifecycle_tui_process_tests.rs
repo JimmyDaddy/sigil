@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::json;
 use sigil_kernel::{
@@ -109,6 +109,108 @@ fn write_trusted_finalized_session(path: &Path, workspace: &Path) -> Result<()> 
     Ok(())
 }
 
+fn write_compaction_config(path: &Path, workspace: &Path, session_dir: &Path) -> Result<()> {
+    let config = format!(
+        r#"[workspace]
+root = "{}"
+
+[storage]
+state_root = "{}"
+cache_root = "auto"
+
+[session]
+log_dir = "{}"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+tool_timeout_secs = 5
+
+[compaction]
+enabled = true
+tail_messages = 2
+
+[terminal]
+keyboard_enhancement = "off"
+mouse_capture = false
+osc52_clipboard = false
+
+[providers.deepseek]
+api_key = "test-key"
+strict_tools_mode = "auto"
+"#,
+        workspace.display(),
+        workspace.join("state").display(),
+        session_dir.display()
+    );
+    fs::write(path, config)?;
+    Ok(())
+}
+
+fn write_compaction_session(path: &Path, workspace: &Path) -> Result<()> {
+    let store = JsonlSessionStore::new(path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+    })?;
+    let workspace_id = stable_workspace_id(workspace)?;
+    session.append_control(ControlEntry::WorkspaceTrustDecision(
+        WorkspaceTrustDecisionEntry {
+            workspace_id: workspace_id.clone(),
+            workspace_trust_snapshot_id: format!("workspace-trust:{workspace_id}"),
+            trust: WorkspaceTrust::Trusted,
+            decided_by_event_id: Some("compaction-process-e2e".to_owned()),
+            reason: Some("trusted compaction process fixture".to_owned()),
+        },
+    ))?;
+    let mut final_message_id = None;
+    for turn in 0..4 {
+        session.append_user_message(ModelMessage::user(format!(
+            "release compaction acceptance objective turn {turn}"
+        )))?;
+        let assistant = ModelMessage::assistant_with_kind(
+            Some(format!(
+                "completed durable implementation evidence for turn {turn}: {}",
+                "verified-state ".repeat(400)
+            )),
+            Vec::new(),
+            AssistantMessageKind::FinalAnswer,
+        );
+        final_message_id = Some(assistant.id.clone());
+        session.append_assistant_message(assistant)?;
+    }
+    session.append_durable_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({
+            "run_status": "completed",
+            "terminal_reason": "final_answer",
+            "final_message_id": final_message_id,
+            "tool_calls": 0,
+            "error": null
+        }),
+    )?;
+    Ok(())
+}
+
+fn require_installed_compaction_tokenizer(cache_root: &Path) -> Result<()> {
+    let profile_root = cache_root.join("provider-profiles/deepseek-v4-flash");
+    let installed = fs::read_dir(&profile_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .any(|entry| entry.path().join("tokenizer.json").is_file());
+    if !installed {
+        bail!(
+            "release acceptance requires `sigil tokenizer install deepseek-v4-flash` under {}",
+            cache_root.display()
+        );
+    }
+    Ok(())
+}
+
 fn captured_text(output: &Arc<Mutex<Vec<u8>>>) -> String {
     output
         .lock()
@@ -143,6 +245,142 @@ fn wait_for_text(output: &Arc<Mutex<Vec<u8>>>, needle: &str) -> Result<()> {
 fn write_input(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
     writer.write_all(bytes)?;
     writer.flush()?;
+    Ok(())
+}
+
+fn run_tui_process(
+    config_path: &Path,
+    workspace: &Path,
+    interact: impl FnOnce(&Arc<Mutex<Vec<u8>>>, &mut dyn Write) -> Result<()>,
+) -> Result<()> {
+    let pty_system = native_pty_system();
+    let pair = pty_system.openpty(PtySize {
+        rows: 40,
+        cols: 120,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+    let master = pair.master;
+    let slave = pair.slave;
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_sigil"));
+    command.args([
+        "--config",
+        config_path.to_str().context("UTF-8 config path")?,
+    ]);
+    command.cwd(workspace);
+    command.env("TERM", "xterm-256color");
+    command.env("SIGIL_BASE_URL", "https://api.deepseek.com");
+    command.env("SIGIL_BETA_BASE_URL", "https://api.deepseek.com/beta");
+    command.env(
+        "SIGIL_ANTHROPIC_BASE_URL",
+        "https://api.deepseek.com/anthropic",
+    );
+    let mut child = slave.spawn_command(command)?;
+    drop(slave);
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let mut reader = master.try_clone_reader()?;
+    let reader_thread = thread::spawn(move || {
+        let mut chunk = [0_u8; 8 * 1024];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if let Ok(mut captured) = reader_output.lock() {
+                        captured.extend_from_slice(&chunk[..read]);
+                    }
+                }
+            }
+        }
+    });
+    let mut writer = master.take_writer()?;
+
+    let result = (|| -> Result<()> {
+        wait_for_text(&output, "deepseek-v4-flash")?;
+        interact(&output, writer.as_mut())?;
+        write_input(writer.as_mut(), &[0x01, 0x0b])?;
+        write_input(writer.as_mut(), b"/quit\r")?;
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                if !status.success() {
+                    return Err(anyhow!(
+                        "sigil TUI process exited with {}: {}",
+                        status.exit_code(),
+                        captured_text(&output)
+                    ));
+                }
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!("sigil TUI process did not exit after /quit"));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        Ok(())
+    })();
+
+    if child.try_wait()?.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    drop(writer);
+    drop(master);
+    let _ = reader_thread.join();
+    result
+}
+
+#[test]
+#[ignore = "release acceptance requires an installed checksum-pinned DeepSeek V4 tokenizer"]
+fn real_tui_process_compacts_and_reloads_the_durable_boundary() -> Result<()> {
+    let workspace = test_workspace()?;
+    let config_path = workspace.join("sigil-compaction.toml");
+    let session_dir = workspace.join("sessions");
+    fs::create_dir(&session_dir)?;
+    write_compaction_config(&config_path, &workspace, &session_dir)?;
+    let session_path = session_dir.join("session-compaction-process-e2e.jsonl");
+    write_compaction_session(&session_path, &workspace)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
+    require_installed_compaction_tokenizer(&paths.cache_root)?;
+
+    let result = (|| -> Result<()> {
+        run_tui_process(&config_path, &workspace, |output, writer| {
+            write_input(writer, b"/resume release compaction acceptance objective\r")?;
+            wait_for_text(output, "verified-state")?;
+            write_input(writer, b"/compact\r")?;
+            wait_for_text(output, "verified locally")?;
+            write_input(writer, b"\r")?;
+            wait_for_text(output, "Context compacted:")?;
+            Ok(())
+        })?;
+
+        run_tui_process(&config_path, &workspace, |output, writer| {
+            write_input(writer, b"/resume release compaction acceptance objective\r")?;
+            wait_for_text(output, "verified-state")?;
+            write_input(writer, b"/compact\r")?;
+            wait_for_text(output, "no newly foldable history:")?;
+            Ok(())
+        })?;
+
+        let records = JsonlSessionStore::read_event_records(&session_path)?;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| {
+                    record.stored_event().event_type
+                        == DurableEventType::CompactionAppliedV2.as_str()
+                })
+                .count(),
+            1
+        );
+        Ok(())
+    })();
+
+    let cleanup = fs::remove_dir_all(&workspace);
+    result?;
+    cleanup?;
     Ok(())
 }
 

@@ -13,11 +13,20 @@ git tag -a v0.0.1-alpha.2 -m "Sigil 0.0.1-alpha.2"
 git push origin v0.0.1-alpha.2
 ```
 
-The `Release` workflow also supports manual dispatch with an existing tag.
+Before creating a tag, manually dispatch the `Release` workflow from the exact
+candidate ref with `publish` left at its safe default of `false`. This build-only
+mode runs all four platform archive, smoke, checksum, attestation, and artifact
+upload steps, but it does not publish npm packages, create a GitHub Release, or
+update the Homebrew tap.
+
+Manual recovery of an already-created tag requires both `publish: true` and the
+existing `v`-prefixed tag. The workflow checks out that tag for every build and
+publish step. Treat this as a public release action, not as package preflight.
 
 ## Workflow
 
-The release workflow is `.github/workflows/release.yml`.
+The release workflow is `.github/workflows/release.yml`. Tag pushes always use
+publish mode; manual dispatch defaults to build-only mode.
 
 1. Build native release archives on Ubuntu, macOS arm64, macOS Intel, and Windows runners.
 2. Run the built `sigil --version` and `sigil doctor` smoke checks.
