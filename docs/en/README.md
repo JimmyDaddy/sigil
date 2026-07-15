@@ -4,7 +4,7 @@
 
 Sigil is a TUI-first coding agent. This page is a compact map of the user documentation; it intentionally does not repeat release versions, install commands, or provider credentials. Follow the linked guide that owns each topic for current details.
 
-These docs track `main`, while the packaged alpha remains `v0.0.1-alpha.2`. Check [Unreleased](changelog.md#unreleased-main) for features that may still require a source install.
+These docs track `main`, while the packaged alpha is `v0.0.1-alpha.3`. Check [Unreleased](changelog.md#unreleased-main) for features added after that release.
 
 ## Start Here
 

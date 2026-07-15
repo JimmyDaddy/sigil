@@ -24,7 +24,7 @@ post_json() {
     -D "${headers}" -o "${response}"
     -H 'Accept: application/json, text/event-stream'
     -H 'Content-Type: application/json'
-    -H 'User-Agent: Sigil/0.0.1-alpha.2 (release-evidence)'
+    -H 'User-Agent: Sigil/0.0.1-alpha.3 (release-evidence)'
   )
   if [[ -n "${session_id}" ]]; then
     request_args+=(-H "Mcp-Session-Id: ${session_id}")
@@ -75,7 +75,7 @@ validate_tools_contract() {
 initialize_headers="${tmp_dir}/initialize.headers"
 initialize_response="${tmp_dir}/initialize.response"
 post_json \
-  '{"jsonrpc":"2.0","id":"sigil-probe-initialize","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Sigil","version":"0.0.1-alpha.2"}}}' \
+  '{"jsonrpc":"2.0","id":"sigil-probe-initialize","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Sigil","version":"0.0.1-alpha.3"}}}' \
   "${initialize_response}" "${initialize_headers}"
 
 response_contains "${initialize_response}" '"jsonrpc"'

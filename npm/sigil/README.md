@@ -19,5 +19,5 @@ Do not publish this directory directly. Generate publishable package directories
 from release archives:
 
 ```bash
-scripts/prepare-npm-packages.sh --version 0.0.1-alpha.2 --dist-dir dist --out-dir dist/npm-packages
+scripts/prepare-npm-packages.sh --version 0.0.1-alpha.3 --dist-dir dist --out-dir dist/npm-packages
 ```

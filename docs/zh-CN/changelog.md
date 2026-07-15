@@ -6,6 +6,12 @@
 
 ## Unreleased - main
 
+`v0.0.1-alpha.3` 之后暂时没有新增的用户可见变更。
+
+## v0.0.1-alpha.3 - 2026-07-15
+
+以下变更已包含在打包发布的 `v0.0.1-alpha.3` 中。
+
 ### 新增
 
 - 为脚本增加稳定的 `sigil run --output json` 与 `--output jsonl` 格式，并增加只监听本机、要求 bearer 认证的高级 `sigil serve` 接口。

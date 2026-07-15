@@ -6,6 +6,12 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+No user-facing changes have been documented after `v0.0.1-alpha.3` yet.
+
+## v0.0.1-alpha.3 - 2026-07-15
+
+These changes are included in the packaged `v0.0.1-alpha.3` release.
+
 ### Added
 
 - Added stable `sigil run --output json` and `--output jsonl` formats for scripts, plus an advanced bearer-authenticated `sigil serve` interface that only listens on the local machine.

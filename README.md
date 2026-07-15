@@ -13,7 +13,7 @@ Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, 
 
 [Website](https://jimmydaddy.github.io/sigil/) · [Docs site](https://jimmydaddy.github.io/sigil/docs/) · [Quickstart](https://jimmydaddy.github.io/sigil/docs/quickstart/) · [Visual tour](https://jimmydaddy.github.io/sigil/docs/visual-tour/) · [Status](https://jimmydaddy.github.io/sigil/docs/status/)
 
-Sigil's first alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha.2` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
+Sigil's alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha.3` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
 
 The website and user docs track `main`, which can be newer than the packaged alpha. Check [Unreleased](docs/en/changelog.md#unreleased-main) before relying on a newer feature; install from source when it has not reached a tagged release yet.
 
@@ -36,7 +36,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 ```
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.2 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.3 --locked sigil
 ```
 
 If you prefer a source install, run this from a checkout:
