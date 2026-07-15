@@ -128,6 +128,9 @@ Role 包括 `planner`、`executor`、`subagent_read` 和 `subagent_write`。
 | `[terminal].keyboard_enhancement` | `"auto"` | `auto`、`on` 或 `off`。 |
 | `[terminal].mouse_capture` / `.osc52_clipboard` | `true` | 鼠标与 OSC52 剪贴板行为。 |
 | `[terminal].scroll_sensitivity` | `3` | 每次滚轮滚动的行数。 |
+| `[terminal.notifications].enabled` | `false` | 在交互式 TUI 中启用有明确隐私边界的 attention signal。 |
+| `[terminal.notifications].method` | `"auto"` | `auto`、`osc9`、`osc777` 或 `bell`。 |
+| `[terminal.notifications].minimum_run_duration_ms` | `10000` | 长任务完成阈值，范围为 `1000` 到 `3600000`。 |
 | `[[mcp_servers]].inherit_env` | `[]` | 传递给本地 MCP server 的仅根配置凭据名列表。 |
 
 设置示例见[高级配置](advanced-configuration.md)和[MCP 指南](mcp.md)。

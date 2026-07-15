@@ -67,7 +67,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 
 When `[terminal].mouse_capture = true`, mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header or hidden-preview expand/collapse. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
 
-Use the `Terminal` section in `/config` to review keyboard enhancement, mouse capture, OSC52 copy, and scroll sensitivity. Edit `sigil.toml` for compatibility overrides.
+Use the `Terminal` section in `/config` to enable attention notifications, choose `auto` / `osc9` / `osc777` / `bell`, and set the long-run threshold. The same section shows keyboard enhancement, mouse capture, OSC52 copy, and scroll sensitivity as compatibility facts; edit `sigil.toml` for those lower-frequency overrides. Notifications are off by default, use fixed privacy-safe text, and are suppressed when reliable terminal focus telemetry says Sigil is focused.
 
 For terminal-specific smoke checks and tmux/SSH guidance, see [Terminal Compatibility Checklist](terminal-compatibility.md).
 

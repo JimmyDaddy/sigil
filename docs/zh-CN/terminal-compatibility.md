@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [排障](troubleshooting.md) · [English](../en/terminal-compatibility.md)
 
-这份清单用于验证 Sigil 在真实终端里的 mouse capture 和 OSC52 剪贴板行为。它保留为人工 smoke checklist，因为 terminal multiplexer、远程 shell 和桌面终端偏好设置都可能在 Sigil 进程外拦截这些能力。
+这份清单用于验证 Sigil 在真实终端里的 mouse capture、OSC52 剪贴板行为和可选 attention notification。部分检查仍需人工完成，因为 terminal multiplexer、远程 shell 和桌面终端偏好设置都可能在 Sigil 进程外拦截这些能力。
 
 先运行诊断：
 
@@ -10,7 +10,7 @@
 sigil doctor
 ```
 
-在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会读取 `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`[terminal].scroll_sensitivity`、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。
+在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会在 mouse、clipboard、scroll、profile、tmux/screen、SSH、WSL 和剪贴板桥接事实之外，显示配置的 notification 开关、method 和 threshold；不会打印 notification payload 或原始环境值。
 
 如果要复用一套本地流程来采集 `/doctor`、启动真实 TUI、逐项记录 pass/fail/skip，并生成 Markdown 报告，可以运行：
 
@@ -26,6 +26,22 @@ scripts/tui-mouse-smoke.sh
 4. 默认保持 `mouse_capture = true` 以启用鼠标支持；如果终端或 multiplexer 不能稳定处理 mouse mode，再显式设为 `false`。
 5. 除非复制序列被拦截或被可见打印出来，否则保持 `osc52_clipboard = true`。
 6. 除非 transcript 和 approval diff 的滚轮速度过快或过慢，否则保持 `scroll_sensitivity = 3`。
+7. 只有后台或长任务确实需要失焦提示时才开启 attention notification。优先使用 `method = "auto"`；只有在测试已知 terminal profile 时才显式使用 `bell`、`osc9` 或 `osc777`。
+
+## Attention Notification Smoke
+
+在 `/config` → `Terminal` 中开启通知，并临时把长任务阈值设为 `1000` ms。启动一个超过一秒的 run，然后把焦点移出终端。
+
+- 预期：完成后只出现一次固定通知。审批和 MCP 等待输入不使用长任务阈值。
+- Sigil 聚焦时：能可靠上报 focus 的终端会抑制通知。如果从未收到 focus event，Sigil 不会假装焦点检测可靠。
+- tmux/screen：OSC method 会使用 multiplexer pass-through。如果出现可见控制文本或通知被忽略，改用 `bell` 或关闭该能力。
+- 隐私：通知不包含 prompt、reply、路径、tool/MCP name、arguments、错误详情、provider 或 session id。
+
+如需用真实 binary 确定性验证 default-off 与 explicit BEL 字节，运行：
+
+```bash
+scripts/tui-attention-signals-pty-acceptance.py
+```
 
 ## 鼠标 Smoke
 
@@ -74,6 +90,9 @@ keyboard_enhancement:
 mouse_capture:
 osc52_clipboard:
 scroll_sensitivity:
+notifications enabled / method / threshold:
+Long-run notification:
+Focused suppression:
 Doctor terminal status:
 Mouse smoke:
 Text selection:

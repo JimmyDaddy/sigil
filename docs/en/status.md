@@ -31,7 +31,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Web data tools | Stable `websearch` and capability-backed `webfetch` routes use separate network policy, durable egress disclosure, and external-source provenance. |
 | MCP servers | Local stdio and user-root Streamable HTTP servers are supported through `[[mcp_servers]]` with trust, approval, and secret-egress policy. |
 | Code intelligence | Optional, disabled by default, with LSP discovery and Rust fallback behavior. |
-| Terminal controls | Mouse capture, OSC52 copy, scroll sensitivity, and terminal diagnostics are documented and configurable. |
+| Terminal controls | Mouse capture, OSC52 copy, scroll sensitivity, diagnostics, and default-off privacy-bounded attention notifications are documented and configurable. |
 
 ## Limited Or Advanced
 

@@ -84,6 +84,8 @@ Doctor 会报告：
 
 它不应该打印 secret 值，但 path、provider name 和本地环境事实仍可能敏感。
 
+可选 terminal attention notification 默认关闭。其 OSC/BEL payload 只来自固定 signal 文案，不包含 prompt、reply、path、tool/MCP 详情、错误文本、provider、model 或 session id。它只是临时 terminal output，不会创建 session/control event 或 state/cache artifact。
+
 需要带版本的脱敏结构、而不是默认文本报告时，使用 `sigil doctor --output json`。它仍然只在本机离线运行。
 
 ## 私密反馈报告

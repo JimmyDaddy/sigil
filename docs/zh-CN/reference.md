@@ -137,7 +137,7 @@ Sigil 按以下顺序解析 config：
 | `[task]` | Planned task 行为和 role settings |
 | `[verification]` | 显式用户批准的 verification checks |
 | `[code_intelligence]` | LSP 和 code intelligence tools |
-| `[terminal]` | Mouse、OSC52 clipboard 和 scroll 行为 |
+| `[terminal]` | Mouse、OSC52 clipboard、scroll 行为和可选 attention notification |
 | `[appearance]` | TUI 主题、usage cost currency 和语义颜色覆盖 |
 | `[[mcp_servers]]` | 显式 `stdio` 或用户根 `streamable_http` MCP server 配置 |
 

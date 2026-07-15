@@ -137,7 +137,7 @@ Use the [Provider guide](providers.md) for the supported provider values, model 
 | `[task]` | Planned task behavior and role settings |
 | `[verification]` | Explicit user-approved verification checks |
 | `[code_intelligence]` | LSP and code intelligence tools |
-| `[terminal]` | Mouse, OSC52 clipboard, and scroll behavior |
+| `[terminal]` | Mouse, OSC52 clipboard, scroll behavior, and optional attention notifications |
 | `[appearance]` | TUI theme, usage cost currency, and semantic color overrides |
 | `[[mcp_servers]]` | Explicit `stdio` or user-root `streamable_http` MCP server configuration |
 

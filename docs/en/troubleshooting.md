@@ -142,6 +142,12 @@ scroll_sensitivity = 3
 
 See [Terminal Compatibility Checklist](terminal-compatibility.md) for tmux, screen, SSH, WSL, and manual smoke checks.
 
+## Attention Notification Does Not Appear
+
+Open `/config` → `Terminal` and confirm notifications are enabled. Temporarily set the long-run threshold to `1000` ms and choose `bell` to separate terminal protocol support from notification timing. Some terminals mute BEL; in a known compatible profile, try `osc9` or `osc777`. Under tmux or screen, verify escape-sequence pass-through. A focused Sigil window suppresses notifications only after the terminal has supplied reliable focus events.
+
+Run `/doctor` to confirm the saved switch, method, and threshold. Notification failures never fail the active run, and no notification is sent for short replies, cancellation, progress, or a restored historical session.
+
 ## Session Restore Shows Interrupted Tools
 
 That is expected after a process exit, crash, terminal close, or cancellation while a tool was running. Sigil restores started-but-unfinished tools as interrupted results. It does not replay them silently.

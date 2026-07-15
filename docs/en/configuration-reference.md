@@ -128,6 +128,9 @@ See [Permissions and sandbox](permissions-and-sandbox.md) for the effective safe
 | `[terminal].keyboard_enhancement` | `"auto"` | `auto`, `on`, or `off`. |
 | `[terminal].mouse_capture` / `.osc52_clipboard` | `true` | Mouse and OSC52 clipboard behavior. |
 | `[terminal].scroll_sensitivity` | `3` | Rows per mouse-wheel tick. |
+| `[terminal.notifications].enabled` | `false` | Enables privacy-bounded attention signals in the interactive TUI. |
+| `[terminal.notifications].method` | `"auto"` | `auto`, `osc9`, `osc777`, or `bell`. |
+| `[terminal.notifications].minimum_run_duration_ms` | `10000` | Long-run completion threshold, from `1000` through `3600000`. |
 | `[[mcp_servers]].inherit_env` | `[]` | Root-only list of credential names to pass to a local MCP server. |
 
 See [Advanced configuration](advanced-configuration.md) and the [MCP guide](mcp.md) for setup examples.

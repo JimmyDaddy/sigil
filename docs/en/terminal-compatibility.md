@@ -2,7 +2,7 @@
 
 [Docs home](README.md) · [Troubleshooting](troubleshooting.md) · [简体中文](../zh-CN/terminal-compatibility.md)
 
-This checklist helps verify Sigil mouse capture and OSC52 clipboard behavior in real terminals. It is intentionally manual because terminal multiplexers, remote shells, and desktop terminal preferences can block features outside Sigil's process.
+This checklist helps verify Sigil mouse capture, OSC52 clipboard behavior, and optional attention notifications in real terminals. Some checks remain manual because terminal multiplexers, remote shells, and desktop terminal preferences can block features outside Sigil's process.
 
 Start with diagnostics:
 
@@ -10,7 +10,7 @@ Start with diagnostics:
 sigil doctor
 ```
 
-Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report reads `[terminal].mouse_capture`, `[terminal].osc52_clipboard`, `[terminal].scroll_sensitivity`, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk.
+Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report includes the configured notification switch, method, and threshold alongside mouse, clipboard, scroll, profile, tmux/screen, SSH, WSL, and clipboard bridge facts. It does not print notification payloads or raw environment values.
 
 For a repeatable local run that captures `/doctor`, launches the real TUI, prompts for pass/fail/skip results, and writes a Markdown report, use:
 
@@ -26,6 +26,22 @@ scripts/tui-mouse-smoke.sh
 4. Keep the default `mouse_capture = true` for mouse support; set it to `false` if the terminal or multiplexer mishandles mouse mode.
 5. Keep `osc52_clipboard = true` unless copy sequences are blocked or printed visibly.
 6. Keep `scroll_sensitivity = 3` unless the mouse wheel feels too fast or too slow in transcript and approval diff views.
+7. Keep attention notifications off unless background or long-running work needs an out-of-focus signal. Prefer `method = "auto"`; use explicit `bell`, `osc9`, or `osc777` only when testing a known terminal profile.
+
+## Attention Notification Smoke
+
+Use `/config` → `Terminal` to enable notifications and temporarily set the long-run threshold to `1000` ms. Start a run that lasts longer than one second, then move focus away from the terminal.
+
+- Expected: one fixed notification after completion. Approval and MCP input requests notify without using the long-run threshold.
+- While Sigil is focused: terminals that report focus reliably suppress the notification. If no focus event has ever been received, Sigil does not pretend focus detection is reliable.
+- Under tmux/screen: OSC methods use multiplexer pass-through. If the terminal exposes control text or ignores it, use `bell` or disable the feature.
+- Privacy: notification text never includes the prompt, reply, path, tool/MCP name, arguments, error details, provider, or session id.
+
+For deterministic real-binary verification of default-off and explicit BEL bytes, run:
+
+```bash
+scripts/tui-attention-signals-pty-acceptance.py
+```
 
 ## Mouse Smoke
 
@@ -74,6 +90,9 @@ keyboard_enhancement:
 mouse_capture:
 osc52_clipboard:
 scroll_sensitivity:
+notifications enabled / method / threshold:
+Long-run notification:
+Focused suppression:
 Doctor terminal status:
 Mouse smoke:
 Text selection:

@@ -84,9 +84,16 @@ keyboard_enhancement = "auto"
 mouse_capture = true
 osc52_clipboard = true
 scroll_sensitivity = 3
+
+[terminal.notifications]
+enabled = false
+method = "auto"
+minimum_run_duration_ms = 10000
 ```
 
 如果终端或 multiplexer 无法处理增强按键，将 `keyboard_enhancement` 设为 `off`。如果 mouse mode 与终端冲突，将 `mouse_capture` 设为 `false`。如果终端阻止剪贴板序列，将 `osc52_clipboard` 设为 `false`。[终端兼容性检查清单](terminal-compatibility.md)提供人工 checklist。
+
+Attention notification 默认关闭。开启后，Sigil 可以在长任务结束、等待工具审批、active run 失败或 MCP 等待输入时发出提示。`method` 支持 `auto`、`osc9`、`osc777` 和 `bell`；长任务阈值范围是 `1000` 到 `3600000` 毫秒。通知使用固定文案，不包含 prompt、reply、路径、tool arguments、server name、错误详情、provider 或 session id。该设置只影响交互式 TUI，不会新增 session event。
 
 `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`、`SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 与 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 可临时覆盖共享模型请求超时。Provider 凭据与 endpoint 选项仍在 [Provider 指南](providers.md)及其专页维护。
 

@@ -84,9 +84,16 @@ keyboard_enhancement = "auto"
 mouse_capture = true
 osc52_clipboard = true
 scroll_sensitivity = 3
+
+[terminal.notifications]
+enabled = false
+method = "auto"
+minimum_run_duration_ms = 10000
 ```
 
 Set `keyboard_enhancement = "off"` if a terminal or multiplexer mishandles enhanced keys. Set `mouse_capture = false` if mouse mode conflicts with your terminal. Set `osc52_clipboard = false` if your terminal blocks clipboard sequences. The [Terminal compatibility guide](terminal-compatibility.md) provides a manual checklist.
+
+Attention notifications are disabled by default. When enabled, Sigil can signal a long run finishing, a required tool approval, a failed active run, or an MCP request waiting for input. `method` accepts `auto`, `osc9`, `osc777`, or `bell`; the long-run threshold accepts `1000` through `3600000` milliseconds. Notification text is fixed and never includes the prompt, reply, path, tool arguments, server name, error details, provider, or session id. The setting affects only the interactive TUI and does not add session events.
 
 The environment variables `SIGIL_MODEL_REQUEST_TIMEOUT_SECS`, `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS`, and `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` temporarily override shared model-request timeouts. Provider credentials and endpoint options stay on the [Provider guide](providers.md) and its provider pages.
 

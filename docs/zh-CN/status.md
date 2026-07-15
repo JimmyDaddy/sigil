@@ -31,7 +31,7 @@
 | Web data tools | Stable `websearch` 与 capability-backed `webfetch` route 使用独立 network policy、durable egress disclosure 和 external-source provenance。 |
 | MCP server | 通过 `[[mcp_servers]]` 支持本地 stdio 与用户根 Streamable HTTP server，并带 trust、approval 和 secret-egress policy。 |
 | Code intelligence | 可选，默认关闭，支持 LSP discovery 和 Rust fallback 行为。 |
-| Terminal controls | Mouse capture、OSC52 copy、scroll sensitivity 和 terminal diagnostics 已有文档和配置。 |
+| Terminal controls | Mouse capture、OSC52 copy、scroll sensitivity、terminal diagnostics 和默认关闭且有隐私边界的 attention notification 已有文档和配置。 |
 
 ## 有限制或高级用法
 

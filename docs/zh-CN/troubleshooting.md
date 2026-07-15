@@ -142,6 +142,12 @@ scroll_sensitivity = 3
 
 tmux、screen、SSH、WSL 和手工 smoke check 见 [Terminal 兼容性检查清单](terminal-compatibility.md)。
 
+## Attention Notification 没有出现
+
+打开 `/config` → `Terminal`，确认 notification 已开启。临时把长任务阈值改为 `1000` ms，并选择 `bell`，先把 terminal protocol 支持与通知时机分开验证。部分终端会静音 BEL；已知兼容的 profile 可尝试 `osc9` 或 `osc777`。在 tmux 或 screen 下，还要确认 escape-sequence pass-through。只有 terminal 已提供可靠 focus event 时，聚焦的 Sigil 才会抑制通知。
+
+运行 `/doctor` 确认已保存的开关、method 和 threshold。通知失败不会使 active run 失败；短回复、取消、progress 或恢复历史 session 也不会发送通知。
+
 ## Session 恢复后显示 Interrupted Tools
 
 这是预期行为。进程退出、崩溃、终端关闭或 cancellation 发生在工具运行中时，Sigil 会把 started-but-unfinished tools 恢复为 interrupted results，不会静默重放。

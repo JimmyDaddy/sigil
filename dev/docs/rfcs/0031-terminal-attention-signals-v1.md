@@ -1,6 +1,6 @@
 # RFC-0031 Terminal Attention Signals V1
 
-状态：accepted / implementation in progress
+状态：accepted / implemented
 
 创建日期：2026-07-16
 
@@ -104,7 +104,7 @@ controller 以进程内 `Instant` 记录 foreground run；main/plan/skill/follow
 - 四种 method 精确编码，auto/unknown/tmux/screen 行为有测试；
 - 短 run 不通知，长 run 只通知一次，缺失 start 不通知；
 - approval、failure、elicitation 各触发一次，focus/cooldown 抑制可证明；
-- canary prompt/path/tool/error/server 不出现在 terminal bytes、session JSONL 或 support bundle；
+- canary prompt/path/tool/error/server 不进入 notification frame 或 support bundle；session JSONL 只保留既有正常事实，不新增 notification event，也不复制固定通知正文（正常用户 prompt 仍按既有会话契约持久化）；
 - notification write failure 不改变 AppState 既有处理结果；
 - TUI `/config`、doctor、EN/ZH docs/site 与真实实现一致；
 - real binary PTY 验证 default-off 和 explicit BEL；
@@ -132,3 +132,4 @@ git diff --check
 - R31.0 complete：技术方案、正式 RFC、执行台账和 commit/gate 边界已冻结于 commit `ce44f8bc`。
 - R31.1 complete：kernel 默认值与边界校验、TUI Terminal 配置入口、保存回读和 runtime doctor 投影已完成；受影响 crate 全量测试、Clippy、格式与 docs gate 通过。
 - R31.2 complete：纯 attention controller/codec、focus telemetry、launcher 动态启停与 cleanup 已完成；固定 payload、cooldown、threshold、multiplexer passthrough 和 non-fatal write failure 均有测试覆盖。
+- R31.3 complete：真实 binary PTY 已证明 default-off 零通知字节、explicit BEL 恰好一次、focus reporting cleanup 对称，且 notification frame、session/state/cache 均满足隐私与 durable boundary；EN/ZH 文档、site、workspace fmt/check/test/strict Clippy、docs/Pages/diff gates 和两轮实现审查全部通过。

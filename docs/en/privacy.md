@@ -84,6 +84,8 @@ Doctor reports:
 
 It should not print secret values, but paths, provider names, and local environment facts can still be sensitive.
 
+Optional terminal attention notifications are disabled by default. Their OSC/BEL payloads come from fixed signal text and never include prompt, reply, path, tool/MCP details, error text, provider, model, or session id. They are ephemeral terminal output and do not create session/control events or state/cache artifacts.
+
 Use `sigil doctor --output json` when you need the versioned, redacted structure instead of the default text report. It is still local and offline.
 
 ## Private Feedback Reports

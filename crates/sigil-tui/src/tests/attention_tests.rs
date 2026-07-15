@@ -16,13 +16,56 @@ fn enabled_config(method: TerminalNotificationMethod) -> TerminalNotificationCon
 
 fn completed_run() -> WorkerMessage {
     WorkerMessage::RunFinished {
-        result: AgentRunResult {
-            final_text: "private reply canary".to_owned(),
-            tool_calls: 0,
-            final_message_id: None,
-        },
+        result: agent_run_result(),
         entries: Vec::new(),
     }
+}
+
+fn agent_run_result() -> AgentRunResult {
+    AgentRunResult {
+        final_text: "private reply canary".to_owned(),
+        tool_calls: 0,
+        final_message_id: None,
+    }
+}
+
+fn approval_message(call_id: &str) -> WorkerMessage {
+    WorkerMessage::Event(Box::new(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: call_id.to_owned(),
+            name: "private-tool-canary".to_owned(),
+            args_json: "{\"private\":true}".to_owned(),
+        },
+        spec: ToolSpec {
+            name: "private-tool-canary".to_owned(),
+            description: "private description canary".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            network_effect: None,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        network_effect: None,
+        local_policy_decision: ApprovalMode::Ask,
+        network_policy_decision: ApprovalMode::Allow,
+        source_policy_decision: ApprovalMode::Allow,
+        operation: ToolOperation::OverwriteFile,
+        risk: PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        preview: None,
+    }))
+}
+
+fn approval_resolved_message(call_id: &str) -> WorkerMessage {
+    WorkerMessage::Event(Box::new(RunEvent::ToolApprovalResolved {
+        call_id: call_id.to_owned(),
+        approved: true,
+        reason: None,
+    }))
 }
 
 #[test]
@@ -95,6 +138,45 @@ fn long_run_notification_honors_default_off_threshold_and_focus() {
 }
 
 #[test]
+fn enabling_notifications_does_not_replay_or_time_disabled_activity() {
+    let start = Instant::now();
+    let environment = TerminalNotificationEnvironment::default();
+    let mut controller =
+        AttentionController::new(TerminalNotificationConfig::default(), environment);
+
+    controller.observe(
+        &WorkerMessage::RunStarted {
+            prompt: "private prompt canary".to_owned(),
+        },
+        start,
+    );
+    controller.update_config(enabled_config(TerminalNotificationMethod::Bell));
+    controller.observe(&completed_run(), start + Duration::from_secs(30));
+    assert_eq!(
+        controller
+            .emit_pending(&mut Vec::new())
+            .expect("enabling should not replay disabled activity"),
+        0
+    );
+
+    controller.observe(
+        &WorkerMessage::RunStarted {
+            prompt: "new enabled run".to_owned(),
+        },
+        start + Duration::from_secs(31),
+    );
+    controller.observe(&completed_run(), start + Duration::from_secs(42));
+    let mut bytes = Vec::new();
+    assert_eq!(
+        controller
+            .emit_pending(&mut bytes)
+            .expect("a run started after enabling should notify"),
+        1
+    );
+    assert_eq!(bytes, b"\x07");
+}
+
+#[test]
 fn run_failure_requires_an_active_run_and_uses_no_error_text() {
     let start = Instant::now();
     let mut controller = AttentionController::new(
@@ -138,35 +220,119 @@ fn run_failure_requires_an_active_run_and_uses_no_error_text() {
 }
 
 #[test]
-fn attention_cooldown_is_per_fixed_signal() {
+fn attention_cooldown_is_scoped_to_request_identity_and_resolution() {
     let start = Instant::now();
     let mut controller = AttentionController::new(
         enabled_config(TerminalNotificationMethod::Bell),
         TerminalNotificationEnvironment::default(),
     );
 
-    controller.queue_signal(AttentionSignal::ApprovalRequired, start);
-    controller.queue_signal(
-        AttentionSignal::ApprovalRequired,
-        start + Duration::from_secs(19),
+    controller.observe(&approval_message("call-1"), start);
+    controller.observe(&approval_message("call-1"), start + Duration::from_secs(19));
+    controller.observe(&approval_message("call-2"), start + Duration::from_secs(19));
+    controller.observe(&approval_message("call-1"), start + Duration::from_secs(20));
+    controller.observe(
+        &approval_resolved_message("call-1"),
+        start + Duration::from_secs(21),
     );
-    controller.queue_signal(
-        AttentionSignal::InputRequired,
-        start + Duration::from_secs(19),
-    );
-    controller.queue_signal(
-        AttentionSignal::ApprovalRequired,
-        start + Duration::from_secs(20),
-    );
+    controller.observe(&approval_message("call-1"), start + Duration::from_secs(21));
 
     let mut bytes = Vec::new();
     assert_eq!(
         controller
             .emit_pending(&mut bytes)
             .expect("cooldown test notifications should emit"),
-        3
+        4
     );
-    assert_eq!(bytes, b"\x07\x07\x07");
+    assert_eq!(bytes, b"\x07\x07\x07\x07");
+}
+
+#[test]
+fn foreground_run_identities_do_not_overwrite_or_suppress_each_other() {
+    let start = Instant::now();
+    let mut controller = AttentionController::new(
+        enabled_config(TerminalNotificationMethod::Bell),
+        TerminalNotificationEnvironment::default(),
+    );
+
+    controller.observe(
+        &WorkerMessage::RunStarted {
+            prompt: "main".to_owned(),
+        },
+        start,
+    );
+    controller.observe(
+        &WorkerMessage::PlanRunStarted {
+            prompt: "plan".to_owned(),
+        },
+        start,
+    );
+    controller.observe(
+        &WorkerMessage::AgentRunStarted {
+            profile_id: "review".to_owned(),
+            prompt: "agent".to_owned(),
+        },
+        start,
+    );
+    controller.observe(
+        &WorkerMessage::TaskRunStarted {
+            task_id: "task-1".to_owned(),
+            objective: "task".to_owned(),
+        },
+        start,
+    );
+
+    let finished_at = start + Duration::from_secs(11);
+    controller.observe(&completed_run(), finished_at);
+    controller.observe(
+        &WorkerMessage::PlanRunFinished {
+            result: agent_run_result(),
+            entries: Vec::new(),
+        },
+        finished_at,
+    );
+    controller.observe(
+        &WorkerMessage::AgentRunFinished {
+            profile_id: "review".to_owned(),
+            result: agent_run_result(),
+            entries: Vec::new(),
+        },
+        finished_at,
+    );
+    controller.observe(
+        &WorkerMessage::TaskRunFinished {
+            task_id: "task-1".to_owned(),
+            status: TaskRunStatus::Completed,
+            entries: Vec::new(),
+        },
+        finished_at,
+    );
+
+    controller.observe(
+        &WorkerMessage::SkillRunStarted {
+            skill_id: "skill-1".to_owned(),
+            prompt: "skill".to_owned(),
+        },
+        start + Duration::from_secs(12),
+    );
+    controller.observe(&completed_run(), start + Duration::from_secs(23));
+
+    controller.observe(
+        &WorkerMessage::RunStarted {
+            prompt: "follow-up".to_owned(),
+        },
+        start + Duration::from_secs(24),
+    );
+    controller.observe(&completed_run(), start + Duration::from_secs(35));
+
+    let mut bytes = Vec::new();
+    assert_eq!(
+        controller
+            .emit_pending(&mut bytes)
+            .expect("each foreground run identity should emit"),
+        6
+    );
+    assert_eq!(bytes, b"\x07\x07\x07\x07\x07\x07");
 }
 
 #[test]
@@ -176,34 +342,7 @@ fn worker_attention_events_map_to_fixed_approval_and_input_signals() {
         enabled_config(TerminalNotificationMethod::Bell),
         TerminalNotificationEnvironment::default(),
     );
-    let approval = WorkerMessage::Event(Box::new(RunEvent::ToolApprovalRequested {
-        call: ToolCall {
-            id: "private-call-canary".to_owned(),
-            name: "private-tool-canary".to_owned(),
-            args_json: "{\"private\":true}".to_owned(),
-        },
-        spec: ToolSpec {
-            name: "private-tool-canary".to_owned(),
-            description: "private description canary".to_owned(),
-            input_schema: json!({"type": "object"}),
-            category: ToolCategory::File,
-            access: ToolAccess::Write,
-            network_effect: None,
-            preview: ToolPreviewCapability::Required,
-        },
-        subjects: Vec::new(),
-        network_effect: None,
-        local_policy_decision: ApprovalMode::Ask,
-        network_policy_decision: ApprovalMode::Allow,
-        source_policy_decision: ApprovalMode::Allow,
-        operation: ToolOperation::OverwriteFile,
-        risk: PermissionRisk::Medium,
-        subject_zones: Vec::new(),
-        confirmation: None,
-        snapshot_required: false,
-        command_permission_matches: Vec::new(),
-        preview: None,
-    }));
+    let approval = approval_message("private-call-canary");
     controller.observe(&approval, start);
 
     let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
@@ -272,6 +411,15 @@ fn auto_method_prefers_known_protocols_and_falls_back_to_bell() {
     };
     assert_eq!(
         iterm.resolve_method(TerminalNotificationMethod::Auto),
+        TerminalNotificationMethod::Osc9
+    );
+
+    let ghostty = TerminalNotificationEnvironment {
+        term_program: Some("ghostty".to_owned()),
+        ..TerminalNotificationEnvironment::default()
+    };
+    assert_eq!(
+        ghostty.resolve_method(TerminalNotificationMethod::Auto),
         TerminalNotificationMethod::Osc9
     );
 
