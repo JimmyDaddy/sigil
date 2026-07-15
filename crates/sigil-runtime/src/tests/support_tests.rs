@@ -1,8 +1,12 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::SecretRedactor;
+use tempfile::tempdir;
 
 use super::*;
 
@@ -17,6 +21,43 @@ fn environment() -> SupportEnvironmentV1 {
         Some("iTerm.app"),
         Some("xterm-256color"),
     )
+}
+
+fn support_bundle() -> Result<SupportBundleV1> {
+    let report = DoctorReport {
+        checks: vec![DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "config:load".to_owned(),
+            message: "config parsed".to_owned(),
+            remediation: None,
+        }],
+    };
+    let build = build_info();
+    let environment = environment();
+    let redactor = SecretRedactor::empty();
+    let doctor = project_doctor_support_report_v1(
+        &report,
+        DoctorSupportProjectionContext {
+            generated_at_unix_ms: 123,
+            build: &build,
+            environment: &environment,
+            redactor: &redactor,
+            path_redactions: &[],
+        },
+    )?;
+    let session = project_support_session_summary_v1(
+        "session-123",
+        7,
+        "deepseek",
+        "deepseek-v4-flash",
+        SupportRunPhase::Idle,
+        false,
+        SupportSessionProjectionContext {
+            redactor: &redactor,
+            path_redactions: &[],
+        },
+    )?;
+    Ok(SupportBundleV1::new(doctor, Some(session)))
 }
 
 #[test]
@@ -93,7 +134,10 @@ fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -
                     "os_arch",
                     "terminal_family",
                     "doctor_status_and_redacted_checks",
-                    "non_secret_provider_model_and_extension_labels"
+                    "provider_and_model_labels",
+                    "mcp_aliases",
+                    "credential_environment_variable_names",
+                    "capability_and_sandbox_status"
                 ],
                 "excluded": [
                     "conversation_content",
@@ -303,4 +347,111 @@ fn terminal_family_mapping_is_frozen_to_coarse_tokens() {
     ] {
         assert_eq!(terminal_family(program, term), expected);
     }
+}
+
+#[test]
+fn support_bundle_schema_and_writer_are_private_bounded_and_non_overwriting() -> Result<()> {
+    let temp = tempdir()?;
+    let cache_root = temp.path().join("cache");
+    let bundle = support_bundle()?;
+    let value = serde_json::to_value(&bundle)?;
+    assert_eq!(value["schema_version"], SUPPORT_BUNDLE_SCHEMA_VERSION);
+    assert_eq!(value["session"]["run_phase"], "idle");
+    assert_eq!(value["session"]["durable_entry_count"], 7);
+    let round_trip: SupportBundleV1 = serde_json::from_value(value.clone())?;
+    assert_eq!(round_trip, bundle);
+    let mut with_unknown = value;
+    with_unknown
+        .as_object_mut()
+        .expect("bundle object")
+        .insert("future_field".to_owned(), json!(true));
+    assert!(serde_json::from_value::<SupportBundleV1>(with_unknown).is_err());
+
+    let first = write_support_bundle(&cache_root, &bundle)?;
+    let second = write_support_bundle(&cache_root, &bundle)?;
+    assert_ne!(first, second);
+    assert!(first.starts_with(cache_root.canonicalize()?));
+    assert!(second.exists());
+    assert_eq!(
+        serde_json::from_str::<SupportBundleV1>(&fs::read_to_string(&first)?)?,
+        bundle
+    );
+    let files = fs::read_dir(first.parent().expect("bundle parent"))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(files.len(), 2);
+    assert!(
+        files
+            .iter()
+            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp"))
+    );
+
+    #[cfg(unix)]
+    {
+        let directory_mode = fs::metadata(first.parent().expect("bundle parent"))?
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = fs::metadata(&first)?.permissions().mode() & 0o777;
+        assert_eq!(directory_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+    }
+    Ok(())
+}
+
+#[test]
+fn support_session_projection_redacts_private_labels() -> Result<()> {
+    let secret = "session-label-secret";
+    let private_path = PathBuf::from("/Users/private/project");
+    let redactor = SecretRedactor::from_values([secret]);
+    let path_redactions = [SupportPathRedaction::new(
+        &private_path,
+        SupportPathKind::Workspace,
+    )];
+    let session = project_support_session_summary_v1(
+        "session-123",
+        2,
+        &format!("provider-{secret}"),
+        &format!("{}", private_path.display()),
+        SupportRunPhase::Agent,
+        true,
+        SupportSessionProjectionContext {
+            redactor: &redactor,
+            path_redactions: &path_redactions,
+        },
+    )?;
+    let json = serde_json::to_string(&session)?;
+    assert!(!json.contains(secret));
+    assert!(!json.contains("/Users/private"));
+    assert!(json.contains("<workspace_path>"));
+    Ok(())
+}
+
+#[test]
+fn invalid_support_bundle_fails_before_creating_cache_files() -> Result<()> {
+    let temp = tempdir()?;
+    let cache_root = temp.path().join("missing-cache");
+    let mut value = serde_json::to_value(support_bundle()?)?;
+    value["session"]["provider"] = json!("x".repeat(MAX_DOCTOR_SUPPORT_NAME_BYTES + 1));
+    let bundle: SupportBundleV1 = serde_json::from_value(value)?;
+
+    assert!(write_support_bundle(&cache_root, &bundle).is_err());
+    assert!(!cache_root.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn support_bundle_writer_rejects_symlinked_destination_directory() -> Result<()> {
+    let temp = tempdir()?;
+    let cache_root = temp.path().join("cache");
+    let external = temp.path().join("external");
+    fs::create_dir_all(&cache_root)?;
+    fs::create_dir_all(&external)?;
+    symlink(&external, cache_root.join(SUPPORT_BUNDLES_DIRECTORY_NAME))?;
+
+    let error = write_support_bundle(&cache_root, &support_bundle()?)
+        .expect_err("symlinked support directory must be rejected");
+    assert!(error.to_string().contains("symbolic link"));
+    assert_eq!(fs::read_dir(&external)?.count(), 0);
+    Ok(())
 }

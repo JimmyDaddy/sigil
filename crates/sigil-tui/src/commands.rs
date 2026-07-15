@@ -12,6 +12,7 @@ pub(crate) enum UiCommand {
     OpenKeyboardHelp,
     OpenConfig,
     OpenDoctor,
+    OpenFeedback,
     StartNewSession,
     PreviewV2Compaction,
     CycleAgentView,
@@ -128,6 +129,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: Some("/doctor"),
         label: "Doctor",
         help: "Run local setup diagnostics.",
+        surface: CommandSurface::Slash,
+    },
+    UiCommandSpec {
+        command: UiCommand::OpenFeedback,
+        keys: &[],
+        slash: Some("/feedback"),
+        label: "Feedback",
+        help: "Review and privately export a redacted support report.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {

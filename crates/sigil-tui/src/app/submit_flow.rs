@@ -137,7 +137,9 @@ impl AppState {
         self.composer.input_paste_spans.clear();
         self.pending_mouse_slash_confirmation = None;
         self.reset_slash_selector();
-        self.push_event("slash", sigil_kernel::safe_persistence_text(&prompt));
+        if command.canonical != "/feedback" {
+            self.push_event("slash", sigil_kernel::safe_persistence_text(&prompt));
+        }
         match command.canonical.as_str() {
             "/compact" => {
                 if self.runtime.is_busy {
@@ -154,6 +156,10 @@ impl AppState {
             }
             "/doctor" => {
                 self.show_doctor_report();
+                Ok(None)
+            }
+            "/feedback" => {
+                self.open_feedback_modal();
                 Ok(None)
             }
             "@agent" => self.execute_agent_slash_command(&command, &prompt),

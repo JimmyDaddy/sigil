@@ -38,6 +38,8 @@ use sigil_kernel::RootConfig;
 use sigil_kernel::TerminalKeyboardEnhancement;
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
+#[cfg(not(test))]
+use sigil_runtime::support::SupportBuildInfo;
 
 #[cfg(not(test))]
 use crate::ui;
@@ -67,22 +69,40 @@ const SPINNER_FRAME_MILLIS: u128 = 120;
 
 #[cfg(not(test))]
 pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
-    run_tui_with_initial_session(config, InitialSessionTarget::Latest)
+    run_tui_with_build_info(config, SupportBuildInfo::unknown())
+}
+
+#[cfg(not(test))]
+pub fn run_tui_with_build_info(
+    config: Option<PathBuf>,
+    build_info: SupportBuildInfo,
+) -> Result<()> {
+    run_tui_with_initial_session(config, InitialSessionTarget::Latest, build_info)
 }
 
 #[cfg(not(test))]
 pub fn run_tui_resume(config: Option<PathBuf>, session_selector: Option<String>) -> Result<()> {
+    run_tui_resume_with_build_info(config, session_selector, SupportBuildInfo::unknown())
+}
+
+#[cfg(not(test))]
+pub fn run_tui_resume_with_build_info(
+    config: Option<PathBuf>,
+    session_selector: Option<String>,
+    build_info: SupportBuildInfo,
+) -> Result<()> {
     let target = session_selector
         .as_deref()
         .map(InitialSessionTarget::Selector)
         .unwrap_or(InitialSessionTarget::Latest);
-    run_tui_with_initial_session(config, target)
+    run_tui_with_initial_session(config, target, build_info)
 }
 
 #[cfg(not(test))]
 fn run_tui_with_initial_session(
     config: Option<PathBuf>,
     initial_session: InitialSessionTarget<'_>,
+    build_info: SupportBuildInfo,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(config.as_deref(), &cwd)?;
@@ -93,6 +113,7 @@ fn run_tui_with_initial_session(
         initial_session,
         spawn_worker,
     )?;
+    app.set_support_build_info(build_info);
 
     enable_raw_mode()?;
     let inline_viewport_height = current_inline_viewport_height()?;
@@ -547,7 +568,9 @@ where
             config_path,
             root_config,
         } => {
+            let support_build_info = app.support_build_info().clone();
             *app = AppState::from_root_config(&config_path, &root_config);
+            app.set_support_build_info(support_build_info);
             app.ensure_current_workspace_trust_decision("trusted by user during quick setup")?;
             *worker = Some(spawn_worker_fn(*root_config, app)?);
         }

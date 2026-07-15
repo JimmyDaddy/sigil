@@ -190,6 +190,7 @@ pub(super) enum ModalState {
     V2CompactionPreview(Box<super::compaction_flow::V2CompactionPreviewModalState>),
     SessionActions(Box<super::session_lifecycle_flow::SessionActionsModalState>),
     SessionRetention(Box<super::session_lifecycle_flow::SessionRetentionModalState>),
+    Feedback(Box<super::feedback_flow::FeedbackModalState>),
     KeyboardHelp,
 }
 
@@ -228,6 +229,7 @@ impl AppState {
             ModalState::V2CompactionPreview(_) => Some("Context Compaction"),
             ModalState::SessionActions(_) => Some("Session Actions"),
             ModalState::SessionRetention(_) => Some("Storage Maintenance"),
+            ModalState::Feedback(_) => Some("Feedback Report"),
             ModalState::KeyboardHelp => Some("Keyboard Help"),
         }
     }
@@ -299,6 +301,7 @@ impl AppState {
             Some(ModalState::V2CompactionPreview(state)) => state.lines(),
             Some(ModalState::SessionActions(state)) => state.lines(),
             Some(ModalState::SessionRetention(state)) => state.lines(),
+            Some(ModalState::Feedback(state)) => state.lines(),
             Some(ModalState::KeyboardHelp) => {
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());
@@ -357,6 +360,7 @@ impl AppState {
             ModalState::CheckpointRestore(_) => None,
             ModalState::V2CompactionPreview(_) => None,
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => None,
+            ModalState::Feedback(_) => None,
             ModalState::KeyboardHelp => None,
         }
     }
@@ -700,6 +704,7 @@ impl AppState {
                 _ => ModalOutcome::None,
             },
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => ModalOutcome::None,
+            ModalState::Feedback(_) => ModalOutcome::None,
             ModalState::KeyboardHelp => match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
                     self.modal_state = None;
@@ -750,6 +755,7 @@ impl AppState {
             | ModalState::V2CompactionPreview(_)
             | ModalState::SessionActions(_)
             | ModalState::SessionRetention(_)
+            | ModalState::Feedback(_)
             | ModalState::KeyboardHelp => ModalOutcome::None,
         }
     }
@@ -797,6 +803,7 @@ impl AppState {
                 }
             }
             ModalState::SessionActions(_) | ModalState::SessionRetention(_) => ModalOutcome::None,
+            ModalState::Feedback(_) => ModalOutcome::None,
             ModalState::KeyboardHelp => {
                 self.modal_state = None;
                 ModalOutcome::Dismissed("closed keyboard help".to_owned())

@@ -48,6 +48,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         completes_with_space: false,
     },
     SlashCommandSpec {
+        canonical: "/feedback",
+        aliases: &[],
+        description: "review and export a private support report",
+        completes_with_space: false,
+    },
+    SlashCommandSpec {
         canonical: "/effort",
         aliases: &["/e"],
         description: "set effort <low|medium|high|max>",

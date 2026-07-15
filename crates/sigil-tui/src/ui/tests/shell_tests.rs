@@ -180,6 +180,24 @@ fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
 }
 
 #[test]
+fn render_main_screen_shows_feedback_privacy_preview_modal() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.composer.input = "/feedback".to_owned();
+    assert!(app.submit_input()?.is_none());
+    let backend = TestBackend::new(140, 42);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Feedback Report"));
+    assert!(rendered.contains("Review before sharing"));
+    assert!(rendered.contains("Excluded: conversation"));
+    assert!(rendered.contains("Enter export locally"));
+    Ok(())
+}
+
+#[test]
 fn render_main_screen_keeps_error_notice_visible() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::Notice(

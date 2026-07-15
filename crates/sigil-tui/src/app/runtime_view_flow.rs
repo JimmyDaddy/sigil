@@ -1,8 +1,17 @@
 use sigil_kernel::{RootConfig, TerminalKeyboardEnhancement};
+use sigil_runtime::support::SupportBuildInfo;
 
 use super::{AppState, ComposerMode};
 
 impl AppState {
+    pub(crate) fn set_support_build_info(&mut self, build_info: SupportBuildInfo) {
+        self.support_build_info = build_info;
+    }
+
+    pub(crate) fn support_build_info(&self) -> &SupportBuildInfo {
+        &self.support_build_info
+    }
+
     pub fn cache_hit_ratio(&self) -> f64 {
         let total = self.runtime.stats.cache_hit_tokens + self.runtime.stats.cache_miss_tokens;
         if total == 0 {

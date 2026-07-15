@@ -132,6 +132,7 @@ impl AppState {
             | UiCommand::OpenKeyboardHelp
             | UiCommand::OpenConfig
             | UiCommand::OpenDoctor
+            | UiCommand::OpenFeedback
             | UiCommand::StartNewSession
             | UiCommand::PreviewV2Compaction
             | UiCommand::CycleAgentView

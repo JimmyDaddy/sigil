@@ -192,6 +192,7 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(metadata_slash_commands().any(|command| command == "/compact"));
     assert!(metadata_slash_commands().any(|command| command == "/agent"));
     assert!(metadata_slash_commands().any(|command| command == "/doctor"));
+    assert!(metadata_slash_commands().any(|command| command == "/feedback"));
     assert!(metadata_slash_commands().any(|command| command == "/new"));
     assert!(metadata_slash_commands().any(|command| command == "/plan"));
     assert!(metadata_slash_commands().any(|command| command == "/task"));

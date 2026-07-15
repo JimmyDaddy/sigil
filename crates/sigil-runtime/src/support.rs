@@ -1,4 +1,12 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -11,13 +19,19 @@ pub const MAX_DOCTOR_SUPPORT_CHECKS: usize = 256;
 pub const MAX_DOCTOR_SUPPORT_NAME_BYTES: usize = 256;
 pub const MAX_DOCTOR_SUPPORT_TEXT_BYTES: usize = 2_048;
 pub const MAX_DOCTOR_SUPPORT_JSON_BYTES: usize = 256 * 1_024;
+pub const SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 1;
+pub const MAX_SUPPORT_BUNDLE_JSON_BYTES: usize = 384 * 1_024;
+pub const SUPPORT_BUNDLES_DIRECTORY_NAME: &str = "support-bundles";
 
 const INCLUDED_CATEGORIES: &[&str] = &[
     "build_metadata",
     "os_arch",
     "terminal_family",
     "doctor_status_and_redacted_checks",
-    "non_secret_provider_model_and_extension_labels",
+    "provider_and_model_labels",
+    "mcp_aliases",
+    "credential_environment_variable_names",
+    "capability_and_sandbox_status",
 ];
 const EXCLUDED_CATEGORIES: &[&str] = &[
     "conversation_content",
@@ -53,6 +67,11 @@ impl SupportBuildInfo {
             target: target.into(),
             profile: profile.into(),
         }
+    }
+
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self::new("unknown", "unknown", "unknown", "unknown")
     }
 }
 
@@ -175,6 +194,251 @@ impl DoctorSupportReportV1 {
         }
         Ok(json)
     }
+}
+
+/// Stable coarse run phases included in a support bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportRunPhase {
+    Idle,
+    Thinking,
+    Agent,
+    Tool,
+    Streaming,
+}
+
+/// Bounded session metadata. Conversation and session-log content are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportSessionSummaryV1 {
+    session_id: String,
+    durable_entry_count: usize,
+    provider: String,
+    model: String,
+    run_phase: SupportRunPhase,
+    busy: bool,
+}
+
+impl SupportSessionSummaryV1 {
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn durable_entry_count(&self) -> usize {
+        self.durable_entry_count
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    #[must_use]
+    pub fn run_phase(&self) -> SupportRunPhase {
+        self.run_phase
+    }
+
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+}
+
+/// Non-serializable inputs used to sanitize coarse session labels.
+pub struct SupportSessionProjectionContext<'a> {
+    pub redactor: &'a SecretRedactor,
+    pub path_redactions: &'a [SupportPathRedaction],
+}
+
+/// Produces the bounded session portion without reading conversation or log content.
+pub fn project_support_session_summary_v1(
+    session_id: &str,
+    durable_entry_count: usize,
+    provider: &str,
+    model: &str,
+    run_phase: SupportRunPhase,
+    busy: bool,
+    context: SupportSessionProjectionContext<'_>,
+) -> Result<SupportSessionSummaryV1> {
+    let projected = SupportSessionSummaryV1 {
+        session_id: sanitize_field(
+            "session.session_id",
+            session_id,
+            MAX_DOCTOR_SUPPORT_NAME_BYTES,
+            context.redactor,
+            context.path_redactions,
+        )?,
+        durable_entry_count,
+        provider: sanitize_field(
+            "session.provider",
+            provider,
+            MAX_DOCTOR_SUPPORT_NAME_BYTES,
+            context.redactor,
+            context.path_redactions,
+        )?,
+        model: sanitize_field(
+            "session.model",
+            model,
+            MAX_DOCTOR_SUPPORT_NAME_BYTES,
+            context.redactor,
+            context.path_redactions,
+        )?,
+        run_phase,
+        busy,
+    };
+    validate_support_session(&projected)?;
+    Ok(projected)
+}
+
+/// Frozen private support bundle exported only after explicit TUI confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportBundleV1 {
+    pub schema_version: u32,
+    pub doctor: DoctorSupportReportV1,
+    pub session: Option<SupportSessionSummaryV1>,
+}
+
+impl SupportBundleV1 {
+    #[must_use]
+    pub fn new(doctor: DoctorSupportReportV1, session: Option<SupportSessionSummaryV1>) -> Self {
+        Self {
+            schema_version: SUPPORT_BUNDLE_SCHEMA_VERSION,
+            doctor,
+            session,
+        }
+    }
+
+    pub fn to_pretty_json(&self) -> Result<String> {
+        if self.schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION {
+            bail!(
+                "support bundle schema version {} is unsupported",
+                self.schema_version
+            );
+        }
+        self.doctor.to_pretty_json()?;
+        if let Some(session) = &self.session {
+            validate_support_session(session)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        if json.len() > MAX_SUPPORT_BUNDLE_JSON_BYTES {
+            bail!(
+                "support bundle JSON is {} bytes; maximum is {MAX_SUPPORT_BUNDLE_JSON_BYTES}",
+                json.len()
+            );
+        }
+        Ok(json)
+    }
+}
+
+/// Writes a private support bundle below the Sigil cache with restrictive permissions.
+///
+/// The destination name is generated internally, existing files are never replaced, and
+/// serialization completes before any filesystem mutation.
+pub fn write_support_bundle(cache_root: &Path, bundle: &SupportBundleV1) -> Result<PathBuf> {
+    let json = bundle.to_pretty_json()?;
+    let cache_root = prepare_private_directory(cache_root, "support cache")?;
+    let support_dir = cache_root.join(SUPPORT_BUNDLES_DIRECTORY_NAME);
+    reject_symlink(&support_dir, "support bundle directory")?;
+    let support_dir = prepare_private_directory(&support_dir, "support bundle directory")?;
+    if support_dir.parent() != Some(cache_root.as_path()) {
+        bail!("support bundle directory escaped the support cache");
+    }
+
+    let suffix = uuid::Uuid::new_v4();
+    let timestamp = bundle.doctor.generated_at_unix_ms;
+    let destination = support_dir.join(format!("sigil-support-{timestamp}-{suffix}.json"));
+    let temporary = support_dir.join(format!(".sigil-support-{timestamp}-{suffix}.tmp"));
+    let mut published = false;
+    let result = write_new_private_file(&temporary, json.as_bytes()).and_then(|()| {
+        fs::hard_link(&temporary, &destination)?;
+        published = true;
+        fs::remove_file(&temporary)?;
+        sync_directory(&support_dir)?;
+        destination.canonicalize().map_err(Into::into)
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        if published {
+            let _ = fs::remove_file(&destination);
+        }
+        let _ = sync_directory(&support_dir);
+    }
+    result
+}
+
+fn validate_support_session(session: &SupportSessionSummaryV1) -> Result<()> {
+    validate_field(
+        "session.session_id",
+        &session.session_id,
+        MAX_DOCTOR_SUPPORT_NAME_BYTES,
+    )?;
+    validate_field(
+        "session.provider",
+        &session.provider,
+        MAX_DOCTOR_SUPPORT_NAME_BYTES,
+    )?;
+    validate_field(
+        "session.model",
+        &session.model,
+        MAX_DOCTOR_SUPPORT_NAME_BYTES,
+    )
+}
+
+fn prepare_private_directory(path: &Path, label: &str) -> Result<PathBuf> {
+    reject_symlink(path, label)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path)?;
+    reject_symlink(path, label)?;
+    if !path.is_dir() {
+        bail!("{label} is not a directory");
+    }
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    path.canonicalize().map_err(Into::into)
+}
+
+fn reject_symlink(path: &Path, label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("{label} must not be a symbolic link")
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_new_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Stable placeholders for caller-known private paths.
@@ -320,7 +584,8 @@ fn project_check(
                 "check.name",
                 &check.name,
                 MAX_DOCTOR_SUPPORT_NAME_BYTES,
-                context,
+                context.redactor,
+                context.path_redactions,
             )?,
             summary: match check.status {
                 DoctorStatus::Ok => "terminal compatibility check passed",
@@ -348,13 +613,15 @@ fn project_check(
             "check.name",
             &check.name,
             MAX_DOCTOR_SUPPORT_NAME_BYTES,
-            context,
+            context.redactor,
+            context.path_redactions,
         )?,
         summary: sanitize_field(
             "check.summary",
             &check.message,
             MAX_DOCTOR_SUPPORT_TEXT_BYTES,
-            context,
+            context.redactor,
+            context.path_redactions,
         )?,
         remediation: check
             .remediation
@@ -364,7 +631,8 @@ fn project_check(
                     "check.remediation",
                     value,
                     MAX_DOCTOR_SUPPORT_TEXT_BYTES,
-                    context,
+                    context.redactor,
+                    context.path_redactions,
                 )
             })
             .transpose()?,
@@ -393,12 +661,12 @@ fn sanitize_field(
     field: &str,
     value: &str,
     max_bytes: usize,
-    context: &DoctorSupportProjectionContext<'_>,
+    redactor: &SecretRedactor,
+    path_redactions: &[SupportPathRedaction],
 ) -> Result<String> {
-    let redacted = context.redactor.redact_text(value);
+    let redacted = redactor.redact_text(value);
     let mut safe = safe_persistence_text(&redacted);
-    let mut replacements = context
-        .path_redactions
+    let mut replacements = path_redactions
         .iter()
         .flat_map(path_replacement_variants)
         .filter(|(path, _)| !path.is_empty())

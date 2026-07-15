@@ -14,6 +14,7 @@ mod config_flow;
 mod conversation_queue_flow;
 mod diagnostics_flow;
 mod egress_disclosure_flow;
+mod feedback_flow;
 mod file_type;
 mod formatting;
 mod input_flow;
@@ -58,7 +59,7 @@ use sigil_kernel::{
 };
 use sigil_runtime::{
     BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths,
-    effective_compaction_config, resolve_sigil_paths,
+    effective_compaction_config, resolve_sigil_paths, support::SupportBuildInfo,
 };
 use uuid::Uuid;
 
@@ -274,6 +275,7 @@ pub struct AppState {
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
     pub session_id: String,
+    support_build_info: SupportBuildInfo,
     pub(crate) runtime: RuntimeStatusState,
     pub(crate) composer: ComposerState,
     pub(crate) approval: ApprovalState,
@@ -550,6 +552,7 @@ impl AppState {
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
+            support_build_info: SupportBuildInfo::unknown(),
             runtime: RuntimeStatusState {
                 provider_name: root_config.agent.provider.clone(),
                 model_name: root_config.agent.model.clone(),
@@ -676,6 +679,7 @@ impl AppState {
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
+            support_build_info: SupportBuildInfo::unknown(),
             runtime: RuntimeStatusState {
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
@@ -1007,6 +1011,9 @@ impl AppState {
         }
         if self.checkpoint_restore_modal_open() {
             return Ok(self.handle_checkpoint_restore_modal_key_event(key));
+        }
+        if self.feedback_modal_open() {
+            return Ok(self.handle_feedback_modal_key_event(key));
         }
         if self.has_modal() {
             let outcome = if key.code == KeyCode::Enter {

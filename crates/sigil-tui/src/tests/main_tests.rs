@@ -1254,6 +1254,12 @@ fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
         PathBuf::from("."),
         Some("missing".to_owned()),
     );
+    app.set_support_build_info(sigil_runtime::support::SupportBuildInfo::new(
+        "1.2.3",
+        "setup-commit",
+        "test-target",
+        "test-profile",
+    ));
     let mut worker = None;
 
     process_app_action_with_spawner(
@@ -1269,6 +1275,7 @@ fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
     assert!(!app.is_setup_mode());
     assert!(worker.is_some());
     assert_eq!(app.runtime.provider_name, "deepseek");
+    assert_eq!(app.support_build_info().commit, "setup-commit");
     Ok(())
 }
 

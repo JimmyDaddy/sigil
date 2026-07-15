@@ -680,6 +680,22 @@ fn build_info_current_uses_compile_time_metadata() {
 }
 
 #[test]
+fn build_info_projects_exactly_into_tui_support_metadata() {
+    let support: sigil_runtime::support::SupportBuildInfo = BuildInfo {
+        version: "1.2.3",
+        git_hash: "abc123",
+        target: "test-target",
+        profile: "release",
+    }
+    .into();
+
+    assert_eq!(support.version, "1.2.3");
+    assert_eq!(support.commit, "abc123");
+    assert_eq!(support.target, "test-target");
+    assert_eq!(support.profile, "release");
+}
+
+#[test]
 fn render_doctor_report_formats_checks_and_summary() {
     let report = DoctorReport {
         checks: vec![

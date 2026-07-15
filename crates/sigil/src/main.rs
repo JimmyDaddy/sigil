@@ -68,6 +68,12 @@ impl BuildInfo {
     }
 }
 
+impl From<BuildInfo> for SupportBuildInfo {
+    fn from(value: BuildInfo) -> Self {
+        Self::new(value.version, value.git_hash, value.target, value.profile)
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "sigil")]
 #[command(about = "TUI-first shell for Sigil")]
@@ -202,7 +208,7 @@ async fn run_main() -> Result<u8> {
         return Ok(0);
     }
     let Some(command) = cli.command else {
-        sigil_tui::launcher::run_tui(cli.config)?;
+        sigil_tui::launcher::run_tui_with_build_info(cli.config, BuildInfo::current().into())?;
         return Ok(0);
     };
     let machine_output = match &command {
@@ -251,7 +257,11 @@ async fn run_main() -> Result<u8> {
             return Ok(u8::try_from(code).expect("machine exit codes must fit in u8"));
         }
         Commands::Resume { session } => {
-            sigil_tui::launcher::run_tui_resume(cli.config, session)?;
+            sigil_tui::launcher::run_tui_resume_with_build_info(
+                cli.config,
+                session,
+                BuildInfo::current().into(),
+            )?;
         }
         Commands::Doctor { output } => doctor_command(&config_path, &cwd, output)?,
         Commands::Tokenizer { command } => {
