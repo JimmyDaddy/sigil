@@ -26,7 +26,7 @@ path = "../outside.txt"
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"
-sha256 = "sha256:38b0259479033b02d81dd8075d96f10ce56bca90fde63ffd9e89f6b508f7593e"
+sha256 = "sha256:cb1757d7b496e7761ec85f4d3eef6468d50cb647aa68c2f3705cd46ec5bf31b9"
 
 [[files]]
 path = "Cargo.lock"

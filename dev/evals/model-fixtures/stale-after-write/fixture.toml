@@ -23,7 +23,7 @@ text = "fixture_generation = 2"
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"
-sha256 = "sha256:a16ef26cbf2d97054509cc2235d6dec7010da7330e489b7e9f845f7eff901012"
+sha256 = "sha256:075ced5e67e6e1012cd518717de56e807d278990c0f7cf07274aabd79757c072"
 
 [[files]]
 path = "Cargo.lock"

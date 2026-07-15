@@ -61,9 +61,48 @@ fn committed_model_eval_fixtures_load_and_materialize() {
         assert_eq!(materialized.fixture_id, id);
         assert!(materialized.tree_digest.starts_with("sha256:"));
         assert!(destination.join("Cargo.toml").is_file());
+        let cargo_manifest =
+            fs::read_to_string(destination.join("Cargo.toml")).expect("read Cargo manifest");
+        let cargo_manifest: toml::Value =
+            toml::from_str(&cargo_manifest).expect("parse Cargo manifest");
+        assert!(
+            cargo_manifest.get("workspace").is_some(),
+            "fixture {id} must remain independent from parent Cargo workspaces"
+        );
         assert!(!materialized.tool_scope.allows("bash"));
         assert!(!materialized.tool_scope.allows("websearch"));
     }
+}
+
+#[test]
+fn model_eval_fixture_is_a_standalone_cargo_workspace_when_nested_in_the_repository() {
+    let fixture = load_model_eval_fixture(fixture_root("small-code-edit")).expect("load fixture");
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target_root = repository_root.join("target");
+    fs::create_dir_all(&target_root).expect("create target root");
+    let temp = tempfile::tempdir_in(&target_root).expect("nested temp dir");
+    let workspace = temp.path().join("workspace");
+    materialize_model_eval_fixture(&fixture, &workspace).expect("materialize fixture");
+
+    let output = std::process::Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--locked",
+            "--offline",
+        ])
+        .current_dir(&workspace)
+        .output()
+        .expect("run cargo metadata");
+
+    assert!(
+        output.status.success(),
+        "nested fixture must not inherit the repository workspace\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

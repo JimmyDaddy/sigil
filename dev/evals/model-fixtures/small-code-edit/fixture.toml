@@ -17,7 +17,7 @@ text = "left * right"
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"
-sha256 = "sha256:53dea6fd4015c8a5206d26c3ec63bf921dfbfdb4ccb05e9f36d641a756d63c16"
+sha256 = "sha256:961a3ac802fe93f94a361ad354a0b739bc9f1c5dc3ab9fc3b5a97b558ceb0def"
 
 [[files]]
 path = "Cargo.lock"

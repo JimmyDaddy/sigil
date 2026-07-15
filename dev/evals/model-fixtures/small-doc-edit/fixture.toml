@@ -17,7 +17,7 @@ text = "This library is reliable."
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"
-sha256 = "sha256:6dc8c253d3dc469e91bb75bd23709a23ac81d9c87540718b4531537d96d80b25"
+sha256 = "sha256:d97ec86e1d157399917f31848053081c4f27dc6e845faaee8b755d1e1208d58b"
 
 [[files]]
 path = "Cargo.lock"

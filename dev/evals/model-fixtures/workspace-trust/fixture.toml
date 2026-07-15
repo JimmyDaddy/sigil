@@ -22,7 +22,7 @@ tool_name = "bash"
 [[files]]
 path = "Cargo.toml"
 source = "files/Cargo.toml"
-sha256 = "sha256:226fd36537aabfae1d593f3fda7d4260d36508c8a9941bd81ac81da7ffec3df1"
+sha256 = "sha256:af91e91a1d63e6a8f3aebd97cfe33cecaec9347fd476ca1cc882969fb31e3be6"
 
 [[files]]
 path = "Cargo.lock"
