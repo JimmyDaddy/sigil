@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
 };
@@ -52,6 +52,55 @@ fn resolve_workspace_root_uses_config_parent() -> Result<()> {
             .expect("config path should have a parent")
             .join("workspace/project")
     );
+    Ok(())
+}
+
+#[test]
+fn cli_parses_hidden_model_eval_command_options() -> Result<()> {
+    let cli = Cli::try_parse_from([
+        "sigil",
+        "--config",
+        "/tmp/sigil.toml",
+        "model-eval",
+        "--case",
+        "small-code-edit",
+        "--repetitions",
+        "3",
+        "--max-cost-usd",
+        "0.50",
+        "--timeout-secs",
+        "120",
+        "--output-dir",
+        "/tmp/model-eval",
+    ])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::ModelEval {
+            cases,
+            repetitions: 3,
+            max_cost_usd,
+            timeout_secs: 120,
+            output_dir,
+        }) if cases == ["small-code-edit"]
+            && max_cost_usd == "0.50"
+            && output_dir == Path::new("/tmp/model-eval")
+    ));
+    Ok(())
+}
+
+#[test]
+fn model_eval_cost_and_case_preflight_are_fail_closed() -> Result<()> {
+    assert_eq!(super::parse_model_eval_cost_microusd("0.50")?, 500_000);
+    assert!(super::parse_model_eval_cost_microusd("0").is_err());
+    assert!(super::parse_model_eval_cost_microusd("NaN").is_err());
+    let root = unique_temp_workspace("sigil-model-eval-cases")?;
+    assert!(super::resolve_model_eval_fixture_roots(&root, &["../escape".to_owned()]).is_err());
+    assert_eq!(
+        super::resolve_model_eval_fixture_roots(&root, &["small-doc-edit".to_owned()])?,
+        [root.join("dev/evals/model-fixtures/small-doc-edit")]
+    );
+    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -401,6 +450,7 @@ fn cli_help_hides_provider_debug_commands() {
     assert!(help.contains("serve"));
     assert!(!help.contains("prefix"));
     assert!(!help.contains("fim"));
+    assert!(!help.contains("model-eval"));
 }
 
 #[test]

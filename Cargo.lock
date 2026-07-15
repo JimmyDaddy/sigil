@@ -2693,6 +2693,7 @@ dependencies = [
  "sigil-kernel",
  "sigil-runtime",
  "sigil-tui",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

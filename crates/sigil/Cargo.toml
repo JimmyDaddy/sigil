@@ -22,6 +22,7 @@ sigil-tui = { path = "../sigil-tui" }
 [dev-dependencies]
 libc.workspace = true
 portable-pty.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

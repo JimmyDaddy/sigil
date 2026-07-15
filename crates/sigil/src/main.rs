@@ -103,6 +103,20 @@ enum Commands {
         #[arg(long = "no-token", action = clap::ArgAction::SetTrue)]
         no_token: bool,
     },
+    /// Hidden developer adapter for explicit provider-backed acceptance campaigns.
+    #[command(name = "model-eval", hide = true)]
+    ModelEval {
+        #[arg(long = "case", required = true)]
+        cases: Vec<String>,
+        #[arg(long, default_value_t = 1)]
+        repetitions: u32,
+        #[arg(long = "max-cost-usd")]
+        max_cost_usd: String,
+        #[arg(long = "timeout-secs", default_value_t = 300)]
+        timeout_secs: u64,
+        #[arg(long = "output-dir")]
+        output_dir: PathBuf,
+    },
     // Hidden provider-specific developer diagnostics. Keep ordinary users on the
     // TUI, `run`, `doctor`, or explicit provider configuration surfaces.
     #[command(hide = true)]
@@ -254,6 +268,24 @@ async fn run_main() -> Result<u8> {
             )
             .await?;
         }
+        Commands::ModelEval {
+            cases,
+            repetitions,
+            max_cost_usd,
+            timeout_secs,
+            output_dir,
+        } => {
+            model_eval_command(
+                &config_path,
+                &cwd,
+                cases,
+                repetitions,
+                &max_cost_usd,
+                timeout_secs,
+                output_dir,
+            )
+            .await?;
+        }
         Commands::Prefix {
             prompt,
             assistant_prefix,
@@ -269,6 +301,92 @@ async fn run_main() -> Result<u8> {
         } => fim_command(&config_path, prompt, suffix, stop, model, max_tokens).await?,
     }
     Ok(0)
+}
+
+#[cfg(not(test))]
+async fn model_eval_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    cases: Vec<String>,
+    repetitions: u32,
+    max_cost_usd: &str,
+    timeout_secs: u64,
+    output_dir: PathBuf,
+) -> Result<()> {
+    let fixture_roots = resolve_model_eval_fixture_roots(launch_cwd, &cases)?;
+    let output_dir = if output_dir.is_absolute() {
+        output_dir
+    } else {
+        launch_cwd.join(output_dir)
+    };
+    let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
+        std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
+    let services = ApplicationRunServices::new(disclosure_presenter);
+    let campaign = sigil_runtime::model_eval::run_model_eval_campaign(
+        sigil_runtime::model_eval::ModelEvalCampaignRequest {
+            config_path: config_path.to_path_buf(),
+            fixture_roots,
+            repetitions,
+            max_cost_microusd: parse_model_eval_cost_microusd(max_cost_usd)?,
+            campaign_timeout: std::time::Duration::from_secs(timeout_secs),
+            output_dir,
+        },
+        &services,
+    )
+    .await?;
+    let manifest_path = campaign.output_dir.join("manifest.json");
+    let manifest: sigil_kernel::ModelEvalReportManifestV3 =
+        serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    println!(
+        "wrote {}",
+        campaign.output_dir.join("results.jsonl").display()
+    );
+    println!("wrote {}", manifest_path.display());
+    println!("wrote {}", campaign.output_dir.join("summary.md").display());
+    if manifest.accepted_repetitions != manifest.provider_admitted_repetitions
+        || manifest.provider_admitted_repetitions == 0
+    {
+        anyhow::bail!(
+            "model eval acceptance failed: accepted {} of {} provider-admitted repetitions",
+            manifest.accepted_repetitions,
+            manifest.provider_admitted_repetitions
+        );
+    }
+    Ok(())
+}
+
+const MODEL_EVAL_CASES: &[&str] = &[
+    "small-doc-edit",
+    "small-code-edit",
+    "stale-after-write",
+    "workspace-trust",
+    "sandbox-denial",
+];
+
+fn resolve_model_eval_fixture_roots(launch_cwd: &Path, cases: &[String]) -> Result<Vec<PathBuf>> {
+    if cases.is_empty() {
+        anyhow::bail!("model eval requires at least one --case");
+    }
+    let fixture_root = launch_cwd.join("dev/evals/model-fixtures");
+    cases
+        .iter()
+        .map(|case| {
+            if !MODEL_EVAL_CASES.contains(&case.as_str()) {
+                anyhow::bail!("unsupported model eval case: {case}");
+            }
+            Ok(fixture_root.join(case))
+        })
+        .collect()
+}
+
+fn parse_model_eval_cost_microusd(raw: &str) -> Result<u64> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("--max-cost-usd must be a positive decimal"))?;
+    if !value.is_finite() || value <= 0.0 || value > u64::MAX as f64 / 1_000_000.0 {
+        anyhow::bail!("--max-cost-usd is outside the supported positive range");
+    }
+    Ok((value * 1_000_000.0).ceil() as u64)
 }
 
 #[cfg(not(test))]
