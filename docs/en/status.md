@@ -14,6 +14,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Distribution | npm alpha, Homebrew tap, Cargo git-tag, source, and release-archive paths are available; use [Installation](installation.md) for current commands and channel details. |
 | Quick Setup | First-run setup can create a usable local config. |
 | Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |
+| Feedback support | `sigil doctor --output json` produces a versioned redacted report; `/feedback` previews its privacy boundary before an explicit local-only export. |
 | Automation output | `sigil run --output json` emits one versioned result, while `--output jsonl` emits ordered versioned events followed by one terminal result or error. |
 | Chat workflow | Users can work through the composer with visible tool activity. |
 | Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |

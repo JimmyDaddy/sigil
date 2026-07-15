@@ -102,6 +102,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Start, switch, or maintain sessions | `/new`, `/resume`, or `sigil resume <session-id>` after exit; use `Ctrl-O` or right-click on a `/resume` row for safe export, fork, pin, or exact delete review |
 | Change common settings | `/config` |
 | Diagnose setup/auth/MCP/LSP | `/doctor` |
+| Prepare a private support report | `/feedback`; review the privacy preview before exporting locally |
 | Toggle the right info rail between compact and detail | `F2` |
 | Cycle default permission mode | `Shift-Tab` |
 | Cancel a run or close an overlay | `Ctrl-C` or `Esc` |
@@ -140,6 +141,7 @@ Sigil treats tool execution as auditable state, not hidden side effects.
 | Configure providers, permissions, memory, planning, terminal, or LSP | [Configuration](docs/en/configuration.md) |
 | Choose or troubleshoot a model provider | [Provider guide](docs/en/providers.md) |
 | Understand approval, workspace, MCP, and data boundaries | [Safety](docs/en/safety.md) and [Privacy](docs/en/privacy.md) |
+| Prepare a private support report before filing an issue | Run `/feedback`, review the privacy preview, then export locally; see [Troubleshooting](docs/en/troubleshooting.md) |
 | Fix setup, auth, terminal, MCP, or LSP issues | [Troubleshooting](docs/en/troubleshooting.md) |
 | Look up every command, key, path, and environment variable | [Reference](docs/en/reference.md) |
 

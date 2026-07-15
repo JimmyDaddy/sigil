@@ -53,9 +53,16 @@ body:
       label: Permission, privacy, or recovery considerations
       description: Note any file mutation, shell, network, credential, session, or rollback implications.
 
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed credentials, private paths, conversation content, tool input/output, file contents, and private endpoints before posting.
+          required: true
+
   - type: textarea
     id: additional
     attributes:
       label: Additional context
       description: Mockups, competitor links, or example workflows are welcome. Remove private data before posting.
-

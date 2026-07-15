@@ -17,7 +17,6 @@ use crate::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 pub const DOCTOR_SUPPORT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_DOCTOR_SUPPORT_CHECKS: usize = 256;
 pub const MAX_DOCTOR_SUPPORT_NAME_BYTES: usize = 256;
-pub const MAX_DOCTOR_SUPPORT_TEXT_BYTES: usize = 2_048;
 pub const MAX_DOCTOR_SUPPORT_JSON_BYTES: usize = 256 * 1_024;
 pub const SUPPORT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_SUPPORT_BUNDLE_JSON_BYTES: usize = 384 * 1_024;
@@ -30,7 +29,6 @@ const INCLUDED_CATEGORIES: &[&str] = &[
     "doctor_status_and_redacted_checks",
     "provider_and_model_labels",
     "mcp_aliases",
-    "credential_environment_variable_names",
     "capability_and_sandbox_status",
 ];
 const EXCLUDED_CATEGORIES: &[&str] = &[
@@ -38,7 +36,7 @@ const EXCLUDED_CATEGORIES: &[&str] = &[
     "tool_input_output",
     "file_content_and_diff",
     "config_file_content",
-    "credential_and_environment_values",
+    "credential_and_environment_names_and_values",
     "local_paths_and_private_endpoints",
     "session_log_content",
 ];
@@ -184,6 +182,11 @@ pub struct DoctorSupportReportV1 {
 }
 
 impl DoctorSupportReportV1 {
+    /// Serializes the frozen V1 report as bounded, pretty-printed JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when serialization fails or the encoded report exceeds the V1 byte limit.
     pub fn to_pretty_json(&self) -> Result<String> {
         let json = serde_json::to_string_pretty(self)?;
         if json.len() > MAX_DOCTOR_SUPPORT_JSON_BYTES {
@@ -258,6 +261,11 @@ pub struct SupportSessionProjectionContext<'a> {
 }
 
 /// Produces the bounded session portion without reading conversation or log content.
+///
+/// # Errors
+///
+/// Returns an error when an allowed coarse label is empty, exceeds its bound, or cannot be
+/// projected through the configured secret and path redactions.
 pub fn project_support_session_summary_v1(
     session_id: &str,
     durable_entry_count: usize,
@@ -316,6 +324,12 @@ impl SupportBundleV1 {
         }
     }
 
+    /// Serializes the frozen V1 bundle as bounded, pretty-printed JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported schema version, an invalid nested report or session,
+    /// serialization failure, or an encoded bundle above the V1 byte limit.
     pub fn to_pretty_json(&self) -> Result<String> {
         if self.schema_version != SUPPORT_BUNDLE_SCHEMA_VERSION {
             bail!(
@@ -342,7 +356,21 @@ impl SupportBundleV1 {
 ///
 /// The destination name is generated internally, existing files are never replaced, and
 /// serialization completes before any filesystem mutation.
+///
+/// # Errors
+///
+/// Returns an error when the bundle is invalid, the private cache boundary cannot be prepared,
+/// a symbolic-link or path-boundary check fails, or any create, publish, sync, or cleanup I/O
+/// operation fails.
 pub fn write_support_bundle(cache_root: &Path, bundle: &SupportBundleV1) -> Result<PathBuf> {
+    write_support_bundle_with_ops(cache_root, bundle, &FilesystemSupportBundlePublishOps)
+}
+
+fn write_support_bundle_with_ops(
+    cache_root: &Path,
+    bundle: &SupportBundleV1,
+    publish_ops: &impl SupportBundlePublishOps,
+) -> Result<PathBuf> {
     let json = bundle.to_pretty_json()?;
     let cache_root = prepare_private_directory(cache_root, "support cache")?;
     let support_dir = cache_root.join(SUPPORT_BUNDLES_DIRECTORY_NAME);
@@ -358,20 +386,50 @@ pub fn write_support_bundle(cache_root: &Path, bundle: &SupportBundleV1) -> Resu
     let temporary = support_dir.join(format!(".sigil-support-{timestamp}-{suffix}.tmp"));
     let mut published = false;
     let result = write_new_private_file(&temporary, json.as_bytes()).and_then(|()| {
-        fs::hard_link(&temporary, &destination)?;
+        publish_ops.hard_link(&temporary, &destination)?;
         published = true;
-        fs::remove_file(&temporary)?;
-        sync_directory(&support_dir)?;
-        destination.canonicalize().map_err(Into::into)
+        publish_ops.remove_file(&temporary)?;
+        publish_ops.sync_directory(&support_dir)?;
+        publish_ops.canonicalize(&destination).map_err(Into::into)
     });
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let _ = publish_ops.remove_file(&temporary);
         if published {
-            let _ = fs::remove_file(&destination);
+            let _ = publish_ops.remove_file(&destination);
         }
-        let _ = sync_directory(&support_dir);
+        let _ = publish_ops.sync_directory(&support_dir);
     }
     result
+}
+
+trait SupportBundlePublishOps {
+    fn hard_link(&self, source: &Path, destination: &Path) -> std::io::Result<()>;
+
+    fn remove_file(&self, path: &Path) -> std::io::Result<()>;
+
+    fn sync_directory(&self, path: &Path) -> std::io::Result<()>;
+
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf>;
+}
+
+struct FilesystemSupportBundlePublishOps;
+
+impl SupportBundlePublishOps for FilesystemSupportBundlePublishOps {
+    fn hard_link(&self, source: &Path, destination: &Path) -> std::io::Result<()> {
+        fs::hard_link(source, destination)
+    }
+
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    fn sync_directory(&self, path: &Path) -> std::io::Result<()> {
+        sync_directory(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        path.canonicalize()
+    }
 }
 
 fn validate_support_session(session: &SupportSessionSummaryV1) -> Result<()> {
@@ -431,13 +489,13 @@ fn write_new_private_file(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
+fn sync_directory(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -490,6 +548,12 @@ pub struct DoctorSupportProjectionContext<'a> {
 }
 
 /// Projects an offline doctor report through a category allowlist and privacy boundary.
+///
+/// # Errors
+///
+/// Returns an error when the report exceeds its check or byte bounds, build or environment
+/// metadata is invalid, an allowlisted check name cannot be safely projected, or serialization
+/// of the frozen V1 contract fails.
 pub fn project_doctor_support_report_v1(
     report: &DoctorReport,
     context: DoctorSupportProjectionContext<'_>,
@@ -576,37 +640,14 @@ fn project_check(
     check: &DoctorCheck,
     context: &DoctorSupportProjectionContext<'_>,
 ) -> Result<SupportDoctorCheckV1> {
-    let category = check.name.split(':').next().unwrap_or_default();
-    if category == "terminal" {
-        return Ok(SupportDoctorCheckV1 {
-            status: check.status.into(),
-            name: sanitize_field(
-                "check.name",
-                &check.name,
-                MAX_DOCTOR_SUPPORT_NAME_BYTES,
-                context.redactor,
-                context.path_redactions,
-            )?,
-            summary: match check.status {
-                DoctorStatus::Ok => "terminal compatibility check passed",
-                DoctorStatus::Warn => "terminal compatibility check needs attention",
-                DoctorStatus::Error => "terminal compatibility check failed",
-            }
-            .to_owned(),
-            remediation: (check.status != DoctorStatus::Ok).then(|| {
-                "review terminal compatibility settings in the Sigil troubleshooting guide"
-                    .to_owned()
-            }),
-        });
-    }
-    if !allowlisted_category(category) {
+    let Some(kind) = support_check_kind(&check.name) else {
         return Ok(SupportDoctorCheckV1 {
             status: check.status.into(),
             name: "other".to_owned(),
             summary: "details omitted for an unrecognized doctor category".to_owned(),
             remediation: None,
         });
-    }
+    };
     Ok(SupportDoctorCheckV1 {
         status: check.status.into(),
         name: sanitize_field(
@@ -616,45 +657,144 @@ fn project_check(
             context.redactor,
             context.path_redactions,
         )?,
-        summary: sanitize_field(
-            "check.summary",
-            &check.message,
-            MAX_DOCTOR_SUPPORT_TEXT_BYTES,
-            context.redactor,
-            context.path_redactions,
-        )?,
-        remediation: check
-            .remediation
-            .as_deref()
-            .map(|value| {
-                sanitize_field(
-                    "check.remediation",
-                    value,
-                    MAX_DOCTOR_SUPPORT_TEXT_BYTES,
-                    context.redactor,
-                    context.path_redactions,
-                )
-            })
-            .transpose()?,
+        summary: kind.summary(check.status),
+        remediation: kind.remediation(check.status).map(str::to_owned),
     })
 }
 
-fn allowlisted_category(category: &str) -> bool {
-    matches!(
-        category,
-        "appearance"
-            | "code_intelligence"
-            | "compaction"
-            | "config"
-            | "execution"
-            | "mcp"
-            | "plugins"
-            | "provider"
-            | "session"
-            | "storage"
-            | "web"
-            | "workspace"
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportCheckKind {
+    Appearance,
+    CodeIntelligence,
+    Compaction,
+    Configuration,
+    ExecutionSandbox,
+    Mcp,
+    Plugins,
+    Provider,
+    Session,
+    Storage,
+    Terminal,
+    Web,
+    Workspace,
+}
+
+impl SupportCheckKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Appearance => "appearance",
+            Self::CodeIntelligence => "code intelligence",
+            Self::Compaction => "context compaction",
+            Self::Configuration => "configuration",
+            Self::ExecutionSandbox => "execution sandbox",
+            Self::Mcp => "MCP",
+            Self::Plugins => "plugin",
+            Self::Provider => "provider",
+            Self::Session => "session storage",
+            Self::Storage => "local storage",
+            Self::Terminal => "terminal compatibility",
+            Self::Web => "Web tools",
+            Self::Workspace => "workspace",
+        }
+    }
+
+    fn summary(self, status: DoctorStatus) -> String {
+        let outcome = match status {
+            DoctorStatus::Ok => "check passed",
+            DoctorStatus::Warn => "check needs attention",
+            DoctorStatus::Error => "check failed",
+        };
+        format!("{} {outcome}", self.label())
+    }
+
+    fn remediation(self, status: DoctorStatus) -> Option<&'static str> {
+        (status != DoctorStatus::Ok).then_some(match self {
+            Self::Appearance => "review Appearance settings in /config",
+            Self::CodeIntelligence => {
+                "review code-intelligence setup in /config and the troubleshooting guide"
+            }
+            Self::Compaction => "review local tokenizer readiness in the troubleshooting guide",
+            Self::Configuration => "review the reported configuration check with sigil doctor",
+            Self::ExecutionSandbox => "review execution sandbox settings in /config",
+            Self::Mcp => "review the named MCP server in /config",
+            Self::Plugins => "review plugin trust and configuration in /config",
+            Self::Provider => "review provider authentication and configuration in /config",
+            Self::Session => "review local session storage with sigil doctor",
+            Self::Storage => "review local storage paths with sigil doctor",
+            Self::Terminal => {
+                "review terminal compatibility settings in the Sigil troubleshooting guide"
+            }
+            Self::Web => "review Web settings in /config",
+            Self::Workspace => "review the active workspace with sigil doctor",
+        })
+    }
+}
+
+fn support_check_kind(name: &str) -> Option<SupportCheckKind> {
+    match name {
+        "appearance:contrast"
+        | "appearance:semantic"
+        | "appearance:structural"
+        | "appearance:colors" => Some(SupportCheckKind::Appearance),
+        value if has_nonempty_suffix(value, "appearance:contrast:") => {
+            Some(SupportCheckKind::Appearance)
+        }
+        value if has_nonempty_suffix(value, "appearance:semantic:") => {
+            Some(SupportCheckKind::Appearance)
+        }
+        value if has_nonempty_suffix(value, "appearance:structural:") => {
+            Some(SupportCheckKind::Appearance)
+        }
+        "code_intelligence" => Some(SupportCheckKind::CodeIntelligence),
+        value if has_nonempty_suffix(value, "lsp:") => Some(SupportCheckKind::CodeIntelligence),
+        "compaction:deepseek-v4-tokenizer" => Some(SupportCheckKind::Compaction),
+        "config:path" | "config:load" => Some(SupportCheckKind::Configuration),
+        "execution:sandbox" => Some(SupportCheckKind::ExecutionSandbox),
+        "mcp" => Some(SupportCheckKind::Mcp),
+        value if has_nonempty_suffix(value, "mcp:") => Some(SupportCheckKind::Mcp),
+        "plugins:discovery" | "plugins:mcp" | "plugins:hooks" => Some(SupportCheckKind::Plugins),
+        value if provider_support_check(value) => Some(SupportCheckKind::Provider),
+        "session:log_dir" | "session:stream" => Some(SupportCheckKind::Session),
+        "storage:state_root"
+        | "storage:cache_root"
+        | "storage:workspace_state"
+        | "storage:project_assets" => Some(SupportCheckKind::Storage),
+        "terminal" | "terminal:profile" | "terminal:config" | "terminal:mouse"
+        | "terminal:clipboard" | "terminal:smoke" => Some(SupportCheckKind::Terminal),
+        "web:route" | "web:bundled" | "web:binding" => Some(SupportCheckKind::Web),
+        "workspace" => Some(SupportCheckKind::Workspace),
+        _ => None,
+    }
+}
+
+fn provider_support_check(name: &str) -> bool {
+    if matches!(name, "provider" | "provider:auth") {
+        return true;
+    }
+    let mut parts = name.split(':');
+    if parts.next() != Some("provider") {
+        return false;
+    }
+    let Some(provider) = parts.next() else {
+        return false;
+    };
+    if !matches!(
+        provider,
+        "deepseek" | "openai_compat" | "openai_responses" | "anthropic" | "gemini"
+    ) {
+        return false;
+    }
+    match (parts.next(), parts.next(), parts.next()) {
+        (None, None, None) | (Some("capabilities"), None, None) => true,
+        (Some("capability"), Some(key), None) => !key.is_empty(),
+        _ => false,
+    }
+}
+
+fn has_nonempty_suffix(value: &str, prefix: &str) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| !suffix.is_empty())
 }
 
 fn sanitize_field(

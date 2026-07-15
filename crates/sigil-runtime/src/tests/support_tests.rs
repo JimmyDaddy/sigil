@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{cell::Cell, fs, io, path::PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -118,14 +118,14 @@ fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -
                 {
                     "status": "ok",
                     "name": "config:load",
-                    "summary": "config parsed",
+                    "summary": "configuration check passed",
                     "remediation": null
                 },
                 {
                     "status": "warn",
                     "name": "execution:sandbox",
-                    "summary": "sandbox fallback is local",
-                    "remediation": "choose a sandbox backend"
+                    "summary": "execution sandbox check needs attention",
+                    "remediation": "review execution sandbox settings in /config"
                 }
             ],
             "privacy": {
@@ -136,7 +136,6 @@ fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -
                     "doctor_status_and_redacted_checks",
                     "provider_and_model_labels",
                     "mcp_aliases",
-                    "credential_environment_variable_names",
                     "capability_and_sandbox_status"
                 ],
                 "excluded": [
@@ -144,7 +143,7 @@ fn doctor_support_schema_v1_matches_exact_fixture_and_rejects_unknown_fields() -
                     "tool_input_output",
                     "file_content_and_diff",
                     "config_file_content",
-                    "credential_and_environment_values",
+                    "credential_and_environment_names_and_values",
                     "local_paths_and_private_endpoints",
                     "session_log_content"
                 ],
@@ -219,6 +218,7 @@ fn terminal_projection_uses_only_coarse_allowlisted_values() -> Result<()> {
 #[test]
 fn doctor_projection_redacts_known_secrets_paths_endpoints_and_unknown_categories() -> Result<()> {
     let secret = "support-secret-canary-12345";
+    let private_registry = "private.registry.example/client/image:tag";
     let home = PathBuf::from("/Users/private-person");
     let workspace = home.join("Client Project");
     let config = home.join(".config/sigil/sigil.toml");
@@ -226,9 +226,9 @@ fn doctor_projection_redacts_known_secrets_paths_endpoints_and_unknown_categorie
         checks: vec![
             DoctorCheck {
                 status: DoctorStatus::Error,
-                name: "provider:private".to_owned(),
+                name: "execution:sandbox".to_owned(),
                 message: format!(
-                    "token={secret} workspace={} config={} base_url=https://private.internal.example/v1?token={secret}",
+                    "token={secret} image={private_registry} workspace={} config={} base_url=https://private.internal.example/v1?token={secret}",
                     workspace.display(),
                     config.display()
                 ),
@@ -236,6 +236,12 @@ fn doctor_projection_redacts_known_secrets_paths_endpoints_and_unknown_categorie
                     "inspect {}/logs and Bearer {secret}",
                     home.display()
                 )),
+            },
+            DoctorCheck {
+                status: DoctorStatus::Warn,
+                name: "provider:deepseek".to_owned(),
+                message: format!("private provider detail {secret}"),
+                remediation: Some(format!("private provider remediation {secret}")),
             },
             DoctorCheck {
                 status: DoctorStatus::Warn,
@@ -264,16 +270,27 @@ fn doctor_projection_redacts_known_secrets_paths_endpoints_and_unknown_categorie
         },
     )?;
     let json = projected.to_pretty_json()?;
-    for canary in [secret, "/Users/private-person", "private.internal.example"] {
+    for canary in [
+        secret,
+        private_registry,
+        "/Users/private-person",
+        "private.internal.example",
+    ] {
         assert!(!json.contains(canary), "private value leaked: {canary}");
     }
-    assert!(json.contains("<workspace_path>"));
-    assert!(json.contains("<config_path>"));
-    assert!(json.contains("<home_path>"));
-    assert!(json.contains("<endpoint>"));
-    assert_eq!(projected.checks[1].name, "other");
+    assert_eq!(projected.checks[0].name, "execution:sandbox");
+    assert_eq!(
+        projected.checks[0].summary,
+        "execution sandbox check failed"
+    );
+    assert_eq!(projected.checks[1].name, "provider:deepseek");
     assert_eq!(
         projected.checks[1].summary,
+        "provider check needs attention"
+    );
+    assert_eq!(projected.checks[2].name, "other");
+    assert_eq!(
+        projected.checks[2].summary,
         "details omitted for an unrecognized doctor category"
     );
     Ok(())
@@ -311,8 +328,8 @@ fn doctor_projection_fails_closed_at_check_and_field_bounds() {
     let oversized_field = DoctorReport {
         checks: vec![DoctorCheck {
             status: DoctorStatus::Ok,
-            name: "config:load".to_owned(),
-            message: "x".repeat(MAX_DOCTOR_SUPPORT_TEXT_BYTES + 1),
+            name: format!("mcp:{}", "x".repeat(MAX_DOCTOR_SUPPORT_NAME_BYTES + 1)),
+            message: "ignored".to_owned(),
             remediation: None,
         }],
     };
@@ -329,6 +346,74 @@ fn doctor_projection_fails_closed_at_check_and_field_bounds() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn doctor_support_projection_catalog_covers_dynamic_public_checks() {
+    for (name, expected) in [
+        ("lsp:rust-analyzer", SupportCheckKind::CodeIntelligence),
+        ("mcp:trusted-local", SupportCheckKind::Mcp),
+        (
+            "provider:anthropic:capabilities",
+            SupportCheckKind::Provider,
+        ),
+        (
+            "provider:openai_responses:capability:web_search",
+            SupportCheckKind::Provider,
+        ),
+        (
+            "appearance:semantic:assistant",
+            SupportCheckKind::Appearance,
+        ),
+    ] {
+        assert_eq!(support_check_kind(name), Some(expected), "check: {name}");
+    }
+
+    for name in [
+        "lsp:",
+        "mcp:",
+        "provider:private",
+        "provider:deepseek:unknown",
+        "appearance:semantic:",
+    ] {
+        assert_eq!(support_check_kind(name), None, "check: {name}");
+    }
+}
+
+#[test]
+fn doctor_support_projection_never_serializes_human_check_text() -> Result<()> {
+    let message_canary = "PRIVATE-DOCTOR-MESSAGE-CANARY";
+    let remediation_canary = "PRIVATE-DOCTOR-REMEDIATION-CANARY";
+    let report = DoctorReport {
+        checks: vec![DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "lsp:rust-analyzer".to_owned(),
+            message: message_canary.to_owned(),
+            remediation: Some(remediation_canary.to_owned()),
+        }],
+    };
+    let build = build_info();
+    let environment = environment();
+    let redactor = SecretRedactor::empty();
+    let projected = project_doctor_support_report_v1(
+        &report,
+        DoctorSupportProjectionContext {
+            generated_at_unix_ms: 123,
+            build: &build,
+            environment: &environment,
+            redactor: &redactor,
+            path_redactions: &[],
+        },
+    )?;
+    let json = projected.to_pretty_json()?;
+    assert!(!json.contains(message_canary));
+    assert!(!json.contains(remediation_canary));
+    assert_eq!(projected.checks[0].name, "lsp:rust-analyzer");
+    assert_eq!(
+        projected.checks[0].summary,
+        "code intelligence check needs attention"
+    );
+    Ok(())
 }
 
 #[test]
@@ -394,6 +479,80 @@ fn support_bundle_schema_and_writer_are_private_bounded_and_non_overwriting() ->
         let file_mode = fs::metadata(&first)?.permissions().mode() & 0o777;
         assert_eq!(directory_mode, 0o700);
         assert_eq!(file_mode, 0o600);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishFault {
+    RemoveTemporary,
+    SyncDirectory,
+    Canonicalize,
+}
+
+struct FaultingPublishOps {
+    fault: PublishFault,
+    failed: Cell<bool>,
+}
+
+impl FaultingPublishOps {
+    fn new(fault: PublishFault) -> Self {
+        Self {
+            fault,
+            failed: Cell::new(false),
+        }
+    }
+
+    fn fail_once(&self, operation: PublishFault) -> io::Result<()> {
+        if self.fault == operation && !self.failed.replace(true) {
+            return Err(io::Error::other(format!(
+                "injected {operation:?} publish failure"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl SupportBundlePublishOps for FaultingPublishOps {
+    fn hard_link(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        fs::hard_link(source, destination)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.fail_once(PublishFault::RemoveTemporary)?;
+        fs::remove_file(path)
+    }
+
+    fn sync_directory(&self, path: &Path) -> io::Result<()> {
+        self.fail_once(PublishFault::SyncDirectory)?;
+        FilesystemSupportBundlePublishOps.sync_directory(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.fail_once(PublishFault::Canonicalize)?;
+        path.canonicalize()
+    }
+}
+
+#[test]
+fn support_bundle_writer_cleans_up_every_post_publish_failure() -> Result<()> {
+    for fault in [
+        PublishFault::RemoveTemporary,
+        PublishFault::SyncDirectory,
+        PublishFault::Canonicalize,
+    ] {
+        let temp = tempdir()?;
+        let cache_root = temp.path().join("cache");
+        let operations = FaultingPublishOps::new(fault);
+        let error = write_support_bundle_with_ops(&cache_root, &support_bundle()?, &operations)
+            .expect_err("injected publish failure must be returned");
+        assert!(
+            error.to_string().contains("injected"),
+            "fault {fault:?}: {error:#}"
+        );
+        let support_dir = cache_root.join(SUPPORT_BUNDLES_DIRECTORY_NAME);
+        assert!(support_dir.is_dir(), "fault {fault:?}");
+        assert_eq!(fs::read_dir(&support_dir)?.count(), 0, "fault {fault:?}");
     }
     Ok(())
 }

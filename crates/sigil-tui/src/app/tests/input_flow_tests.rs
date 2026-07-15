@@ -1378,6 +1378,11 @@ fn input_history_does_not_record_session_control_commands() -> Result<()> {
         Some(AppAction::StartNewSession { .. })
     ));
 
+    app.composer.input = "/feedback".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert!(app.feedback_modal_open());
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
     app.composer.input = "normal prompt".to_owned();
     assert!(matches!(
         app.submit_input()?,

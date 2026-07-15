@@ -16,6 +16,14 @@ Inside the TUI:
 
 The report shows a status summary, warnings/errors, and remediation lines. It reports where credentials were resolved from, but it does not print secret values.
 
+For a structured report that is easier to attach to a private or public support request, run:
+
+```bash
+sigil doctor --output json
+```
+
+Both forms are generated locally and make no provider request.
+
 ## Decision Tree
 
 Start here when you know the symptom:
@@ -207,7 +215,11 @@ Use the matching channel in [Installation](installation.md) to confirm that chan
 
 ## Report A Bug
 
-If the decision tree and `sigil doctor` do not resolve the problem, [open a GitHub issue](https://github.com/JimmyDaddy/sigil/issues/new) with a minimal reproduction and the redacted diagnostics listed below.
+If the decision tree and `sigil doctor` do not resolve the problem, run `/feedback` in the TUI. The first screen is a privacy preview: nothing has been written or uploaded yet. It lists the broad diagnostic categories that will be included and the private categories that are excluded.
+
+Press `Enter` only if you want to save one JSON report in Sigil's local cache. Review that file before attaching it anywhere. Sigil never uploads it automatically. After export, `C` copies the [structured bug-report URL](https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml); opening the page and attaching the report remain your actions.
+
+The report can include build, operating-system and architecture details; redacted doctor status; provider and model labels; MCP aliases; and capability or sandbox status. It excludes conversation text, tool input and output, file content and diffs, config-file content, credential and environment names and values, private endpoints, local paths, and session-log content.
 
 Do not open a public issue for a suspected vulnerability. Follow the repository [Security Policy](https://github.com/JimmyDaddy/sigil/blob/main/SECURITY.md) for private reporting instead.
 
@@ -216,9 +228,9 @@ Do not open a public issue for a suspected vulnerability. Follow the repository 
 Include:
 
 - `sigil --version`
-- `sigil doctor` output with secrets redacted
+- the reviewed `/feedback` JSON report, or `sigil doctor --output json` when the TUI is unavailable
 - operating system and terminal emulator
 - whether you are inside tmux, screen, SSH, or WSL
-- relevant config sections without real secrets
 - the smallest prompt or command that reproduces the issue
-- any session path or log excerpt only after removing secrets
+
+Do not attach a config file, session log, source file, or raw terminal transcript unless it is necessary and you have reviewed and removed private content yourself.

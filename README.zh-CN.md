@@ -102,6 +102,7 @@ sigil doctor
 | 新建、切换或维护 session | `/new`、`/resume`，或退出后用 `sigil resume <session-id>`；在 `/resume` 行按 `Ctrl-O` 或右键，可安全导出、fork、pin 或审查精确删除 |
 | 修改常用设置 | `/config` |
 | 诊断 setup/auth/MCP/LSP | `/doctor` |
+| 准备私密支持报告 | `/feedback`；先检查隐私预览，再导出到本机 |
 | 在紧凑和详细信息栏之间切换 | `F2` |
 | 切换默认权限模式 | `Shift-Tab` |
 | 取消当前运行或关闭浮层 | `Ctrl-C` 或 `Esc` |
@@ -140,6 +141,7 @@ Sigil 把工具执行视为可审计状态，而不是隐藏副作用。
 | 配置 provider、权限、memory、planning、terminal 或 LSP | [配置指南](docs/zh-CN/configuration.md) |
 | 选择或排查模型 provider | [Provider 指南](docs/zh-CN/providers.md) |
 | 理解 approval、workspace、MCP 和数据边界 | [安全](docs/zh-CN/safety.md) 和 [隐私](docs/zh-CN/privacy.md) |
+| 提交 issue 前准备私密支持报告 | 运行 `/feedback`，确认隐私预览后再导出到本地；参见[排障](docs/zh-CN/troubleshooting.md) |
 | 修复 setup、认证、terminal、MCP 或 LSP 问题 | [排障](docs/zh-CN/troubleshooting.md) |
 | 查找所有命令、键位、路径和环境变量 | [参考](docs/zh-CN/reference.md) |
 

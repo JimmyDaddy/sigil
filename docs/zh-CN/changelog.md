@@ -6,7 +6,11 @@
 
 ## Unreleased - main
 
-`v0.0.1-alpha.3` 之后暂时没有新增的用户可见变更。
+### 新增
+
+- 增加 `sigil doctor --output json`，为支持请求提供带版本且脱敏的本地诊断格式。
+- 增加 `/feedback`：先预览包含和排除的数据，再显式导出仅保存在本机的 JSON；报告绝不会自动上传。
+- 增加 bug、feature request 和 documentation issue 的结构化 GitHub 表单。
 
 ## v0.0.1-alpha.3 - 2026-07-15
 

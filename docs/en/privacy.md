@@ -27,6 +27,7 @@ These are local by default:
 - local memory files such as `SIGIL.md`, `AGENTS.md`, and `SIGIL.local.md`;
 - release archives and checksums you build locally;
 - doctor output unless you copy it elsewhere.
+- `/feedback` support reports unless you explicitly attach or copy them elsewhere.
 
 ## API Keys
 
@@ -82,6 +83,16 @@ Doctor reports:
 - terminal profile and compatibility risk.
 
 It should not print secret values, but paths, provider names, and local environment facts can still be sensitive.
+
+Use `sigil doctor --output json` when you need the versioned, redacted structure instead of the default text report. It is still local and offline.
+
+## Private Feedback Reports
+
+`/feedback` opens a preview before it writes anything. The preview states which broad diagnostic categories are included and excluded. Pressing `Enter` writes one JSON report below the Sigil cache directory; it does not write to the workspace, change the session log, contact a provider, or upload the report. On Unix, the report directory is restricted to the current user and the file is created as owner-readable and owner-writable only.
+
+The report can include build, operating-system and architecture details; redacted doctor checks; provider and model labels; MCP aliases; and capability or sandbox status. It excludes conversations, tool input and output, file content and diffs, config-file content, credential and environment names and values, private endpoints, local paths, and session-log content.
+
+After export, the TUI shows the exact local folder and file name. `C` copies the structured GitHub bug-report URL, not the report itself. Always open and review the JSON before you choose to attach it.
 
 ## Before Sharing Logs Or Reports
 

@@ -41,6 +41,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | --- | --- |
 | `/config` | Open the TUI config panel |
 | `/doctor` | Run local setup diagnostics inside the transcript |
+| `/feedback` | Preview a private support report; `Enter` saves it locally, `C` copies the bug-report URL, and `Esc` closes |
 | `/new` | Start a fresh session with the current provider and model |
 | `/resume` | Select and restore a previous session; `Ctrl-O` or right-click opens its lifecycle actions |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
@@ -67,7 +68,7 @@ Workspace trust is handled by the startup workspace trust gate, not a slash comm
 | Command | Use |
 | --- | --- |
 | `sigil` | Open the TUI in the current workspace |
-| `sigil doctor` | Run local diagnostics |
+| `sigil doctor [--output text|json]` | Run local diagnostics; JSON produces one versioned, redacted report on stdout |
 | `sigil run "<task>" [--output text|json|jsonl]` | Run a non-interactive task; machine modes keep stdout parseable |
 | `sigil resume [session-id]` | Open the TUI and restore the latest or requested session; TUI exit prints a copyable resume command |
 | `sigil serve` | Start the loopback-only, bearer-authenticated local HTTP/SSE service |

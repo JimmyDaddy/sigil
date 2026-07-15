@@ -16,6 +16,14 @@ sigil doctor
 
 Report 会展示状态摘要、warning/error 和 remediation line。它会说明 credential 来源，但不会打印 secret 值。
 
+如果需要更适合附加到私密或公开支持请求的结构化报告，运行：
+
+```bash
+sigil doctor --output json
+```
+
+两种形式都只在本机生成，不会发起 provider 请求。
+
 ## 决策树
 
 知道症状时从这里开始：
@@ -207,7 +215,11 @@ echo "$PATH"
 
 ## 报告问题
 
-如果决策树和 `sigil doctor` 仍无法解决问题，请[创建 GitHub Issue](https://github.com/JimmyDaddy/sigil/issues/new)，并附上最小复现以及下方列出的脱敏诊断信息。
+如果决策树和 `sigil doctor` 仍无法解决问题，在 TUI 中运行 `/feedback`。首先出现的是隐私预览：此时没有写入或上传任何内容。预览会列出将包含的诊断类别，以及明确排除的私密类别。
+
+只有确实要在 Sigil 本地 cache 中保存一份 JSON 报告时才按 `Enter`。附加到任何地方之前先查看该文件；Sigil 绝不会自动上传。导出后按 `C` 会复制[结构化问题报告链接](https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml)，打开页面和附加报告仍由你完成。
+
+报告可能包含 build、操作系统与架构信息、脱敏 doctor 状态、provider 和 model 标签、MCP alias，以及 capability 或 sandbox 状态。它会排除对话文本、tool input/output、文件内容和 diff、配置文件正文、credential 与环境变量名称及值、私有 endpoint、本地路径和 session log 内容。
 
 疑似安全漏洞不要提交公开 Issue；请改为按照仓库的[安全策略](https://github.com/JimmyDaddy/sigil/blob/main/SECURITY.md)私下报告。
 
@@ -216,9 +228,9 @@ echo "$PATH"
 建议包括：
 
 - `sigil --version`
-- 去除 secret 后的 `sigil doctor` 输出
+- 已自行检查的 `/feedback` JSON 报告；TUI 不可用时可改用 `sigil doctor --output json`
 - 操作系统和终端模拟器
 - 是否在 tmux、screen、SSH 或 WSL 中
-- 去除真实 secret 后的相关配置 section
 - 能复现问题的最小 prompt 或 command
-- session path 或 log excerpt 只在移除 secret 后提供
+
+除非确有必要并且你已自行检查和移除私密内容，否则不要附加配置文件、session log、源码文件或原始终端 transcript。

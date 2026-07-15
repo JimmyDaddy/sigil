@@ -24,13 +24,18 @@ pub(super) struct FeedbackModalState {
 impl FeedbackModalState {
     pub(super) fn lines(&self) -> Vec<String> {
         if let Some(path) = &self.exported_path {
+            let directory = path.parent().unwrap_or(path);
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("support report");
             return vec![
                 "Saved locally. Nothing was uploaded.".to_owned(),
-                format!("Path: {}", path.display()),
+                "C copy issue URL  Esc close".to_owned(),
+                format!("Folder: {}", directory.display()),
+                format!("File: {file_name}"),
                 format!("Report issue: {GITHUB_BUG_REPORT_URL}"),
                 "Review the JSON before attaching it to an issue.".to_owned(),
-                String::new(),
-                "C copy issue URL  Esc close".to_owned(),
             ];
         }
 
@@ -57,11 +62,10 @@ impl FeedbackModalState {
         }
         lines.extend([
             "Excluded: conversation, tool input/output, file content/diff, config file content,".to_owned(),
-            "credential/environment values, local paths, private endpoints, and session-log content."
+            "credential/environment names and values, local paths, private endpoints, and session-log content."
                 .to_owned(),
-            "Doctor metadata may include provider/model labels, MCP aliases, environment variable names,"
+            "Metadata may include provider/model labels, MCP aliases, and capability or sandbox status."
                 .to_owned(),
-            "and capability or sandbox status.".to_owned(),
         ]);
         if let Some(error) = &self.export_error {
             lines.push(String::new());
@@ -111,7 +115,7 @@ impl AppState {
                 self.last_notice = Some("closed feedback report".to_owned());
                 None
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') => {
                 let cache_root = self.sigil_paths.cache_root.clone();
                 let Some(ModalState::Feedback(state)) = self.modal_state.as_mut() else {
                     return None;

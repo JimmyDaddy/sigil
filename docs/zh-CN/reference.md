@@ -41,6 +41,7 @@
 | --- | --- |
 | `/config` | 打开 TUI config panel |
 | `/doctor` | 在 transcript 中运行本地 setup diagnostics |
+| `/feedback` | 预览私密支持报告；`Enter` 保存到本机，`C` 复制问题报告链接，`Esc` 关闭 |
 | `/new` | 使用当前 provider 和 model 开始新 session |
 | `/resume` | 选择并恢复历史 session；`Ctrl-O` 或右键打开 lifecycle actions |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
@@ -67,7 +68,7 @@ Workspace trust 由启动时的 workspace trust gate 处理，不是 slash comma
 | Command | 用途 |
 | --- | --- |
 | `sigil` | 在当前 workspace 打开 TUI |
-| `sigil doctor` | 运行本地诊断 |
+| `sigil doctor [--output text|json]` | 运行本地诊断；JSON 会在 stdout 输出唯一一份带版本的脱敏报告 |
 | `sigil run "<task>" [--output text|json|jsonl]` | 运行非交互任务；machine mode 保持 stdout 可直接解析 |
 | `sigil resume [session-id]` | 打开 TUI 并恢复 latest 或指定 session；TUI 退出时会打印可复制的恢复命令 |
 | `sigil serve` | 启动只允许 loopback、要求 bearer auth 的本机 HTTP/SSE 服务 |

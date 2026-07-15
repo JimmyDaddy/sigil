@@ -6,7 +6,11 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have been documented after `v0.0.1-alpha.3` yet.
+### Added
+
+- Added `sigil doctor --output json`, a versioned and redacted local diagnostics format for support requests.
+- Added `/feedback`, which previews included and excluded data before an explicit local-only JSON export; reports are never uploaded automatically.
+- Added structured GitHub forms for bugs, feature requests, and documentation issues.
 
 ## v0.0.1-alpha.3 - 2026-07-15
 

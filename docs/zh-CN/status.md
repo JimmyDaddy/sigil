@@ -14,6 +14,7 @@
 | 分发 | 当前提供 npm alpha、Homebrew tap、Cargo git-tag、源码和 release archive 路径；最新命令和渠道细节见[安装](installation.md)。 |
 | Quick Setup | 首次运行 setup 可以创建可用本地配置。 |
 | Doctor | `sigil doctor` 和 `/doctor` 报告 config、auth、workspace、MCP、code intelligence 和 terminal readiness。 |
+| 反馈支持 | `sigil doctor --output json` 生成带版本的脱敏报告；`/feedback` 会先预览隐私边界，再由用户显式导出到本机。 |
 | 自动化输出 | `sigil run --output json` 输出一条带版本的结果；`--output jsonl` 输出有序的带版本事件，并以唯一 terminal result 或 error 结束。 |
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
 | Tool approvals | 文件变更、shell execution、外部路径和外部工具可在执行前 review。 |

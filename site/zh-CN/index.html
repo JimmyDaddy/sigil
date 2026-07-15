@@ -303,6 +303,7 @@ sigil</code></pre>
             <li>Tool、task、agent、approval 和 execution lifecycle 都是 durable control records。</li>
             <li>中断工具在恢复时变成 interrupted result，而不是隐藏重试。</li>
             <li>MCP server、plugin、workspace agent 和外部数据都受显式 trust policy 约束。</li>
+            <li><code>/feedback</code> 会先预览隐私边界，再显式导出到本机；不会自动上传任何内容。</li>
           </ul>
         </div>
       </section>
@@ -327,7 +328,7 @@ sigil</code></pre>
           </a>
           <a href="docs/#troubleshooting">
             <span>排障</span>
-            修复 setup、认证、workspace、approval、terminal、MCP 和 LSP 问题。
+            修复常见问题，预览私密支持报告，并打开结构化问题表单。
           </a>
         </div>
       </section>
@@ -337,6 +338,7 @@ sigil</code></pre>
       <span class="footer-brand">Sigil</span>
       <a href="docs/">文档</a>
       <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+      <a href="https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml">报告问题</a>
       <a href="../">English</a>
     </footer>
   </body>

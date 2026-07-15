@@ -122,7 +122,7 @@ fn should_record_input_history_entry(prompt: &str) -> bool {
         .map(|(token, _)| token)
         .unwrap_or(trimmed);
 
-    !matches!(token, "/quit" | "/q" | "/exit" | "/new")
+    !matches!(token, "/quit" | "/q" | "/exit" | "/new" | "/feedback")
 }
 
 fn read_input_history(path: &Path, limit: usize) -> Result<Vec<String>> {

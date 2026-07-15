@@ -23,7 +23,17 @@ fn push_entry_deduplicates_and_keeps_tail() {
 
 #[test]
 fn prompt_history_skips_control_commands() {
-    for prompt in ["", "   ", "/quit", "/q", "/exit", "/new", "  /quit  "] {
+    for prompt in [
+        "",
+        "   ",
+        "/quit",
+        "/q",
+        "/exit",
+        "/new",
+        "/feedback",
+        "  /quit  ",
+        "  /feedback  ",
+    ] {
         assert!(!should_record_input_history_entry(prompt));
     }
 

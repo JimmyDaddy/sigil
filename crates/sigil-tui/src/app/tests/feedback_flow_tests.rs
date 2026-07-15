@@ -49,7 +49,7 @@ fn feedback_preview_is_private_and_writes_nothing_before_enter() -> anyhow::Resu
     assert!(lines.contains("Nothing has been written or uploaded"));
     assert!(lines.contains("Included: build, OS/architecture"));
     assert!(lines.contains("Excluded: conversation, tool input/output, file content/diff"));
-    assert!(lines.contains("Doctor metadata may include provider/model labels"));
+    assert!(lines.contains("Metadata may include provider/model labels"));
     assert!(lines.contains("Enter export locally  Esc cancel"));
     assert!(!support_dir.exists());
     assert_eq!(app.timeline.len(), timeline_count);
@@ -97,7 +97,7 @@ fn feedback_modal_owns_input_and_exports_only_redacted_coarse_facts() -> anyhow:
     );
     assert_eq!(app.composer.input, "composer draft");
     assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE))?
             .is_none()
     );
     assert_eq!(app.composer.input, "composer draft");
@@ -148,6 +148,20 @@ fn feedback_modal_owns_input_and_exports_only_redacted_coarse_facts() -> anyhow:
     assert_eq!(app.composer.input, "composer draft");
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(!app.has_modal());
+    Ok(())
+}
+
+#[test]
+fn feedback_export_accepts_terminal_newline_key_code() -> anyhow::Result<()> {
+    let mut app = feedback_app()?;
+    open_feedback(&mut app)?;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        app.modal_state,
+        Some(ModalState::Feedback(ref state)) if state.exported_path.is_some()
+    ));
     Ok(())
 }
 
