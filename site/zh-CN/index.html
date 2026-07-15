@@ -72,6 +72,11 @@
 
     <main id="main-content">
       <section class="hero">
+        <div class="hero-field" aria-hidden="true">
+          <span class="hero-grid"></span>
+          <span class="hero-orbit hero-orbit-one"></span>
+          <span class="hero-orbit hero-orbit-two"></span>
+        </div>
         <div class="hero-brand-lockup">
           <img
             class="hero-logo hero-logo-on-light"
@@ -86,8 +91,8 @@
           >
         </div>
         <div class="hero-copy">
-          <p class="eyebrow">TUI-first Rust coding agent</p>
-          <h1>在一个终端里完成仓库工作。</h1>
+          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first Rust coding agent</p>
+          <h1>在一个终端里<br><span class="hero-accent">完成仓库工作。</span></h1>
           <p class="lede">
             Sigil 把对话、durable task、child agent、审批、diff、诊断、verification 和 session 恢复放进面向 coding session 的终端产品里。
           </p>
@@ -102,44 +107,83 @@
             <a class="button secondary" href="docs/status/">支持状态</a>
           </div>
         </div>
-        <div class="terminal-preview" aria-label="Sigil 终端工作流预览">
-          <div class="terminal-bar">
-            <span></span><span></span><span></span>
-            <strong>sigil</strong>
+        <div class="terminal-stage" data-terminal-stage>
+          <div class="terminal-preview" aria-label="Sigil 终端工作流预览">
+            <div class="terminal-bar">
+              <span></span><span></span><span></span>
+              <strong>sigil</strong>
+            </div>
+            <div class="terminal-command">
+              <span class="terminal-prompt" aria-hidden="true">&gt;</span>
+              <code>/task 审核发布文档</code>
+            </div>
+            <ol class="session-timeline" aria-label="任务执行阶段">
+              <li class="session-phase session-phase-planner" data-phase="planner">
+                <span class="session-role">planner</span>
+                <span class="session-description">为发布审核写入可持久化步骤</span>
+                <span class="session-state session-state-complete">已完成</span>
+              </li>
+              <li class="session-phase session-phase-worker" data-phase="worker">
+                <span class="session-role">worker</span>
+                <span class="session-description">完成只读文档评审</span>
+                <span class="session-state session-state-complete">已完成</span>
+              </li>
+              <li class="session-phase session-phase-tool" data-phase="tool">
+                <span class="session-role">tool</span>
+                <span class="session-description">生成待审批的 edit_file 预览</span>
+                <span class="session-state session-state-ready">待审批</span>
+              </li>
+              <li class="session-phase session-phase-verify" data-phase="verify">
+                <span class="session-role">verify</span>
+                <span class="session-description">运行 Pages 检查和链接验证</span>
+                <span class="session-state session-state-passed">已通过</span>
+              </li>
+              <li class="session-phase session-phase-status" data-phase="status">
+                <span class="session-role">status</span>
+                <span class="session-description">发布 alpha 版本</span>
+                <span class="session-state session-state-live">已上线</span>
+              </li>
+            </ol>
+            <div class="terminal-signals" aria-label="工作流保障">
+              <span><i class="signal-dot signal-dot-cyan" aria-hidden="true"></i>会话可恢复</span>
+              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>审批受控</span>
+              <span><i class="signal-dot signal-dot-green" aria-hidden="true"></i>验证已通过</span>
+            </div>
           </div>
-          <div class="terminal-command">
-            <span class="terminal-prompt" aria-hidden="true">&gt;</span>
-            <code>/task 审核发布文档</code>
-          </div>
-          <ol class="session-timeline" aria-label="任务执行阶段">
-            <li class="session-phase session-phase-planner" data-phase="planner">
-              <span class="session-role">planner</span>
-              <span class="session-description">为发布审核写入可持久化步骤</span>
-              <span class="session-state session-state-complete">已完成</span>
-            </li>
-            <li class="session-phase session-phase-worker" data-phase="worker">
-              <span class="session-role">worker</span>
-              <span class="session-description">完成只读文档评审</span>
-              <span class="session-state session-state-complete">已完成</span>
-            </li>
-            <li class="session-phase session-phase-tool" data-phase="tool">
-              <span class="session-role">tool</span>
-              <span class="session-description">生成待审批的 edit_file 预览</span>
-              <span class="session-state session-state-ready">待审批</span>
-            </li>
-            <li class="session-phase session-phase-verify" data-phase="verify">
-              <span class="session-role">verify</span>
-              <span class="session-description">运行 Pages 检查和链接验证</span>
-              <span class="session-state session-state-passed">已通过</span>
-            </li>
-            <li class="session-phase session-phase-status" data-phase="status">
-              <span class="session-role">status</span>
-              <span class="session-description">发布 alpha 版本</span>
-              <span class="session-state session-state-live">已上线</span>
-            </li>
-          </ol>
         </div>
       </section>
+
+      <div class="capability-rail">
+        <div class="capability-track">
+          <div class="capability-set" role="list" aria-label="Sigil 能力">
+            <span role="listitem">持久会话</span>
+            <span role="listitem">审批预览</span>
+            <span role="listitem">子 Agent</span>
+            <span role="listitem">MCP 工具</span>
+            <span role="listitem">代码智能</span>
+            <span role="listitem">验证</span>
+            <span role="listitem">恢复</span>
+          </div>
+          <div class="capability-set" aria-hidden="true">
+            <span>持久会话</span>
+            <span>审批预览</span>
+            <span>子 Agent</span>
+            <span>MCP 工具</span>
+            <span>代码智能</span>
+            <span>验证</span>
+            <span>恢复</span>
+          </div>
+        </div>
+        <button
+          class="capability-motion-toggle"
+          type="button"
+          data-capability-motion-toggle
+          data-pause-label="暂停能力栏动画"
+          data-resume-label="继续能力栏动画"
+          aria-label="暂停能力栏动画"
+          title="暂停能力栏动画"
+        ><span aria-hidden="true">Ⅱ</span></button>
+      </div>
 
       <section class="section" id="quickstart">
         <div class="section-heading">

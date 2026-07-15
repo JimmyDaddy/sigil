@@ -72,6 +72,11 @@
 
     <main id="main-content">
       <section class="hero">
+        <div class="hero-field" aria-hidden="true">
+          <span class="hero-grid"></span>
+          <span class="hero-orbit hero-orbit-one"></span>
+          <span class="hero-orbit hero-orbit-two"></span>
+        </div>
         <div class="hero-brand-lockup">
           <img
             class="hero-logo hero-logo-on-light"
@@ -86,8 +91,8 @@
           >
         </div>
         <div class="hero-copy">
-          <p class="eyebrow">TUI-first Rust coding agent</p>
-          <h1>Repository work, inside one terminal.</h1>
+          <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first Rust coding agent</p>
+          <h1>Repository work,<br><span class="hero-accent">inside one terminal.</span></h1>
           <p class="lede">
             Sigil brings chat, durable tasks, child agents, approvals, diffs, diagnostics, verification, and session recovery into a terminal product built for real coding sessions.
           </p>
@@ -102,44 +107,83 @@
             <a class="button secondary" href="docs/status/">Status</a>
           </div>
         </div>
-        <div class="terminal-preview" aria-label="Sigil terminal workflow preview">
-          <div class="terminal-bar">
-            <span></span><span></span><span></span>
-            <strong>sigil</strong>
+        <div class="terminal-stage" data-terminal-stage>
+          <div class="terminal-preview" aria-label="Sigil terminal workflow preview">
+            <div class="terminal-bar">
+              <span></span><span></span><span></span>
+              <strong>sigil</strong>
+            </div>
+            <div class="terminal-command">
+              <span class="terminal-prompt" aria-hidden="true">&gt;</span>
+              <code>/task audit the release docs</code>
+            </div>
+            <ol class="session-timeline" aria-label="Task execution phases">
+              <li class="session-phase session-phase-planner" data-phase="planner">
+                <span class="session-role">planner</span>
+                <span class="session-description">Wrote durable steps for the release audit</span>
+                <span class="session-state session-state-complete">complete</span>
+              </li>
+              <li class="session-phase session-phase-worker" data-phase="worker">
+                <span class="session-role">worker</span>
+                <span class="session-description">Ran a read-only documentation review</span>
+                <span class="session-state session-state-complete">complete</span>
+              </li>
+              <li class="session-phase session-phase-tool" data-phase="tool">
+                <span class="session-role">tool</span>
+                <span class="session-description">Prepared the edit_file preview for approval</span>
+                <span class="session-state session-state-ready">ready</span>
+              </li>
+              <li class="session-phase session-phase-verify" data-phase="verify">
+                <span class="session-role">verify</span>
+                <span class="session-description">Ran Pages checks and link validation</span>
+                <span class="session-state session-state-passed">passed</span>
+              </li>
+              <li class="session-phase session-phase-status" data-phase="status">
+                <span class="session-role">status</span>
+                <span class="session-description">Published the alpha release</span>
+                <span class="session-state session-state-live">live</span>
+              </li>
+            </ol>
+            <div class="terminal-signals" aria-label="Workflow guarantees">
+              <span><i class="signal-dot signal-dot-cyan" aria-hidden="true"></i>session durable</span>
+              <span><i class="signal-dot signal-dot-gold" aria-hidden="true"></i>approval gated</span>
+              <span><i class="signal-dot signal-dot-green" aria-hidden="true"></i>verification passed</span>
+            </div>
           </div>
-          <div class="terminal-command">
-            <span class="terminal-prompt" aria-hidden="true">&gt;</span>
-            <code>/task audit the release docs</code>
-          </div>
-          <ol class="session-timeline" aria-label="Task execution phases">
-            <li class="session-phase session-phase-planner" data-phase="planner">
-              <span class="session-role">planner</span>
-              <span class="session-description">Wrote durable steps for the release audit</span>
-              <span class="session-state session-state-complete">complete</span>
-            </li>
-            <li class="session-phase session-phase-worker" data-phase="worker">
-              <span class="session-role">worker</span>
-              <span class="session-description">Ran a read-only documentation review</span>
-              <span class="session-state session-state-complete">complete</span>
-            </li>
-            <li class="session-phase session-phase-tool" data-phase="tool">
-              <span class="session-role">tool</span>
-              <span class="session-description">Prepared the edit_file preview for approval</span>
-              <span class="session-state session-state-ready">ready</span>
-            </li>
-            <li class="session-phase session-phase-verify" data-phase="verify">
-              <span class="session-role">verify</span>
-              <span class="session-description">Ran Pages checks and link validation</span>
-              <span class="session-state session-state-passed">passed</span>
-            </li>
-            <li class="session-phase session-phase-status" data-phase="status">
-              <span class="session-role">status</span>
-              <span class="session-description">Published the alpha release</span>
-              <span class="session-state session-state-live">live</span>
-            </li>
-          </ol>
         </div>
       </section>
+
+      <div class="capability-rail">
+        <div class="capability-track">
+          <div class="capability-set" role="list" aria-label="Sigil capabilities">
+            <span role="listitem">Durable sessions</span>
+            <span role="listitem">Approval previews</span>
+            <span role="listitem">Child agents</span>
+            <span role="listitem">MCP tools</span>
+            <span role="listitem">Code intelligence</span>
+            <span role="listitem">Verification</span>
+            <span role="listitem">Recovery</span>
+          </div>
+          <div class="capability-set" aria-hidden="true">
+            <span>Durable sessions</span>
+            <span>Approval previews</span>
+            <span>Child agents</span>
+            <span>MCP tools</span>
+            <span>Code intelligence</span>
+            <span>Verification</span>
+            <span>Recovery</span>
+          </div>
+        </div>
+        <button
+          class="capability-motion-toggle"
+          type="button"
+          data-capability-motion-toggle
+          data-pause-label="Pause capability animation"
+          data-resume-label="Resume capability animation"
+          aria-label="Pause capability animation"
+          title="Pause capability animation"
+        ><span aria-hidden="true">Ⅱ</span></button>
+      </div>
 
       <section class="section" id="quickstart">
         <div class="section-heading">

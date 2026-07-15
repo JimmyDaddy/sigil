@@ -96,6 +96,25 @@ end
   lockups = tags(html, "div").count { |tag| class_token?(attributes(tag), "hero-brand-lockup") }
   failures << "#{page}: expected one hero brand lockup, found #{lockups}" unless lockups == 1
 
+  hero_fields = tags(html, "div").count { |tag| class_token?(attributes(tag), "hero-field") }
+  failures << "#{page}: expected one decorative hero field, found #{hero_fields}" unless hero_fields == 1
+
+  terminal_stages = tags(html, "div").count { |tag| attributes(tag).key?("data-terminal-stage") }
+  failures << "#{page}: expected one interactive terminal stage, found #{terminal_stages}" unless terminal_stages == 1
+
+  terminal_signals = tags(html, "i").count { |tag| class_token?(attributes(tag), "signal-dot") }
+  failures << "#{page}: expected three terminal status signals, found #{terminal_signals}" unless terminal_signals == 3
+
+  capability_rails = tags(html, "div").count { |tag| class_token?(attributes(tag), "capability-rail") }
+  failures << "#{page}: expected one capability rail, found #{capability_rails}" unless capability_rails == 1
+
+  capability_motion_toggles = tags(html, "button").count do |tag|
+    attributes(tag).key?("data-capability-motion-toggle")
+  end
+  unless capability_motion_toggles == 1
+    failures << "#{page}: expected one capability motion toggle, found #{capability_motion_toggles}"
+  end
+
   timeline_phases = tags(html, "li").filter_map do |tag|
     attrs = attributes(tag)
     attrs["data-phase"] if class_token?(attrs, "session-phase")
@@ -165,7 +184,7 @@ if File.file?(site_css_path)
     failures << "assets/site.css: terminal shimmer must be finite"
   end
 
-  %w[session-timeline terminal-deck docs-command-palette task-router].each do |class_name|
+  %w[hero-field terminal-stage terminal-signals capability-rail session-timeline terminal-deck docs-command-palette task-router].each do |class_name|
     failures << "assets/site.css: missing .#{class_name} styles" unless site_css.include?(".#{class_name}")
   end
 else

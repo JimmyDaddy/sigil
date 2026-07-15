@@ -240,7 +240,8 @@ def probe_html(viewport, variant)
                   const computed = view.getComputedStyle(element);
                   if (computed.display === "none" || computed.visibility === "hidden") return false;
                   const bounds = element.getBoundingClientRect();
-                  return !hasScrollableAncestor(element) &&
+                  const intentionallyClipped = element.closest(".hero-field, .capability-track");
+                  return !intentionallyClipped && !hasScrollableAncestor(element) &&
                     (bounds.left < -1 || bounds.right > clientWidth + 1);
                 })
                 .slice(0, 8)
