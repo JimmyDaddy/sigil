@@ -307,3 +307,112 @@ fn conversation_fork_rejects_unfinalized_turn_without_creating_destination() -> 
     assert!(!destination_path.exists());
     Ok(())
 }
+
+#[test]
+fn conversation_turn_fork_supports_finalized_turn_without_file_mutations() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_path = temp.path().join("source.jsonl");
+    let source_store = JsonlSessionStore::new(&source_path)?;
+    let mut source = Session::new("deepseek", "chat").with_store(source_store.clone());
+    source.append_control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "chat".to_owned(),
+    })?;
+    source.append_user_message(ModelMessage::user("explain the repository"))?;
+    let assistant = ModelMessage::assistant_with_kind(
+        Some("Here is the explanation.".to_owned()),
+        Vec::new(),
+        AssistantMessageKind::FinalAnswer,
+    );
+    source.append_assistant_message(assistant.clone())?;
+    source.append_durable_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({
+            "run_status": "completed",
+            "terminal_reason": "final_answer",
+            "final_message_id": assistant.id,
+            "tool_calls": 0,
+            "error": null
+        }),
+    )?;
+    let records = JsonlSessionStore::read_event_records(&source_path)?;
+    assert!(
+        ControlledCheckpointProjection::from_records(&records)?
+            .latest()
+            .is_none()
+    );
+    let point = ConversationForkProjection::from_records(&records)?
+        .latest()
+        .cloned()
+        .expect("finalized turn");
+    let before_parent = fs::read(&source_path)?;
+    let destination_path = temp.path().join("fork.jsonl");
+
+    let output = fork_conversation_at_turn(
+        &source_store,
+        &records,
+        &ConversationTurnForkRequest {
+            source_turn_digest: point.source_turn_digest.clone(),
+            source_session_ref: SessionRef::new_relative("source.jsonl")?,
+            destination_path: destination_path.clone(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "chat".to_owned(),
+        },
+    )?;
+
+    assert_eq!(fs::read(&source_path)?, before_parent);
+    assert_eq!(output.copied_message_count, 2);
+    let destination_records = JsonlSessionStore::read_event_records(destination_path)?;
+    let fork_payload = destination_records
+        .iter()
+        .find_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_kind() == Some(DurableEventType::ConversationForked) =>
+            {
+                serde_json::from_value::<ConversationForked>(event.payload.clone()).ok()
+            }
+            _ => None,
+        })
+        .expect("fork provenance");
+    assert!(fork_payload.source_checkpoint_id.is_none());
+    assert!(fork_payload.source_checkpoint_digest.is_none());
+    assert_eq!(fork_payload.source_turn_digest, point.source_turn_digest);
+    Ok(())
+}
+
+#[test]
+fn conversation_turn_fork_rejects_stale_digest_before_creating_destination() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_path = temp.path().join("source.jsonl");
+    let source_store = JsonlSessionStore::new(&source_path)?;
+    source_store.append(&SessionLogEntry::User(ModelMessage::user("hello")))?;
+    source_store.append_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({"run_status": "completed"}),
+    )?;
+    let records = JsonlSessionStore::read_event_records(&source_path)?;
+    let destination_path = temp.path().join("fork.jsonl");
+
+    let error = fork_conversation_at_turn(
+        &source_store,
+        &records,
+        &ConversationTurnForkRequest {
+            source_turn_digest: "stale".to_owned(),
+            source_session_ref: SessionRef::new_relative("source.jsonl")?,
+            destination_path: destination_path.clone(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "chat".to_owned(),
+        },
+    )
+    .expect_err("stale digest must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("changed or is no longer available")
+    );
+    assert!(!destination_path.exists());
+    Ok(())
+}

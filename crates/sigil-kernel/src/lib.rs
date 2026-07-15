@@ -124,8 +124,9 @@ pub use context_engine::{
     pack_context_items, validate_context_render_snippet, write_context_quality_evidence_artifacts,
 };
 pub use conversation_fork::{
-    ConversationForkOutput, ConversationForkRequest, ConversationForked,
-    fork_conversation_at_checkpoint,
+    ConversationForkOutput, ConversationForkPoint, ConversationForkProjection,
+    ConversationForkRequest, ConversationForked, ConversationTurnForkRequest,
+    fork_conversation_at_checkpoint, fork_conversation_at_turn,
 };
 pub use conversation_queue::{
     CONVERSATION_QUEUE_DURABLE_PROJECTION_SCHEMA_VERSION, ConversationInputEditedEntry,
