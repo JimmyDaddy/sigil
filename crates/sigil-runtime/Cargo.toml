@@ -9,6 +9,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 ignore.workspace = true
+image.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -27,12 +28,12 @@ tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 uuid.workspace = true
 url.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio.workspace = true
 
 [lints]

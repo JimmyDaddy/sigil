@@ -2,6 +2,15 @@
 
 本文记录新增直接依赖的用途、owner、启用 feature、许可与安全边界。它是代码评审输入，不替代发布前的 `cargo audit` / `cargo deny` 或仓库认可的等价 gate。
 
+## Image & Attachment Input V1（RFC-0033）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `image` | `0.25.10`；`default-features = false`；仅 `png,jpeg,webp` | `sigil-runtime/image_attachment` | 对 bounded encoded image 做真实格式识别、尺寸读取与完整 decode；在解码前执行 byte cap、在完整 decode 前执行 dimension/pixel cap，不接受扩展名推断或 SVG/GIF 等 V1 外格式 | `MIT OR Apache-2.0`；`image-rs/image` | 仅 runtime controlled cache ingress/resolution 直接消费；不启用 AVIF、BMP、DDS、EXR、FF、GIF、HDR、ICO、PNM、QOI、TIFF、TGA 等无关 codec |
+| `tempfile` | `3.27.0`；默认 feature | `sigil-runtime/image_attachment` | 在目标 cache 目录创建随机临时文件，完成 write+sync 后用 `persist_noclobber` 原子提交内容寻址 blob；拒绝覆盖既有 blob并重新校验已存在内容 | `MIT OR Apache-2.0`；`Stebalien/tempfile` | 从 runtime dev-dependency 提升为直接依赖；临时文件与最终文件同目录，不跨文件系统 rename |
+
+R33.2 同时复用 workspace 已有的 `sha2`、`url` 与 `libc`。文件入口和 cache leaf 都以 no-follow regular-file 方式读取，大小、hash、格式、dimensions 与 canonical artifact ref 任一不一致即 fail closed；原始粘贴路径不会进入 session/export/provider request。
+
 ## WebFetch 受控传输（E21.9 / E21.17 public cutover）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

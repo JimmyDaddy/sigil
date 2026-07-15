@@ -21,6 +21,7 @@ pub const DEFAULT_ARTIFACTS_DIR: &str = "artifacts";
 pub const DEFAULT_CHANGESETS_DIR: &str = "changesets";
 pub const DEFAULT_TERMINAL_TASKS_DIR: &str = "tasks";
 pub const DEFAULT_SCRATCH_DIR: &str = "tmp";
+pub const DEFAULT_ATTACHMENTS_DIR: &str = "attachments";
 pub const DEFAULT_PROJECT_ASSETS_DIR: &str = ".sigil";
 pub const DEFAULT_WORKSPACE_SKILLS_LEAF: &str = "skills";
 pub const DEFAULT_WORKSPACE_COMMANDS_LEAF: &str = "commands";
@@ -43,6 +44,7 @@ pub struct SigilPaths {
     pub changesets_root: PathBuf,
     pub terminal_tasks_root: PathBuf,
     pub scratch_root: PathBuf,
+    pub attachments_root: PathBuf,
     pub project_assets_root: PathBuf,
     pub workspace_skills_dir: PathBuf,
     pub workspace_commands_dir: PathBuf,
@@ -126,6 +128,7 @@ pub fn resolve_sigil_paths_with_env(
     let changesets_root = artifacts_root.join(DEFAULT_CHANGESETS_DIR);
     let terminal_tasks_root = artifacts_root.join(DEFAULT_TERMINAL_TASKS_DIR);
     let scratch_root = workspace_cache_root.join(DEFAULT_SCRATCH_DIR);
+    let attachments_root = workspace_cache_root.join(DEFAULT_ATTACHMENTS_DIR);
 
     SigilPaths {
         workspace_root,
@@ -142,6 +145,7 @@ pub fn resolve_sigil_paths_with_env(
         changesets_root,
         terminal_tasks_root,
         scratch_root,
+        attachments_root,
         project_assets_root,
         workspace_skills_dir,
         workspace_commands_dir,

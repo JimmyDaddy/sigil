@@ -67,6 +67,7 @@ pub mod egress_ordering;
 mod exa_text_v1;
 pub mod hosted_finalizer;
 mod hosted_web_search;
+pub mod image_attachment;
 pub mod machine_protocol;
 pub mod mcp_declaration;
 pub mod model_eval;
@@ -124,6 +125,7 @@ pub use egress_ordering::{
     AuthorizedTransportEgress, EgressOrderingCoordinator, EgressOrderingError,
 };
 pub use hosted_finalizer::{HostedEvidenceFinalizer, hosted_terminal_status};
+pub use image_attachment::{ControlledImageAttachmentCache, image_path_from_pasted_text};
 pub use mcp_declaration::{
     McpConfigOrigin, McpConfigOriginKind, McpExecutionBase, McpExecutionBaseKind,
     McpRegistrationError, McpRegistrationErrorCode, McpServerDeclarationProjection,
@@ -131,12 +133,13 @@ pub use mcp_declaration::{
     resolve_user_root_mcp_declarations,
 };
 pub use paths::{
-    DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR,
-    DEFAULT_SESSION_EXPORTS_DIR, DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE, DEFAULT_SESSIONS_DIR,
-    DEFAULT_TERMINAL_TASKS_DIR, DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_COMMANDS_LEAF,
-    DEFAULT_WORKSPACE_PLUGINS_LEAF, DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE,
-    PathResolverEnv, SIGIL_CACHE_HOME_ENV, SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform,
-    resolve_sigil_paths, resolve_sigil_paths_with_env, workspace_id_for_root,
+    DEFAULT_ARTIFACTS_DIR, DEFAULT_ATTACHMENTS_DIR, DEFAULT_CHANGESETS_DIR,
+    DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR, DEFAULT_SESSION_EXPORTS_DIR,
+    DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE, DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR,
+    DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_COMMANDS_LEAF, DEFAULT_WORKSPACE_PLUGINS_LEAF,
+    DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE, PathResolverEnv, SIGIL_CACHE_HOME_ENV,
+    SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform, resolve_sigil_paths,
+    resolve_sigil_paths_with_env, workspace_id_for_root,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,

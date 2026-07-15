@@ -29,6 +29,10 @@ fn resolves_linux_defaults_under_user_state_and_cache() {
         Path::new("/home/alice/.local/state/sigil")
     );
     assert_eq!(paths.cache_root, Path::new("/home/alice/.cache/sigil"));
+    assert_eq!(
+        paths.attachments_root,
+        paths.workspace_cache_root.join(DEFAULT_ATTACHMENTS_DIR)
+    );
     assert!(paths.workspace_id.contains('-'));
     assert!(paths.session_log_dir.ends_with("sessions"));
     assert_eq!(
