@@ -37,7 +37,8 @@ use super::{
     build_plan_prompt_tool_registry, build_provider, build_role_provider, build_role_run_options,
     build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
     build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
-    build_tool_registry_without_eager_mcp_with_workspace_trust, launch_planned_mcp_process,
+    build_tool_registry_without_eager_mcp_with_workspace_trust,
+    build_tool_surface_without_eager_mcp_with_workspace_trust, launch_planned_mcp_process,
     load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
     load_openai_responses_config, provider_capabilities_for_name, provider_capability_view,
     refresh_mcp_server_tools_with_mcp_handlers,
@@ -1640,6 +1641,45 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
 
     assert!(registry.spec_for("code_symbols").is_some());
     assert!(registry.spec_for("code_diagnostics").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_tool_surface_shares_code_intelligence_with_context_resolver() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n")?;
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.code_intelligence.enabled = true;
+    config.code_intelligence.server_startup = CodeIntelStartup::Lazy;
+
+    let surface = build_tool_surface_without_eager_mcp_with_workspace_trust(
+        &config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        WorkspaceTrust::Trusted,
+    )?;
+
+    assert!(surface.registry.spec_for("code_symbols").is_some());
+    assert!(surface.context_resolver.has_shared_code_intelligence());
+    let context = surface
+        .context_resolver
+        .resolve("where is `hello` defined?")
+        .await?;
+    assert!(
+        context
+            .items
+            .iter()
+            .any(|item| item.id == "repo-file:lib.rs")
+    );
+    assert!(
+        context
+            .items
+            .iter()
+            .any(|item| item.id == "lsp-context:unavailable")
+    );
     Ok(())
 }
 

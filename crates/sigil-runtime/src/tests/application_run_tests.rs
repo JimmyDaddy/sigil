@@ -17,10 +17,10 @@ use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
     ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
     ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, PublicApplicationEventBridge,
-    application_run_input, application_terminal_projection, bind_application_session,
-    constrain_application_tool_registry, default_application_session_path,
-    optional_eager_mcp_warning, record_application_preparation_cancellation,
-    validate_execution_contract,
+    application_run_input, application_terminal_projection, attach_application_request_context,
+    bind_application_session, constrain_application_tool_registry,
+    default_application_session_path, optional_eager_mcp_warning,
+    record_application_preparation_cancellation, validate_execution_contract,
 };
 
 struct NamedTool(&'static str);
@@ -131,6 +131,36 @@ fn default_session_path_and_repo_context_are_application_owned() -> Result<()> {
             .items
             .iter()
             .any(|item| item.id == "repo-file:README.md")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_request_context_uses_runtime_resolver() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("README.md"), "Sigil application resolver")?;
+    let resolver = crate::RequestContextResolver::request_local(temp.path().to_path_buf());
+
+    let input = attach_application_request_context(
+        sigil_kernel::AgentRunInput::user("summarize README.md"),
+        &resolver,
+        "summarize README.md",
+    )
+    .await;
+
+    assert!(
+        input
+            .runtime_context
+            .items
+            .iter()
+            .any(|item| item.id == "repo-file:README.md")
+    );
+    assert!(
+        input
+            .runtime_context
+            .items
+            .iter()
+            .any(|item| item.id == "lsp-context:unavailable")
     );
     Ok(())
 }

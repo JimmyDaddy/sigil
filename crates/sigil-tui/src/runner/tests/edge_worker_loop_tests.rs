@@ -1132,6 +1132,8 @@ fn spawn_loop_with_shared_agent(
                 .enable_all()
                 .build()
                 .expect("edge worker runtime should build");
+            let context_resolver =
+                sigil_runtime::RequestContextResolver::request_local(workspace_root.clone());
             run_worker_loop(
                 runtime,
                 agent_for_loop,
@@ -1147,6 +1149,7 @@ fn spawn_loop_with_shared_agent(
                     event_handler: mcp_event_handler,
                     event_rx: mcp_event_rx,
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
+                    context_resolver,
                 },
             );
         })

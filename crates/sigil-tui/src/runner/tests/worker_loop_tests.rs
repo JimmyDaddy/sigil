@@ -20,8 +20,8 @@ use crate::runner::{
     },
 };
 
-#[test]
-fn chat_agent_run_input_with_repo_context_attaches_repository_candidates() {
+#[tokio::test]
+async fn chat_agent_run_input_with_repo_context_attaches_repository_candidates() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         temp.path().join("README.md"),
@@ -29,12 +29,14 @@ fn chat_agent_run_input_with_repo_context_attaches_repository_candidates() {
     )
     .expect("write README");
 
+    let resolver = sigil_runtime::RequestContextResolver::request_local(temp.path().to_path_buf());
     let input = chat_agent_run_input_with_repo_context(
-        temp.path(),
+        &resolver,
         "summarize README.md".to_owned(),
         false,
         Vec::new(),
-    );
+    )
+    .await;
 
     assert!(input.persisted_user_message.is_some());
     assert!(input.runtime_context.items.iter().any(|item| {
@@ -45,17 +47,19 @@ fn chat_agent_run_input_with_repo_context_attaches_repository_candidates() {
     }));
 }
 
-#[test]
-fn chat_agent_run_input_with_repo_context_preserves_plan_mode_transience() {
+#[tokio::test]
+async fn chat_agent_run_input_with_repo_context_preserves_plan_mode_transience() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("README.md"), "plan context").expect("write README");
 
+    let resolver = sigil_runtime::RequestContextResolver::request_local(temp.path().to_path_buf());
     let input = chat_agent_run_input_with_repo_context(
-        temp.path(),
+        &resolver,
         "plan from README.md".to_owned(),
         true,
         Vec::new(),
-    );
+    )
+    .await;
 
     assert!(input.persisted_user_message.is_none());
     assert!(input.runtime_context.items.iter().any(|item| {

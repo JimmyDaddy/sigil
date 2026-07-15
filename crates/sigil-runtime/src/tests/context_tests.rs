@@ -12,9 +12,10 @@ use sigil_kernel::{
 
 use super::{
     ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,
-    McpResourceContextProvider, PluginHookContextProvider, collect_context_from_source_provider,
-    context_candidates_from_repo_query, context_candidates_from_safe_sources,
-    context_items_from_plugin_hook_output, context_items_from_task_memory,
+    McpResourceContextProvider, PluginHookContextProvider, RequestContextResolver,
+    collect_context_from_source_provider, context_candidates_from_repo_query,
+    context_candidates_from_safe_sources, context_items_from_plugin_hook_output,
+    context_items_from_task_memory,
 };
 
 #[derive(Clone)]
@@ -634,6 +635,71 @@ fn safe_context_sources_include_query_relevant_warm_lsp_rows() -> Result<()> {
         ContextInclusionReason::WarmLspMatch
     );
     assert!(reference.score.is_some());
+    assert!(
+        context
+            .items
+            .iter()
+            .all(|item| item.source != ContextSource::RepositoryFile)
+    );
+    Ok(())
+}
+
+#[test]
+fn safe_context_sources_fall_back_when_warm_lsp_rows_are_unrelated() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("src"))?;
+    fs::write(
+        temp.path().join("src/config.rs"),
+        "pub fn parse_config() {}\n",
+    )?;
+    let snapshot = LspContextSnapshot::ready().with_symbols(vec![CodeSymbol {
+        name: "render_dashboard".to_owned(),
+        kind: "function".to_owned(),
+        path: "src/dashboard.rs".to_owned(),
+        range: code_range(),
+        container_name: None,
+    }]);
+
+    let context = context_candidates_from_safe_sources(
+        temp.path(),
+        "where is `parse_config` defined?",
+        Some(&snapshot),
+    )?;
+
+    assert!(
+        context
+            .items
+            .iter()
+            .any(|item| item.id == "repo-file:src/config.rs")
+    );
+    assert!(context.items.iter().any(|item| {
+        item.id == "lsp-context:miss"
+            && item.inclusion_reason == ContextInclusionReason::ExcludedUnsupported
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_context_resolver_without_service_uses_bounded_fallback() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("README.md"), "Sigil request context")?;
+    let resolver = RequestContextResolver::request_local(temp.path().to_path_buf());
+
+    let context = resolver.resolve("summarize README.md").await?;
+
+    assert!(!resolver.has_shared_code_intelligence());
+    assert!(
+        context
+            .items
+            .iter()
+            .any(|item| item.id == "repo-file:README.md")
+    );
+    assert!(
+        context
+            .items
+            .iter()
+            .any(|item| item.id == "lsp-context:unavailable")
+    );
     Ok(())
 }
 

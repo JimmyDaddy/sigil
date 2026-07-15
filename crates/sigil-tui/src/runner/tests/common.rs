@@ -179,6 +179,8 @@ where
                 .enable_all()
                 .build()
                 .expect("test runtime should build");
+            let context_resolver =
+                sigil_runtime::RequestContextResolver::request_local(workspace_root.clone());
             run_worker_loop(
                 runtime,
                 agent,
@@ -194,6 +196,7 @@ where
                     event_handler: mcp_event_handler,
                     event_rx: mcp_event_rx,
                     role_provider_builder,
+                    context_resolver,
                 },
             );
         })

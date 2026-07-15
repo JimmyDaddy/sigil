@@ -110,10 +110,10 @@ pub use agent_tools::{
 };
 pub use context::{
     ContextSourcePolicy, ContextSourceProvider, ContextSourceRequest, McpResourceContextItem,
-    McpResourceContextProvider, PluginHookContextProvider, collect_context_from_source_provider,
-    collect_context_from_source_providers, context_candidates_from_repo_query,
-    context_candidates_from_safe_sources, context_items_from_plugin_hook_output,
-    context_items_from_task_memory,
+    McpResourceContextProvider, PluginHookContextProvider, RequestContextResolver,
+    collect_context_from_source_provider, collect_context_from_source_providers,
+    context_candidates_from_repo_query, context_candidates_from_safe_sources,
+    context_items_from_plugin_hook_output, context_items_from_task_memory,
 };
 pub use context_window::{
     ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
@@ -232,7 +232,7 @@ pub use webfetch::{
 
 pub use mcp_registry::{
     LazyMcpActivationResult, McpDeclarationRegistrationOptions, McpPluginTrustSource,
-    McpRefreshResult, SessionMcpPluginTrustSource, activate_lazy_mcp_tools,
+    McpRefreshResult, RuntimeToolSurface, SessionMcpPluginTrustSource, activate_lazy_mcp_tools,
     activate_lazy_mcp_tools_detailed, activate_lazy_mcp_tools_detailed_with_mcp_elicitation,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder,
@@ -243,7 +243,9 @@ pub use mcp_registry::{
     build_tool_registry_with_mutation_recorder_and_workspace_trust,
     build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission,
     build_tool_registry_without_eager_mcp,
-    build_tool_registry_without_eager_mcp_with_workspace_trust, mcp_process_receipts_summary,
+    build_tool_registry_without_eager_mcp_with_workspace_trust,
+    build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission,
+    build_tool_surface_without_eager_mcp_with_workspace_trust, mcp_process_receipts_summary,
     mcp_stdio_boundary_summary, refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,

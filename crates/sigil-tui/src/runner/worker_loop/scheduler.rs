@@ -21,6 +21,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         event_handler: mcp_event_handler,
         event_rx: mcp_event_rx,
         role_provider_builder,
+        context_resolver,
     } = mcp_handlers;
     let mut current_session_log_path = session_log_path;
     let mut exact_conversation_prompts = ExactConversationPromptStore::new();
@@ -1369,7 +1370,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let run_id = next_run_id;
                 next_run_id += 1;
                 let provider_logical_run_id = format!("foreground-run-{run_id}");
-                let workspace_root = options.workspace_root.clone();
+                let context_resolver = context_resolver.clone();
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
                     Err(error) => {
@@ -1393,11 +1394,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let result = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
                         let input = chat_agent_run_input_with_repo_context(
-                            &workspace_root,
+                            &context_resolver,
                             prompt,
                             plan_mode,
                             Vec::new(),
                         )
+                        .await
                         .with_logical_run_id(provider_logical_run_id.clone())
                         .with_cancellation(cancellation_handle);
                         if let Some(tools) = plan_tools {

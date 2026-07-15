@@ -64,8 +64,8 @@ pub fn spawn_agent_worker(
                         return;
                     }
                 };
-            let mut registry =
-                match sigil_runtime::build_tool_registry_without_eager_mcp_with_workspace_trust(
+            let surface =
+                match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust(
                     &root_config,
                     &provider_capabilities,
                     workspace_root.clone(),
@@ -73,12 +73,14 @@ pub fn spawn_agent_worker(
                     mcp_event_handler.clone(),
                     workspace_trust,
                 ) {
-                    Ok(registry) => registry,
+                    Ok(surface) => surface,
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                         return;
                     }
                 };
+            let mut registry = surface.registry;
+            let context_resolver = surface.context_resolver;
             let disclosure_presenter: Arc<dyn EgressDisclosurePresenter> = Arc::new(
                 super::egress_disclosure_bridge::ChannelEgressDisclosurePresenter::new(
                     message_tx.clone(),
@@ -152,6 +154,7 @@ pub fn spawn_agent_worker(
                     event_handler: mcp_event_handler,
                     event_rx: mcp_event_rx,
                     role_provider_builder: Arc::new(RuntimeTaskRoleProviderBuilder),
+                    context_resolver,
                 },
             );
         })

@@ -4,6 +4,13 @@ use std::collections::BTreeMap;
 
 use crate::mcp_declaration::declarations_by_effective_name;
 
+/// Local/extension tool registry plus the request-context resolver that shares its code-intel
+/// service instance.
+pub struct RuntimeToolSurface {
+    pub registry: ToolRegistry,
+    pub context_resolver: crate::context::RequestContextResolver,
+}
+
 /// Read-through source for the latest durable plugin trust projection.
 ///
 /// Implementations must load current state on every call. A cached discovery-time snapshot is not
@@ -308,7 +315,40 @@ pub async fn build_tool_registry_with_mutation_recorder_and_workspace_trust_and_
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<ToolRegistry> {
-    build_tool_registry_with_mcp_handlers_and_mutation_recorder(
+    Ok(build_tool_surface_with_mcp_handlers_and_mutation_recorder(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        Some(mutation_recorder),
+        workspace_trust,
+        network_admission,
+    )
+    .await?
+    .registry)
+}
+
+/// Builds the complete runtime tool and Context V1 surface with explicit process network
+/// admission.
+///
+/// The returned resolver owns a clone of the exact `CodeIntelligenceService` registered behind
+/// the code-intelligence tools, so request assembly can only inspect that service's warm cache.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as
+/// [`build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission`].
+#[allow(clippy::too_many_arguments)]
+pub async fn build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    mutation_recorder: MutationEventRecorder,
+    workspace_trust: WorkspaceTrust,
+    network_admission: ExtensionProcessNetworkAdmission,
+) -> Result<RuntimeToolSurface> {
+    build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         root_config,
         provider_capabilities,
         workspace_root,
@@ -377,15 +417,42 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
     workspace_trust: WorkspaceTrust,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<ToolRegistry> {
+    Ok(build_tool_surface_with_mcp_handlers_and_mutation_recorder(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        mutation_recorder,
+        workspace_trust,
+        network_admission,
+    )
+    .await?
+    .registry)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+    workspace_trust: WorkspaceTrust,
+    network_admission: ExtensionProcessNetworkAdmission,
+) -> Result<RuntimeToolSurface> {
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let mut registry = ToolRegistry::new();
-    register_local_tools(
+    let code_intelligence = register_local_tools(
         &mut registry,
         root_config,
         workspace_root.clone(),
         workspace_trust,
     )?;
+    let context_resolver =
+        crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
     let mut registration_options = McpDeclarationRegistrationOptions::new(McpServerStartup::Eager)
         .with_handlers(
             Arc::clone(&elicitation_handler),
@@ -412,7 +479,10 @@ async fn build_tool_registry_with_mcp_handlers_and_mutation_recorder(
         elicitation_handler,
         runtime_event_handler,
     );
-    Ok(registry)
+    Ok(RuntimeToolSurface {
+        registry,
+        context_resolver,
+    })
 }
 
 /// Builds the local tool surface and lazy MCP activation tool without starting eager MCP servers.
@@ -459,15 +529,42 @@ pub fn build_tool_registry_without_eager_mcp_with_workspace_trust(
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     workspace_trust: WorkspaceTrust,
 ) -> Result<ToolRegistry> {
+    Ok(build_tool_surface_without_eager_mcp_with_workspace_trust(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+        workspace_trust,
+    )?
+    .registry)
+}
+
+/// Builds the local tool and Context V1 surface with an explicit workspace-trust projection.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as
+/// [`build_tool_registry_without_eager_mcp_with_workspace_trust`].
+pub fn build_tool_surface_without_eager_mcp_with_workspace_trust(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    workspace_trust: WorkspaceTrust,
+) -> Result<RuntimeToolSurface> {
     let _declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let mut registry = ToolRegistry::new();
-    register_local_tools(
+    let code_intelligence = register_local_tools(
         &mut registry,
         root_config,
         workspace_root.clone(),
         workspace_trust,
     )?;
+    let context_resolver =
+        crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
     register_lazy_mcp_activation_tool(
         &mut registry,
         root_config,
@@ -476,7 +573,10 @@ pub fn build_tool_registry_without_eager_mcp_with_workspace_trust(
         elicitation_handler,
         runtime_event_handler,
     );
-    Ok(registry)
+    Ok(RuntimeToolSurface {
+        registry,
+        context_resolver,
+    })
 }
 
 /// Activates lazy MCP servers against an existing runtime tool registry.
@@ -721,7 +821,7 @@ fn register_local_tools(
     root_config: &RootConfig,
     workspace_root: PathBuf,
     workspace_trust: WorkspaceTrust,
-) -> Result<()> {
+) -> Result<Option<sigil_code_intel::CodeIntelligenceService>> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     let execution_backend = build_configured_execution_backend(root_config)?;
     sigil_tools_builtin::register_builtin_tools_with_paths_execution_backend_and_execution_config(
@@ -737,7 +837,7 @@ fn register_local_tools(
         execution_backend,
         &root_config.execution,
     );
-    sigil_code_intel::register_code_intelligence_tools_with_workspace_trust(
+    let code_intelligence = sigil_code_intel::register_code_intelligence_tools_with_workspace_trust(
         registry,
         &root_config.code_intelligence,
         workspace_root.clone(),
@@ -750,7 +850,7 @@ fn register_local_tools(
         user_config_dir.as_deref(),
         &root_config.skills,
     );
-    Ok(())
+    Ok(code_intelligence)
 }
 
 /// Builds the execution backend configured for tools and verification checks.

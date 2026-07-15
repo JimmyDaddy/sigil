@@ -11,7 +11,9 @@ use sigil_code_intel::context::{
     CodeContextBuilder, CodeContextHit, LspContextSnapshot, LspContextSnapshotStatus, RepoMapLite,
     RepoMapLiteOptions, RepoSourceFileRef,
 };
-use sigil_code_intel::service::{CodeDiagnostic, CodeLocation, CodeRange, CodeSymbol};
+use sigil_code_intel::service::{
+    CodeDiagnostic, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol,
+};
 use sigil_kernel::{
     ContextBodyRef, ContextInclusionReason, ContextItem, ContextScoreComponent,
     ContextScoreComponentKind, ContextSensitivity, ContextSource, ContextTrustLevel,
@@ -42,6 +44,8 @@ const MCP_RESOURCE_CONTEXT_TIMEOUT_MS: u64 = 50;
 const MCP_RESOURCE_CONTEXT_MAX_BYTES: usize = 8 * 1024;
 const CONTEXT_QUERY_MAX_TERMS: usize = 64;
 const CONTEXT_QUERY_MAX_TERM_BYTES: usize = 96;
+const REQUEST_CONTEXT_LSP_SNAPSHOT_MAX_RESULTS: usize = 24;
+const REQUEST_CONTEXT_LSP_SNAPSHOT_TIMEOUT_MS: u64 = 35;
 
 #[derive(Debug, Clone)]
 struct RepoContextCandidate {
@@ -61,6 +65,84 @@ struct RepoCandidateScore {
 #[derive(Debug, Clone)]
 pub struct WarmLspContextProvider {
     snapshot: Option<LspContextSnapshot>,
+}
+
+/// Runtime-owned Context V1 resolver bound to the code-intelligence service used by local tools.
+///
+/// Resolution reads only the existing warm LSP cache. It never starts a server or issues a new LSP
+/// request; a miss falls back to the bounded request-local RepoMap.
+#[derive(Clone)]
+pub struct RequestContextResolver {
+    workspace_root: PathBuf,
+    code_intelligence: Option<CodeIntelligenceService>,
+}
+
+impl std::fmt::Debug for RequestContextResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RequestContextResolver")
+            .field("workspace_root", &self.workspace_root)
+            .field(
+                "code_intelligence",
+                &self.code_intelligence.as_ref().map(|_| "shared"),
+            )
+            .finish()
+    }
+}
+
+impl RequestContextResolver {
+    #[must_use]
+    pub(crate) fn new(
+        workspace_root: PathBuf,
+        code_intelligence: Option<CodeIntelligenceService>,
+    ) -> Self {
+        Self {
+            workspace_root,
+            code_intelligence,
+        }
+    }
+
+    #[must_use]
+    pub fn request_local(workspace_root: PathBuf) -> Self {
+        Self::new(workspace_root, None)
+    }
+
+    /// Reports whether this resolver is bound to the service shared with code-intelligence tools.
+    #[must_use]
+    pub fn has_shared_code_intelligence(&self) -> bool {
+        self.code_intelligence.is_some()
+    }
+
+    /// Resolves one request using a warm-LSP-first, request-local-RepoMap-fallback policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace cannot be canonicalized or the blocking resolver task
+    /// cannot complete. A missing, stale, timed-out, or unrelated LSP cache is normal fallback.
+    pub async fn resolve(&self, query: &str) -> Result<RuntimeContextCandidates> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(RuntimeContextCandidates::default());
+        }
+        let snapshot = if let Some(service) = self.code_intelligence.as_ref() {
+            service
+                .warm_lsp_context_snapshot(
+                    query,
+                    REQUEST_CONTEXT_LSP_SNAPSHOT_MAX_RESULTS,
+                    std::time::Duration::from_millis(REQUEST_CONTEXT_LSP_SNAPSHOT_TIMEOUT_MS),
+                )
+                .await
+        } else {
+            LspContextSnapshot::unavailable("code intelligence disabled or unavailable")
+        };
+        let workspace_root = self.workspace_root.clone();
+        let query = query.to_owned();
+        tokio::task::spawn_blocking(move || {
+            context_candidates_from_safe_sources(&workspace_root, &query, Some(&snapshot))
+        })
+        .await
+        .context("request context resolver task failed")?
+    }
 }
 
 impl WarmLspContextProvider {
@@ -589,13 +671,59 @@ pub fn context_candidates_from_safe_sources(
         return Ok(RuntimeContextCandidates::default());
     }
 
-    let mut context = context_candidates_from_repo_query(workspace_root, query)?;
     let lsp_provider = WarmLspContextProvider::new(lsp_snapshot.cloned());
-    context.extend(collect_context_from_source_provider(
+    let lsp_context = collect_context_from_source_provider(
         &lsp_provider,
         &ContextSourceRequest::new(workspace_root, query),
-    )?);
+    )?;
+    let has_relevant_lsp_hit = lsp_context.items.iter().any(|item| {
+        item.inclusion_reason.is_included()
+            && matches!(
+                item.source,
+                ContextSource::LspSymbol
+                    | ContextSource::LspDiagnostic
+                    | ContextSource::LspReference
+            )
+    });
+    let mut context = if has_relevant_lsp_hit {
+        context_candidates_from_explicit_paths(workspace_root, query)?
+    } else {
+        context_candidates_from_repo_query(workspace_root, query)?
+    };
+    context.extend(lsp_context);
     Ok(context)
+}
+
+fn context_candidates_from_explicit_paths(
+    workspace_root: &Path,
+    query: &str,
+) -> Result<RuntimeContextCandidates> {
+    let workspace_root = workspace_root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", workspace_root.display()))?;
+    let builder = CodeContextBuilder::new();
+    let mut runtime = RuntimeContextCandidates::new();
+    let explicit_paths = explicit_query_paths(query)
+        .filter_map(|path| normalize_workspace_relative_path(&workspace_root, &path))
+        .collect::<BTreeSet<_>>();
+    for relative in explicit_paths.into_iter().take(REPO_CONTEXT_MAX_ITEMS) {
+        let candidate = RepoContextCandidate {
+            score: 100.0,
+            score_breakdown: vec![score_component(
+                ContextScoreComponentKind::ExplicitPath,
+                100.0,
+            )],
+            inclusion_reason: ContextInclusionReason::RetrievalHit,
+            snippet_terms: BTreeSet::new(),
+            symbol_range: None,
+        };
+        let hit = repo_context_hit(&workspace_root, &builder, relative, candidate);
+        runtime
+            .snippets
+            .insert(hit.item.id.clone(), hit.snippet.clone());
+        runtime.items.push(hit.item);
+    }
+    Ok(runtime)
 }
 
 fn enforce_context_source_policy(

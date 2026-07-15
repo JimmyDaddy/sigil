@@ -21,7 +21,7 @@ use sigil_kernel::{
 use crate::{
     activate_eager_remote_mcp_server, attach_remote_mcp_activation_presenter,
     attach_session_url_capability_store,
-    build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission,
+    build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission,
     context_candidates_from_safe_sources, current_unix_time_ms, resolve_sigil_paths,
     secret_redactor_for_root_config, unsupported_mcp_elicitation_handler,
     unsupported_mcp_runtime_event_handler,
@@ -746,15 +746,15 @@ pub async fn prepare_application_run(
         root_task_guard,
         provider,
         options,
-        input,
+        mut input,
         run_id,
         prompt,
         interaction,
         redactor,
         tool_scope,
     } = prepared;
-    let mut registry =
-        build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission(
+    let surface =
+        build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission(
             &root_config,
             &provider.capabilities(),
             workspace_root.clone(),
@@ -767,6 +767,8 @@ pub async fn prepare_application_run(
         )
         .await
         .map_err(ApplicationRunPrepareError::execution)?;
+    input = attach_application_request_context(input, &surface.context_resolver, &prompt).await;
+    let mut registry = surface.registry;
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
     attach_remote_mcp_activation_presenter(
@@ -955,6 +957,14 @@ pub fn application_run_input(workspace_root: &Path, prompt: String) -> AgentRunI
     AgentRunInput::user(prompt).with_runtime_context(runtime_context)
 }
 
+async fn attach_application_request_context(
+    input: AgentRunInput,
+    context_resolver: &crate::RequestContextResolver,
+    prompt: &str,
+) -> AgentRunInput {
+    input.with_runtime_context(context_resolver.resolve(prompt).await.unwrap_or_default())
+}
+
 struct BlockingApplicationRunPreparation {
     root_config: RootConfig,
     workspace_root: PathBuf,
@@ -1039,7 +1049,7 @@ fn prepare_application_run_blocking(
     if let Some(constraints) = request.constraints.as_ref() {
         options.max_turns = Some(constraints.max_turns);
     }
-    let mut input = application_run_input(&workspace_root, request.prompt.clone())
+    let mut input = AgentRunInput::user(request.prompt.clone())
         .with_logical_run_id(request.run_id.clone())
         .with_cancellation(cancellation_handle.clone());
     if let Some(constraints) = request.constraints.as_ref() {
