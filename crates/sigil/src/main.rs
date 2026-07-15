@@ -1,4 +1,6 @@
 use std::{
+    future::Future,
+    io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
 };
@@ -7,9 +9,13 @@ pub mod egress_disclosure;
 
 #[cfg(not(test))]
 use std::env;
+#[cfg(not(test))]
+use std::io;
+#[cfg(not(test))]
+use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use futures::StreamExt;
 use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
 use sigil_kernel::{
@@ -22,8 +28,13 @@ use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_repo
 use sigil_runtime::{
     DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest,
     application_run::{
-        ApplicationRunEventHandler, ApplicationRunRequest, ApplicationRunServices,
+        ApplicationRunEventHandler, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
+        ApplicationRunRequest, ApplicationRunServices, ApplicationRunTerminalStatus,
         prepare_application_run,
+    },
+    machine_protocol::{
+        MachineError, MachineErrorCode, MachineExitCode, MachineRecord, MachineRunResult,
+        MachineRunStatus,
     },
     stream_deepseek_fim_debug, stream_deepseek_prefix_debug,
 };
@@ -64,6 +75,8 @@ struct Cli {
 enum Commands {
     Run {
         prompt: String,
+        #[arg(long, value_enum, default_value = "text")]
+        output: RunOutput,
     },
     Resume {
         session: Option<String>,
@@ -109,6 +122,14 @@ enum Commands {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum RunOutput {
+    #[default]
+    Text,
+    Json,
+    Jsonl,
+}
+
 #[derive(Subcommand)]
 enum TokenizerCommand {
     /// Explicitly download and checksum-verify the public tokenizer needed for DeepSeek V4 Flash portable compaction.
@@ -116,24 +137,92 @@ enum TokenizerCommand {
 }
 
 #[cfg(not(test))]
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> ExitCode {
     tracing_subscriber::fmt::init();
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("error: failed to start async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(run_main());
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    match result {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn run_main() -> Result<u8> {
     let cli = Cli::parse();
     if cli.show_version {
         print!("{}", render_version(BuildInfo::current()));
-        return Ok(());
+        return Ok(0);
     }
     let Some(command) = cli.command else {
-        return sigil_tui::launcher::run_tui(cli.config);
+        sigil_tui::launcher::run_tui(cli.config)?;
+        return Ok(0);
     };
-    let cwd = env::current_dir()?;
-    let config_path = preferred_config_path(cli.config.as_deref(), &cwd)?;
+    let machine_output = match &command {
+        Commands::Run { output, .. } if *output != RunOutput::Text => Some(*output),
+        _ => None,
+    };
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(_error) if machine_output.is_some() => {
+            eprintln!("sigil run: process working directory is unavailable");
+            return Ok(write_bootstrap_machine_error(
+                MachineError::new(
+                    MachineErrorCode::Internal,
+                    "process working directory is unavailable",
+                    false,
+                ),
+                MachineExitCode::ExecutionFailed,
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let config_path = match preferred_config_path(cli.config.as_deref(), &cwd) {
+        Ok(path) => path,
+        Err(_error) if machine_output.is_some() => {
+            eprintln!("sigil run: application configuration path is unavailable");
+            return Ok(write_bootstrap_machine_error(
+                MachineError::new(
+                    MachineErrorCode::ConfigurationInvalid,
+                    "application configuration path is unavailable",
+                    false,
+                ),
+                MachineExitCode::InvalidInput,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     match command {
-        Commands::Run { prompt } => run_command(&config_path, &cwd, prompt).await,
-        Commands::Resume { session } => sigil_tui::launcher::run_tui_resume(cli.config, session),
-        Commands::Doctor => doctor_command(&config_path, &cwd),
-        Commands::Tokenizer { command } => tokenizer_command(&config_path, &cwd, command).await,
+        Commands::Run {
+            prompt,
+            output: RunOutput::Text,
+        } => run_command(&config_path, &cwd, prompt).await?,
+        Commands::Run { prompt, output } => {
+            let code = run_machine_command(&config_path, &cwd, prompt, output)
+                .await
+                .as_i32();
+            return Ok(u8::try_from(code).expect("machine exit codes must fit in u8"));
+        }
+        Commands::Resume { session } => {
+            sigil_tui::launcher::run_tui_resume(cli.config, session)?;
+        }
+        Commands::Doctor => doctor_command(&config_path, &cwd)?,
+        Commands::Tokenizer { command } => {
+            tokenizer_command(&config_path, &cwd, command).await?;
+        }
         Commands::Serve {
             host,
             port,
@@ -153,22 +242,30 @@ async fn main() -> Result<()> {
                     no_token,
                 },
                 token.as_deref(),
-            )
+            )?;
         }
         Commands::Prefix {
             prompt,
             assistant_prefix,
             stop,
             model,
-        } => prefix_command(&config_path, &cwd, prompt, assistant_prefix, stop, model).await,
+        } => prefix_command(&config_path, &cwd, prompt, assistant_prefix, stop, model).await?,
         Commands::Fim {
             prompt,
             suffix,
             stop,
             model,
             max_tokens,
-        } => fim_command(&config_path, prompt, suffix, stop, model, max_tokens).await,
+        } => fim_command(&config_path, prompt, suffix, stop, model, max_tokens).await?,
     }
+    Ok(0)
+}
+
+#[cfg(not(test))]
+fn write_bootstrap_machine_error(error: MachineError, exit: MachineExitCode) -> u8 {
+    let mut stdout = io::stdout();
+    let actual = write_machine_terminal(&mut stdout, MachineRecord::error(error), exit).as_i32();
+    u8::try_from(actual).expect("machine exit codes must fit in u8")
 }
 
 #[cfg(not(test))]
@@ -331,6 +428,311 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
         println!();
     }
     eprintln!("session log: {}", output.session_log_path.display());
+    Ok(())
+}
+
+#[cfg(not(test))]
+async fn run_machine_command(
+    config_path: &Path,
+    launch_cwd: &Path,
+    prompt: String,
+    output: RunOutput,
+) -> MachineExitCode {
+    let mut stdout = io::stdout();
+    let mut cancellation =
+        Box::pin(async { tokio::signal::ctrl_c().await.map_err(anyhow::Error::from) });
+    tokio::select! {
+        biased;
+        trigger = &mut cancellation => {
+            let (error, exit) = pre_start_cancellation_error(trigger.is_err());
+            eprintln!("sigil run: {}", error.message);
+            return write_machine_terminal(&mut stdout, MachineRecord::error(error), exit);
+        }
+        () = tokio::task::yield_now() => {}
+    }
+    run_machine_command_with_cancellation(
+        config_path,
+        launch_cwd,
+        prompt,
+        output,
+        &mut stdout,
+        cancellation,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn run_machine_command_with_writer<W>(
+    config_path: &Path,
+    launch_cwd: &Path,
+    prompt: String,
+    output: RunOutput,
+    writer: &mut W,
+) -> MachineExitCode
+where
+    W: Write + Send,
+{
+    run_machine_command_with_cancellation(
+        config_path,
+        launch_cwd,
+        prompt,
+        output,
+        writer,
+        std::future::pending(),
+    )
+    .await
+}
+
+async fn run_machine_command_with_cancellation<W, F>(
+    config_path: &Path,
+    launch_cwd: &Path,
+    prompt: String,
+    output: RunOutput,
+    writer: &mut W,
+    cancellation: F,
+) -> MachineExitCode
+where
+    W: Write + Send,
+    F: Future<Output = Result<()>> + Send,
+{
+    debug_assert!(output != RunOutput::Text);
+    let disclosure_presenter: std::sync::Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
+        std::sync::Arc::new(crate::egress_disclosure::CliEgressDisclosurePresenter::stderr());
+    let services = ApplicationRunServices::new(disclosure_presenter);
+    let mut cancellation = Box::pin(cancellation);
+    let mut preparation = Box::pin(prepare_application_run(
+        ApplicationRunRequest::non_interactive(
+            config_path,
+            launch_cwd,
+            prompt,
+            uuid::Uuid::new_v4().to_string(),
+        ),
+        &services,
+    ));
+    let prepared = tokio::select! {
+        biased;
+        trigger = &mut cancellation => {
+            let (error, exit) = pre_start_cancellation_error(trigger.is_err());
+            eprintln!("sigil run: {}", error.message);
+            return write_machine_terminal(writer, MachineRecord::error(error), exit);
+        }
+        prepared = &mut preparation => prepared,
+    };
+    drop(preparation);
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let machine_error = machine_error_from_prepare(&error);
+            eprintln!("sigil run: {error}");
+            return write_machine_terminal(
+                writer,
+                MachineRecord::error(machine_error.clone()),
+                MachineExitCode::for_error(machine_error.code),
+            );
+        }
+    };
+    let session_id = prepared.session_id().to_owned();
+    let run_id = prepared.run_id().to_owned();
+    let Some(session_log_path) = prepared.session_log_path().to_str().map(str::to_owned) else {
+        eprintln!("sigil run: durable session path is not valid UTF-8");
+        return write_machine_terminal(
+            writer,
+            MachineRecord::error(MachineError::new(
+                MachineErrorCode::Internal,
+                "durable session path cannot be represented by the machine protocol",
+                false,
+            )),
+            MachineExitCode::ExecutionFailed,
+        );
+    };
+    let (execution, control) = prepared.into_parts();
+    let mut handler = MachineRunEventHandler { output, writer };
+    let mut approval_handler = AutoApproveHandler;
+    let mut execution = Box::pin(execution.execute(&mut handler, &mut approval_handler));
+    let mut cancellation_ticket = None;
+    let mut cancellation_trigger_failed = false;
+    let mut execution_joined = true;
+    let executed = tokio::select! {
+        biased;
+        trigger = &mut cancellation => {
+            cancellation_trigger_failed = trigger.is_err();
+            let reason = if cancellation_trigger_failed {
+                "machine cancellation signal watcher failed"
+            } else {
+                "machine run interrupted by SIGINT"
+            };
+            match control.request_cancellation(reason, None, || {}) {
+                Ok(ticket) => cancellation_ticket = Some(ticket),
+                Err(error) => cancellation_ticket = error.into_ticket(),
+            }
+            let join_timeout = cancellation_ticket
+                .as_ref()
+                .map_or(std::time::Duration::from_secs(5), |ticket| {
+                    ticket.remaining_timeout()
+                });
+            match tokio::time::timeout(join_timeout, execution.as_mut()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    execution_joined = false;
+                    Err(anyhow::anyhow!("application run did not join before cancellation deadline"))
+                }
+            }
+        }
+        result = &mut execution => result,
+    };
+    drop(execution);
+    if let Some(ticket) = cancellation_ticket {
+        let finalized = control
+            .finalize_cancellation(ticket, execution_joined, &mut handler)
+            .await;
+        return match finalized {
+            Ok(sigil_kernel::RunCancellationTerminalOutcome::Cancelled)
+                if !cancellation_trigger_failed =>
+            {
+                write_machine_terminal(
+                    handler.writer,
+                    MachineRecord::result(MachineRunResult {
+                        session_id,
+                        run_id,
+                        status: MachineRunStatus::Cancelled,
+                        final_text: String::new(),
+                        session_log_path,
+                    }),
+                    MachineExitCode::Cancelled,
+                )
+            }
+            Ok(sigil_kernel::RunCancellationTerminalOutcome::Cancelled) => {
+                eprintln!("sigil run: cancellation signal watcher failed");
+                write_machine_terminal(
+                    handler.writer,
+                    MachineRecord::error(MachineError::new(
+                        MachineErrorCode::Internal,
+                        "application run supervision failed",
+                        false,
+                    )),
+                    MachineExitCode::ExecutionFailed,
+                )
+            }
+            Ok(sigil_kernel::RunCancellationTerminalOutcome::Interrupted) | Err(_) => {
+                eprintln!("sigil run: application run cancellation did not reach clean quiescence");
+                write_machine_terminal(
+                    handler.writer,
+                    MachineRecord::error(MachineError::new(
+                        MachineErrorCode::ExecutionFailed,
+                        "application run cancellation was interrupted",
+                        false,
+                    )),
+                    MachineExitCode::ExecutionFailed,
+                )
+            }
+        };
+    }
+    match executed {
+        Ok(run) => {
+            let status = match run.terminal_status {
+                ApplicationRunTerminalStatus::Succeeded => MachineRunStatus::Succeeded,
+                ApplicationRunTerminalStatus::Interrupted
+                | ApplicationRunTerminalStatus::Blocked => MachineRunStatus::Failed,
+            };
+            let result = MachineRunResult {
+                session_id: run.session_id,
+                run_id: run.run_id,
+                status,
+                final_text: run.agent_output.result.final_text,
+                session_log_path,
+            };
+            write_machine_terminal(
+                handler.writer,
+                MachineRecord::result(result),
+                MachineExitCode::for_status(status),
+            )
+        }
+        Err(_error) => {
+            let error = MachineError::new(
+                MachineErrorCode::ExecutionFailed,
+                "application run execution failed",
+                false,
+            );
+            eprintln!("sigil run: application run execution failed");
+            write_machine_terminal(
+                handler.writer,
+                MachineRecord::error(error),
+                MachineExitCode::ExecutionFailed,
+            )
+        }
+    }
+}
+
+fn pre_start_cancellation_error(failed: bool) -> (MachineError, MachineExitCode) {
+    if failed {
+        (
+            MachineError::new(
+                MachineErrorCode::Internal,
+                "application run supervision failed before startup completed",
+                false,
+            ),
+            MachineExitCode::ExecutionFailed,
+        )
+    } else {
+        (
+            MachineError::new(
+                MachineErrorCode::Cancelled,
+                "application run was cancelled before startup completed",
+                false,
+            ),
+            MachineExitCode::Cancelled,
+        )
+    }
+}
+
+struct MachineRunEventHandler<'a, W> {
+    output: RunOutput,
+    writer: &'a mut W,
+}
+
+impl<W> ApplicationRunEventHandler for MachineRunEventHandler<'_, W>
+where
+    W: Write,
+{
+    fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+        if self.output == RunOutput::Jsonl {
+            write_machine_record(self.writer, &MachineRecord::event(event))?;
+        }
+        Ok(())
+    }
+}
+
+fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineError {
+    let code = match error.class() {
+        ApplicationRunPrepareErrorClass::InvalidInvocation => MachineErrorCode::InvalidInvocation,
+        ApplicationRunPrepareErrorClass::Configuration => MachineErrorCode::ConfigurationInvalid,
+        ApplicationRunPrepareErrorClass::Execution => MachineErrorCode::ExecutionFailed,
+        ApplicationRunPrepareErrorClass::Internal => MachineErrorCode::Internal,
+    };
+    MachineError::new(code, error.to_string(), false)
+}
+
+fn write_machine_terminal<W>(
+    writer: &mut W,
+    record: MachineRecord,
+    intended_exit: MachineExitCode,
+) -> MachineExitCode
+where
+    W: Write,
+{
+    match write_machine_record(writer, &record) {
+        Ok(()) => intended_exit,
+        Err(_) => {
+            eprintln!("sigil run: failed to write machine output");
+            MachineExitCode::ExecutionFailed
+        }
+    }
+}
+
+fn write_machine_record(writer: &mut impl Write, record: &MachineRecord) -> Result<()> {
+    serde_json::to_writer(&mut *writer, record)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
     Ok(())
 }
 

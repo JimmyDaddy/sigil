@@ -1,6 +1,6 @@
 # RFC-0026 Stable Machine Protocol and Real Local Serve
 
-状态：accepted / P26.1-P26.2 implemented / P26.3 ready
+状态：accepted / P26.1-P26.3 implemented / P26.4A ready
 
 创建日期：2026-07-15
 
@@ -89,6 +89,8 @@ V1 record kinds：
 - `error`：run 创建前或 terminal result 无法产生时的结构化错误。
 
 JSON mode 只输出一个最终 report；JSONL mode 输出有序 events，并以一个 `result` 或 `error` record 结束。machine stdout 不混入 human progress、session path 或 tracing line；安全 disclosure 和诊断保留在 stderr。
+
+machine mode 必须在 preparation 开始前安装 `SIGINT` supervision：durable run identity 尚未建立时输出 cancelled error 与 exit `130`；identity 已建立后进入 durable cancellation request，并以同一 deadline 约束 owned execution join 和 quiescence。只有 `Cancelled` terminal 已落盘后才能输出 `status=cancelled` 和 exit `130`；无法证明 clean terminal 时输出 failed/error 与 exit `1`。进入 JSONL 的 optional extension warning 必须先通过配置绑定的 secret redactor。
 
 ### 5.3 Result and error
 

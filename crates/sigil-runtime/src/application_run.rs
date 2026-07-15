@@ -3,7 +3,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -27,6 +27,73 @@ use crate::{
 };
 
 const DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Stable preparation failure class used by machine adapters without parsing error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationRunPrepareErrorClass {
+    /// Request shape was invalid before configuration or durable state was opened.
+    InvalidInvocation,
+    /// Root configuration or provider construction was invalid.
+    Configuration,
+    /// Durable session, tool, or extension assembly failed.
+    Execution,
+    /// The owned blocking preparation worker itself failed.
+    Internal,
+}
+
+/// Typed application-run preparation failure with a deliberately bounded public display string.
+#[derive(Debug, thiserror::Error)]
+pub enum ApplicationRunPrepareError {
+    /// Invalid adapter request.
+    #[error("invalid application run request: {message}")]
+    InvalidInvocation {
+        /// Safe request validation message.
+        message: String,
+    },
+    /// Invalid root/provider configuration.
+    #[error("application configuration is invalid")]
+    Configuration {
+        #[source]
+        source: anyhow::Error,
+    },
+    /// Runtime/session/tool preparation failure.
+    #[error("application run preparation failed")]
+    Execution {
+        #[source]
+        source: anyhow::Error,
+    },
+    /// Blocking worker join failure.
+    #[error("application run preparation worker failed")]
+    Internal {
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl ApplicationRunPrepareError {
+    /// Returns the typed machine-routing class without inspecting source text.
+    #[must_use]
+    pub const fn class(&self) -> ApplicationRunPrepareErrorClass {
+        match self {
+            Self::InvalidInvocation { .. } => ApplicationRunPrepareErrorClass::InvalidInvocation,
+            Self::Configuration { .. } => ApplicationRunPrepareErrorClass::Configuration,
+            Self::Execution { .. } => ApplicationRunPrepareErrorClass::Execution,
+            Self::Internal { .. } => ApplicationRunPrepareErrorClass::Internal,
+        }
+    }
+
+    fn configuration(source: impl Into<anyhow::Error>) -> Self {
+        Self::Configuration {
+            source: source.into(),
+        }
+    }
+
+    fn execution(source: impl Into<anyhow::Error>) -> Self {
+        Self::Execution {
+            source: source.into(),
+        }
+    }
+}
 
 /// Interaction contract used by one shared application run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,7 +326,14 @@ impl ApplicationRunControl {
                 anyhow!("application run already reached a terminal cancellation phase"),
             ));
         }
-        let timeout = timeout.unwrap_or(DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT);
+        let requested_timeout = timeout.unwrap_or(DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT);
+        let requested_at = Instant::now();
+        let timeout = if requested_at.checked_add(requested_timeout).is_some() {
+            requested_timeout
+        } else {
+            DEFAULT_CANCELLATION_QUIESCENCE_TIMEOUT
+        };
+        let deadline = requested_at + timeout;
         let requested_at_ms = current_unix_time_ms();
         let request = RunCancellationRequestedEntry {
             request_id: format!("cancel-{}", self.owner.handle().scope_id()),
@@ -280,14 +354,14 @@ impl ApplicationRunControl {
         match append {
             Ok(_) => Ok(ApplicationCancellationTicket {
                 request,
-                timeout,
+                deadline,
                 request_recorded: true,
             }),
             Err(error) => Err(ApplicationCancellationRequestError::with_ticket(
                 error.context("failed to persist application cancellation request"),
                 ApplicationCancellationTicket {
                     request,
-                    timeout,
+                    deadline,
                     request_recorded: false,
                 },
             )),
@@ -311,7 +385,10 @@ impl ApplicationRunControl {
         H: ApplicationRunEventHandler,
     {
         if !ticket.request_recorded {
-            let _ = self.owner.wait_for_quiescence(ticket.timeout).await;
+            let _ = self
+                .owner
+                .wait_for_quiescence(ticket.remaining_timeout())
+                .await;
             self.events.emit(
                 handler,
                 PublicRunEventKind::RunFailed {
@@ -321,7 +398,10 @@ impl ApplicationRunControl {
             )?;
             bail!("application cancellation request was not durably recorded");
         }
-        let quiescence = self.owner.wait_for_quiescence(ticket.timeout).await;
+        let quiescence = self
+            .owner
+            .wait_for_quiescence(ticket.remaining_timeout())
+            .await;
         let (outcome, cleanup_complete, active_effects, active_tasks, reason) = match quiescence {
             RunQuiescenceOutcome::Quiescent
                 if execution_joined && self.owner.cleanup_complete() =>
@@ -379,8 +459,16 @@ impl ApplicationRunControl {
 #[derive(Debug)]
 pub struct ApplicationCancellationTicket {
     request: RunCancellationRequestedEntry,
-    timeout: Duration,
+    deadline: Instant,
     request_recorded: bool,
+}
+
+impl ApplicationCancellationTicket {
+    /// Returns the time remaining before the cancellation request's bounded deadline.
+    #[must_use]
+    pub fn remaining_timeout(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
 }
 
 /// Cancellation activation failure that may still carry a ticket requiring quiescence cleanup.
@@ -578,19 +666,25 @@ impl ApplicationRunExecution {
 pub async fn prepare_application_run(
     request: ApplicationRunRequest,
     services: &ApplicationRunServices,
-) -> Result<PreparedApplicationRun> {
+) -> std::result::Result<PreparedApplicationRun, ApplicationRunPrepareError> {
     if request.prompt.trim().is_empty() {
-        bail!("application run prompt must not be empty");
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "prompt must not be empty".to_owned(),
+        });
     }
     if request.run_id.trim().is_empty() {
-        bail!("application run id must not be empty");
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "run id must not be empty".to_owned(),
+        });
     }
     let session_leases = Arc::clone(&services.session_leases);
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking(request, session_leases)
     })
     .await
-    .context("application run blocking preparation task failed")??;
+    .map_err(|error| ApplicationRunPrepareError::Internal {
+        source: anyhow!(error).context("application run blocking preparation task failed"),
+    })??;
     let BlockingApplicationRunPreparation {
         root_config,
         workspace_root,
@@ -623,7 +717,8 @@ pub async fn prepare_application_run(
                 false,
             ),
         )
-        .await?;
+        .await
+        .map_err(ApplicationRunPrepareError::execution)?;
     let elicitation_handler = unsupported_mcp_elicitation_handler();
     let runtime_event_handler = unsupported_mcp_runtime_event_handler();
     attach_remote_mcp_activation_presenter(
@@ -651,18 +746,18 @@ pub async fn prepare_application_run(
             &server_name,
             provider.capabilities().tool_name_max_chars,
             workspace_root.clone(),
-            session.egress_audit_recorder()?,
+            session
+                .egress_audit_recorder()
+                .map_err(ApplicationRunPrepareError::execution)?,
             Arc::clone(&services.disclosure_presenter),
             Arc::clone(&elicitation_handler),
         )
         .await;
         if let Err(error) = activation {
             if required {
-                return Err(error);
+                return Err(ApplicationRunPrepareError::execution(error));
             }
-            warnings.push(format!(
-                "optional eager MCP server {server_name} failed: {error:#}"
-            ));
+            warnings.push(optional_eager_mcp_warning(&redactor, &server_name, &error));
         }
     }
     let session_id = session.session_scope_id().to_owned();
@@ -732,8 +827,11 @@ struct BlockingApplicationRunPreparation {
 fn prepare_application_run_blocking(
     request: ApplicationRunRequest,
     session_leases: Arc<ApplicationSessionLeaseManager>,
-) -> Result<BlockingApplicationRunPreparation> {
-    let root_config = RootConfig::load(&request.config_path)?;
+) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
+    let root_config = RootConfig::load(&request.config_path)
+        .map_err(ApplicationRunPrepareError::configuration)?;
+    let provider =
+        crate::build_provider(&root_config).map_err(ApplicationRunPrepareError::configuration)?;
     let workspace_root = resolve_workspace_root(
         &request.config_path,
         &request.launch_cwd,
@@ -744,23 +842,33 @@ fn prepare_application_run_blocking(
     let requested_session_path = request
         .session_path
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
-    let session_store = JsonlSessionStore::new(&requested_session_path)?;
+    let session_store = JsonlSessionStore::new(&requested_session_path)
+        .map_err(ApplicationRunPrepareError::execution)?;
     let session_path = session_store.path().to_owned();
-    let session_lease = Arc::new(session_leases.acquire(&session_path)?);
+    let session_lease = Arc::new(
+        session_leases
+            .acquire(&session_path)
+            .map_err(ApplicationRunPrepareError::execution)?,
+    );
     let mutation_recorder = MutationEventRecorder::new(session_store.clone());
     let (mut session, workspace_trust) = load_application_session_with_workspace_trust(
         root_config.agent.provider.clone(),
         root_config.agent.model.clone(),
         session_store,
         &workspace_root,
-    )?;
-    attach_session_url_capability_store(&mut session)?;
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    attach_session_url_capability_store(&mut session)
+        .map_err(ApplicationRunPrepareError::execution)?;
 
-    let cancellation_recorder = session.run_cancellation_recorder()?;
+    let cancellation_recorder = session
+        .run_cancellation_recorder()
+        .map_err(ApplicationRunPrepareError::execution)?;
     let cancellation_owner = RunCancellationOwner::new();
     let cancellation_handle = cancellation_owner.handle();
-    let root_task_guard = cancellation_handle.register_task()?;
-    let provider = crate::build_provider(&root_config)?;
+    let root_task_guard = cancellation_handle
+        .register_task()
+        .map_err(ApplicationRunPrepareError::execution)?;
     let options = crate::build_run_options(
         &root_config,
         workspace_root.clone(),
@@ -953,6 +1061,15 @@ fn application_terminal_projection(
             },
         ),
     }
+}
+
+fn optional_eager_mcp_warning(
+    redactor: &sigil_kernel::SecretRedactor,
+    server_name: &str,
+    error: &anyhow::Error,
+) -> String {
+    let safe_error = redactor.redact_text(&format!("{error:#}"));
+    format!("optional eager MCP server {server_name} failed: {safe_error}")
 }
 
 #[cfg(test)]

@@ -18,16 +18,18 @@ use sigil_kernel::{
 };
 use sigil_runtime::application_run::{application_run_input, default_application_session_path};
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
+use sigil_runtime::machine_protocol::MachineExitCode;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
 
 use super::{
-    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, ServeOptions, ServeStartupPlan,
+    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, RunOutput, ServeOptions, ServeStartupPlan,
     StdoutEventHandler, build_serve_startup_plan, drain_provider_stream, render_cli_doctor_report,
     render_doctor_report, render_provider_chunk, render_run_event, render_serve_startup_plan,
-    render_version, serve_command,
+    render_version, run_machine_command_with_cancellation, run_machine_command_with_writer,
+    serve_command,
 };
 
 fn boxed_chunk_stream(
@@ -412,8 +414,24 @@ fn cli_parses_run_command_with_explicit_config() -> Result<()> {
     );
     assert!(matches!(
         cli.command,
-        Some(Commands::Run { ref prompt }) if prompt == "hello"
+        Some(Commands::Run {
+            ref prompt,
+            output: RunOutput::Text,
+        }) if prompt == "hello"
     ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_run_machine_output_modes() -> Result<()> {
+    for (label, expected) in [("json", RunOutput::Json), ("jsonl", RunOutput::Jsonl)] {
+        let cli = Cli::try_parse_from(["sigil", "run", "hello", "--output", label])?;
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Run { output, .. }) if output == expected
+        ));
+    }
+    assert!(Cli::try_parse_from(["sigil", "run", "hello", "--output", "xml"]).is_err());
     Ok(())
 }
 
@@ -923,6 +941,163 @@ async fn run_command_creates_session_log_in_user_state() -> Result<()> {
         .expect("provider attempt should carry the application run id");
     assert!(uuid::Uuid::parse_str(logical_run_id).is_ok());
     assert!(!logical_run_id.starts_with("agent-run-"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_json_emits_exactly_one_terminal_result_record() -> Result<()> {
+    let requests = Arc::new(Mutex::new(VecDeque::new()));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"json answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )])));
+    let server = spawn_recording_server(Arc::clone(&requests), responses).await?;
+    let workspace = create_test_workspace("run-json");
+    let config_path = workspace.join("sigil.toml");
+    write_test_config(&config_path, &server)?;
+    let mut stdout = Vec::new();
+
+    let exit = run_machine_command_with_writer(
+        &config_path,
+        &workspace,
+        "Say hi".to_owned(),
+        RunOutput::Json,
+        &mut stdout,
+    )
+    .await;
+
+    assert_eq!(exit, MachineExitCode::Success);
+    let lines = String::from_utf8(stdout)?
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["record_type"], "result");
+    assert_eq!(lines[0]["protocol_version"], 1);
+    assert_eq!(lines[0]["result"]["status"], "succeeded");
+    assert_eq!(lines[0]["result"]["final_text"], "json answer");
+    assert!(
+        std::path::Path::new(
+            lines[0]["result"]["session_log_path"]
+                .as_str()
+                .expect("result must expose the durable session path")
+        )
+        .exists()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_jsonl_emits_ordered_events_then_one_terminal_result() -> Result<()> {
+    let requests = Arc::new(Mutex::new(VecDeque::new()));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"jsonl answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )])));
+    let server = spawn_recording_server(Arc::clone(&requests), responses).await?;
+    let workspace = create_test_workspace("run-jsonl");
+    let config_path = workspace.join("sigil.toml");
+    write_test_config(&config_path, &server)?;
+    let mut stdout = Vec::new();
+
+    let exit = run_machine_command_with_writer(
+        &config_path,
+        &workspace,
+        "Say hi".to_owned(),
+        RunOutput::Jsonl,
+        &mut stdout,
+    )
+    .await;
+
+    assert_eq!(exit, MachineExitCode::Success);
+    let lines = String::from_utf8(stdout)?
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert!(lines.len() >= 3);
+    assert!(
+        lines[..lines.len() - 1]
+            .iter()
+            .all(|record| record["record_type"] == "event")
+    );
+    assert_eq!(
+        lines.last().expect("terminal record")["record_type"],
+        "result"
+    );
+    let sequences = lines[..lines.len() - 1]
+        .iter()
+        .map(|record| {
+            record["event"]["sequence"]
+                .as_u64()
+                .expect("event sequence")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sequences,
+        (1..=u64::try_from(sequences.len())?).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        lines.last().expect("terminal record")["result"]["final_text"],
+        "jsonl answer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_json_classifies_missing_config_without_leaking_raw_source() -> Result<()> {
+    let workspace = create_test_workspace("run-json-invalid-config");
+    let missing = workspace.join("missing.toml");
+    let mut stdout = Vec::new();
+
+    let exit = run_machine_command_with_writer(
+        &missing,
+        &workspace,
+        "Say hi".to_owned(),
+        RunOutput::Json,
+        &mut stdout,
+    )
+    .await;
+
+    assert_eq!(exit, MachineExitCode::InvalidInput);
+    let record: serde_json::Value = serde_json::from_slice(&stdout)?;
+    assert_eq!(record["record_type"], "error");
+    assert_eq!(record["error"]["code"], "configuration_invalid");
+    assert_eq!(
+        record["error"]["message"],
+        "application configuration is invalid"
+    );
+    assert!(!String::from_utf8(stdout)?.contains("missing.toml"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_json_cancellation_during_preparation_emits_error_and_exit_130() -> Result<()> {
+    let workspace = create_test_workspace("run-json-cancelled");
+    let config_path = workspace.join("sigil.toml");
+    write_test_config(&config_path, "http://127.0.0.1:9")?;
+    let mut stdout = Vec::new();
+
+    let exit = run_machine_command_with_cancellation(
+        &config_path,
+        &workspace,
+        "Wait".to_owned(),
+        RunOutput::Json,
+        &mut stdout,
+        std::future::ready(Ok(())),
+    )
+    .await;
+
+    assert_eq!(exit, MachineExitCode::Cancelled);
+    let record: serde_json::Value = serde_json::from_slice(&stdout)?;
+    assert_eq!(record["record_type"], "error");
+    assert_eq!(record["error"]["code"], "cancelled");
+    assert_eq!(
+        record["error"]["message"],
+        "application run was cancelled before startup completed"
+    );
+    assert!(!workspace.join("state").exists());
     Ok(())
 }
 

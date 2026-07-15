@@ -2686,6 +2686,7 @@ dependencies = [
  "async-trait",
  "clap",
  "futures",
+ "libc",
  "serde_json",
  "sigil-http",
  "sigil-kernel",

@@ -13,9 +13,10 @@ use sigil_kernel::{
 
 use super::{
     ApplicationRunControl, ApplicationRunEventHandler, ApplicationRunEventSequence,
-    ApplicationRunInteraction, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
-    PublicApplicationEventBridge, application_run_input, application_terminal_projection,
-    default_application_session_path, validate_execution_contract,
+    ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
+    ApplicationRunTerminalStatus, ApplicationSessionLeaseManager, PublicApplicationEventBridge,
+    application_run_input, application_terminal_projection, default_application_session_path,
+    optional_eager_mcp_warning, validate_execution_contract,
 };
 
 #[test]
@@ -88,6 +89,34 @@ fn interaction_contract_distinguishes_noninteractive_and_external_surfaces() {
         ApplicationRunInteraction::ExternallyInteractive.kernel_mode(),
         sigil_kernel::InteractionMode::Interactive
     );
+}
+
+#[test]
+fn prepare_error_class_is_typed_and_public_message_does_not_expose_source() {
+    let error = ApplicationRunPrepareError::configuration(anyhow::anyhow!(
+        "secret provider value must remain in the source chain"
+    ));
+
+    assert_eq!(
+        error.class(),
+        ApplicationRunPrepareErrorClass::Configuration
+    );
+    assert_eq!(error.to_string(), "application configuration is invalid");
+    assert!(!error.to_string().contains("secret provider value"));
+}
+
+#[test]
+fn optional_eager_mcp_warning_redacts_known_and_structural_secret_carriers() {
+    let redactor = sigil_kernel::SecretRedactor::from_values(["known-secret-value"]);
+    let error =
+        anyhow::anyhow!("Authorization: Bearer known-secret-value; api_key=another-secret-value");
+
+    let warning = optional_eager_mcp_warning(&redactor, "optional-server", &error);
+
+    assert!(warning.contains("optional eager MCP server optional-server failed"));
+    assert!(!warning.contains("known-secret-value"));
+    assert!(!warning.contains("another-secret-value"));
+    assert!(warning.contains("[redacted]"));
 }
 
 struct ExplicitApprovalHandler;
@@ -295,6 +324,56 @@ async fn cancellation_control_persists_request_then_terminal_after_quiescence() 
         events.0.last().map(|event| &event.event),
         Some(PublicRunEventKind::RunCancelled)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_without_execution_join_persists_interrupted_and_failed_event() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let session = Session::load_from_store("deepseek", "model", store)?;
+    let recorder = session.run_cancellation_recorder()?;
+    let owner = RunCancellationOwner::new();
+    let handle = owner.handle();
+    let root_task_guard = handle.register_task()?;
+    let control = ApplicationRunControl {
+        owner,
+        recorder,
+        events: ApplicationRunEventSequence::new(
+            session.session_scope_id().to_owned(),
+            "run-1".to_owned(),
+        ),
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
+    };
+    let ticket = control.request_cancellation(
+        "test interrupted terminal",
+        Some(std::time::Duration::from_millis(10)),
+        || {},
+    )?;
+    drop(root_task_guard);
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+    let mut events = Recorder::default();
+
+    let outcome = control
+        .finalize_cancellation(ticket, false, &mut events)
+        .await?;
+
+    assert_eq!(outcome, RunCancellationTerminalOutcome::Interrupted);
+    assert!(matches!(
+        events.0.last().map(|event| &event.event),
+        Some(PublicRunEventKind::RunFailed { .. })
+    ));
+    let durable = std::fs::read_to_string(store_path)?;
+    assert!(durable.contains("\"outcome\":\"interrupted\""));
     Ok(())
 }
 
