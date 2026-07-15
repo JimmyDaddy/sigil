@@ -1725,6 +1725,7 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
         slash_overlay: None,
         approval_modal: Some(Rect::new(10, 2, 20, 6)),
         approval_modal_hit_areas: None,
+        session_modal_hit_areas: None,
         setup_hit_areas: None,
         config_hit_areas: None,
     };
@@ -1759,6 +1760,7 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
         slash_overlay: None,
         approval_modal: None,
         approval_modal_hit_areas: None,
+        session_modal_hit_areas: None,
         setup_hit_areas: None,
         config_hit_areas: None,
     };

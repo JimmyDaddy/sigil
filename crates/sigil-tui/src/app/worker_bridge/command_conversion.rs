@@ -180,6 +180,57 @@ impl AppState {
                 request_id,
                 request,
             },
+            AppAction::InspectLocalSession {
+                request_id,
+                source_path,
+            } => WorkerCommand::InspectLocalSession {
+                request_id,
+                source_path,
+            },
+            AppAction::ForkLocalSession {
+                request_id,
+                source_path,
+            } => WorkerCommand::ForkLocalSession {
+                request_id,
+                source_path,
+            },
+            AppAction::ExportLocalSession {
+                request_id,
+                source_path,
+            } => WorkerCommand::ExportLocalSession {
+                request_id,
+                source_path,
+            },
+            AppAction::SetLocalSessionPin {
+                request_id,
+                source_path,
+                pinned,
+            } => WorkerCommand::SetLocalSessionPin {
+                request_id,
+                source_path,
+                pinned,
+            },
+            AppAction::PreviewLocalSessionDelete {
+                request_id,
+                source_path,
+            } => WorkerCommand::PreviewLocalSessionDelete {
+                request_id,
+                source_path,
+            },
+            AppAction::ApplyLocalSessionDelete {
+                request_id,
+                preview,
+            } => WorkerCommand::ApplyLocalSessionDelete {
+                request_id,
+                preview,
+            },
+            AppAction::ApplySessionRetention {
+                request_id,
+                preview,
+            } => WorkerCommand::ApplySessionRetention {
+                request_id,
+                preview,
+            },
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
             }

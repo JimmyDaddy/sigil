@@ -7,6 +7,7 @@ mod edge_worker_loop_tests;
 mod elicitation_tests;
 mod event_bridge_tests;
 mod plan_handoff_e2e_tests;
+mod session_lifecycle_runtime_tests;
 mod session_tests;
 mod spawn_tests;
 mod verification_e2e_tests;

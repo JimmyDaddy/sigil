@@ -146,6 +146,10 @@ fn config_footer_action_navigation_wraps() {
     );
     assert_eq!(
         ConfigFooterAction::CleanMutationArtifacts.next_for_section(ConfigSection::Storage),
+        ConfigFooterAction::CleanSessions
+    );
+    assert_eq!(
+        ConfigFooterAction::CleanSessions.next_for_section(ConfigSection::Storage),
         ConfigFooterAction::SaveAndClose
     );
     assert_eq!(

@@ -72,7 +72,7 @@ fn config_storage_footer_dispatches_mutation_artifact_cleanup() -> Result<()> {
 
     assert_eq!(
         app.config_footer_action_labels(),
-        vec!["clean", "save+close", "close"]
+        vec!["clean", "sessions", "save+close", "close"]
     );
     assert_eq!(app.config_selected_field_label(), Some("clean_artifacts"));
     assert!(
@@ -131,7 +131,7 @@ fn config_storage_footer_keeps_artifact_delete_out_of_primary_actions() -> Resul
     );
     assert_eq!(
         app.config_footer_action_labels(),
-        vec!["clean", "save+close", "close"]
+        vec!["clean", "sessions", "save+close", "close"]
     );
     assert!(!app.config_footer_action_labels().contains(&"delete"));
     Ok(())

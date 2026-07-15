@@ -33,6 +33,7 @@ use sigil_runtime::{
     resolve_context_window_tokens,
 };
 
+use super::session_lifecycle_flow::SessionRetentionMaintenancePreview;
 use super::{
     AppAction, AppState, McpServerRuntimeStatus, MutationArtifactRetentionPreview,
     code_intelligence_config_status,
@@ -586,6 +587,10 @@ impl AppState {
                         ConfigFooterAction::CleanMutationArtifacts => {
                             self.clean_selected_mutation_artifacts()
                         }
+                        ConfigFooterAction::CleanSessions => {
+                            self.open_session_retention_modal();
+                            Ok(None)
+                        }
                         ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
                         ConfigFooterAction::TrustAgent => {
                             self.review_selected_agent(AgentTrustState::Trusted)
@@ -989,6 +994,7 @@ impl AppState {
         config_state.set_plugin_discovery(plugins, plugin_warnings);
         self.config_state = Some(config_state);
         self.refresh_mutation_artifact_retention_preview();
+        self.schedule_session_retention_preview();
         self.last_notice = Some("opened config".to_owned());
         self.push_event("mode", "config");
     }

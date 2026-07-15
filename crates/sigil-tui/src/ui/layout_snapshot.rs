@@ -1,7 +1,9 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::{
-    app::{AppState, ApprovalAction, ApprovalModalView},
+    app::{
+        AppState, ApprovalAction, ApprovalModalView, session_lifecycle_flow::SessionModalAction,
+    },
     config_panel::{ConfigField, ConfigSection},
     mouse::HitTarget,
     view_model::{
@@ -49,6 +51,7 @@ pub struct LayoutSnapshot {
     pub slash_overlay: Option<SlashOverlayHitAreas>,
     pub approval_modal: Option<Rect>,
     pub approval_modal_hit_areas: Option<ApprovalModalHitAreas>,
+    pub(crate) session_modal_hit_areas: Option<SessionModalHitAreas>,
     pub setup_hit_areas: Option<SetupHitAreas>,
     pub config_hit_areas: Option<ConfigHitAreas>,
 }
@@ -122,6 +125,18 @@ pub struct ApprovalFileRowHitArea {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionModalHitAreas {
+    pub(crate) modal: Rect,
+    pub(crate) actions: Vec<SessionModalActionHitArea>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionModalActionHitArea {
+    pub(crate) action: SessionModalAction,
+    pub(crate) area: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupHitAreas {
     pub fields: Vec<SetupFieldHitArea>,
 }
@@ -171,17 +186,19 @@ impl LayoutSnapshot {
         if app.is_setup_mode() {
             let mut snapshot = Self::single(screen, LayoutMode::Setup);
             snapshot.setup_hit_areas = setup_hit_areas(screen, app);
+            snapshot.session_modal_hit_areas = session_modal_hit_areas(screen, app);
             return snapshot;
         }
         if app.is_config_mode() {
             let mut snapshot = Self::single(screen, LayoutMode::Config);
             snapshot.config_hit_areas = config_hit_areas(screen, app);
+            snapshot.session_modal_hit_areas = session_modal_hit_areas(screen, app);
             return snapshot;
         }
 
         let shell = shell_layout(screen, app.footer_strip_height(), app.composer_height());
         let (egress_disclosure, live_content) = egress_disclosure_layout(shell.live_panel, app);
-        Self {
+        let mut snapshot = Self {
             screen,
             mode: LayoutMode::Main,
             live_panel: shell.live_panel,
@@ -203,9 +220,12 @@ impl LayoutSnapshot {
             approval_modal_hit_areas: app
                 .approval_modal_view()
                 .and_then(|view| approval_modal_hit_areas(screen, &view)),
+            session_modal_hit_areas: None,
             setup_hit_areas: None,
             config_hit_areas: None,
-        }
+        };
+        snapshot.session_modal_hit_areas = session_modal_hit_areas(screen, app);
+        snapshot
     }
 
     fn single(screen: Rect, mode: LayoutMode) -> Self {
@@ -227,12 +247,25 @@ impl LayoutSnapshot {
             slash_overlay: None,
             approval_modal: None,
             approval_modal_hit_areas: None,
+            session_modal_hit_areas: None,
             setup_hit_areas: None,
             config_hit_areas: None,
         }
     }
 
-    pub fn hit_target(&self, column: u16, row: u16) -> HitTarget {
+    pub(crate) fn hit_target(&self, column: u16, row: u16) -> HitTarget {
+        if let Some(areas) = &self.session_modal_hit_areas {
+            for action in &areas.actions {
+                if contains(action.area, column, row) {
+                    return HitTarget::SessionModalAction {
+                        action: action.action,
+                    };
+                }
+            }
+            if contains(areas.modal, column, row) {
+                return HitTarget::SessionModal;
+            }
+        }
         if let Some(areas) = &self.approval_modal_hit_areas {
             if contains(areas.hunk_previous, column, row) {
                 return HitTarget::ApprovalHunkPrevious;
@@ -398,6 +431,39 @@ impl LayoutSnapshot {
             column: column.saturating_sub(self.composer_input.x) as usize,
         })
     }
+}
+
+fn session_modal_hit_areas(screen: Rect, app: &AppState) -> Option<SessionModalHitAreas> {
+    if !app.session_lifecycle_modal_open() {
+        return None;
+    }
+    let geometry = super::modal::modal_geometry(screen, app);
+    let action_rows = app.session_modal_action_rows();
+    let mut actions = Vec::new();
+    let mut row_offset = 0u16;
+    for line in app.modal_lines() {
+        let row_height = super::text::wrapped_line_rows(&line, geometry.inner_width)
+            .max(1)
+            .min(u16::MAX as usize) as u16;
+        if let Some((action, _)) = action_rows.iter().find(|(_, label)| label == &line)
+            && row_offset < geometry.content.height
+        {
+            actions.push(SessionModalActionHitArea {
+                action: *action,
+                area: Rect::new(
+                    geometry.content.x,
+                    geometry.content.y.saturating_add(row_offset),
+                    geometry.content.width,
+                    row_height.min(geometry.content.height - row_offset),
+                ),
+            });
+        }
+        row_offset = row_offset.saturating_add(row_height);
+    }
+    Some(SessionModalHitAreas {
+        modal: geometry.area,
+        actions,
+    })
 }
 
 fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {

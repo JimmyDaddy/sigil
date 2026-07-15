@@ -18,6 +18,7 @@ use super::{
     PendingPlanApproval, SessionViewCache,
     modal_flow::PendingModelPickerRefresh,
     runtime_status::{McpProgressState, McpServerRuntimeStatus},
+    session_lifecycle_flow::SessionRetentionMaintenancePreview,
 };
 
 #[derive(Debug)]
@@ -29,6 +30,7 @@ pub(crate) struct RuntimeStatusState {
     pub(crate) memory_document_count: usize,
     pub(crate) memory_last_status: String,
     pub(crate) mutation_artifact_retention_preview: MutationArtifactRetentionPreview,
+    pub(crate) session_retention_preview: SessionRetentionMaintenancePreview,
     pub(crate) compaction_status: String,
     pub(crate) code_intelligence_status: String,
     pub(crate) code_intelligence_server_lines: BTreeMap<String, String>,

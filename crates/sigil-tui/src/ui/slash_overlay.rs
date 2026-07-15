@@ -161,7 +161,11 @@ fn selector_title_line_with_theme(title: &str, theme: &Theme) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  Enter restore · Up/Down choose",
+            if title == "Resume session" {
+                "  Enter restore · Ctrl-O actions · right-click actions"
+            } else {
+                "  Enter choose · Up/Down choose"
+            },
             Style::default()
                 .fg(palette.text_secondary)
                 .bg(palette.overlay_bg),

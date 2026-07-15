@@ -1,5 +1,6 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+use crate::app::session_lifecycle_flow::SessionModalAction;
 use crate::app::{AppAction, ApprovalAction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +31,9 @@ pub enum AppMouseOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HitTarget {
+pub(crate) enum HitTarget {
+    SessionModal,
+    SessionModalAction { action: SessionModalAction },
     ApprovalModal,
     ApprovalDiffArea,
     ApprovalFileRow { index: usize },

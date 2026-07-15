@@ -228,7 +228,7 @@ impl AppState {
                     fill: format!("/resume {ordinal}"),
                     label: ordinal.to_string(),
                     description: format!(
-                        "{}{}  {} · {}",
+                        "{}{}  {} · {} · Ctrl-O actions · right-click actions",
                         label,
                         if current { "  current" } else { "" },
                         human_file_size(entry.bytes),
@@ -616,6 +616,20 @@ impl AppState {
         self.record_input_history(prompt.clone());
         self.reset_input_history_navigation();
         self.execute_slash_command(entry.resolved, prompt)
+    }
+
+    pub(super) fn select_resume_slash_candidate(&mut self, index: usize) -> bool {
+        let rows = self.slash_selector_entries();
+        let selected = index.min(rows.len().saturating_sub(1));
+        if rows
+            .get(selected)
+            .is_none_or(|entry| entry.resolved.canonical != "/resume")
+        {
+            return false;
+        }
+        self.slash_selector_index = selected;
+        self.pending_mouse_slash_confirmation = None;
+        true
     }
 
     pub(super) fn accept_slash_selector(&mut self) {

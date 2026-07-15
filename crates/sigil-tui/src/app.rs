@@ -26,6 +26,7 @@ mod runtime_command_flow;
 mod runtime_status;
 mod runtime_view_flow;
 mod session_flow;
+pub(crate) mod session_lifecycle_flow;
 mod session_review;
 mod session_view_cache_flow;
 mod setup_flow;
@@ -56,7 +57,8 @@ use sigil_kernel::{
     resolve_workspace_root,
 };
 use sigil_runtime::{
-    BalanceSnapshot, SigilPaths, effective_compaction_config, resolve_sigil_paths,
+    BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths,
+    effective_compaction_config, resolve_sigil_paths,
 };
 use uuid::Uuid;
 
@@ -467,6 +469,35 @@ pub enum AppAction {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
+    InspectLocalSession {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    ForkLocalSession {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    ExportLocalSession {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    SetLocalSessionPin {
+        request_id: u64,
+        source_path: PathBuf,
+        pinned: bool,
+    },
+    PreviewLocalSessionDelete {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    ApplyLocalSessionDelete {
+        request_id: u64,
+        preview: SessionDeletePreview,
+    },
+    ApplySessionRetention {
+        request_id: u64,
+        preview: SessionRetentionPreview,
+    },
     ActivateLazyMcp {
         server_name: Option<String>,
     },
@@ -527,6 +558,7 @@ impl AppState {
                 memory_document_count: 0,
                 memory_last_status: "pending".to_owned(),
                 mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
+                session_retention_preview: Default::default(),
                 compaction_status: initial_compaction_status,
                 code_intelligence_status: initial_code_intelligence_status,
                 code_intelligence_server_lines: BTreeMap::new(),
@@ -652,6 +684,7 @@ impl AppState {
                 memory_document_count: 0,
                 memory_last_status: "pending".to_owned(),
                 mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
+                session_retention_preview: Default::default(),
                 compaction_status: CompactionThresholdStatus::NotAvailable.as_str().to_owned(),
                 code_intelligence_status: "off".to_owned(),
                 code_intelligence_server_lines: BTreeMap::new(),
@@ -934,6 +967,9 @@ impl AppState {
         if self.is_workspace_trust_gate_mode() {
             return self.handle_workspace_trust_gate_key_event(key);
         }
+        if self.session_lifecycle_modal_open() {
+            return Ok(self.handle_session_lifecycle_modal_key(key));
+        }
         if self.is_setup_mode() {
             return self.handle_setup_key_event(key);
         }
@@ -1075,6 +1111,13 @@ impl AppState {
                 }
                 _ => {}
             }
+        }
+
+        if matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+            && key.modifiers == KeyModifiers::CONTROL
+            && self.resume_session_selector_active()
+        {
+            return Ok(self.open_selected_session_actions());
         }
 
         if let Some(command) = command_for_key_event(key) {

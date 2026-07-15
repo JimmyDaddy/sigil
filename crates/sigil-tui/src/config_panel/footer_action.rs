@@ -5,6 +5,7 @@ pub(crate) enum ConfigFooterAction {
     Save,
     SaveAndClose,
     CleanMutationArtifacts,
+    CleanSessions,
     ActivateMcp,
     TrustAgent,
     BlockAgent,
@@ -22,8 +23,9 @@ pub(crate) enum ConfigFooterAction {
 
 impl ConfigFooterAction {
     const DEFAULT_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
-    const STORAGE_ORDER: [Self; 3] = [
+    const STORAGE_ORDER: [Self; 4] = [
         Self::CleanMutationArtifacts,
+        Self::CleanSessions,
         Self::SaveAndClose,
         Self::Close,
     ];
@@ -60,6 +62,7 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save+close",
             Self::CleanMutationArtifacts => "clean",
+            Self::CleanSessions => "sessions",
             Self::ActivateMcp => "activate",
             Self::TrustAgent => "trust",
             Self::BlockAgent => "disable",
@@ -81,6 +84,7 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save_and_close",
             Self::CleanMutationArtifacts => "clean_artifacts",
+            Self::CleanSessions => "clean_sessions",
             Self::ActivateMcp => "activate_mcp",
             Self::TrustAgent => "trust_agent",
             Self::BlockAgent => "disable_agent",

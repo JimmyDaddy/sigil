@@ -67,6 +67,7 @@ mod mcp_refresh;
 mod provider_status;
 mod queue_driver;
 mod scheduler;
+mod session_lifecycle_runtime;
 mod task_runtime;
 mod terminal_refresh;
 
@@ -112,6 +113,11 @@ pub(in crate::runner) use queue_driver::{
     queue_conversation_input, send_conversation_queue_update, set_conversation_queue_paused,
 };
 pub(in crate::runner) use scheduler::run_worker_loop;
+pub(in crate::runner) use session_lifecycle_runtime::{
+    apply_local_session_delete, apply_session_retention, export_local_session, fork_local_session,
+    inspect_local_session, local_session_lifecycle_service, preview_local_session_delete,
+    preview_session_retention, set_local_session_pin,
+};
 pub(in crate::runner) use task_runtime::{
     CreateTaskFromPlanRequest, PlanApprovalRequest, RejectPlanRequest, SkillChildRunSpawn,
     TaskContinueSpawn, TaskRunSpawn, VerificationCheckPromotionKind,

@@ -555,6 +555,117 @@ impl AppState {
                 );
                 self.schedule_balance_refresh();
             }
+            WorkerMessage::LocalSessionInspected { request_id, entry } => {
+                if !self.apply_local_session_inspected(request_id, entry) {
+                    self.push_event(
+                        "session:lifecycle",
+                        format!("ignored stale inspect response {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::LocalSessionForked {
+                request_id,
+                session_log_path,
+                provider_name,
+                model_name,
+                copied_message_count,
+                entries,
+            } => {
+                if !self.local_session_action_request_matches(request_id) {
+                    self.push_event(
+                        "session:lifecycle",
+                        format!("ignored stale fork response {request_id}"),
+                    );
+                    return Ok(());
+                }
+                self.clear_worker_run_state();
+                self.finish_worker_streams();
+                self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
+                self.modal_state = None;
+                self.restore_session_view(
+                    session_log_path,
+                    provider_name,
+                    model_name,
+                    entries,
+                    "local conversation fork created",
+                );
+                self.last_notice = Some(format!(
+                    "conversation fork created with {copied_message_count} safe message(s); workspace files are shared"
+                ));
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    "Conversation fork created. Active approvals/tasks were not copied; workspace files remain shared.",
+                );
+                self.schedule_balance_refresh();
+            }
+            WorkerMessage::LocalSessionExported { request_id, output } => {
+                if !self.apply_local_session_exported(request_id, &output) {
+                    self.push_event(
+                        "session:lifecycle",
+                        format!("ignored stale export response {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::LocalSessionPinChanged { request_id, entry } => {
+                if self.apply_local_session_pin_changed(request_id, entry) {
+                    self.refresh_session_history();
+                } else {
+                    self.push_event(
+                        "session:lifecycle",
+                        format!("ignored stale pin response {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::LocalSessionDeletePreviewed {
+                request_id,
+                preview,
+            } => {
+                if !self.apply_local_session_delete_preview(request_id, preview) {
+                    self.push_event(
+                        "session:lifecycle",
+                        format!("ignored stale delete preview {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::LocalSessionDeleted { request_id, output } => {
+                if !self.apply_local_session_deleted(request_id, &output) {
+                    self.push_event(
+                        "session:lifecycle",
+                        format!("ignored stale delete response {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::SessionRetentionPreviewed {
+                request_id,
+                preview,
+            } => {
+                if !self.apply_session_retention_preview(request_id, preview) {
+                    self.push_event(
+                        "session:retention",
+                        format!("ignored stale preview response {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::SessionRetentionApplied { request_id, output } => {
+                if !self.apply_session_retention_output(request_id, &output) {
+                    self.push_event(
+                        "session:retention",
+                        format!("ignored stale apply response {request_id}"),
+                    );
+                }
+            }
+            WorkerMessage::LocalSessionLifecycleFailed { request_id, error } => {
+                let summary = summarize_error(&error);
+                if self.apply_local_session_lifecycle_failed(request_id, summary.clone()) {
+                    self.last_notice = Some(summary);
+                    self.push_event("session:lifecycle:error", error);
+                } else {
+                    self.push_event(
+                        "session:lifecycle",
+                        format!("ignored stale failure response {request_id}"),
+                    );
+                }
+            }
             WorkerMessage::CheckpointOperationFailed { request_id, error } => {
                 let summary = summarize_error(&error);
                 if self.apply_checkpoint_operation_failed(request_id, &summary) {

@@ -10,8 +10,10 @@ use sigil_kernel::{
     TaskRunStatus, TaskVerificationRerunRequest, TerminalTaskEntry, V2CompactionPreview,
 };
 use sigil_runtime::{
-    BalanceSnapshot, McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
-    McpProgressNotification, ProviderStatusConfig,
+    BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
+    McpListChangedNotification, McpProgressNotification, ProviderStatusConfig, SessionDeleteOutput,
+    SessionDeletePreview, SessionExportOutput, SessionRetentionOutput, SessionRetentionPolicy,
+    SessionRetentionPreview,
 };
 use tokio::sync::oneshot;
 
@@ -248,6 +250,39 @@ pub enum WorkerCommand {
         request_id: u64,
         request: ControlledCheckpointRestoreRequest,
     },
+    InspectLocalSession {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    ForkLocalSession {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    ExportLocalSession {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    SetLocalSessionPin {
+        request_id: u64,
+        source_path: PathBuf,
+        pinned: bool,
+    },
+    PreviewLocalSessionDelete {
+        request_id: u64,
+        source_path: PathBuf,
+    },
+    ApplyLocalSessionDelete {
+        request_id: u64,
+        preview: SessionDeletePreview,
+    },
+    PreviewSessionRetention {
+        request_id: u64,
+        policy: SessionRetentionPolicy,
+    },
+    ApplySessionRetention {
+        request_id: u64,
+        preview: SessionRetentionPreview,
+    },
     RefreshProviderBalance {
         request_id: u64,
         provider_config: ProviderStatusConfig,
@@ -416,6 +451,46 @@ pub enum WorkerMessage {
         model_name: String,
         copied_message_count: usize,
         entries: Vec<SessionLogEntry>,
+    },
+    LocalSessionInspected {
+        request_id: u64,
+        entry: LocalSessionCatalogEntry,
+    },
+    LocalSessionForked {
+        request_id: u64,
+        session_log_path: PathBuf,
+        provider_name: String,
+        model_name: String,
+        copied_message_count: usize,
+        entries: Vec<SessionLogEntry>,
+    },
+    LocalSessionExported {
+        request_id: u64,
+        output: SessionExportOutput,
+    },
+    LocalSessionPinChanged {
+        request_id: u64,
+        entry: LocalSessionCatalogEntry,
+    },
+    LocalSessionDeletePreviewed {
+        request_id: u64,
+        preview: SessionDeletePreview,
+    },
+    LocalSessionDeleted {
+        request_id: u64,
+        output: SessionDeleteOutput,
+    },
+    SessionRetentionPreviewed {
+        request_id: u64,
+        preview: SessionRetentionPreview,
+    },
+    SessionRetentionApplied {
+        request_id: u64,
+        output: SessionRetentionOutput,
+    },
+    LocalSessionLifecycleFailed {
+        request_id: u64,
+        error: String,
     },
     CheckpointOperationFailed {
         request_id: u64,

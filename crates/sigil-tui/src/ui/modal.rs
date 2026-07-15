@@ -1,5 +1,6 @@
 use ratatui::{
     Frame,
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
@@ -19,28 +20,11 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 
     let visual = modal_visual(app);
+    let geometry = modal_geometry(frame.area(), app);
     let raw_lines = app.modal_lines();
     let title = app.modal_title().unwrap_or("Modal");
-    let max_inner_width = frame.area().width.saturating_sub(8).max(24) as usize;
-    let desired_inner_width = raw_lines
-        .iter()
-        .map(|line| line.chars().count())
-        .chain(std::iter::once(title.chars().count()))
-        .max()
-        .unwrap_or(24)
-        .saturating_add(2)
-        .clamp(24, max_inner_width);
-    let body_height = raw_lines
-        .iter()
-        .map(|line| wrapped_line_rows(line, desired_inner_width))
-        .sum::<usize>()
-        .max(4) as u16
-        + 2;
-    let area = centered_rect(
-        desired_inner_width as u16 + 2,
-        body_height.min(frame.area().height.saturating_sub(2)),
-        frame.area(),
-    );
+    let desired_inner_width = geometry.inner_width;
+    let area = geometry.area;
     let lines = raw_lines
         .iter()
         .cloned()
@@ -110,6 +94,49 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ModalGeometry {
+    pub(super) area: Rect,
+    pub(super) content: Rect,
+    pub(super) inner_width: usize,
+}
+
+pub(super) fn modal_geometry(screen: Rect, app: &AppState) -> ModalGeometry {
+    let raw_lines = app.modal_lines();
+    let title = app.modal_title().unwrap_or("Modal");
+    let max_inner_width = screen.width.saturating_sub(8).max(24) as usize;
+    let inner_width = raw_lines
+        .iter()
+        .map(|line| line.chars().count())
+        .chain(std::iter::once(title.chars().count()))
+        .max()
+        .unwrap_or(24)
+        .saturating_add(2)
+        .clamp(24, max_inner_width);
+    let body_height = raw_lines
+        .iter()
+        .map(|line| wrapped_line_rows(line, inner_width))
+        .sum::<usize>()
+        .max(4) as u16
+        + 2;
+    let area = centered_rect(
+        inner_width as u16 + 2,
+        body_height.min(screen.height.saturating_sub(2)),
+        screen,
+    );
+    let content = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    ModalGeometry {
+        area,
+        content,
+        inner_width,
+    }
+}
+
 fn render_modal_focus_row_bgs(
     frame: &mut Frame,
     content_area: ratatui::layout::Rect,
@@ -173,6 +200,15 @@ fn render_modal_line(index: usize, line: String, visual: &ModalVisual) -> Line<'
     }
     if line.starts_with("Up/Down ") || line.starts_with("Enter apply") {
         return render_modal_command_line(&line, visual);
+    }
+    if line.starts_with('[') {
+        return Line::styled(
+            line,
+            Style::default()
+                .fg(visual.hint)
+                .bg(visual.command_bg)
+                .add_modifier(Modifier::BOLD),
+        );
     }
     if let Some((label, value)) = line.split_once(':') {
         if line_is_input_value(&line) {

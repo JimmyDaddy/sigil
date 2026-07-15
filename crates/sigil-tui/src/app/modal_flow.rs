@@ -188,6 +188,8 @@ pub(super) enum ModalState {
     McpElicitation(McpElicitationModalState),
     CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
     V2CompactionPreview(Box<super::compaction_flow::V2CompactionPreviewModalState>),
+    SessionActions(Box<super::session_lifecycle_flow::SessionActionsModalState>),
+    SessionRetention(Box<super::session_lifecycle_flow::SessionRetentionModalState>),
     KeyboardHelp,
 }
 
@@ -224,6 +226,8 @@ impl AppState {
             ModalState::McpElicitation(_) => Some("MCP Elicitation"),
             ModalState::CheckpointRestore(_) => Some("Restore Checkpoint"),
             ModalState::V2CompactionPreview(_) => Some("Context Compaction"),
+            ModalState::SessionActions(_) => Some("Session Actions"),
+            ModalState::SessionRetention(_) => Some("Storage Maintenance"),
             ModalState::KeyboardHelp => Some("Keyboard Help"),
         }
     }
@@ -293,6 +297,8 @@ impl AppState {
             }
             Some(ModalState::CheckpointRestore(_)) => Vec::new(),
             Some(ModalState::V2CompactionPreview(state)) => state.lines(),
+            Some(ModalState::SessionActions(state)) => state.lines(),
+            Some(ModalState::SessionRetention(state)) => state.lines(),
             Some(ModalState::KeyboardHelp) => {
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());
@@ -350,6 +356,7 @@ impl AppState {
             ModalState::ModelPicker(_) => None,
             ModalState::CheckpointRestore(_) => None,
             ModalState::V2CompactionPreview(_) => None,
+            ModalState::SessionActions(_) | ModalState::SessionRetention(_) => None,
             ModalState::KeyboardHelp => None,
         }
     }
@@ -692,6 +699,7 @@ impl AppState {
                 }
                 _ => ModalOutcome::None,
             },
+            ModalState::SessionActions(_) | ModalState::SessionRetention(_) => ModalOutcome::None,
             ModalState::KeyboardHelp => match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
                     self.modal_state = None;
@@ -740,6 +748,8 @@ impl AppState {
             | ModalState::McpElicitation(_)
             | ModalState::CheckpointRestore(_)
             | ModalState::V2CompactionPreview(_)
+            | ModalState::SessionActions(_)
+            | ModalState::SessionRetention(_)
             | ModalState::KeyboardHelp => ModalOutcome::None,
         }
     }
@@ -786,6 +796,7 @@ impl AppState {
                     ModalOutcome::V2CompactionDismissed { request_id }
                 }
             }
+            ModalState::SessionActions(_) | ModalState::SessionRetention(_) => ModalOutcome::None,
             ModalState::KeyboardHelp => {
                 self.modal_state = None;
                 ModalOutcome::Dismissed("closed keyboard help".to_owned())

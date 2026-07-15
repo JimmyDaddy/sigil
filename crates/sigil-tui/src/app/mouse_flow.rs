@@ -31,6 +31,18 @@ impl AppState {
             });
         }
         let target = layout.hit_target(input.column, input.row);
+        if self.session_lifecycle_modal_open() {
+            return Ok(match (input.kind, target) {
+                (
+                    crate::mouse::MouseInputKind::LeftDown,
+                    crate::mouse::HitTarget::SessionModalAction { action },
+                ) => match self.handle_session_modal_action(action) {
+                    Some(action) => crate::mouse::AppMouseOutcome::Action(action),
+                    None => crate::mouse::AppMouseOutcome::Redraw,
+                },
+                _ => crate::mouse::AppMouseOutcome::Noop,
+            });
+        }
         match input.kind {
             crate::mouse::MouseInputKind::ScrollUp => self.handle_mouse_scroll_target(target, true),
             crate::mouse::MouseInputKind::ScrollDown => {
@@ -83,6 +95,17 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
+            crate::mouse::MouseInputKind::RightDown => match target {
+                crate::mouse::HitTarget::SlashCandidate { index }
+                    if self.select_resume_slash_candidate(index) =>
+                {
+                    Ok(match self.open_selected_session_actions() {
+                        Some(action) => crate::mouse::AppMouseOutcome::Action(action),
+                        None => crate::mouse::AppMouseOutcome::Redraw,
+                    })
+                }
+                _ => Ok(crate::mouse::AppMouseOutcome::Noop),
+            },
             _ => Ok(crate::mouse::AppMouseOutcome::Noop),
         }
     }
@@ -471,6 +494,10 @@ impl AppState {
             | crate::mouse::HitTarget::ConfigSection { .. }
             | crate::mouse::HitTarget::ConfigField { .. }
             | crate::mouse::HitTarget::ConfigFooterAction { .. } => {
+                Ok(crate::mouse::AppMouseOutcome::Noop)
+            }
+            crate::mouse::HitTarget::SessionModal
+            | crate::mouse::HitTarget::SessionModalAction { .. } => {
                 Ok(crate::mouse::AppMouseOutcome::Noop)
             }
             crate::mouse::HitTarget::InfoRail => {
