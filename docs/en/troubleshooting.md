@@ -217,7 +217,7 @@ Use the matching channel in [Installation](installation.md) to confirm that chan
 
 If the decision tree and `sigil doctor` do not resolve the problem, run `/feedback` in the TUI. The first screen is a privacy preview: nothing has been written or uploaded yet. It lists the broad diagnostic categories that will be included and the private categories that are excluded.
 
-Press `Enter` only if you want to save one JSON report in Sigil's local cache. Review that file before attaching it anywhere. Sigil never uploads it automatically. After export, `C` copies the [structured bug-report URL](https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml); opening the page and attaching the report remain your actions.
+Press `Enter` only if you want to save one JSON report in Sigil's local cache. Sigil never uploads it automatically. After export, press `Enter` again to review the exact redacted JSON in the TUI, `O` to reveal the file, or `B` to open the [structured bug-report form](https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml). `C` copies the report path and `U` copies the form URL. Attaching and submitting the report remain your actions.
 
 The report can include build, operating-system and architecture details; redacted doctor status; provider and model labels; MCP aliases; and capability or sandbox status. It excludes conversation text, tool input and output, file content and diffs, config-file content, credential and environment names and values, private endpoints, local paths, and session-log content.
 

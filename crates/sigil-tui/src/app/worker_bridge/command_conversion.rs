@@ -247,7 +247,9 @@ impl AppState {
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }
-            | AppAction::CopyToClipboard { .. } => unreachable!(
+            | AppAction::CopyToClipboard { .. }
+            | AppAction::OpenExternalUrl { .. }
+            | AppAction::RevealFile { .. } => unreachable!(
                 "setup/config/runtime updates are handled before worker command conversion"
             ),
         }

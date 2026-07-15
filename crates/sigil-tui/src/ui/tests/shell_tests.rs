@@ -210,9 +210,32 @@ fn render_main_screen_keeps_feedback_export_actions_visible() -> anyhow::Result<
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Saved locally. Nothing was uploaded"));
-    assert!(rendered.contains("C copy issue URL"));
+    assert!(rendered.contains("Enter review JSON"));
+    assert!(rendered.contains("B open bug form"));
+    assert!(rendered.contains("C copy report path"));
+    assert!(rendered.contains("U copy issue URL"));
     assert!(rendered.contains("Folder:"));
     assert!(rendered.contains("File:"));
+    Ok(())
+}
+
+#[test]
+fn render_feedback_json_review_fits_a_short_terminal() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 16);
+    app.composer.input = "/feedback".to_owned();
+    assert!(app.submit_input()?.is_none());
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let backend = TestBackend::new(80, 16);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Reviewing the exact redacted JSON"));
+    assert!(rendered.contains("PgUp/PgDn page"));
+    assert!(rendered.contains("\"schema_version\": 1"));
     Ok(())
 }
 

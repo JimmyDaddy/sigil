@@ -431,7 +431,8 @@ def main() -> int:
         runner.wait_until(
             lambda text: (
                 "Saved locally. Nothing was uploaded" in text
-                and "C copy issue URL" in text
+                and "Enter review JSON" in text
+                and "B open bug form" in text
             ),
             args.timeout,
             "feedback export result",
@@ -450,7 +451,18 @@ def main() -> int:
             raise RuntimeError("feedback export left unexpected support files")
         checks["privacy_canaries_absent"] = True
 
+        runner.send("\r")
+        runner.wait_until(
+            lambda text: (
+                "Reviewing the exact redacted JSON saved locally" in text
+                and '"schema_version": 1' in text
+            ),
+            args.timeout,
+            "feedback JSON review",
+        )
         runner.type_text("fi")
+        runner.settle()
+        runner.send("\x1b[27u")
         runner.settle()
         runner.send("\x1b[27u")
         runner.settle()

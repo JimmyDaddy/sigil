@@ -41,7 +41,7 @@
 | --- | --- |
 | `/config` | 打开 TUI config panel |
 | `/doctor` | 在 transcript 中运行本地 setup diagnostics |
-| `/feedback` | 预览私密支持报告；`Enter` 保存到本机，`C` 复制问题报告链接，`Esc` 关闭 |
+| `/feedback` | 预览并保存私密支持报告；导出后用 `Enter` 检查 JSON、`O` 定位文件、`B` 打开 Bug 表单、`C` 复制报告路径、`U` 复制表单链接 |
 | `/new` | 使用当前 provider 和 model 开始新 session |
 | `/resume` | 选择并恢复历史 session；`Ctrl-O` 或右键打开 lifecycle actions |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |

@@ -136,14 +136,42 @@ fn feedback_modal_owns_input_and_exports_only_redacted_coarse_facts() -> anyhow:
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
             .is_none()
     );
+    let review = app.modal_lines().join("\n");
+    assert!(review.contains("Reviewing the exact redacted JSON saved locally"));
+    assert!(review.contains("\"schema_version\": 1"));
+    assert!(review.contains("Up/Down or J/K scroll"));
     assert_eq!(
         fs::read_dir(exported_path.parent().expect("support directory"))?.count(),
         1
     );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    let review_end = app.modal_lines().join("\n");
+    assert!(review_end.contains("of "));
+    assert_ne!(review, review_end);
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(app.feedback_modal_open());
+    assert!(app.modal_lines().join("\n").contains("Enter review JSON"));
+
     let copy = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
     assert!(matches!(
         copy,
+        Some(AppAction::CopyToClipboard { text }) if text == exported_path.to_string_lossy()
+    ));
+    let copy_url = app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        copy_url,
         Some(AppAction::CopyToClipboard { text }) if text == GITHUB_BUG_REPORT_URL
+    ));
+    let open_issue = app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        open_issue,
+        Some(AppAction::OpenExternalUrl { url }) if url == GITHUB_BUG_REPORT_URL
+    ));
+    let reveal = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        reveal,
+        Some(AppAction::RevealFile { path }) if path == exported_path
     ));
     assert_eq!(app.composer.input, "composer draft");
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;

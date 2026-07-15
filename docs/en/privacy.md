@@ -92,7 +92,7 @@ Use `sigil doctor --output json` when you need the versioned, redacted structure
 
 The report can include build, operating-system and architecture details; redacted doctor checks; provider and model labels; MCP aliases; and capability or sandbox status. It excludes conversations, tool input and output, file content and diffs, config-file content, credential and environment names and values, private endpoints, local paths, and session-log content.
 
-After export, the TUI shows the exact local folder and file name. `C` copies the structured GitHub bug-report URL, not the report itself. Always open and review the JSON before you choose to attach it.
+After export, the TUI shows the exact local folder and file name. Press `Enter` to review the exact redacted JSON in the modal, `O` to reveal the file, or `B` to open the structured GitHub bug-report form. `C` copies the local report path and `U` copies the form URL. These explicit actions do not upload or attach the report; always finish reviewing it before you choose to share it.
 
 ## Before Sharing Logs Or Reports
 

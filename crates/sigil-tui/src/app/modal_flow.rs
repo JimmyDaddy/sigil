@@ -301,7 +301,7 @@ impl AppState {
             Some(ModalState::V2CompactionPreview(state)) => state.lines(),
             Some(ModalState::SessionActions(state)) => state.lines(),
             Some(ModalState::SessionRetention(state)) => state.lines(),
-            Some(ModalState::Feedback(state)) => state.lines(),
+            Some(ModalState::Feedback(state)) => state.lines(self.terminal_height),
             Some(ModalState::KeyboardHelp) => {
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());

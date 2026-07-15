@@ -12,17 +12,31 @@ use super::{AppAction, AppState, ModalState, RunPhase};
 
 pub(super) const GITHUB_BUG_REPORT_URL: &str =
     "https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml";
+const MAX_FEEDBACK_REVIEW_PAGE_LINES: usize = 18;
+const FEEDBACK_REVIEW_RESERVED_TERMINAL_ROWS: usize = 12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedbackModalView {
+    Summary,
+    JsonReview,
+}
 
 #[derive(Debug)]
 pub(super) struct FeedbackModalState {
     bundle: SupportBundleV1,
+    report_json: String,
     report_bytes: usize,
     exported_path: Option<PathBuf>,
     export_error: Option<String>,
+    view: FeedbackModalView,
+    review_offset: usize,
 }
 
 impl FeedbackModalState {
-    pub(super) fn lines(&self) -> Vec<String> {
+    pub(super) fn lines(&self, terminal_height: u16) -> Vec<String> {
+        if self.view == FeedbackModalView::JsonReview && self.exported_path.is_some() {
+            return self.json_review_lines(feedback_review_page_lines(terminal_height));
+        }
         if let Some(path) = &self.exported_path {
             let directory = path.parent().unwrap_or(path);
             let file_name = path
@@ -31,11 +45,13 @@ impl FeedbackModalState {
                 .unwrap_or("support report");
             return vec![
                 "Saved locally. Nothing was uploaded.".to_owned(),
-                "C copy issue URL  Esc close".to_owned(),
                 format!("Folder: {}", directory.display()),
                 format!("File: {file_name}"),
-                format!("Report issue: {GITHUB_BUG_REPORT_URL}"),
-                "Review the JSON before attaching it to an issue.".to_owned(),
+                "Review the JSON before sharing it. Then open the form and attach the file yourself."
+                    .to_owned(),
+                String::new(),
+                "Enter review JSON  O reveal file  B open bug form".to_owned(),
+                "C copy report path  U copy issue URL  Esc close".to_owned(),
             ];
         }
 
@@ -77,21 +93,51 @@ impl FeedbackModalState {
         }
         lines
     }
+
+    fn json_review_lines(&self, page_lines: usize) -> Vec<String> {
+        let report_lines = self.report_json.lines().collect::<Vec<_>>();
+        let total = report_lines.len();
+        let start = self.review_offset.min(total.saturating_sub(page_lines));
+        let end = start.saturating_add(page_lines).min(total);
+        let mut lines = vec![
+            "Reviewing the exact redacted JSON saved locally. Nothing was uploaded.".to_owned(),
+            "Up/Down or J/K scroll  PgUp/PgDn page  Home/End jump  Esc back".to_owned(),
+            format!("Lines: {}-{} of {total}", start.saturating_add(1), end),
+            String::new(),
+        ];
+        lines.extend(
+            report_lines[start..end]
+                .iter()
+                .map(|line| (*line).to_owned()),
+        );
+        lines
+    }
+
+    fn scroll_review_by(&mut self, delta: isize, page_lines: usize) {
+        let max_offset = self.report_json.lines().count().saturating_sub(page_lines);
+        self.review_offset = self
+            .review_offset
+            .saturating_add_signed(delta)
+            .min(max_offset);
+    }
 }
 
 impl AppState {
     pub(super) fn open_feedback_modal(&mut self) {
         match self.build_feedback_bundle() {
             Ok(bundle) => {
-                let report_bytes = bundle
+                let report_json = bundle
                     .to_pretty_json()
-                    .expect("validated feedback bundle must remain serializable")
-                    .len();
+                    .expect("validated feedback bundle must remain serializable");
+                let report_bytes = report_json.len();
                 self.modal_state = Some(ModalState::Feedback(Box::new(FeedbackModalState {
                     bundle,
+                    report_json,
                     report_bytes,
                     exported_path: None,
                     export_error: None,
+                    view: FeedbackModalView::Summary,
+                    review_offset: 0,
                 })));
                 self.last_notice = Some("feedback report preview".to_owned());
             }
@@ -109,8 +155,16 @@ impl AppState {
     }
 
     pub(super) fn handle_feedback_modal_key_event(&mut self, key: KeyEvent) -> Option<AppAction> {
+        let review_page_lines = feedback_review_page_lines(self.terminal_height);
         match key.code {
             KeyCode::Esc => {
+                if let Some(ModalState::Feedback(state)) = self.modal_state.as_mut()
+                    && state.view == FeedbackModalView::JsonReview
+                {
+                    state.view = FeedbackModalView::Summary;
+                    self.last_notice = Some("closed feedback JSON review".to_owned());
+                    return None;
+                }
                 self.modal_state = None;
                 self.last_notice = Some("closed feedback report".to_owned());
                 None
@@ -121,6 +175,11 @@ impl AppState {
                     return None;
                 };
                 if state.exported_path.is_some() {
+                    if state.view == FeedbackModalView::Summary {
+                        state.view = FeedbackModalView::JsonReview;
+                        state.review_offset = 0;
+                        self.last_notice = Some("reviewing redacted feedback JSON".to_owned());
+                    }
                     return None;
                 }
                 match write_support_bundle(&cache_root, &state.bundle) {
@@ -136,26 +195,133 @@ impl AppState {
                 }
                 None
             }
+            KeyCode::Up | KeyCode::Char('k' | 'K') => {
+                if let Some(ModalState::Feedback(state)) = self.modal_state.as_mut()
+                    && state.view == FeedbackModalView::JsonReview
+                {
+                    state.scroll_review_by(-1, review_page_lines);
+                }
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j' | 'J') => {
+                if let Some(ModalState::Feedback(state)) = self.modal_state.as_mut()
+                    && state.view == FeedbackModalView::JsonReview
+                {
+                    state.scroll_review_by(1, review_page_lines);
+                }
+                None
+            }
+            KeyCode::PageUp => {
+                if let Some(ModalState::Feedback(state)) = self.modal_state.as_mut()
+                    && state.view == FeedbackModalView::JsonReview
+                {
+                    state.scroll_review_by(-(review_page_lines as isize), review_page_lines);
+                }
+                None
+            }
+            KeyCode::PageDown => {
+                if let Some(ModalState::Feedback(state)) = self.modal_state.as_mut()
+                    && state.view == FeedbackModalView::JsonReview
+                {
+                    state.scroll_review_by(review_page_lines as isize, review_page_lines);
+                }
+                None
+            }
+            KeyCode::Home => {
+                if let Some(ModalState::Feedback(state)) = self.modal_state.as_mut()
+                    && state.view == FeedbackModalView::JsonReview
+                {
+                    state.review_offset = 0;
+                }
+                None
+            }
+            KeyCode::End => {
+                if let Some(ModalState::Feedback(state)) = self.modal_state.as_mut()
+                    && state.view == FeedbackModalView::JsonReview
+                {
+                    state.review_offset = state
+                        .report_json
+                        .lines()
+                        .count()
+                        .saturating_sub(review_page_lines);
+                }
+                None
+            }
             KeyCode::Char('c' | 'C')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                let path = match self.modal_state.as_ref() {
+                    Some(ModalState::Feedback(state))
+                        if state.view == FeedbackModalView::Summary =>
+                    {
+                        state.exported_path.as_ref()?.to_string_lossy().into_owned()
+                    }
+                    _ => return None,
+                };
+                self.last_notice = Some("copying feedback report path".to_owned());
+                Some(AppAction::CopyToClipboard { text: path })
+            }
+            KeyCode::Char('u' | 'U')
                 if !key
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 let exported = matches!(
                     self.modal_state,
-                    Some(ModalState::Feedback(ref state)) if state.exported_path.is_some()
+                    Some(ModalState::Feedback(ref state))
+                        if state.exported_path.is_some()
+                            && state.view == FeedbackModalView::Summary
                 );
-                if exported {
-                    self.last_notice = Some("copying feedback issue URL".to_owned());
-                    Some(AppAction::CopyToClipboard {
-                        text: GITHUB_BUG_REPORT_URL.to_owned(),
-                    })
-                } else {
-                    None
-                }
+                exported.then(|| AppAction::CopyToClipboard {
+                    text: GITHUB_BUG_REPORT_URL.to_owned(),
+                })
+            }
+            KeyCode::Char('b' | 'B')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                let exported = matches!(
+                    self.modal_state,
+                    Some(ModalState::Feedback(ref state))
+                        if state.exported_path.is_some()
+                            && state.view == FeedbackModalView::Summary
+                );
+                exported.then(|| AppAction::OpenExternalUrl {
+                    url: GITHUB_BUG_REPORT_URL.to_owned(),
+                })
+            }
+            KeyCode::Char('o' | 'O')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                let path = match self.modal_state.as_ref() {
+                    Some(ModalState::Feedback(state))
+                        if state.view == FeedbackModalView::Summary =>
+                    {
+                        state.exported_path.clone()?
+                    }
+                    _ => return None,
+                };
+                Some(AppAction::RevealFile { path })
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn record_feedback_external_action_success(&mut self, notice: &str) {
+        self.last_notice = Some(notice.to_owned());
+    }
+
+    pub(crate) fn record_feedback_external_action_failure(
+        &mut self,
+        action: &str,
+        error: &anyhow::Error,
+    ) {
+        self.last_notice = Some(format!("{action} failed: {}", bounded_safe_error(error)));
     }
 
     fn build_feedback_bundle(&self) -> Result<SupportBundleV1> {
@@ -195,6 +361,12 @@ impl AppState {
         )?;
         Ok(SupportBundleV1::new(doctor, Some(session)))
     }
+}
+
+fn feedback_review_page_lines(terminal_height: u16) -> usize {
+    usize::from(terminal_height)
+        .saturating_sub(FEEDBACK_REVIEW_RESERVED_TERMINAL_ROWS)
+        .clamp(1, MAX_FEEDBACK_REVIEW_PAGE_LINES)
 }
 
 fn support_run_phase(phase: &RunPhase) -> SupportRunPhase {

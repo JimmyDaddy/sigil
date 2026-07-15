@@ -435,6 +435,12 @@ pub enum AppAction {
     CopyToClipboard {
         text: String,
     },
+    OpenExternalUrl {
+        url: String,
+    },
+    RevealFile {
+        path: PathBuf,
+    },
     PreviewV2Compaction,
     ApplyV2Compaction {
         request_id: u64,

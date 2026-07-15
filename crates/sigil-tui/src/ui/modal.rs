@@ -198,7 +198,7 @@ fn render_modal_line(index: usize, line: String, visual: &ModalVisual) -> Line<'
         ])
         .style(Style::default().bg(visual.selected_bg));
     }
-    if line.starts_with("Up/Down ") || line.starts_with("Enter apply") {
+    if line.starts_with("Up/Down ") || line.starts_with("Enter ") || line.starts_with("C copy ") {
         return render_modal_command_line(&line, visual);
     }
     if line.starts_with('[') {

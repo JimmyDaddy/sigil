@@ -12,6 +12,10 @@
 - 增加 `/feedback`：先预览包含和排除的数据，再显式导出仅保存在本机的 JSON；报告绝不会自动上传。
 - 增加 bug、feature request 和 documentation issue 的结构化 GitHub 表单。
 
+### 调整
+
+- 补全 `/feedback` 交接流程：导出后可在 TUI 内检查报告、在文件管理器中定位，或显式打开 Bug 表单；只有用户自行附加时报告才会离开本机。
+
 ## v0.0.1-alpha.3 - 2026-07-15
 
 以下变更已包含在打包发布的 `v0.0.1-alpha.3` 中。

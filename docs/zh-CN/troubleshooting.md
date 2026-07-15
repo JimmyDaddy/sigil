@@ -217,7 +217,7 @@ echo "$PATH"
 
 如果决策树和 `sigil doctor` 仍无法解决问题，在 TUI 中运行 `/feedback`。首先出现的是隐私预览：此时没有写入或上传任何内容。预览会列出将包含的诊断类别，以及明确排除的私密类别。
 
-只有确实要在 Sigil 本地 cache 中保存一份 JSON 报告时才按 `Enter`。附加到任何地方之前先查看该文件；Sigil 绝不会自动上传。导出后按 `C` 会复制[结构化问题报告链接](https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml)，打开页面和附加报告仍由你完成。
+只有确实要在 Sigil 本地 cache 中保存一份 JSON 报告时才按 `Enter`；Sigil 绝不会自动上传。导出后再次按 `Enter` 可在 TUI 内检查实际写盘的脱敏 JSON，按 `O` 在文件管理器中定位，或按 `B` 打开[结构化 Bug 表单](https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml)。`C` 复制报告路径，`U` 复制表单链接；附加和提交报告仍由你完成。
 
 报告可能包含 build、操作系统与架构信息、脱敏 doctor 状态、provider 和 model 标签、MCP alias，以及 capability 或 sandbox 状态。它会排除对话文本、tool input/output、文件内容和 diff、配置文件正文、credential 与环境变量名称及值、私有 endpoint、本地路径和 session log 内容。
 

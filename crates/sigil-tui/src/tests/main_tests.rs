@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::mpsc, time::Duration};
+use std::{
+    collections::BTreeMap, ffi::OsString, path::Path, path::PathBuf, sync::mpsc, time::Duration,
+};
 
 use crate::{
     app::{AppAction, AppState},
@@ -19,10 +21,11 @@ use sigil_kernel::{
 };
 
 use super::{
-    AppMouseOutcome, BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, InitialSessionTarget,
-    SCROLLBACK_SEED_POLL_INTERVAL, ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState,
-    WorkerRuntime, apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app,
-    drain_worker_messages, flush_pending_worker_commands, mouse_layout_snapshot,
+    AppMouseOutcome, BUSY_POLL_INTERVAL, ExternalLaunchPlatform, ExternalLaunchTarget,
+    IDLE_POLL_INTERVAL, InitialSessionTarget, SCROLLBACK_SEED_POLL_INTERVAL,
+    ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
+    apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app, drain_worker_messages,
+    external_launch_plan, flush_pending_worker_commands, mouse_layout_snapshot,
     next_mouse_capture_action, next_poll_interval, osc52_clipboard_sequence, plan_scrollback_sync,
     plan_scrollback_sync_with_chunk_size, poll_interval, prepare_scrollback_sync,
     prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
@@ -766,6 +769,91 @@ fn process_app_action_reports_disabled_osc52_clipboard() -> anyhow::Result<()> {
         app.last_notice(),
         Some("clipboard unavailable: OSC52 disabled")
     );
+    Ok(())
+}
+
+#[test]
+fn feedback_external_launch_plans_are_shell_free_and_platform_specific() -> anyhow::Result<()> {
+    let issue_url = "https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml";
+    let report = Path::new("/tmp/sigil-support.json");
+
+    let mac_url = external_launch_plan(
+        ExternalLaunchTarget::Url(issue_url),
+        ExternalLaunchPlatform::MacOs,
+    )?;
+    assert_eq!(mac_url.program, "/usr/bin/open");
+    assert_eq!(mac_url.args, vec![OsString::from(issue_url)]);
+    let mac_reveal = external_launch_plan(
+        ExternalLaunchTarget::RevealFile(report),
+        ExternalLaunchPlatform::MacOs,
+    )?;
+    assert_eq!(
+        mac_reveal.args,
+        vec![OsString::from("-R"), report.as_os_str().to_owned()]
+    );
+
+    let linux_reveal = external_launch_plan(
+        ExternalLaunchTarget::RevealFile(report),
+        ExternalLaunchPlatform::Freedesktop,
+    )?;
+    assert_eq!(linux_reveal.program, "xdg-open");
+    assert_eq!(linux_reveal.args, vec![OsString::from("/tmp")]);
+
+    let windows_url = external_launch_plan(
+        ExternalLaunchTarget::Url(issue_url),
+        ExternalLaunchPlatform::Windows,
+    )?;
+    assert_eq!(windows_url.program, "rundll32.exe");
+    assert_eq!(windows_url.args[1], OsString::from(issue_url));
+
+    assert!(
+        external_launch_plan(
+            ExternalLaunchTarget::Url("http://example.com"),
+            ExternalLaunchPlatform::MacOs,
+        )
+        .is_err()
+    );
+    assert!(
+        external_launch_plan(
+            ExternalLaunchTarget::Url(issue_url),
+            ExternalLaunchPlatform::Unsupported,
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn process_app_action_handles_feedback_handoff_locally() -> anyhow::Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (worker_tx, command_rx) = mpsc::channel();
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+        ready: true,
+    });
+
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::OpenExternalUrl {
+            url: "https://github.com/JimmyDaddy/sigil/issues/new?template=bug-report.yml"
+                .to_owned(),
+        },
+    )?;
+    assert_eq!(app.last_notice(), Some("opening bug report form"));
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::RevealFile {
+            path: PathBuf::from("/tmp/sigil-support.json"),
+        },
+    )?;
+    assert_eq!(app.last_notice(), Some("revealing feedback report"));
+    assert!(command_rx.recv_timeout(Duration::from_millis(10)).is_err());
     Ok(())
 }
 

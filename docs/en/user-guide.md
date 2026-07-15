@@ -77,7 +77,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [Terminal Compatib
 | --- | --- |
 | `/config` | Open the TUI config panel |
 | `/doctor` | Run local setup and appearance diagnostics with a summary and remediation list |
-| `/feedback` | Preview a privacy-bounded support report, then explicitly save it locally |
+| `/feedback` | Preview and save a privacy-bounded report, review its JSON, then open the bug form or locate the file |
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |

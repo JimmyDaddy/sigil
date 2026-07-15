@@ -92,7 +92,7 @@ Doctor 会报告：
 
 报告可能包含 build、操作系统和架构信息、脱敏 doctor checks、provider 与 model 标签、MCP alias，以及 capability 或 sandbox 状态。它会排除对话、tool input/output、文件内容和 diff、配置文件正文、credential 与环境变量名称及值、私有 endpoint、本地路径和 session log 内容。
 
-导出后，TUI 会显示准确的本地目录和文件名。`C` 复制的是结构化 GitHub 问题报告链接，而不是报告本身。决定附加前始终先打开并检查 JSON。
+导出后，TUI 会显示准确的本地目录和文件名。按 `Enter` 可在弹窗中检查实际写盘的脱敏 JSON，按 `O` 定位文件，按 `B` 打开结构化 GitHub Bug 表单。`C` 复制本地报告路径，`U` 复制表单链接。这些显式动作都不会上传或附加报告；决定分享前仍应完成检查。
 
 ## 分享 Log 或 Report 前
 

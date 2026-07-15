@@ -41,7 +41,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | --- | --- |
 | `/config` | Open the TUI config panel |
 | `/doctor` | Run local setup diagnostics inside the transcript |
-| `/feedback` | Preview a private support report; `Enter` saves it locally, `C` copies the bug-report URL, and `Esc` closes |
+| `/feedback` | Preview and save a private support report; after export, `Enter` reviews the JSON, `O` reveals the file, `B` opens the bug form, `C` copies the report path, and `U` copies the form URL |
 | `/new` | Start a fresh session with the current provider and model |
 | `/resume` | Select and restore a previous session; `Ctrl-O` or right-click opens its lifecycle actions |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |

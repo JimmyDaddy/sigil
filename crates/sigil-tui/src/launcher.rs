@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -7,6 +8,7 @@ use std::{
 use std::{
     env, io,
     panic::{self, AssertUnwindSafe},
+    process::{Command, Stdio},
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -600,6 +602,22 @@ where
                 app.record_clipboard_copy_unavailable("OSC52 disabled");
             }
         }
+        AppAction::OpenExternalUrl { url } => {
+            match launch_external_target(ExternalLaunchTarget::Url(&url)) {
+                Ok(()) => app.record_feedback_external_action_success("opening bug report form"),
+                Err(error) => {
+                    app.record_feedback_external_action_failure("open bug report form", &error);
+                }
+            }
+        }
+        AppAction::RevealFile { path } => {
+            match launch_external_target(ExternalLaunchTarget::RevealFile(&path)) {
+                Ok(()) => app.record_feedback_external_action_success("revealing feedback report"),
+                Err(error) => {
+                    app.record_feedback_external_action_failure("reveal feedback report", &error);
+                }
+            }
+        }
         action => {
             let command = app.into_worker_command(action);
             send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
@@ -623,6 +641,114 @@ fn copy_text_to_terminal_clipboard(text: &str) -> Result<()> {
 #[cfg(test)]
 fn copy_text_to_terminal_clipboard(_text: &str) -> Result<()> {
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalLaunchPlatform {
+    MacOs,
+    Windows,
+    Freedesktop,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExternalLaunchTarget<'a> {
+    Url(&'a str),
+    RevealFile(&'a Path),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalLaunchPlan {
+    program: &'static str,
+    args: Vec<OsString>,
+}
+
+fn external_launch_plan(
+    target: ExternalLaunchTarget<'_>,
+    platform: ExternalLaunchPlatform,
+) -> Result<ExternalLaunchPlan> {
+    if let ExternalLaunchTarget::Url(url) = target
+        && (!url.starts_with("https://") || url.chars().any(char::is_control))
+    {
+        anyhow::bail!("external URL must be a valid HTTPS URL");
+    }
+
+    let plan = match (platform, target) {
+        (ExternalLaunchPlatform::MacOs, ExternalLaunchTarget::Url(url)) => ExternalLaunchPlan {
+            program: "/usr/bin/open",
+            args: vec![OsString::from(url)],
+        },
+        (ExternalLaunchPlatform::MacOs, ExternalLaunchTarget::RevealFile(path)) => {
+            ExternalLaunchPlan {
+                program: "/usr/bin/open",
+                args: vec![OsString::from("-R"), path.as_os_str().to_owned()],
+            }
+        }
+        (ExternalLaunchPlatform::Windows, ExternalLaunchTarget::Url(url)) => ExternalLaunchPlan {
+            program: "rundll32.exe",
+            args: vec![
+                OsString::from("url.dll,FileProtocolHandler"),
+                OsString::from(url),
+            ],
+        },
+        (ExternalLaunchPlatform::Windows, ExternalLaunchTarget::RevealFile(path)) => {
+            let mut select_arg = OsString::from("/select,");
+            select_arg.push(path.as_os_str());
+            ExternalLaunchPlan {
+                program: "explorer.exe",
+                args: vec![select_arg],
+            }
+        }
+        (ExternalLaunchPlatform::Freedesktop, ExternalLaunchTarget::Url(url)) => {
+            ExternalLaunchPlan {
+                program: "xdg-open",
+                args: vec![OsString::from(url)],
+            }
+        }
+        (ExternalLaunchPlatform::Freedesktop, ExternalLaunchTarget::RevealFile(path)) => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("support report has no parent directory"))?;
+            ExternalLaunchPlan {
+                program: "xdg-open",
+                args: vec![parent.as_os_str().to_owned()],
+            }
+        }
+        (ExternalLaunchPlatform::Unsupported, _) => {
+            anyhow::bail!("external opening is not supported on this platform");
+        }
+    };
+    Ok(plan)
+}
+
+const fn current_external_launch_platform() -> ExternalLaunchPlatform {
+    if cfg!(target_os = "macos") {
+        ExternalLaunchPlatform::MacOs
+    } else if cfg!(target_os = "windows") {
+        ExternalLaunchPlatform::Windows
+    } else if cfg!(unix) {
+        ExternalLaunchPlatform::Freedesktop
+    } else {
+        ExternalLaunchPlatform::Unsupported
+    }
+}
+
+#[cfg(not(test))]
+fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
+    let plan = external_launch_plan(target, current_external_launch_platform())?;
+    Command::new(plan.program)
+        .args(plan.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to launch {}", plan.program))?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn launch_external_target(target: ExternalLaunchTarget<'_>) -> Result<()> {
+    external_launch_plan(target, current_external_launch_platform()).map(|_| ())
 }
 
 fn osc52_clipboard_sequence(text: &str) -> String {

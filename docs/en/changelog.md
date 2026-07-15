@@ -12,6 +12,10 @@ This page lists user-facing release notes. For support boundaries and early-prev
 - Added `/feedback`, which previews included and excluded data before an explicit local-only JSON export; reports are never uploaded automatically.
 - Added structured GitHub forms for bugs, feature requests, and documentation issues.
 
+### Changed
+
+- Completed the `/feedback` handoff: exported reports can now be reviewed in the TUI, revealed in the file manager, or paired with an explicitly opened bug form; reports remain local until the user attaches them.
+
 ## v0.0.1-alpha.3 - 2026-07-15
 
 These changes are included in the packaged `v0.0.1-alpha.3` release.
