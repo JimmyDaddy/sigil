@@ -154,7 +154,18 @@ async fn handle_http_connection(
     event_bus: Arc<HttpLiveEventBus>,
 ) -> Result<(), HttpListenerError> {
     let response = match read_http_request(&mut stream).await {
-        Ok(request) => route_http_request(request, &validator, &registry, &event_bus),
+        Ok(request) => {
+            match tokio::task::spawn_blocking(move || {
+                route_http_request(request, &validator, &registry, &event_bus)
+            })
+            .await
+            {
+                Ok(response) => response,
+                Err(_) => {
+                    http_error_response(500, "route_error", "http request routing worker failed")
+                }
+            }
+        }
         Err(error) => http_error_response(400, "bad_request", error.to_string()),
     };
     write_http_response(&mut stream, response).await
@@ -183,8 +194,10 @@ fn route_http_request(
         let Ok(body) = parse_json_body::<HttpSessionCreateRequest>(&request.body) else {
             return http_error_response(400, "bad_request", "invalid session create body");
         };
-        let session = registry.create_session(body);
-        return json_response(201, json!(session));
+        return match registry.create_session(body) {
+            Ok(session) => json_response(201, json!(session)),
+            Err(error) => registry_error_response(error),
+        };
     }
 
     if request.method == "GET"
@@ -450,9 +463,18 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ApprovalToolCallChanged { .. }
         | HttpRegistryError::ApprovalPolicyChanged { .. }
         | HttpRegistryError::ApprovalExpiryChanged { .. }
-        | HttpRegistryError::ApprovalExpired { .. } => 409,
+        | HttpRegistryError::ApprovalExpired { .. }
+        | HttpRegistryError::SessionForegroundRunActive { .. }
+        | HttpRegistryError::CommandKeyConflict { .. }
+        | HttpRegistryError::RunTerminalConflict { .. } => 409,
         HttpRegistryError::EmptyPrompt | HttpRegistryError::MissingApprovalMode => 400,
-        HttpRegistryError::DriverRejected { .. } => 500,
+        HttpRegistryError::DriverRejected { .. }
+        | HttpRegistryError::DriverPanicked { .. }
+        | HttpRegistryError::SessionBindingRejected { .. }
+        | HttpRegistryError::InvalidSessionBinding { .. }
+        | HttpRegistryError::CommandExecutionAborted
+        | HttpRegistryError::CommandIdentityEncodingFailed => 500,
+        HttpRegistryError::CommandRegistrySaturated => 503,
     };
     http_error_response(status, "registry_error", error.to_string())
 }
@@ -509,6 +531,7 @@ fn http_reason(status: u16) -> &'static str {
         404 => "Not Found",
         409 => "Conflict",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     }
 }

@@ -24,6 +24,22 @@ pub struct HttpSessionSnapshot {
     /// Runs that were registered under this HTTP session.
     #[serde(default)]
     pub run_ids: Vec<String>,
+    /// Durable V2 session scope bound to this process-local adapter session.
+    pub durable_session_scope_id: String,
+    /// Durable JSONL session path selected by the runtime adapter.
+    pub session_log_path: String,
+    /// Current foreground run, when this session is leased for execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_run_id: Option<String>,
+}
+
+/// Runtime-owned durable binding for one process-local HTTP adapter session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpSessionBinding {
+    /// Durable V2 session scope id derived from the canonical session path.
+    pub session_scope_id: String,
+    /// Canonical durable JSONL session path exposed to the local authenticated adapter.
+    pub session_log_path: String,
 }
 
 /// Request body for starting one run inside an HTTP adapter session.
@@ -90,17 +106,53 @@ pub enum HttpRunStatus {
     WaitingForApproval,
     /// Cancellation has been requested and routed to the driver.
     CancelRequested,
+    /// The driver boundary unwound and execution state requires durable reconciliation.
+    ExecutionUncertain,
     /// The run has finished.
     Finished,
     /// The run failed or the driver rejected startup.
     Failed,
+    /// Cooperative cancellation reached a durable clean terminal.
+    Cancelled,
+    /// Execution stopped without proving a clean cancellation terminal.
+    Interrupted,
 }
 
 impl HttpRunStatus {
     /// Returns whether the status is terminal for routing purposes.
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Finished | Self::Failed)
+        matches!(
+            self,
+            Self::Finished | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
+}
+
+/// Typed terminal outcome reported by the production run driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpRunTerminalOutcome {
+    /// The shared application run completed successfully.
+    Finished,
+    /// The shared application run failed.
+    Failed,
+    /// Cooperative cancellation reached durable quiescence.
+    Cancelled,
+    /// Execution stopped without a provable clean cancellation terminal.
+    Interrupted,
+}
+
+impl HttpRunTerminalOutcome {
+    /// Returns the terminal lifecycle status projected into run snapshots.
+    #[must_use]
+    pub const fn status(self) -> HttpRunStatus {
+        match self {
+            Self::Finished => HttpRunStatus::Finished,
+            Self::Failed => HttpRunStatus::Failed,
+            Self::Cancelled => HttpRunStatus::Cancelled,
+            Self::Interrupted => HttpRunStatus::Interrupted,
+        }
     }
 }
 

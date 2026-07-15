@@ -1,6 +1,8 @@
 use thiserror::Error as ThisError;
 
-use crate::dto::{HttpApprovalDecisionRecord, HttpRunSnapshot, HttpSessionSnapshot};
+use crate::dto::{
+    HttpApprovalDecisionRecord, HttpRunSnapshot, HttpSessionBinding, HttpSessionSnapshot,
+};
 
 /// Start context delivered to the HTTP run driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,13 @@ pub struct HttpRunDriverApproval {
 /// The registry owns IDs and routing state. The driver owns actual agent execution,
 /// cancellation, and approval delivery so this crate does not duplicate the agent loop.
 pub trait HttpRunDriver: Send + Sync {
+    /// Creates or resolves the durable session binding for one adapter session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot establish a durable V2 session scope and path.
+    fn bind_session(&self, session_id: &str) -> Result<HttpSessionBinding, HttpRunDriverError>;
+
     /// Starts execution for a registered run.
     ///
     /// # Errors

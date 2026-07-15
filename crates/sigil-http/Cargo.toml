@@ -8,6 +8,7 @@ license.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-runtime = { path = "../sigil-runtime" }
 thiserror.workspace = true

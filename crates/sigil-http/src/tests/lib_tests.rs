@@ -1,6 +1,9 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Barrier, Mutex, MutexGuard,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use serde_json::{Value, json};
@@ -24,8 +27,9 @@ use super::{
     HttpProtocolVersionError, HttpRegistryError, HttpRunApprovalMode, HttpRunCancelRequest,
     HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
     HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus,
-    HttpServerConfig, HttpServerConfigError, HttpSessionCreateRequest, HttpSessionRunRegistry,
-    HttpSseError, HttpSseEvent, http_openapi_document, public_run_event_to_sse,
+    HttpRunTerminalOutcome, HttpServerConfig, HttpServerConfigError, HttpSessionBinding,
+    HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError, HttpSseEvent,
+    http_openapi_document, public_run_event_to_sse,
 };
 
 #[test]
@@ -328,6 +332,119 @@ async fn local_server_routes_run_start_command_and_replays_retry() {
 }
 
 #[tokio::test]
+async fn local_server_duplicate_wait_does_not_block_async_health_routing() {
+    let (address, shutdown, driver, registry) = spawn_test_http_server_with_registry().await;
+    let session_body = json!({"label": "desktop"}).to_string();
+    let session_request = http_post("/sessions", Some("secret-token"), &session_body);
+    let (status, _session) = http_raw_request(address, session_request).await;
+    assert_eq!(status, 201);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let observer_release = Arc::clone(&release);
+    driver.observe_start(Arc::new(move |_start| {
+        entered_tx
+            .send(())
+            .expect("driver entered signal should send");
+        let (lock, ready) = &*observer_release;
+        let mut released = lock.lock().expect("release lock should not be poisoned");
+        while !*released {
+            released = ready
+                .wait(released)
+                .expect("release lock should not be poisoned");
+        }
+    }));
+    let command = HttpCommandEnvelope::new(
+        "command-concurrent-http",
+        "desktop-client",
+        "http-session-1",
+        run_start("hello", HttpRunApprovalMode::Ask),
+    );
+    let body = serde_json::to_string(&command).expect("command should serialize");
+    let request = http_post("/sessions/http-session-1/runs", Some("secret-token"), &body);
+    let first_request = request.clone();
+    let first = tokio::spawn(async move { http_raw_request(address, first_request).await });
+    tokio::task::spawn_blocking(move || entered_rx.recv())
+        .await
+        .expect("entered waiter should join")
+        .expect("driver should enter");
+    let second = tokio::spawn(async move { http_raw_request(address, request).await });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if registry.activity().command_waiters == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "duplicate HTTP command did not enter reservation wait"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let (health_status, health) = http_raw_request(
+        address,
+        "GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n".to_owned(),
+    )
+    .await;
+    assert_eq!(health_status, 200);
+    assert_eq!(health["status"], "ok");
+    let (release_lock, release_ready) = &*release;
+    *release_lock
+        .lock()
+        .expect("release lock should not be poisoned") = true;
+    release_ready.notify_all();
+
+    let (first_status, first_receipt) = first.await.expect("first request should join");
+    let (second_status, second_receipt) = second.await.expect("second request should join");
+    assert_eq!(first_status, 201);
+    assert_eq!(second_status, 201);
+    assert_eq!(first_receipt["replayed"], false);
+    assert_eq!(second_receipt["replayed"], true);
+    assert_eq!(driver.starts().len(), 1);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_returns_503_when_command_capacity_is_exhausted() {
+    let (address, shutdown, _driver, registry) = spawn_test_http_server_with_registry().await;
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    for index in 0..256 {
+        let command = HttpCommandEnvelope::new(
+            format!("capacity-{index}"),
+            "client-a",
+            &session.id,
+            run_start(" ", HttpRunApprovalMode::Ask),
+        );
+        assert_eq!(
+            registry.start_run_command(&session.id, command),
+            Err(HttpRegistryError::EmptyPrompt)
+        );
+    }
+    let saturated = HttpCommandEnvelope::new(
+        "capacity-256",
+        "client-a",
+        &session.id,
+        run_start(" ", HttpRunApprovalMode::Ask),
+    );
+    let body = serde_json::to_string(&saturated).expect("command should serialize");
+    let request = http_post(
+        &format!("/sessions/{}/runs", session.id),
+        Some("secret-token"),
+        &body,
+    );
+
+    let (status, error) = http_raw_request(address, request).await;
+    assert_eq!(status, 503);
+    assert_eq!(error["error"]["code"], "registry_error");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("identity capacity"))
+    );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn local_server_routes_approval_command_and_replays_retry() {
     let (address, shutdown, driver, registry) = spawn_test_http_server_with_registry().await;
 
@@ -584,10 +701,19 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     );
     assert!(document["paths"]["/sessions"]["post"]["responses"]["401"].is_object());
     assert!(document["paths"]["/sessions"]["get"]["responses"]["200"].is_object());
+    assert!(document["paths"]["/sessions"]["post"]["responses"]["500"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
     assert!(
         document["paths"]["/sessions/{session_id}/runs"]["post"]["responses"]["409"].is_object()
     );
+    for path in [
+        "/sessions/{session_id}/runs",
+        "/runs/{run_id}/cancel",
+        "/runs/{run_id}/approvals/{call_id}",
+    ] {
+        assert!(document["paths"][path]["post"]["responses"]["500"].is_object());
+        assert!(document["paths"][path]["post"]["responses"]["503"].is_object());
+    }
     assert!(document["paths"]["/runs/{run_id}"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/runs/{run_id}/cancel"]["post"]["responses"]["409"].is_object());
     assert!(document["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"].is_object());
@@ -616,6 +742,18 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             .iter()
             .all(|field| field != "created_at_ms")
     );
+    let session_required = document["components"]["schemas"]["SessionSnapshot"]["required"]
+        .as_array()
+        .expect("session required fields");
+    for field in ["durable_session_scope_id", "session_log_path"] {
+        assert!(session_required.iter().any(|value| value == field));
+    }
+    let run_statuses = document["components"]["schemas"]["RunStatus"]["enum"]
+        .as_array()
+        .expect("run status enum");
+    for status in ["execution_uncertain", "cancelled", "interrupted"] {
+        assert!(run_statuses.iter().any(|value| value == status));
+    }
     assert!(
         document["components"]["schemas"]["RunSnapshot"]["required"]
             .as_array()
@@ -1109,13 +1247,22 @@ fn crate_dependency_boundary_excludes_tui_and_extra_sigil_crates() {
 fn session_create_get_returns_stable_snapshot() {
     let (registry, _driver) = registry_with_driver();
 
-    let session = registry.create_session(HttpSessionCreateRequest {
-        label: Some("mobile-client".to_owned()),
-    });
+    let session = create_session(
+        &registry,
+        HttpSessionCreateRequest {
+            label: Some("mobile-client".to_owned()),
+        },
+    );
 
     assert_eq!(session.id, "http-session-1");
     assert_eq!(session.label.as_deref(), Some("mobile-client"));
     assert!(session.run_ids.is_empty());
+    assert_eq!(session.durable_session_scope_id, "scope-http-session-1");
+    assert_eq!(
+        session.session_log_path,
+        "/tmp/sigil-http-tests/http-session-1.jsonl"
+    );
+    assert_eq!(session.foreground_run_id, None);
     assert_eq!(
         registry
             .get_session(&session.id)
@@ -1131,6 +1278,372 @@ fn session_create_get_returns_stable_snapshot() {
 }
 
 #[test]
+fn session_creation_fails_closed_without_a_valid_durable_binding() {
+    let (registry, driver) = registry_with_driver();
+    driver.reject_next_binding("session store unavailable");
+    assert_eq!(
+        registry.create_session(HttpSessionCreateRequest::default()),
+        Err(HttpRegistryError::SessionBindingRejected {
+            session_id: "http-session-1".to_owned(),
+            message: "session store unavailable".to_owned(),
+        })
+    );
+    assert!(registry.list_sessions().is_empty());
+
+    driver.return_next_binding(HttpSessionBinding {
+        session_scope_id: "scope-invalid".to_owned(),
+        session_log_path: "relative/session.jsonl".to_owned(),
+    });
+    assert_eq!(
+        registry.create_session(HttpSessionCreateRequest::default()),
+        Err(HttpRegistryError::InvalidSessionBinding {
+            session_id: "http-session-2".to_owned(),
+            message: "durable session log path must be absolute".to_owned(),
+        })
+    );
+    assert!(registry.list_sessions().is_empty());
+}
+
+#[test]
+fn session_foreground_lease_releases_only_after_typed_terminal() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+
+    for outcome in [
+        HttpRunTerminalOutcome::Finished,
+        HttpRunTerminalOutcome::Failed,
+        HttpRunTerminalOutcome::Cancelled,
+        HttpRunTerminalOutcome::Interrupted,
+    ] {
+        let run = registry
+            .start_run(
+                &session.id,
+                run_start("foreground", HttpRunApprovalMode::Ask),
+            )
+            .expect("foreground run should start");
+        assert_eq!(
+            registry.start_run(
+                &session.id,
+                run_start("competing", HttpRunApprovalMode::Ask),
+            ),
+            Err(HttpRegistryError::SessionForegroundRunActive {
+                session_id: session.id.clone(),
+                run_id: run.id.clone(),
+            })
+        );
+        assert_eq!(
+            registry
+                .get_session(&session.id)
+                .expect("session should remain readable")
+                .foreground_run_id
+                .as_deref(),
+            Some(run.id.as_str())
+        );
+
+        let terminal = registry
+            .record_run_terminal(&run.id, outcome)
+            .expect("typed terminal should release the lease");
+        assert_eq!(terminal.status, outcome.status());
+        assert_eq!(
+            registry
+                .record_run_terminal(&run.id, outcome)
+                .expect("same terminal should be idempotent"),
+            terminal
+        );
+        assert_eq!(
+            registry
+                .get_session(&session.id)
+                .expect("session should remain readable")
+                .foreground_run_id,
+            None
+        );
+    }
+}
+
+#[test]
+fn contradictory_terminal_callback_fails_closed() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(&session.id, run_start("terminal", HttpRunApprovalMode::Ask))
+        .expect("run should start");
+    registry
+        .record_run_terminal(&run.id, HttpRunTerminalOutcome::Cancelled)
+        .expect("first terminal should win");
+
+    assert_eq!(
+        registry.record_run_terminal(&run.id, HttpRunTerminalOutcome::Finished),
+        Err(HttpRegistryError::RunTerminalConflict {
+            run_id: run.id.clone(),
+            current: HttpRunStatus::Cancelled,
+            requested: HttpRunTerminalOutcome::Finished,
+        })
+    );
+    assert_eq!(
+        registry
+            .get_run(&run.id)
+            .expect("run should remain inspectable")
+            .status,
+        HttpRunStatus::Cancelled
+    );
+}
+
+#[test]
+fn driver_panics_quarantine_tentative_start_cancel_and_approval_state() {
+    let start_driver = Arc::new(RecordingRunDriver::default());
+    let start_registry = HttpSessionRunRegistry::new(start_driver.clone());
+    let start_session = create_session(&start_registry, HttpSessionCreateRequest::default());
+    start_driver.observe_start(Arc::new(|_start| panic!("start driver panic")));
+    assert_eq!(
+        start_registry.start_run(
+            &start_session.id,
+            run_start("panic", HttpRunApprovalMode::Ask),
+        ),
+        Err(HttpRegistryError::DriverPanicked {
+            operation: "start",
+            run_id: "http-run-1".to_owned(),
+        })
+    );
+    assert_eq!(
+        start_registry
+            .get_run("http-run-1")
+            .expect("uncertain start should remain inspectable")
+            .status,
+        HttpRunStatus::ExecutionUncertain
+    );
+    assert_eq!(
+        start_registry
+            .get_session(&start_session.id)
+            .expect("uncertain session should remain quarantined")
+            .foreground_run_id
+            .as_deref(),
+        Some("http-run-1")
+    );
+    start_registry
+        .record_run_terminal("http-run-1", HttpRunTerminalOutcome::Failed)
+        .expect("later durable terminal should resolve uncertain startup");
+    assert_eq!(
+        start_registry
+            .get_session(&start_session.id)
+            .expect("confirmed terminal should release the lease")
+            .foreground_run_id,
+        None
+    );
+
+    let cancel_driver = Arc::new(RecordingRunDriver::default());
+    let cancel_registry = HttpSessionRunRegistry::new(cancel_driver.clone());
+    let cancel_session = create_session(&cancel_registry, HttpSessionCreateRequest::default());
+    let cancel_run = cancel_registry
+        .start_run(
+            &cancel_session.id,
+            run_start("cancel panic", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    cancel_driver.observe_cancel(Arc::new(|_cancel| panic!("cancel driver panic")));
+    assert_eq!(
+        cancel_registry.cancel_run(&cancel_run.id),
+        Err(HttpRegistryError::DriverPanicked {
+            operation: "cancel",
+            run_id: cancel_run.id.clone(),
+        })
+    );
+    assert_eq!(
+        cancel_registry
+            .get_run(&cancel_run.id)
+            .expect("uncertain cancel should remain inspectable")
+            .status,
+        HttpRunStatus::ExecutionUncertain
+    );
+    cancel_registry
+        .record_run_terminal(&cancel_run.id, HttpRunTerminalOutcome::Cancelled)
+        .expect("later durable cancellation should replace uncertain projection");
+
+    let approval_driver = Arc::new(RecordingRunDriver::default());
+    let approval_registry = HttpSessionRunRegistry::new(approval_driver.clone());
+    let approval_session = create_session(&approval_registry, HttpSessionCreateRequest::default());
+    let approval_run = approval_registry
+        .start_run(
+            &approval_session.id,
+            run_start("approval panic", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    approval_registry
+        .register_approval_request(&approval_run.id, pending_approval("call-1", "write_file"))
+        .expect("approval should be pending");
+    approval_driver.observe_approval(Arc::new(|_approval| panic!("approval driver panic")));
+    assert_eq!(
+        approval_registry.submit_approval_decision(
+            &approval_run.id,
+            "call-1",
+            approval_decision("call-1", HttpApprovalDecision::Approve, None),
+        ),
+        Err(HttpRegistryError::DriverPanicked {
+            operation: "approval",
+            run_id: approval_run.id.clone(),
+        })
+    );
+    let approval_state = approval_registry
+        .get_run(&approval_run.id)
+        .expect("uncertain approval should remain inspectable");
+    assert_eq!(approval_state.status, HttpRunStatus::ExecutionUncertain);
+    assert!(approval_state.pending_approval_call_ids.is_empty());
+}
+
+#[test]
+fn concurrent_duplicate_start_waits_and_replays_one_driver_receipt() {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer_entered = Arc::clone(&entered);
+    let observer_release = Arc::clone(&release);
+    let observer_calls = Arc::clone(&calls);
+    driver.observe_start(Arc::new(move |_start| {
+        observer_calls.fetch_add(1, Ordering::SeqCst);
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+    let command = HttpCommandEnvelope::new(
+        "command-concurrent-start",
+        "client-a",
+        &session.id,
+        run_start("hello", HttpRunApprovalMode::Ask),
+    );
+    let first_registry = Arc::clone(&registry);
+    let first_session_id = session.id.clone();
+    let first_command = command.clone();
+    let first = std::thread::spawn(move || {
+        first_registry.start_run_command(&first_session_id, first_command)
+    });
+    entered.wait();
+
+    let conflicting = HttpCommandEnvelope::new(
+        "command-concurrent-start",
+        "client-a",
+        &session.id,
+        run_start("different payload", HttpRunApprovalMode::Ask),
+    );
+    assert_eq!(
+        registry.start_run_command(&session.id, conflicting),
+        Err(HttpRegistryError::CommandKeyConflict {
+            session_id: session.id.clone(),
+            client_id: "client-a".to_owned(),
+            command_id: "command-concurrent-start".to_owned(),
+        })
+    );
+
+    let second_registry = Arc::clone(&registry);
+    let second_session_id = session.id.clone();
+    let second =
+        std::thread::spawn(move || second_registry.start_run_command(&second_session_id, command));
+    wait_for_registry_activity(&registry, |activity| activity.command_waiters == 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    release.wait();
+
+    let first = first
+        .join()
+        .expect("first command thread should join")
+        .expect("first command should succeed");
+    let second = second
+        .join()
+        .expect("duplicate command thread should join")
+        .expect("duplicate command should replay");
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.run.id, second.run.id);
+    assert_eq!(driver.starts().len(), 1);
+}
+
+#[test]
+fn command_key_conflict_is_global_and_does_not_reuse_receipt() {
+    let (registry, driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let command = HttpCommandEnvelope::new(
+        "command-global-key",
+        "client-a",
+        &session.id,
+        run_start("first", HttpRunApprovalMode::Ask),
+    );
+    let receipt = registry
+        .start_run_command(&session.id, command)
+        .expect("first command should reserve the key");
+    let conflicting = HttpCommandEnvelope::new(
+        "command-global-key",
+        "client-a",
+        &session.id,
+        HttpRunCancelRequest::default(),
+    );
+
+    assert_eq!(
+        registry.cancel_run_command(&receipt.run.id, conflicting),
+        Err(HttpRegistryError::CommandKeyConflict {
+            session_id: session.id,
+            client_id: "client-a".to_owned(),
+            command_id: "command-global-key".to_owned(),
+        })
+    );
+    assert!(driver.cancels().is_empty());
+}
+
+#[test]
+fn command_capacity_fails_closed_without_forgetting_completed_identities() {
+    let (registry, _driver) = registry_with_driver();
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    for index in 0..256 {
+        let command = HttpCommandEnvelope::new(
+            format!("bounded-{index}"),
+            "client-a",
+            &session.id,
+            run_start(" ", HttpRunApprovalMode::Ask),
+        );
+        assert_eq!(
+            registry.start_run_command(&session.id, command),
+            Err(HttpRegistryError::EmptyPrompt)
+        );
+    }
+
+    let saturated = HttpCommandEnvelope::new(
+        "bounded-256",
+        "client-a",
+        &session.id,
+        run_start(" ", HttpRunApprovalMode::Ask),
+    );
+    assert_eq!(
+        registry.start_run_command(&session.id, saturated),
+        Err(HttpRegistryError::CommandRegistrySaturated)
+    );
+    let replayed = HttpCommandEnvelope::new(
+        "bounded-0",
+        "client-a",
+        &session.id,
+        run_start(" ", HttpRunApprovalMode::Ask),
+    );
+    assert_eq!(
+        registry.start_run_command(&session.id, replayed),
+        Err(HttpRegistryError::EmptyPrompt),
+        "existing keys must replay even after capacity is reached"
+    );
+    let conflicting = HttpCommandEnvelope::new(
+        "bounded-0",
+        "client-a",
+        &session.id,
+        run_start("\t", HttpRunApprovalMode::Ask),
+    );
+    assert_eq!(
+        registry.start_run_command(&session.id, conflicting),
+        Err(HttpRegistryError::CommandKeyConflict {
+            session_id: session.id,
+            client_id: "client-a".to_owned(),
+            command_id: "bounded-0".to_owned(),
+        })
+    );
+    assert_eq!(registry.activity().retained_commands, 256);
+    assert_eq!(registry.activity().in_flight_commands, 0);
+}
+
+#[test]
 fn run_start_requires_session_prompt_and_explicit_approval_mode() {
     let (registry, _driver) = registry_with_driver();
 
@@ -1141,7 +1654,7 @@ fn run_start_requires_session_prompt_and_explicit_approval_mode() {
         })
     );
 
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     assert_eq!(
         registry.start_run(&session.id, run_start("   ", HttpRunApprovalMode::Ask)),
         Err(HttpRegistryError::EmptyPrompt)
@@ -1161,9 +1674,12 @@ fn run_start_requires_session_prompt_and_explicit_approval_mode() {
 #[test]
 fn run_start_registers_run_and_routes_full_prompt_to_driver() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest {
-        label: Some("desktop".to_owned()),
-    });
+    let session = create_session(
+        &registry,
+        HttpSessionCreateRequest {
+            label: Some("desktop".to_owned()),
+        },
+    );
     let prompt = format!("{}{}", "x".repeat(120), "tail");
 
     let run = registry
@@ -1195,7 +1711,7 @@ fn run_start_registers_run_and_routes_full_prompt_to_driver() {
 fn run_start_driver_failure_marks_run_failed() {
     let (registry, driver) = registry_with_driver();
     driver.reject_next_start("runtime offline");
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
 
     let error = registry
         .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Deny))
@@ -1225,7 +1741,7 @@ fn run_start_driver_failure_marks_run_failed() {
 #[test]
 fn cancel_routes_to_driver_and_is_idempotent() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Ask))
         .expect("driver should accept run");
@@ -1258,9 +1774,140 @@ fn cancel_routes_to_driver_and_is_idempotent() {
 }
 
 #[test]
+fn concurrent_duplicate_cancel_waits_and_routes_once() {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(&session.id, run_start("cancel", HttpRunApprovalMode::Ask))
+        .expect("run should start");
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let observer_entered = Arc::clone(&entered);
+    let observer_release = Arc::clone(&release);
+    driver.observe_cancel(Arc::new(move |_cancel| {
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+    let command = HttpCommandEnvelope::new(
+        "command-concurrent-cancel",
+        "client-a",
+        &session.id,
+        HttpRunCancelRequest::default(),
+    )
+    .with_expected_stream_sequence(run.stream_sequence);
+    let first_registry = Arc::clone(&registry);
+    let first_run_id = run.id.clone();
+    let first_command = command.clone();
+    let first =
+        std::thread::spawn(move || first_registry.cancel_run_command(&first_run_id, first_command));
+    entered.wait();
+
+    let second_registry = Arc::clone(&registry);
+    let second_run_id = run.id.clone();
+    let second =
+        std::thread::spawn(move || second_registry.cancel_run_command(&second_run_id, command));
+    wait_for_registry_activity(&registry, |activity| activity.command_waiters == 1);
+    release.wait();
+
+    let first = first
+        .join()
+        .expect("first cancel thread should join")
+        .expect("first cancel should succeed");
+    let second = second
+        .join()
+        .expect("duplicate cancel thread should join")
+        .expect("duplicate cancel should replay");
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.run, second.run);
+    assert_eq!(driver.cancels().len(), 1);
+}
+
+#[test]
+fn distinct_cancel_commands_share_late_driver_rejection() {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("cancel rejection", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    driver.reject_next_cancel("cancel route closed");
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer_entered = Arc::clone(&entered);
+    let observer_release = Arc::clone(&release);
+    let observer_calls = Arc::clone(&calls);
+    driver.observe_cancel(Arc::new(move |_cancel| {
+        observer_calls.fetch_add(1, Ordering::SeqCst);
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+    let first_command = HttpCommandEnvelope::new(
+        "cancel-first",
+        "client-a",
+        &session.id,
+        HttpRunCancelRequest::default(),
+    )
+    .with_expected_stream_sequence(run.stream_sequence);
+    let first_registry = Arc::clone(&registry);
+    let first_run_id = run.id.clone();
+    let first =
+        std::thread::spawn(move || first_registry.cancel_run_command(&first_run_id, first_command));
+    entered.wait();
+
+    let second_command = HttpCommandEnvelope::new(
+        "cancel-second",
+        "client-b",
+        &session.id,
+        HttpRunCancelRequest::default(),
+    );
+    let second_registry = Arc::clone(&registry);
+    let second_run_id = run.id.clone();
+    let (second_started, second_started_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        second_started
+            .send(())
+            .expect("second cancel start signal should send");
+        second_registry.cancel_run_command(&second_run_id, second_command)
+    });
+    second_started_rx
+        .recv()
+        .expect("second cancel should reach its call boundary");
+    wait_for_registry_activity(&registry, |activity| activity.cancellation_waiters == 1);
+    release.wait();
+
+    let expected = Err(HttpRegistryError::DriverRejected {
+        operation: "cancel",
+        run_id: run.id.clone(),
+        message: "cancel route closed".to_owned(),
+    });
+    assert_eq!(
+        first.join().expect("first cancel thread should join"),
+        expected
+    );
+    assert_eq!(
+        second.join().expect("second cancel thread should join"),
+        expected
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        registry
+            .get_run(&run.id)
+            .expect("rejected cancellation should restore the run")
+            .status,
+        HttpRunStatus::Running
+    );
+}
+
+#[test]
 fn cancel_rejects_terminal_run_and_restores_status_on_driver_failure() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     driver.reject_next_start("start failed");
     let _error = registry
         .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Ask))
@@ -1297,7 +1944,7 @@ fn cancel_rejects_terminal_run_and_restores_status_on_driver_failure() {
 #[test]
 fn approval_requests_and_decisions_are_routed_in_order() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(
             &session.id,
@@ -1367,7 +2014,7 @@ fn approval_requests_and_decisions_are_routed_in_order() {
 #[test]
 fn approval_command_deduplicates_retries_and_audits_client_fields() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(
             &session.id,
@@ -1420,9 +2067,65 @@ fn approval_command_deduplicates_retries_and_audits_client_fields() {
 }
 
 #[test]
+fn concurrent_duplicate_approval_waits_and_routes_once() {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(&session.id, run_start("approval", HttpRunApprovalMode::Ask))
+        .expect("run should start");
+    let waiting = registry
+        .register_approval_request(&run.id, pending_approval("call-1", "write_file"))
+        .expect("approval should be pending");
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let observer_entered = Arc::clone(&entered);
+    let observer_release = Arc::clone(&release);
+    driver.observe_approval(Arc::new(move |_approval| {
+        observer_entered.wait();
+        observer_release.wait();
+    }));
+    let command = HttpCommandEnvelope::new(
+        "command-concurrent-approval",
+        "client-a",
+        &session.id,
+        approval_decision("call-1", HttpApprovalDecision::Approve, None),
+    )
+    .with_expected_stream_sequence(waiting.stream_sequence);
+    let first_registry = Arc::clone(&registry);
+    let first_run_id = run.id.clone();
+    let first_command = command.clone();
+    let first = std::thread::spawn(move || {
+        first_registry.submit_approval_command(&first_run_id, "call-1", first_command)
+    });
+    entered.wait();
+
+    let second_registry = Arc::clone(&registry);
+    let second_run_id = run.id.clone();
+    let second = std::thread::spawn(move || {
+        second_registry.submit_approval_command(&second_run_id, "call-1", command)
+    });
+    wait_for_registry_activity(&registry, |activity| activity.command_waiters == 1);
+    release.wait();
+
+    let first = first
+        .join()
+        .expect("first approval thread should join")
+        .expect("first approval should succeed");
+    let second = second
+        .join()
+        .expect("duplicate approval thread should join")
+        .expect("duplicate approval should replay");
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.decision, second.decision);
+    assert_eq!(driver.approvals().len(), 1);
+}
+
+#[test]
 fn approval_command_rejects_stale_stream_sequence() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(
             &session.id,
@@ -1461,7 +2164,7 @@ fn approval_command_rejects_stale_stream_sequence() {
 #[test]
 fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
 
     let run = registry
         .start_run(
@@ -1485,6 +2188,9 @@ fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
             call_id: "call-tool".to_owned(),
         })
     );
+    registry
+        .record_run_terminal(&run.id, HttpRunTerminalOutcome::Failed)
+        .expect("terminal callback should release the foreground lease");
 
     let run = registry
         .start_run(
@@ -1504,6 +2210,9 @@ fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
             call_id: "call-policy".to_owned(),
         })
     );
+    registry
+        .record_run_terminal(&run.id, HttpRunTerminalOutcome::Failed)
+        .expect("terminal callback should release the foreground lease");
 
     let run = registry
         .start_run(
@@ -1530,7 +2239,7 @@ fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
 #[test]
 fn approval_command_rejects_expired_request_without_consuming_pending_call() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(
             &session.id,
@@ -1572,7 +2281,7 @@ fn start_does_not_overwrite_approval_registered_by_driver() {
             .register_approval_request(&start.run.id, pending_approval("call-1", "write_file"))
             .expect("driver should be able to register approval during start");
     }));
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
 
     let run = registry
         .start_run(
@@ -1588,7 +2297,7 @@ fn start_does_not_overwrite_approval_registered_by_driver() {
 #[test]
 fn approval_endpoint_only_accepts_ask_runs() {
     let (registry, _driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
 
     for mode in [
         HttpRunApprovalMode::Deny,
@@ -1613,6 +2322,9 @@ fn approval_endpoint_only_accepts_ask_runs() {
             ),
             Err(expected)
         );
+        registry
+            .record_run_terminal(&run.id, HttpRunTerminalOutcome::Finished)
+            .expect("terminal callback should release the foreground lease");
     }
 }
 
@@ -1626,7 +2338,7 @@ fn approval_routing_reports_missing_or_inactive_runs() {
         })
     );
 
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(&session.id, run_start("hello", HttpRunApprovalMode::Ask))
         .expect("run should start");
@@ -1669,7 +2381,7 @@ fn approval_routing_reports_missing_or_inactive_runs() {
 fn duplicate_approval_submit_during_driver_route_is_rejected() {
     let driver = Arc::new(RecordingRunDriver::default());
     let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(
             &session.id,
@@ -1725,7 +2437,7 @@ fn duplicate_approval_submit_during_driver_route_is_rejected() {
 #[test]
 fn approval_driver_failure_keeps_pending_call() {
     let (registry, driver) = registry_with_driver();
-    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
     let run = registry
         .start_run(
             &session.id,
@@ -1801,8 +2513,11 @@ fn run_status_terminal_helper_covers_terminal_and_non_terminal_states() {
     assert!(!HttpRunStatus::Running.is_terminal());
     assert!(!HttpRunStatus::WaitingForApproval.is_terminal());
     assert!(!HttpRunStatus::CancelRequested.is_terminal());
+    assert!(!HttpRunStatus::ExecutionUncertain.is_terminal());
     assert!(HttpRunStatus::Finished.is_terminal());
     assert!(HttpRunStatus::Failed.is_terminal());
+    assert!(HttpRunStatus::Cancelled.is_terminal());
+    assert!(HttpRunStatus::Interrupted.is_terminal());
 }
 
 fn dependency_edges(manifest: &str) -> Vec<(String, String)> {
@@ -1835,6 +2550,33 @@ fn dependency_edges(manifest: &str) -> Vec<(String, String)> {
 fn registry_with_driver() -> (HttpSessionRunRegistry, Arc<RecordingRunDriver>) {
     let driver = Arc::new(RecordingRunDriver::default());
     (HttpSessionRunRegistry::new(driver.clone()), driver)
+}
+
+fn create_session(
+    registry: &HttpSessionRunRegistry,
+    request: HttpSessionCreateRequest,
+) -> super::HttpSessionSnapshot {
+    registry
+        .create_session(request)
+        .expect("test driver should bind a durable session")
+}
+
+fn wait_for_registry_activity(
+    registry: &HttpSessionRunRegistry,
+    predicate: impl Fn(super::HttpRegistryActivity) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let activity = registry.activity();
+        if predicate(activity) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "registry activity did not reach expected state: {activity:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 fn run_start(prompt: &str, approval_mode: HttpRunApprovalMode) -> HttpRunStartRequest {
@@ -1888,9 +2630,12 @@ struct RecordingRunDriver {
     cancels: Mutex<Vec<HttpRunDriverCancel>>,
     approvals: Mutex<Vec<HttpRunDriverApproval>>,
     next_start_error: Mutex<Option<String>>,
+    next_binding_error: Mutex<Option<String>>,
+    next_binding: Mutex<Option<HttpSessionBinding>>,
     next_cancel_error: Mutex<Option<String>>,
     next_approval_error: Mutex<Option<String>>,
     start_observer: Mutex<Option<StartObserver>>,
+    cancel_observer: Mutex<Option<CancelObserver>>,
     approval_observer: Mutex<Option<ApprovalObserver>>,
 }
 
@@ -1911,6 +2656,14 @@ impl RecordingRunDriver {
         *lock(&self.next_start_error) = Some(message.to_owned());
     }
 
+    fn reject_next_binding(&self, message: &str) {
+        *lock(&self.next_binding_error) = Some(message.to_owned());
+    }
+
+    fn return_next_binding(&self, binding: HttpSessionBinding) {
+        *lock(&self.next_binding) = Some(binding);
+    }
+
     fn reject_next_cancel(&self, message: &str) {
         *lock(&self.next_cancel_error) = Some(message.to_owned());
     }
@@ -1926,9 +2679,26 @@ impl RecordingRunDriver {
     fn observe_approval(&self, observer: ApprovalObserver) {
         *lock(&self.approval_observer) = Some(observer);
     }
+
+    fn observe_cancel(&self, observer: CancelObserver) {
+        *lock(&self.cancel_observer) = Some(observer);
+    }
 }
 
 impl HttpRunDriver for RecordingRunDriver {
+    fn bind_session(&self, session_id: &str) -> Result<HttpSessionBinding, HttpRunDriverError> {
+        if let Some(message) = lock(&self.next_binding_error).take() {
+            return Err(HttpRunDriverError::new(message));
+        }
+        if let Some(binding) = lock(&self.next_binding).take() {
+            return Ok(binding);
+        }
+        Ok(HttpSessionBinding {
+            session_scope_id: format!("scope-{session_id}"),
+            session_log_path: format!("/tmp/sigil-http-tests/{session_id}.jsonl"),
+        })
+    }
+
     fn start_run(&self, start: HttpRunDriverStart) -> Result<(), HttpRunDriverError> {
         if let Some(message) = lock(&self.next_start_error).take() {
             return Err(HttpRunDriverError::new(message));
@@ -1942,7 +2712,12 @@ impl HttpRunDriver for RecordingRunDriver {
     }
 
     fn cancel_run(&self, cancel: HttpRunDriverCancel) -> Result<(), HttpRunDriverError> {
-        if let Some(message) = lock(&self.next_cancel_error).take() {
+        let rejection = lock(&self.next_cancel_error).take();
+        let observer = lock(&self.cancel_observer).clone();
+        if let Some(observer) = observer {
+            observer(&cancel);
+        }
+        if let Some(message) = rejection {
             return Err(HttpRunDriverError::new(message));
         }
         lock(&self.cancels).push(cancel);
@@ -1963,6 +2738,7 @@ impl HttpRunDriver for RecordingRunDriver {
 }
 
 type StartObserver = Arc<dyn Fn(&HttpRunDriverStart) + Send + Sync>;
+type CancelObserver = Arc<dyn Fn(&HttpRunDriverCancel) + Send + Sync>;
 type ApprovalObserver = Arc<dyn Fn(&HttpRunDriverApproval) + Send + Sync>;
 
 async fn spawn_test_http_server() -> (SocketAddr, oneshot::Sender<()>, Arc<RecordingRunDriver>) {

@@ -1,6 +1,6 @@
 # RFC-0026 Stable Machine Protocol and Real Local Serve
 
-状态：accepted / P26.1-P26.3 implemented / P26.4A ready
+状态：accepted / P26.1-P26.4A implemented / P26.4B ready
 
 创建日期：2026-07-15
 
@@ -175,6 +175,10 @@ production driver 必须：
 - run 结束后移除 active approval/cancellation state。
 
 同一 adapter session 同时只能有一个 foreground run。Command de-duplication 必须先原子 reserve `(session_id, client_id, command_id)`；并发重复请求等待/重放同一 receipt，同 key 不同 payload 必须 fail closed。
+
+registry 必须在创建 adapter session 时由 runtime driver 建立并校验 durable V2 scope/path binding；binding 失败时不得发布 session。foreground lease 只在 typed `finished` / `failed` / `cancelled` / `interrupted` terminal 回写后释放；相同 terminal 回写幂等，冲突 terminal 不覆盖先到达的状态。
+
+driver unwind 属于 unknown execution state：registry 必须投影非终态 `execution_uncertain` 并保留 foreground quarantine，直到后续 durable terminal 确认或进程重启后由 session recovery 接管，不得回滚成可继续运行，也不得把 quarantine 伪装为可被覆盖的 terminal。command identity 只保留 bounded cryptographic fingerprint 与 bounded completion；容量到达上限时，新 key 返回 unavailable，既有 key 仍重放/冲突，不得淘汰后静默重新执行，也不能无界保存 prompt。P26.4B 的 durable journal 必须在 real serve 开放前替代这一 fail-closed 过渡容量。
 
 `allow_readonly` 只能自动放行 read-only approval；`deny` 拒绝所有 gated tool call；`ask` 必须等待显式 approval endpoint decision。
 

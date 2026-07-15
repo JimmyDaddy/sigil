@@ -70,7 +70,8 @@ pub fn http_openapi_document() -> Value {
                                 }
                             }
                         },
-                        "401": { "$ref": "#/components/responses/Unauthorized" }
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "500": { "$ref": "#/components/responses/InternalError" }
                     }
                 }
             },
@@ -116,7 +117,9 @@ pub fn http_openapi_document() -> Value {
                         "400": { "$ref": "#/components/responses/BadRequest" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
-                        "409": { "$ref": "#/components/responses/Conflict" }
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
                     }
                 }
             },
@@ -162,7 +165,9 @@ pub fn http_openapi_document() -> Value {
                         "400": { "$ref": "#/components/responses/BadRequest" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
-                        "409": { "$ref": "#/components/responses/Conflict" }
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
                     }
                 }
             },
@@ -220,7 +225,9 @@ pub fn http_openapi_document() -> Value {
                         "400": { "$ref": "#/components/responses/BadRequest" },
                         "401": { "$ref": "#/components/responses/Unauthorized" },
                         "404": { "$ref": "#/components/responses/NotFound" },
-                        "409": { "$ref": "#/components/responses/Conflict" }
+                        "409": { "$ref": "#/components/responses/Conflict" },
+                        "500": { "$ref": "#/components/responses/InternalError" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
                     }
                 }
             }
@@ -256,7 +263,9 @@ pub fn http_openapi_document() -> Value {
                 "BadRequest": { "description": "Invalid request body or command payload", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
                 "Unauthorized": { "description": "Bearer token is missing or invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
                 "NotFound": { "description": "Session, run, or route was not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
-                "Conflict": { "description": "Command is stale, mismatched, expired, or not pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+                "Conflict": { "description": "Command is stale, mismatched, expired, or not pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+                "InternalError": { "description": "Session binding, driver routing, or command completion failed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+                "Unavailable": { "description": "The bounded command identity registry has no available slot", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
             },
             "schemas": {
                 "HealthResponse": {
@@ -272,11 +281,14 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionSnapshot": {
                     "type": "object",
-                    "required": ["id", "run_ids"],
+                    "required": ["id", "run_ids", "durable_session_scope_id", "session_log_path"],
                     "properties": {
                         "id": { "type": "string" },
                         "label": { "type": ["string", "null"] },
-                        "run_ids": { "type": "array", "items": { "type": "string" } }
+                        "run_ids": { "type": "array", "items": { "type": "string" } },
+                        "durable_session_scope_id": { "type": "string" },
+                        "session_log_path": { "type": "string" },
+                        "foreground_run_id": { "type": ["string", "null"] }
                     }
                 },
                 "SessionListResponse": {
@@ -384,7 +396,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunStatus": {
                     "type": "string",
-                    "enum": ["starting", "running", "waiting_for_approval", "cancel_requested", "finished", "failed"]
+                    "enum": ["starting", "running", "waiting_for_approval", "cancel_requested", "execution_uncertain", "finished", "failed", "cancelled", "interrupted"]
                 },
                 "ApprovalDecisionCommand": {
                     "allOf": [

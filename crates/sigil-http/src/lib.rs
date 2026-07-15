@@ -24,12 +24,13 @@ pub use dto::{
     HttpApprovalCommandReceipt, HttpApprovalDecision, HttpApprovalDecisionRecord,
     HttpApprovalDecisionRequest, HttpPendingApproval, HttpRunApprovalMode,
     HttpRunCancelCommandReceipt, HttpRunCancelRequest, HttpRunSnapshot, HttpRunStartCommandReceipt,
-    HttpRunStartRequest, HttpRunStatus, HttpSessionCreateRequest, HttpSessionSnapshot,
+    HttpRunStartRequest, HttpRunStatus, HttpRunTerminalOutcome, HttpSessionBinding,
+    HttpSessionCreateRequest, HttpSessionSnapshot,
 };
 pub use listener::{HttpListenerError, HttpLocalServer};
 pub use openapi::{HTTP_OPENAPI_VERSION, http_openapi_document};
 pub use protocol::{HTTP_PROTOCOL_VERSION, HttpCommandEnvelope, HttpProtocolVersionError};
-pub use registry::{HttpRegistryError, HttpSessionRunRegistry};
+pub use registry::{HttpRegistryActivity, HttpRegistryError, HttpSessionRunRegistry};
 pub use sse::{
     HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_RUN_EVENT_SSE_NAME, HttpDurableEventView,
     HttpLiveEventBus, HttpLiveEventRecvError, HttpLiveEventSubscriber, HttpProtocolCursor,
