@@ -68,7 +68,7 @@ pub struct PortableSemanticCompactionPreflight {
     request: PortableSemanticCompactionRequest,
     session_id: crate::SessionId,
     source_record_count: usize,
-    interleaved_input_token_measurement: Option<ProviderNonGeneratingAttemptReceipt>,
+    interleaved_input_token_measurements: Vec<ProviderNonGeneratingAttemptReceipt>,
     prepared: PreparedPortableCheckpoint,
     candidate_messages: Vec<crate::ModelMessage>,
 }
@@ -94,14 +94,17 @@ impl PortableSemanticCompactionPreflight {
 
     /// Binds one completed non-generating token measurement that occurred after this preflight.
     ///
-    /// The executor permits exactly this start/terminal pair between the planned source and its
-    /// portable `Started` barrier. The pair must be for the same session and frozen target
-    /// fingerprint; any other durable append remains a stale-plan failure.
+    /// The executor permits exactly the bound start/terminal pairs between the planned source and
+    /// its portable `Started` barrier. A normal portable attempt admits at most one target
+    /// measurement. Overflow recovery may admit two: one for the rejected pre-compaction request
+    /// and one for the compacted target, so the activation can prove exact before/after economics.
+    /// Any other durable append remains a stale-plan failure.
     ///
     /// # Errors
     ///
     /// Returns an error when the receipt is not an input-token measurement, belongs to another
-    /// session or frozen target, or a measurement has already been bound.
+    /// session or frozen target, duplicates another receipt, or exceeds the narrow initiation
+    /// limit.
     pub fn admit_completed_input_token_measurement(
         &mut self,
         receipt: ProviderNonGeneratingAttemptReceipt,
@@ -116,10 +119,21 @@ impl PortableSemanticCompactionPreflight {
         if receipt.request_material_fingerprint() != expected_request_material_fingerprint {
             bail!("input-token measurement does not bind the portable frozen target");
         }
-        if self.interleaved_input_token_measurement.is_some() {
-            bail!("portable preflight already has an interleaved input-token measurement");
+        if self
+            .interleaved_input_token_measurements
+            .iter()
+            .any(|bound| bound.physical_attempt_id() == receipt.physical_attempt_id())
+        {
+            bail!("portable preflight already has this input-token measurement");
         }
-        self.interleaved_input_token_measurement = Some(receipt);
+        let maximum_measurements = usize::from(matches!(
+            &self.request.initiation,
+            CompactionInitiation::OverflowRecovery { .. }
+        )) + 1;
+        if self.interleaved_input_token_measurements.len() >= maximum_measurements {
+            bail!("portable preflight input-token measurement limit exceeded");
+        }
+        self.interleaved_input_token_measurements.push(receipt);
         Ok(())
     }
 
@@ -137,13 +151,17 @@ impl PortableSemanticCompactionPreflight {
             bail!("portable semantic compaction source cursor changed before Start");
         }
         validate_request_against_source_records(source_records, &self.request)?;
-        match &self.interleaved_input_token_measurement {
-            Some(receipt) => {
-                validate_interleaved_input_token_measurement(records, interleaved_records, receipt)
-            }
-            None if interleaved_records.is_empty() => Ok(()),
-            None => bail!("portable semantic compaction source stream changed before Start"),
+        if interleaved_records.len() != self.interleaved_input_token_measurements.len() * 2 {
+            bail!("portable semantic compaction source stream changed before Start");
         }
+        for (records, receipt) in interleaved_records
+            .chunks_exact(2)
+            .zip(&self.interleaved_input_token_measurements)
+        {
+            validate_interleaved_input_token_measurement(records, receipt)?;
+        }
+        ProviderPhysicalAttemptProjection::from_records(records)?;
+        Ok(())
     }
 
     fn attach_and_validate_target_material(
@@ -156,6 +174,10 @@ impl PortableSemanticCompactionPreflight {
             proof,
             portable_economics,
         } = target_material;
+        self.validate_input_token_measurement_bindings(
+            &frozen_request,
+            portable_economics.as_ref(),
+        )?;
         let target_request_fit = ContinuationTargetRequestFitV1 {
             material_fingerprint: frozen_request.fingerprint().to_owned(),
             binding,
@@ -177,6 +199,35 @@ impl PortableSemanticCompactionPreflight {
                     )
             })?;
         validate_frozen_target_contains_candidate(&frozen_request, &self.candidate_messages)
+    }
+
+    fn validate_input_token_measurement_bindings(
+        &self,
+        frozen_target_request: &FrozenProviderRequestMaterial,
+        portable_economics: Option<&PortableCompactionEconomicsV1>,
+    ) -> Result<()> {
+        match self.interleaved_input_token_measurements.as_slice() {
+            [] => Ok(()),
+            [target]
+                if target.request_material_fingerprint() == frozen_target_request.fingerprint() =>
+            {
+                Ok(())
+            }
+            [before, target] => {
+                let economics = portable_economics.context(
+                    "two portable input-token measurements require before/after economics",
+                )?;
+                if before.request_material_fingerprint()
+                    != economics.before_input.material_fingerprint()
+                    || target.request_material_fingerprint() != frozen_target_request.fingerprint()
+                {
+                    bail!("portable input-token measurements do not bind the before/after proof");
+                }
+                Ok(())
+            }
+            [_] => bail!("portable target input-token measurement does not bind the frozen target"),
+            _ => bail!("portable input-token measurement set is invalid"),
+        }
     }
 }
 
@@ -286,7 +337,7 @@ impl JsonlSessionStore {
             request,
             session_id,
             source_record_count: source_records.len(),
-            interleaved_input_token_measurement: None,
+            interleaved_input_token_measurements: Vec::new(),
             prepared,
             candidate_messages,
         })
@@ -600,7 +651,6 @@ fn prepare_portable_checkpoint(
 }
 
 fn validate_interleaved_input_token_measurement(
-    all_records: &[SessionStreamRecord],
     interleaved_records: &[SessionStreamRecord],
     receipt: &ProviderNonGeneratingAttemptReceipt,
 ) -> Result<()> {
@@ -645,7 +695,6 @@ fn validate_interleaved_input_token_measurement(
             "portable preflight input-token measurement terminal is not a completed no-output measurement"
         );
     }
-    ProviderPhysicalAttemptProjection::from_records(all_records)?;
     Ok(())
 }
 
@@ -655,7 +704,7 @@ fn validate_completion_cas(
     started: &StoredEvent,
 ) -> Result<()> {
     let expected_record_count = preflight.source_record_count
-        + usize::from(preflight.interleaved_input_token_measurement.is_some()) * 2
+        + preflight.interleaved_input_token_measurements.len() * 2
         + 1;
     if records.len() != expected_record_count {
         bail!("portable semantic compaction source stream changed after its Start barrier");

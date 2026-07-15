@@ -3,7 +3,8 @@ use sigil_kernel::{
     CompactionInitiation, CompactionLifecycleProjection, CompactionThresholdStatus,
     ContinuationModelOutputV1, FrozenProviderRequestMaterial, PortableSemanticCompactionOutcome,
     PortableSemanticCompactionPreflight, PortableSemanticCompactionRequest,
-    PortableTargetRequestMaterial, ProviderNonGeneratingAttempt, ProviderPhysicalAttemptOutcome,
+    PortableTargetRequestMaterial, ProviderNonGeneratingAttempt,
+    ProviderNonGeneratingAttemptReceipt, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptPurpose, ProviderRequestRejection, RuntimeContextCandidates,
     ToolOutputProjectionPolicy, V2CompactionPreview,
 };
@@ -25,13 +26,8 @@ const IDLE_AUTO_COMPACTION_COOLDOWN_MS: u64 = 60_000;
 pub(in crate::runner) const V2_COMPACTION_APPLY_FREEZE_REASON: &str =
     "V2 context compaction apply is temporarily frozen while correctness fixes are in progress";
 
-fn v2_compaction_apply_is_frozen(initiation: &CompactionInitiation) -> bool {
-    !matches!(
-        initiation,
-        CompactionInitiation::Manual
-            | CompactionInitiation::IdleAutomatic { .. }
-            | CompactionInitiation::PreTurnPressure { .. }
-    )
+fn v2_compaction_apply_is_frozen(_initiation: &CompactionInitiation) -> bool {
+    false
 }
 
 /// Process-local post-run policy state for the deliberately narrow K25.11 automation path.
@@ -151,48 +147,34 @@ impl PreparedPortableV2Compaction {
     where
         P: sigil_kernel::Provider,
     {
-        let logical_run_id =
-            format!("overflow-input-token-measurement:{source_physical_attempt_id}");
-        let mut measurement = ProviderNonGeneratingAttempt::start(
+        let (before_material, before_receipt) = measure_portable_request_input(
+            provider,
             session,
-            &logical_run_id,
-            &self.frozen_target_request,
-            ProviderPhysicalAttemptPurpose::InputTokenMeasurement,
+            format!("overflow-before-input-token-measurement:{source_physical_attempt_id}"),
+            self.frozen_before_request.clone(),
+            "pre-compaction overflow request",
         )
         .await?;
-        let target_material = match provider
-            .prove_portable_compaction_target(self.frozen_target_request)
-            .await
-        {
-            Ok(target_material) => {
-                measurement
-                    .finish(session, ProviderPhysicalAttemptOutcome::Completed)
-                    .await?;
-                let receipt = measurement
-                    .completed_receipt()
-                    .cloned()
-                    .context("portable overflow input-token measurement has no durable receipt")?;
-                self.preflight.admit_completed_input_token_measurement(
-                    receipt,
-                    target_material.frozen_request().fingerprint(),
-                )?;
-                target_material
-            }
-            Err(error) => {
-                if let Err(terminal_error) = measurement
-                    .finish(
-                        session,
-                        ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
-                    )
-                    .await
-                {
-                    return Err(terminal_error.context(format!(
-                        "portable overflow input-token measurement failed after its durable start: {error:#}"
-                    )));
-                }
-                return Err(error.context("portable overflow input-token measurement failed"));
-            }
-        };
+        let before_input = before_material.proof().input.clone();
+        self.preflight.admit_completed_input_token_measurement(
+            before_receipt,
+            before_material.frozen_request().fingerprint(),
+        )?;
+
+        let (target_material, target_receipt) = measure_portable_request_input(
+            provider,
+            session,
+            format!("overflow-target-input-token-measurement:{source_physical_attempt_id}"),
+            self.frozen_target_request,
+            "post-compaction overflow target",
+        )
+        .await?;
+        self.preflight.admit_completed_input_token_measurement(
+            target_receipt,
+            target_material.frozen_request().fingerprint(),
+        )?;
+        let target_material =
+            target_material.with_portable_economics(&self.frozen_before_request, before_input)?;
         Ok(PendingV2Compaction {
             request_id: self.request_id,
             session_scope_id: self.session_scope_id,
@@ -202,6 +184,57 @@ impl PreparedPortableV2Compaction {
             target_material,
             folded_event_count: self.folded_event_count,
         })
+    }
+}
+
+async fn measure_portable_request_input<P>(
+    provider: &P,
+    session: &Session,
+    logical_run_id: String,
+    frozen_request: FrozenProviderRequestMaterial,
+    description: &str,
+) -> Result<(
+    PortableTargetRequestMaterial,
+    ProviderNonGeneratingAttemptReceipt,
+)>
+where
+    P: sigil_kernel::Provider,
+{
+    let mut measurement = ProviderNonGeneratingAttempt::start(
+        session,
+        &logical_run_id,
+        &frozen_request,
+        ProviderPhysicalAttemptPurpose::InputTokenMeasurement,
+    )
+    .await?;
+    match provider
+        .prove_portable_compaction_target(frozen_request)
+        .await
+    {
+        Ok(target_material) => {
+            measurement
+                .finish(session, ProviderPhysicalAttemptOutcome::Completed)
+                .await?;
+            let receipt = measurement
+                .completed_receipt()
+                .cloned()
+                .with_context(|| format!("{description} measurement has no durable receipt"))?;
+            Ok((target_material, receipt))
+        }
+        Err(error) => {
+            if let Err(terminal_error) = measurement
+                .finish(
+                    session,
+                    ProviderPhysicalAttemptOutcome::TransportOutcomeUncertain,
+                )
+                .await
+            {
+                return Err(terminal_error.context(format!(
+                    "{description} measurement failed after its durable start: {error:#}"
+                )));
+            }
+            Err(error).with_context(|| format!("{description} measurement failed"))
+        }
     }
 }
 

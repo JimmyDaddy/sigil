@@ -5,7 +5,8 @@ use crate::{
     COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompletionRequest, ContextSensitivity,
     ContextTrustLevel, ContinuationCheckpointV1, EffectiveTokenBudget, ExternalProvenanceEntry,
     ExternalTrust, FrozenProviderRequestMaterial, InputTokenEvidence, ModelMessage,
-    PortableTargetRequestMaterial, ProviderNonGeneratingAttempt, ProviderPhysicalAttemptOutcome,
+    PortableTargetRequestMaterial, ProviderNonGeneratingAttempt,
+    ProviderNonGeneratingAttemptReceipt, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptPurpose, RequestFitProof, Session, TaskMemoryV1,
     TokenMeasurementBinding, TokenMeasurementScope, VersionedProfileIdentity,
 };
@@ -73,6 +74,27 @@ fn session_scope_id(store: &JsonlSessionStore) -> Result<String> {
         .expect("fixture has a durable session stream")
         .session_id()
         .to_owned())
+}
+
+async fn record_completed_input_measurement(
+    session: &Session,
+    logical_run_id: &str,
+    frozen_request: &FrozenProviderRequestMaterial,
+) -> Result<ProviderNonGeneratingAttemptReceipt> {
+    let mut measurement = ProviderNonGeneratingAttempt::start(
+        session,
+        logical_run_id,
+        frozen_request,
+        ProviderPhysicalAttemptPurpose::InputTokenMeasurement,
+    )
+    .await?;
+    measurement
+        .finish(session, ProviderPhysicalAttemptOutcome::Completed)
+        .await?;
+    measurement
+        .completed_receipt()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("store-backed measurement has no completed receipt"))
 }
 
 fn profile(profile_id: &str) -> VersionedProfileIdentity {
@@ -191,26 +213,71 @@ fn portable_executor_admits_one_completed_input_measurement_without_relaxing_the
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let receipt = runtime.block_on(async {
-        let mut measurement = ProviderNonGeneratingAttempt::start(
-            &session,
-            "input-token-measurement-portable-test",
-            &frozen_request,
-            ProviderPhysicalAttemptPurpose::InputTokenMeasurement,
-        )
-        .await?;
-        measurement
-            .finish(&session, ProviderPhysicalAttemptOutcome::Completed)
-            .await?;
-        measurement
-            .completed_receipt()
-            .cloned()
-            .context("store-backed measurement must expose a completed receipt")
-    })?;
+    let receipt = runtime.block_on(record_completed_input_measurement(
+        &session,
+        "input-token-measurement-portable-test",
+        &frozen_request,
+    ))?;
     preflight.admit_completed_input_token_measurement(receipt, frozen_request.fingerprint())?;
 
     let outcome = store.execute_portable_semantic_compaction(preflight, target)?;
     assert_eq!(outcome.compaction_id, "compaction-measured");
+    Ok(())
+}
+
+#[test]
+fn overflow_portable_executor_admits_exact_before_and_after_measurements() -> Result<()> {
+    let (_temp, store, session) = setup_session()?;
+    let session_scope_id = session_scope_id(&store)?;
+    let mut request = request(&store, "attempt-overflow", "compaction-overflow", None)?;
+    request.initiation = CompactionInitiation::OverflowRecovery {
+        source_physical_attempt_id: "rejected-attempt".to_owned(),
+    };
+    let mut preflight = store.prepare_portable_semantic_compaction(request)?;
+    let target = target_material(
+        &session_scope_id,
+        preflight.checkpoint(),
+        preflight.task_memory(),
+        preflight.candidate_messages(),
+    )?;
+    let frozen_target_request = target.frozen_request.clone();
+    let mut before_request = frozen_target_request.request().clone();
+    before_request
+        .messages
+        .push(ModelMessage::user("uncompacted overflow source material"));
+    let frozen_before_request =
+        FrozenProviderRequestMaterial::freeze(&session_scope_id, before_request)?;
+    let before_input = InputTokenEvidence::Exact {
+        tokens: 80,
+        material_fingerprint: frozen_before_request.fingerprint().to_owned(),
+        measurement_scope: TokenMeasurementScope::RenderedTargetInput,
+        binding: target.binding.clone(),
+        provider_model_snapshot: None,
+        provider_system_fingerprint: None,
+    };
+    let target = PortableTargetRequestMaterial::new(
+        frozen_target_request.clone(),
+        target.binding,
+        target.proof,
+    )
+    .with_portable_economics(&frozen_before_request, before_input)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    for (logical_run_id, frozen_request) in [
+        ("overflow-before-count", &frozen_before_request),
+        ("overflow-target-count", &frozen_target_request),
+    ] {
+        let receipt = runtime.block_on(record_completed_input_measurement(
+            &session,
+            logical_run_id,
+            frozen_request,
+        ))?;
+        preflight.admit_completed_input_token_measurement(receipt, frozen_request.fingerprint())?;
+    }
+
+    let outcome = store.execute_portable_semantic_compaction(preflight, target)?;
+    assert_eq!(outcome.compaction_id, "compaction-overflow");
     Ok(())
 }
 

@@ -197,7 +197,7 @@ To prepare a verified local DeepSeek V4 Flash tokenizer without changing any ses
 
 Idle automation never preempts streaming work, queued input, an agent continuation, a manual review, model switching, or overflow recovery. Preparation is request/session-owned and its result is discarded if that idle frontier changes. Only an exact local admission may append the lifecycle and activate the boundary; unavailable admission leaves the session unchanged and enters a short process-local cooldown. Queued pre-turn preparation uses the same owned background pipeline; queue changes cancel it, and stale source or queue revisions fail before provider dispatch.
 
-The guarded overflow apply path is also frozen. It does not count, compact, or retry a request while correctness fixes are in progress.
+For the official OpenAI Responses endpoint and exact supported snapshot, one provider-confirmed context-window rejection before output or side effects may start guarded overflow recovery. Sigil performs two audited, non-generating input-token measurements for the rejected request and compacted target, requires exact fit and minimum-savings evidence, rechecks the session/rejection frontier, and retries the retained request once. Count failures, stale state, aliases, compatible endpoints, restored sessions, and a second overflow fail closed without replay.
 
 ## Code Intelligence
 

@@ -30,6 +30,13 @@ pub(in crate::runner) struct PreTurnV2CompactionPreparation {
         Option<Result<Box<QueuedConversationCandidatePreparation>, String>>,
 }
 
+pub(in crate::runner) struct OverflowV2CompactionPreparation {
+    pub(in crate::runner) source_physical_attempt_id: String,
+    pub(in crate::runner) source_logical_run_id: String,
+    pub(in crate::runner) original_run_error: String,
+    pub(in crate::runner) preparation: Result<PendingV2Compaction, String>,
+}
+
 pub(in crate::runner) enum CompactionPreparationTaskResult {
     Manual {
         request_id: u64,
@@ -45,6 +52,11 @@ pub(in crate::runner) enum CompactionPreparationTaskResult {
         request_id: u64,
         session_scope_id: String,
         result: Result<Box<PreTurnV2CompactionPreparation>, String>,
+    },
+    Overflow {
+        request_id: u64,
+        session_scope_id: String,
+        result: Result<Box<OverflowV2CompactionPreparation>, String>,
     },
 }
 
@@ -160,6 +172,42 @@ impl CompactionPreparationTaskManager {
                 return;
             }
             let _ = result_tx.send(CompactionPreparationTaskResult::PreTurn {
+                request_id,
+                session_scope_id: result_session_scope_id,
+                result,
+            });
+        });
+        self.active = Some(ActiveCompactionPreparationTask {
+            request_id,
+            session_scope_id,
+            cancelled,
+            handle,
+        });
+    }
+
+    pub(in crate::runner) fn start_overflow<F>(
+        &mut self,
+        runtime: &Runtime,
+        request_id: u64,
+        session_scope_id: String,
+        result_tx: mpsc::Sender<CompactionPreparationTaskResult>,
+        prepare: F,
+    ) where
+        F: FnOnce() -> Result<OverflowV2CompactionPreparation, String> + Send + 'static,
+    {
+        self.abort_all();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::clone(&cancelled);
+        let result_session_scope_id = session_scope_id.clone();
+        let handle = runtime.spawn_blocking(move || {
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let result = prepare().map(Box::new);
+            if task_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = result_tx.send(CompactionPreparationTaskResult::Overflow {
                 request_id,
                 session_scope_id: result_session_scope_id,
                 result,

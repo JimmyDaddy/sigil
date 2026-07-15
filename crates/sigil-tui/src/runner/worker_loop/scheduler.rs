@@ -261,6 +261,139 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         }
                     }
                 }
+                CompactionPreparationTaskResult::Overflow {
+                    request_id,
+                    session_scope_id,
+                    result,
+                } => {
+                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                        continue;
+                    }
+                    let prepared = match result {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                "overflow recovery preparation task failed: {error}"
+                            )));
+                            continue;
+                        }
+                    };
+                    let source_is_current = current_session
+                        .as_ref()
+                        .filter(|session| {
+                            active_run.is_none() && session.session_scope_id() == session_scope_id
+                        })
+                        .and_then(|session| {
+                            exact_context_window_rejection_source(
+                                session,
+                                &prepared.source_logical_run_id,
+                            )
+                            .ok()
+                            .flatten()
+                        })
+                        .is_some_and(|source| source == prepared.source_physical_attempt_id);
+                    if !source_is_current {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            "discarded stale overflow recovery preparation".to_owned(),
+                        ));
+                        let _ =
+                            message_tx.send(WorkerMessage::RunFailed(prepared.original_run_error));
+                        continue;
+                    }
+                    let pending = match prepared.preparation {
+                        Ok(pending) => pending,
+                        Err(preparation_error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "overflow recovery is unavailable: {preparation_error}"
+                            )));
+                            let _ = message_tx
+                                .send(WorkerMessage::RunFailed(prepared.original_run_error));
+                            continue;
+                        }
+                    };
+                    let compaction_request_id = pending.request_id();
+                    let folded_event_count = pending.folded_event_count();
+                    let frozen_request = pending.frozen_target_request();
+                    let applied = current_session
+                        .as_ref()
+                        .map(|session| pending.apply(session, &current_session_log_path));
+                    let outcome = match applied {
+                        Some(Ok(outcome)) => outcome,
+                        Some(Err(apply_error)) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "overflow recovery compaction was not applied: {apply_error:#}"
+                            )));
+                            let _ = message_tx
+                                .send(WorkerMessage::RunFailed(prepared.original_run_error));
+                            continue;
+                        }
+                        None => {
+                            let _ = message_tx
+                                .send(WorkerMessage::RunFailed(prepared.original_run_error));
+                            continue;
+                        }
+                    };
+                    let Some(session) = current_session.as_ref() else {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "overflow recovery applied without a loaded session".to_owned(),
+                        ));
+                        continue;
+                    };
+                    match load_session_with_url_capability_attachment(
+                        session.provider_name(),
+                        session.model_name(),
+                        &current_session_log_path,
+                        Some(session),
+                    ) {
+                        Ok(reloaded) => {
+                            let entries = reloaded.entries().to_vec();
+                            current_session = Some(reloaded);
+                            let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
+                                request_id: compaction_request_id,
+                                source: V2CompactionApplySource::OverflowRecovery,
+                                compaction_id: outcome.compaction_id,
+                                folded_event_count,
+                                entries,
+                            });
+                            match start_portable_overflow_recovery_run(
+                                &runtime,
+                                Arc::clone(&agent),
+                                &agent_supervisor,
+                                &root_config,
+                                agent.tool_registry(),
+                                &options,
+                                &background_agent_runs,
+                                &mut current_session,
+                                &task_result_tx,
+                                &message_tx,
+                                Arc::clone(&elicitation_handler),
+                                &mut next_run_id,
+                                frozen_request,
+                                format!(
+                                    "overflow-recovery-{}",
+                                    prepared.source_physical_attempt_id
+                                ),
+                            ) {
+                                Ok(recovery_run) => active_run = Some(recovery_run),
+                                Err(start_error) => {
+                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                        "overflow recovery was applied but its one-shot retry could not start: {start_error:#}"
+                                    )));
+                                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                                        prepared.original_run_error,
+                                    ));
+                                }
+                            }
+                        }
+                        Err(reload_error) => {
+                            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                                "failed to reload applied overflow recovery: {reload_error:#}"
+                            )));
+                            let _ = message_tx
+                                .send(WorkerMessage::RunFailed(prepared.original_run_error));
+                        }
+                    }
+                }
             }
         }
 
@@ -424,6 +557,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         );
                     }
 
+                    let mut overflow_preparation_started = false;
                     if queue_id.is_none()
                         && !plan_mode
                         && agent_result_continuation_thread_ids.is_empty()
@@ -445,125 +579,81 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             None => None,
                         };
                         if let Some(source_physical_attempt_id) = source_physical_attempt_id {
-                            let prepared = match current_session.as_ref() {
-                                Some(session) => {
-                                    runtime.block_on(prepare_overflow_recovery_compaction(
-                                        task_result.run_id,
-                                        &root_config,
-                                        &workspace_root,
-                                        &current_session_log_path,
-                                        session,
-                                        &options,
-                                        agent.tool_registry().specs(),
-                                        source_physical_attempt_id.clone(),
-                                        agent.provider(),
-                                    ))
-                                }
-                                None => {
-                                    let _ = message_tx.send(WorkerMessage::Notice(
-                                        "overflow recovery requires a loaded session".to_owned(),
-                                    ));
-                                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                                    continue;
-                                }
+                            let Some(session) = current_session.as_ref() else {
+                                let _ = message_tx.send(WorkerMessage::Notice(
+                                    "overflow recovery requires a loaded session".to_owned(),
+                                ));
+                                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                continue;
                             };
-                            match prepared {
-                                Ok(pending) => {
-                                    let compaction_request_id = pending.request_id();
-                                    let folded_event_count = pending.folded_event_count();
-                                    let frozen_request = pending.frozen_target_request();
-                                    let applied = current_session.as_ref().map(|session| {
-                                        pending.apply(session, &current_session_log_path)
-                                    });
-                                    match applied {
-                                        Some(Ok(outcome)) => {
-                                            let reloaded = match current_session.as_ref() {
-                                                Some(session) => {
-                                                    load_session_with_url_capability_attachment(
-                                                        session.provider_name(),
-                                                        session.model_name(),
-                                                        &current_session_log_path,
-                                                        Some(session),
-                                                    )
-                                                }
-                                                None => {
-                                                    let _ = message_tx.send(WorkerMessage::Notice(
-                                                        "overflow recovery applied without a loaded session"
-                                                            .to_owned(),
-                                                    ));
-                                                    let _ = message_tx
-                                                        .send(WorkerMessage::RunFailed(error));
-                                                    continue;
-                                                }
-                                            };
-                                            match reloaded {
-                                                Ok(reloaded) => {
-                                                    let entries = reloaded.entries().to_vec();
-                                                    current_session = Some(reloaded);
-                                                    let _ = message_tx.send(
-                                                        WorkerMessage::V2CompactionApplied {
-                                                            request_id: compaction_request_id,
-                                                            source: V2CompactionApplySource::OverflowRecovery,
-                                                            compaction_id: outcome.compaction_id,
-                                                            folded_event_count,
-                                                            entries,
-                                                        },
-                                                    );
-                                                    match start_portable_overflow_recovery_run(
-                                                        &runtime,
-                                                        Arc::clone(&agent),
-                                                        &agent_supervisor,
-                                                        &root_config,
-                                                        agent.tool_registry(),
-                                                        &options,
-                                                        &background_agent_runs,
-                                                        &mut current_session,
-                                                        &task_result_tx,
-                                                        &message_tx,
-                                                        Arc::clone(&elicitation_handler),
-                                                        &mut next_run_id,
-                                                        frozen_request,
-                                                        format!(
-                                                            "overflow-recovery-{source_physical_attempt_id}"
-                                                        ),
-                                                    ) {
-                                                        Ok(recovery_run) => {
-                                                            active_run = Some(recovery_run);
-                                                            continue;
-                                                        }
-                                                        Err(start_error) => {
-                                                            let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                                                "overflow recovery was applied but its one-shot retry could not start: {start_error:#}"
-                                                            )));
-                                                        }
-                                                    }
-                                                }
-                                                Err(reload_error) => {
-                                                    let _ = message_tx.send(WorkerMessage::Notice(
-                                                        format!(
-                                                            "failed to reload applied overflow recovery: {reload_error:#}"
-                                                        ),
-                                                    ));
-                                                }
-                                            }
+                            let request_id = next_v2_compaction_request_id;
+                            next_v2_compaction_request_id =
+                                next_v2_compaction_request_id.saturating_add(1);
+                            let expected_session_scope_id = session.session_scope_id().to_owned();
+                            let provider_name = session.provider_name().to_owned();
+                            let model_name = session.model_name().to_owned();
+                            let root_config = root_config.clone();
+                            let workspace_root = workspace_root.clone();
+                            let session_log_path = current_session_log_path.clone();
+                            let options = options.clone();
+                            let tools = agent.tool_registry().specs();
+                            let runtime_handle = runtime.handle().clone();
+                            let preparation_agent = Arc::clone(&agent);
+                            let source_logical_run_id = logical_run_id.to_owned();
+                            let original_run_error = error.clone();
+                            compaction_preparation_tasks.start_overflow(
+                                &runtime,
+                                request_id,
+                                expected_session_scope_id.clone(),
+                                compaction_preparation_tx.clone(),
+                                move || {
+                                    let preparation = (|| {
+                                        let store = JsonlSessionStore::new(&session_log_path)
+                                            .map_err(|error| format!("{error:#}"))?;
+                                        let session = Session::load_from_store(
+                                            provider_name,
+                                            model_name,
+                                            store,
+                                        )
+                                        .map_err(|error| format!("{error:#}"))?;
+                                        if session.session_scope_id() != expected_session_scope_id {
+                                            return Err(
+                                                "overflow recovery preparation loaded a different session scope"
+                                                    .to_owned(),
+                                            );
                                         }
-                                        Some(Err(apply_error)) => {
-                                            let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                                "overflow recovery compaction was not applied: {apply_error:#}"
-                                            )));
-                                        }
-                                        None => {}
-                                    }
-                                }
-                                Err(preparation_error) => {
-                                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                                        "overflow recovery is unavailable: {preparation_error:#}"
-                                    )));
-                                }
-                            }
+                                        runtime_handle
+                                            .block_on(prepare_overflow_recovery_compaction(
+                                                request_id,
+                                                &root_config,
+                                                &workspace_root,
+                                                &session_log_path,
+                                                &session,
+                                                &options,
+                                                tools,
+                                                source_physical_attempt_id.clone(),
+                                                preparation_agent.provider(),
+                                            ))
+                                            .map_err(|error| format!("{error:#}"))
+                                    })();
+                                    Ok(OverflowV2CompactionPreparation {
+                                        source_physical_attempt_id,
+                                        source_logical_run_id,
+                                        original_run_error,
+                                        preparation,
+                                    })
+                                },
+                            );
+                            let _ = message_tx.send(WorkerMessage::Notice(
+                                "context window was rejected before generation; preparing one owned overflow recovery"
+                                    .to_owned(),
+                            ));
+                            overflow_preparation_started = true;
                         }
                     }
-                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    if !overflow_preparation_started {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
                 }
                 RunTaskPayload::Agent {
                     result: Err(error), ..

@@ -72,7 +72,7 @@ server_startup = "lazy"
 auto_discover = true
 ```
 
-compaction 管理长对话。修复正确性问题期间，Context Compaction V2 apply 暂时冻结，因此这项配置目前只控制审查和压力展示；它不会创建自动或手动的 boundary change。代码智能默认关闭。开启后，它可使用已安装的 language server，提供代码导航、诊断和经过审查的编辑建议。开启它不会绕过 workspace trust、文件批准或 diff review。
+compaction 管理长对话。manual、完全 idle 的 hard-threshold 与 queued pre-turn apply 仍由本地 exact target proof 门控；窄 OpenAI Responses overflow route 使用独立的受审计 server-count proof。不受支持的 profile 会 fail closed，不改变 active boundary。代码智能默认关闭。开启后，它可使用已安装的 language server，提供代码导航、诊断和经过审查的编辑建议。开启它不会绕过 workspace trust、文件批准或 diff review。
 
 在 TUI 中用 `Alt-D` 查看 changed source files 的 diagnostics。即使缺少 language server，普通 chat 和文件工具仍可使用。
 

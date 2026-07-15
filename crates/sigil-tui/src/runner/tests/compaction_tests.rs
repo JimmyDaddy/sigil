@@ -26,7 +26,8 @@ use super::{
 use crate::runner::worker_loop::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult,
     ExactConversationPromptStore, IdleAutoCompactionPreparation, IdleAutoCompactionState,
-    IdleV2CompactionPreparation, ManualV2CompactionPreparation, queue_conversation_input,
+    IdleV2CompactionPreparation, ManualV2CompactionPreparation, OverflowV2CompactionPreparation,
+    queue_conversation_input,
 };
 
 #[test]
@@ -109,6 +110,35 @@ fn idle_compaction_preparation_has_one_owned_background_result() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn cancelled_overflow_preparation_finishes_without_publishing_a_stale_result() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut tasks = CompactionPreparationTaskManager::new();
+
+    tasks.start_overflow(
+        &runtime,
+        44,
+        "session-overflow".to_owned(),
+        result_tx,
+        move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            Err::<OverflowV2CompactionPreparation, _>("cancelled".to_owned())
+        },
+    );
+    started_rx.recv_timeout(Duration::from_secs(1))?;
+    tasks.abort_all();
+    let _ = release_tx.send(());
+    assert!(result_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    Ok(())
+}
+
 fn has_v2_compaction_lifecycle_event(path: &Path) -> Result<bool> {
     Ok(JsonlSessionStore::read_event_records(path)?
         .iter()
@@ -161,6 +191,7 @@ fn overflow_recovery_profile(profile_id: &str) -> VersionedProfileIdentity {
 
 fn overflow_recovery_target_material(
     frozen_request: FrozenProviderRequestMaterial,
+    input_tokens: u64,
 ) -> Result<PortableTargetRequestMaterial> {
     let request = frozen_request.request();
     let binding = TokenMeasurementBinding {
@@ -174,7 +205,7 @@ fn overflow_recovery_target_material(
     let proof = RequestFitProof {
         schema_version: COMPACTION_TOKEN_PROOF_SCHEMA_VERSION,
         input: InputTokenEvidence::Exact {
-            tokens: 1,
+            tokens: input_tokens,
             material_fingerprint: frozen_request.fingerprint().to_owned(),
             measurement_scope: TokenMeasurementScope::RenderedTargetInput,
             binding: binding.clone(),
@@ -222,11 +253,13 @@ impl Provider for OverflowRecoveryProvider {
         &self,
         frozen_request: FrozenProviderRequestMaterial,
     ) -> Result<PortableTargetRequestMaterial> {
-        *self
+        let mut calls = self
             .target_proof_calls
             .lock()
-            .expect("target proof mutex should not be poisoned") += 1;
-        overflow_recovery_target_material(frozen_request)
+            .expect("target proof mutex should not be poisoned");
+        *calls += 1;
+        let input_tokens = if *calls == 1 { 10_000 } else { 1 };
+        overflow_recovery_target_material(frozen_request, input_tokens)
     }
 
     async fn stream(
@@ -278,7 +311,7 @@ fn overflow_recovery_config(workspace_root: &Path) -> sigil_kernel::RootConfig {
 }
 
 #[test]
-fn exact_overflow_rejection_does_not_apply_or_retry_while_v2_is_frozen() -> Result<()> {
+fn exact_overflow_rejection_applies_and_retries_once_with_owned_preparation() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -306,29 +339,46 @@ fn exact_overflow_rejection_does_not_apply_or_retry_while_v2_is_frozen() -> Resu
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    let notice = worker.recv_until(|message| matches!(message, WorkerMessage::Notice(_)))?;
+    let applied = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::V2CompactionApplied {
+                source: super::super::V2CompactionApplySource::OverflowRecovery,
+                ..
+            }
+        )
+    })?;
     assert!(matches!(
-        notice,
-        WorkerMessage::Notice(ref text)
-            if text.contains("V2 context compaction apply is temporarily frozen")
+        applied,
+        WorkerMessage::V2CompactionApplied {
+            source: super::super::V2CompactionApplySource::OverflowRecovery,
+            ..
+        }
     ));
-    assert_eq!(observed_provider.target_proof_calls(), 0);
-    assert_eq!(observed_provider.stream_calls(), 1);
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+    assert_eq!(observed_provider.target_proof_calls(), 2);
+    assert_eq!(observed_provider.stream_calls(), 2);
 
     let records = JsonlSessionStore::read_event_records(&session_log_path)?;
-    assert!(!records.iter().any(|record| {
-        let event = record.stored_event();
-        event.event_type == DurableEventType::ProviderPhysicalAttemptStarted.as_str()
-            && event.payload["purpose"] == "input_token_measurement"
-    }));
-    assert!(!has_v2_compaction_lifecycle_event(&session_log_path)?);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                let event = record.stored_event();
+                event.event_type == DurableEventType::ProviderPhysicalAttemptStarted.as_str()
+                    && event.payload["purpose"] == "input_token_measurement"
+            })
+            .count(),
+        2
+    );
+    assert!(has_v2_compaction_lifecycle_event(&session_log_path)?);
 
     worker.shutdown()?;
     Ok(())
 }
 
 #[test]
-fn frozen_overflow_recovery_is_not_recursively_retried() -> Result<()> {
+fn overflow_recovery_is_not_recursively_retried() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -353,18 +403,29 @@ fn frozen_overflow_recovery_is_not_recursively_retried() -> Result<()> {
         reasoning_effort: ReasoningEffort::Max,
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    let notice = worker.recv_until(|message| matches!(message, WorkerMessage::Notice(_)))?;
-    assert!(
-        matches!(
-            notice,
-            WorkerMessage::Notice(ref text)
-                if text.contains("V2 context compaction apply is temporarily frozen")
-        ),
-        "overflow recovery did not report the activation freeze: {notice:?}"
-    );
-    assert_eq!(observed_provider.target_proof_calls(), 0);
-    assert_eq!(observed_provider.stream_calls(), 1);
-    assert!(!has_v2_compaction_lifecycle_event(&session_log_path)?);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut notices = Vec::new();
+    loop {
+        let message =
+            worker.recv_with_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        match message {
+            WorkerMessage::V2CompactionApplied {
+                source: super::super::V2CompactionApplySource::OverflowRecovery,
+                ..
+            } => break,
+            WorkerMessage::Notice(notice) => notices.push(notice),
+            WorkerMessage::RunFailed(error) => {
+                return Err(anyhow!(
+                    "overflow recovery failed before apply: {error}; notices: {notices:?}"
+                ));
+            }
+            _ => {}
+        }
+    }
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert_eq!(observed_provider.target_proof_calls(), 2);
+    assert_eq!(observed_provider.stream_calls(), 2);
+    assert!(has_v2_compaction_lifecycle_event(&session_log_path)?);
 
     worker.shutdown()?;
     Ok(())
@@ -858,7 +919,7 @@ fn hard_threshold_idle_run_checks_local_admission_without_writing_an_unadmitted_
     })?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
-    let notice = worker.recv_until(|message| {
+    let notice = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::Notice(text) if text.contains("automatic compaction was not applied"))
     })?;
     assert!(matches!(

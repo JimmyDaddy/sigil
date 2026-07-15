@@ -18,7 +18,7 @@ use super::*;
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=pre-turn-secret exactly";
 
 #[test]
-fn manual_idle_and_pre_turn_are_unfrozen_before_overflow() -> Result<()> {
+fn every_staged_compaction_initiator_is_unfrozen() -> Result<()> {
     assert!(!v2_compaction_apply_is_frozen(
         &CompactionInitiation::Manual
     ));
@@ -32,7 +32,7 @@ fn manual_idle_and_pre_turn_are_unfrozen_before_overflow() -> Result<()> {
             queue_id: ConversationInputQueueId::new("queue_1")?,
         }
     ));
-    assert!(v2_compaction_apply_is_frozen(
+    assert!(!v2_compaction_apply_is_frozen(
         &CompactionInitiation::OverflowRecovery {
             source_physical_attempt_id: "attempt-1".to_owned(),
         }

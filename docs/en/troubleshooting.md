@@ -146,7 +146,7 @@ Use `/resume` to select a session. If a planned task is still unfinished, contin
 
 ## Context Usage Is High
 
-The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`. Soft and hard thresholds show context pressure. After a successful turn reaches the hard threshold and becomes fully idle, Sigil may prepare one locally verified compaction in the background. A queued request may also compact before promotion when its exact frozen material exceeds the admitted budget. Overflow recovery remains frozen.
+The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`. Soft and hard thresholds show context pressure. After a successful turn reaches the hard threshold and becomes fully idle, Sigil may prepare one locally verified compaction in the background. A queued request may also compact before promotion when its exact frozen material exceeds the admitted budget. The pinned official OpenAI Responses profile may perform one guarded overflow recovery after an exact output-free context rejection and two successful audited counts.
 
 Manual compaction:
 
@@ -154,7 +154,7 @@ Manual compaction:
 /compact
 ```
 
-This opens a read-only V2 fold preview. Opening it does not append a compaction record or rewrite session history. If the review says the target is ready, `Enter` confirms one manual apply; otherwise the review explains which local admission prerequisite is missing. Idle and queued pre-turn paths may use the same exact local admission; overflow recovery still does not change the active boundary.
+This opens a read-only V2 fold preview. Opening it does not append a compaction record or rewrite session history. If the review says the target is ready, `Enter` confirms one manual apply; otherwise the review explains which local admission prerequisite is missing. Idle and queued pre-turn paths may use the same exact local admission. Guarded OpenAI Responses overflow recovery uses separately audited remote count evidence and is not initiated from this review.
 
 You can install the checksum-verified DeepSeek V4 Flash tokenizer required by local manual admission with:
 
@@ -162,7 +162,7 @@ You can install the checksum-verified DeepSeek V4 Flash tokenizer required by lo
 sigil tokenizer install deepseek-v4-flash
 ```
 
-The command prints a network disclosure before downloading the public artifact. Installing it does not unfreeze or apply compaction.
+The command prints a network disclosure before downloading the public artifact. Installing it does not apply compaction or change a session.
 
 ## MCP Server Is Missing, Failed, Or Deferred
 

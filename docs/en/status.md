@@ -20,10 +20,10 @@ This page separates what users can rely on today from what is experimental, limi
 | Checkpoint recovery | `Ctrl-R` previews an evidence-bound checkpoint and offers controlled file restore or a conversation fork that leaves files unchanged. |
 | Planning | `/plan` runs read-only planning prompts and can explicitly hand an accepted plan to durable `/task` execution; `/task <task>` creates durable multi-step task state directly, and `/task continue` resumes the latest task. |
 | Task verification | The Verification card exposes readiness, recommended checks, and inspectable snapshot and changeset evidence; `Alt-V` focuses it. |
-| Context controls | Context pressure stays visible. Manual, fully idle hard-threshold, and queued pre-turn portable apply are enabled only after exact local admission. Owned preparation and source/queue CAS prevent stale dispatch. Overflow recovery remains temporarily frozen. |
+| Context controls | Context pressure stays visible. Manual, fully idle hard-threshold, and queued pre-turn portable apply require exact local admission. The narrow OpenAI Responses overflow path requires audited server counts and exact economics. Owned preparation and source/queue/rejection CAS prevent stale dispatch. |
 | DeepSeek provider | DeepSeek is the default Quick Setup path. |
 | OpenAI-compatible provider | Supported through `[providers.openai_compat]` for compatible Chat Completions endpoints. |
-| OpenAI Responses provider | Supported through `[providers.openai_responses]` for Responses streaming endpoints. Guarded overflow recovery remains temporarily frozen while its owned preparation path is completed. |
+| OpenAI Responses provider | Supported through `[providers.openai_responses]` for Responses streaming endpoints. The official pinned snapshot can perform one guarded, non-recursive overflow recovery after an exact output-free context rejection. |
 | Anthropic provider | Supported through `[providers.anthropic]` for Anthropic Messages streaming. Its native-compaction beta driver records encrypted candidates only; it is not a user action and does not automatically change context. |
 | Gemini provider | Supported through `[providers.gemini]` for Gemini `streamGenerateContent` streaming. |
 | Web data tools | Stable `websearch` and capability-backed `webfetch` routes use separate network policy, durable egress disclosure, and external-source provenance. |

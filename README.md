@@ -89,7 +89,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
 | Verify task completion and inspect evidence | Focus the Verification card with `Alt-V`; run the recommended check or inspect its snapshot and changeset evidence |
 | Review a safe recovery point | Press `Ctrl-R` to preview a controlled checkpoint restore or fork before changing files |
-| Preview long-context compaction | Use `/compact` for a read-only Context Compaction V2 preview; apply remains temporarily frozen |
+| Review or apply long-context compaction | Use `/compact` for a read-only V2 preview, then confirm only when exact target admission is ready |
 | Add a follow-up while Sigil is busy | Submit ordinary chat while a run is active; Sigil shows it in Follow-ups and adds the user message when it dispatches at the next safe turn |
 | Review pending follow-ups | `Tab` focuses the follow-up panel; `/queue show`, `/queue next`, `/queue interrupt`, `/queue edit`, and `/queue delete` are advanced controls |
 | Require a child agent from chat | Say so explicitly, for example "use a sub-agent for ..." |

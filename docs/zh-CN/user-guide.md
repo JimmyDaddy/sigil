@@ -192,7 +192,7 @@ Info rail 会显示上一轮 provider 返回的 prompt token 相对模型 contex
 
 idle 自动化不会抢占 streaming work、排队输入、agent continuation、手动 review、model switch 或 overflow recovery。Preparation 由 request/session owner 管理；idle frontier 一旦变化，结果会被丢弃。只有 exact local admission 通过后才会追加 lifecycle 并激活 boundary；admission 不可用时 session 保持不变，并进入短暂的进程内 cooldown。queued pre-turn preparation 使用同一后台 owner；queue 发生变化会取消它，stale source 或 queue revision 会在 provider dispatch 前失败。
 
-受控 overflow apply path 同样冻结。修复正确性问题期间，它不会计数、压缩或重试请求。
+对于官方 OpenAI Responses endpoint 与精确受支持 snapshot，只有 provider 确认尚未产生 output 或 side effect 的 context-window rejection，才可能进入受控 overflow recovery。Sigil 会对被拒请求与压缩后 target 执行两次受审计、无生成的 input-token measurement，要求 exact fit 与 minimum-savings evidence，重新核对 session/rejection frontier，并只重试一次 retained request。计数失败、stale state、alias、兼容 endpoint、恢复后的 session 或第二次 overflow 都会 fail closed，不会 replay。
 
 ## Code Intelligence
 

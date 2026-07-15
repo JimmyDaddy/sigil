@@ -89,7 +89,7 @@ sigil doctor
 | 执行 durable 多步骤任务 | `/task <任务>`；未完成任务用 `/task continue` |
 | 验证任务完成情况并查看证据 | 用 `Alt-V` 聚焦 Verification card；运行推荐检查，或查看 snapshot 与 changeset 证据 |
 | 检查安全恢复点 | 按 `Ctrl-R` 预览受控 checkpoint restore 或 fork，再决定是否变更文件 |
-| 预览长上下文压缩 | 用 `/compact` 打开只读 Context Compaction V2 preview；apply 仍暂时冻结 |
+| 审查或应用长上下文压缩 | 用 `/compact` 打开只读 V2 preview，仅在 exact target admission ready 后确认 |
 | Sigil 忙碌时追加后续消息 | 在当前 run 进行中提交普通 chat；Sigil 会显示在 Follow-ups，并在下一次安全 turn 派发时追加用户消息 |
 | 查看待处理 follow-ups | `Tab` 聚焦 follow-up panel；`/queue show`、`/queue next`、`/queue interrupt`、`/queue edit` 和 `/queue delete` 是高级控制 |
 | 要求普通 chat 使用子 agent | 明确说明“使用子 agent ...” |
