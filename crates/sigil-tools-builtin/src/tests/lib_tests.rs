@@ -661,13 +661,26 @@ impl Drop for StatefulDockerCleanupFixture {
 }
 
 #[cfg(unix)]
-fn python3_is_available() -> bool {
-    std::process::Command::new("python3")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+fn python3_path() -> Option<PathBuf> {
+    let is_executable = |path: &Path| {
+        fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
+    let system_candidates = [
+        Path::new("/usr/bin/python3"),
+        Path::new("/opt/homebrew/bin/python3"),
+        Path::new("/usr/local/bin/python3"),
+    ];
+    if let Some(path) = system_candidates
+        .into_iter()
+        .find(|path| is_executable(path))
+    {
+        return Some(path.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("python3"))
+        .find(|candidate| is_executable(candidate))
 }
 
 #[cfg(unix)]
@@ -677,6 +690,7 @@ fn write_stateful_docker_cleanup_fixture(
     remove_succeeds: bool,
     spawn_detached_writer: bool,
 ) -> Result<StatefulDockerCleanupFixture> {
+    let python3 = python3_path().context("python3 is required for the Docker cleanup fixture")?;
     let docker = temp.path().join("docker-cleanup-fixture");
     let state_path = temp.path().join("container-running.state");
     let calls_path = temp.path().join("docker-cleanup-calls.txt");
@@ -708,15 +722,18 @@ with writes.open("ab", buffering=0) as stream:
         "exit 17"
     };
     let writer_start_body = if spawn_detached_writer {
-        r#"python3 "$WRITER" "$STATE" "$WRITES" "$WRITER_PID" >/dev/null 2>&1 &
+        format!(
+            r#"{} "$WRITER" "$STATE" "$WRITES" "$WRITER_PID" >/dev/null 2>&1 &
     ATTEMPTS=0
     while [ ! -s "$WRITES" ] && [ "$ATTEMPTS" -lt 500 ]; do
       sleep 0.01
       ATTEMPTS=$((ATTEMPTS + 1))
     done
-    [ -s "$WRITES" ] || exit 15"#
+    [ -s "$WRITES" ] || exit 15"#,
+            shell_quote_path(&python3)
+        )
     } else {
-        "printf started > \"$WRITES\""
+        "printf started > \"$WRITES\"".to_owned()
     };
     let script = format!(
         r#"#!/bin/sh
@@ -882,7 +899,7 @@ async fn docker_cleanup_timeout_force_removes_and_verifies_daemon_container() ->
 #[cfg(unix)]
 #[serial]
 async fn docker_cleanup_output_limit_force_removes_and_verifies_daemon_container() -> Result<()> {
-    if !python3_is_available() {
+    if python3_path().is_none() {
         eprintln!("skipping detached Docker cleanup fixture: python3 unavailable");
         return Ok(());
     }
@@ -922,7 +939,7 @@ async fn docker_cleanup_output_limit_force_removes_and_verifies_daemon_container
 #[cfg(unix)]
 #[serial]
 async fn docker_cleanup_reports_failed_when_daemon_container_remains_running() -> Result<()> {
-    if !python3_is_available() {
+    if python3_path().is_none() {
         eprintln!("skipping detached Docker cleanup fixture: python3 unavailable");
         return Ok(());
     }
@@ -951,9 +968,16 @@ async fn docker_cleanup_reports_failed_when_daemon_container_remains_running() -
     );
     assert!(fixture.state_path.exists());
     let writes_before = fs::metadata(&fixture.writes_path)?.len();
-    sleep(Duration::from_millis(50)).await;
+    let mut writer_survived_cleanup = false;
+    for _ in 0..40 {
+        sleep(Duration::from_millis(25)).await;
+        if fs::metadata(&fixture.writes_path)?.len() > writes_before {
+            writer_survived_cleanup = true;
+            break;
+        }
+    }
     assert!(
-        fs::metadata(&fixture.writes_path)?.len() > writes_before,
+        writer_survived_cleanup,
         "detached daemon simulator should survive host process-group cleanup when Docker removal fails"
     );
     fs::remove_file(&fixture.state_path)?;
@@ -965,7 +989,7 @@ async fn docker_cleanup_reports_failed_when_daemon_container_remains_running() -
 #[cfg(unix)]
 #[serial]
 async fn docker_cleanup_reconciles_running_container_after_cli_exit() -> Result<()> {
-    if !python3_is_available() {
+    if python3_path().is_none() {
         eprintln!("skipping detached Docker cleanup fixture: python3 unavailable");
         return Ok(());
     }
