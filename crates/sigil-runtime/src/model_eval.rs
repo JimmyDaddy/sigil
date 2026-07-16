@@ -648,12 +648,20 @@ pub fn current_model_eval_fixture_tree_digest(
     Ok(format!("sha256:{:x}", tree_hasher.finalize()))
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     let directory = fs::File::open(path)
         .with_context(|| format!("failed to open directory {}", path.display()))?;
     directory
         .sync_all()
         .with_context(|| format!("failed to sync directory {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    // Materialized files are individually synced before publication. Directory fsync is not
+    // available through Rust's portable Windows filesystem API.
+    Ok(())
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {

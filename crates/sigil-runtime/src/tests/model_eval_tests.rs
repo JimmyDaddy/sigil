@@ -75,6 +75,28 @@ fn committed_model_eval_fixtures_load_and_materialize() {
 }
 
 #[test]
+fn model_eval_materialization_publishes_synced_files_portably() {
+    let fixture = load_model_eval_fixture(fixture_root("small-code-edit")).expect("load fixture");
+    let temp = tempdir().expect("temp dir");
+    let workspace = temp.path().join("workspace");
+
+    let materialized =
+        materialize_model_eval_fixture(&fixture, &workspace).expect("materialize fixture");
+
+    assert_eq!(
+        materialized.workspace_root,
+        fs::canonicalize(temp.path())
+            .expect("canonical temp dir")
+            .join("workspace")
+    );
+    assert_eq!(
+        fs::read(workspace.join("src/lib.rs")).expect("read published source"),
+        fs::read(fixture_root("small-code-edit").join("files/src/lib.rs"))
+            .expect("read fixture source")
+    );
+}
+
+#[test]
 fn model_eval_fixture_is_a_standalone_cargo_workspace_when_nested_in_the_repository() {
     let fixture = load_model_eval_fixture(fixture_root("small-code-edit")).expect("load fixture");
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
