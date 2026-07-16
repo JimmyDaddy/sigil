@@ -385,7 +385,11 @@ def provider_environment(case_root: Path, provider: str) -> dict[str, str]:
 
 
 def session_files(state_root: Path) -> list[Path]:
-    return sorted(path for path in state_root.rglob("*.jsonl") if path.is_file())
+    return sorted(
+        path
+        for path in state_root.rglob("session-*.jsonl")
+        if path.is_file() and path.parent.name == "sessions"
+    )
 
 
 def _control(record: dict[str, object]) -> dict[str, object]:

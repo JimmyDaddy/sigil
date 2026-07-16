@@ -231,6 +231,20 @@ allowed_tools = ["read_file"]
 
 
 class DurableEvidenceTests(unittest.TestCase):
+    def test_session_discovery_ignores_non_session_jsonl_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            history = state / "workspaces" / "fixture" / "input-history.jsonl"
+            history.parent.mkdir(parents=True)
+            history.write_text('{"input":"private prompt"}\n', encoding="utf-8")
+            session = history.parent / "sessions" / "session-fixture.jsonl"
+            session.parent.mkdir()
+            session.write_text("{}\n", encoding="utf-8")
+            unrelated = state / "sessions" / "other.jsonl"
+            unrelated.parent.mkdir()
+            unrelated.write_text("{}\n", encoding="utf-8")
+            self.assertEqual(MODULE.session_files(state), [session])
+
     def test_audit_requires_structured_plan_usage_terminal_and_read_only_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             session = Path(temporary) / "session.jsonl"
