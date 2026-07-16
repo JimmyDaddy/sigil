@@ -89,6 +89,10 @@ pub(crate) enum TimelineRenderInvariantError {
         effective_lines: usize,
         block_lines: usize,
     },
+    LastVisibleBlockMismatch {
+        expected: Option<usize>,
+        actual: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -97,6 +101,7 @@ pub(crate) struct TimelineRenderStore {
     blocks: Vec<RenderedTimelineBlock>,
     prefix_line_counts: Vec<usize>,
     prefix_hashes: Vec<u64>,
+    last_visible_block_index: Option<usize>,
     revision: u64,
 }
 
@@ -113,6 +118,7 @@ impl TimelineRenderStore {
             .map(|(index, entry)| render_block(entry, options, index))
             .collect();
         self.repair_separators();
+        self.last_visible_block_index = self.find_last_visible_block_index();
         self.rebuild_indexes();
         self.revision = self.revision.saturating_add(1);
         debug_assert!(self.validate_invariants().is_ok());
@@ -132,12 +138,18 @@ impl TimelineRenderStore {
             return AppendOutcome::Rebuilt;
         }
         let block = render_block(&timeline[index], options, index);
-        if !block.lines.is_empty() {
-            self.restore_separator_on_last_visible_block();
+        let block_is_visible = block_is_visible(&block);
+        let previous_last_visible = self.last_visible_block_index;
+        if block_is_visible && let Some(previous_index) = previous_last_visible {
+            self.restore_separator_on_block(previous_index);
         }
         self.blocks.push(block);
-        self.repair_separators();
-        self.rebuild_indexes();
+        if block_is_visible {
+            self.last_visible_block_index = Some(index);
+            self.rebuild_indexes_from(previous_last_visible.unwrap_or(0));
+        } else {
+            self.prefix_line_counts.push(self.total_lines());
+        }
         self.revision = self.revision.saturating_add(1);
         debug_assert!(self.validate_invariants().is_ok());
         AppendOutcome::Appended
@@ -153,14 +165,37 @@ impl TimelineRenderStore {
             self.rebuild(timeline, options);
             return RerenderOutcome::Rebuilt;
         };
-        if self.blocks.get(index).is_none() || !self.global_key_matches(options) {
+        if self.blocks.get(index).is_none()
+            || index.saturating_add(1) != self.blocks.len()
+            || !self.global_key_matches(options)
+        {
             self.rebuild(timeline, options);
             return RerenderOutcome::Rebuilt;
         }
         let next_block = render_block(entry, options, index);
+        let was_visible = self.last_visible_block_index == Some(index);
+        let is_visible = block_is_visible(&next_block);
+        let previous_visible = if was_visible {
+            self.blocks[..index].iter().rposition(block_is_visible)
+        } else {
+            self.last_visible_block_index
+        };
         self.blocks[index] = next_block;
-        self.repair_separators();
-        self.rebuild_indexes();
+        match (was_visible, is_visible) {
+            (true, true) => self.rebuild_indexes_from(index),
+            (false, false) => {}
+            (false, true) => {
+                if let Some(previous_index) = previous_visible {
+                    self.restore_separator_on_block(previous_index);
+                }
+                self.last_visible_block_index = Some(index);
+                self.rebuild_indexes_from(previous_visible.unwrap_or(0));
+            }
+            (true, false) => {
+                self.last_visible_block_index = previous_visible;
+                self.rebuild_indexes_from(previous_visible.unwrap_or(0));
+            }
+        }
         self.revision = self.revision.saturating_add(1);
         debug_assert!(self.validate_invariants().is_ok());
         RerenderOutcome::Rerendered
@@ -177,6 +212,13 @@ impl TimelineRenderStore {
     }
 
     pub(crate) fn validate_invariants(&self) -> Result<(), TimelineRenderInvariantError> {
+        let actual_last_visible = self.find_last_visible_block_index();
+        if self.last_visible_block_index != actual_last_visible {
+            return Err(TimelineRenderInvariantError::LastVisibleBlockMismatch {
+                expected: actual_last_visible,
+                actual: self.last_visible_block_index,
+            });
+        }
         let expected_prefix_len = self.blocks.len().saturating_add(1);
         if self.prefix_line_counts.len() != expected_prefix_len {
             return Err(TimelineRenderInvariantError::PrefixLineCountsLen {
@@ -253,10 +295,22 @@ impl TimelineRenderStore {
         self.prefix_line_counts.clear();
         self.prefix_line_counts.push(0);
         self.prefix_hashes.clear();
-        let mut line_count = 0usize;
-        let mut hash = 0u64;
-        let effective_line_counts = self.effective_block_line_counts();
-        for (block, effective_lines) in self.blocks.iter().zip(effective_line_counts) {
+        self.rebuild_indexes_from(0);
+    }
+
+    fn rebuild_indexes_from(&mut self, start_block_index: usize) {
+        let start_block_index = start_block_index.min(self.blocks.len());
+        let base_line_count = self
+            .prefix_line_counts
+            .get(start_block_index)
+            .copied()
+            .unwrap_or(0);
+        self.prefix_line_counts.truncate(start_block_index + 1);
+        self.prefix_hashes.truncate(base_line_count);
+        let mut line_count = base_line_count;
+        let mut hash = self.prefix_hashes.last().copied().unwrap_or(0);
+        for (index, block) in self.blocks.iter().enumerate().skip(start_block_index) {
+            let effective_lines = self.effective_block_line_count(index);
             line_count = line_count.saturating_add(effective_lines);
             self.prefix_line_counts.push(line_count);
             for plain in block.plain_lines.iter().take(effective_lines) {
@@ -267,41 +321,39 @@ impl TimelineRenderStore {
     }
 
     fn effective_block_line_counts(&self) -> Vec<usize> {
-        let Some(last_visible_index) = self.last_visible_block_index() else {
-            return vec![0; self.blocks.len()];
-        };
         self.blocks
             .iter()
             .enumerate()
-            .map(|(index, block)| {
-                if index < last_visible_index {
-                    block.lines.len()
-                } else if index == last_visible_index {
-                    tail_trimmed_line_count(block)
-                } else {
-                    0
-                }
-            })
+            .map(|(index, _)| self.effective_block_line_count(index))
             .collect()
     }
 
-    fn last_visible_block_index(&self) -> Option<usize> {
-        self.blocks
-            .iter()
-            .rposition(|block| block.lines.iter().any(line_has_visible_content))
+    fn effective_block_line_count(&self, index: usize) -> usize {
+        let Some(last_visible_index) = self.last_visible_block_index else {
+            return 0;
+        };
+        let Some(block) = self.blocks.get(index) else {
+            return 0;
+        };
+        if index < last_visible_index {
+            block.lines.len()
+        } else if index == last_visible_index {
+            tail_trimmed_line_count(block)
+        } else {
+            0
+        }
+    }
+
+    fn find_last_visible_block_index(&self) -> Option<usize> {
+        self.blocks.iter().rposition(block_is_visible)
     }
 
     fn global_key_matches(&self, options: &crate::ui::TimelineRenderOptions) -> bool {
         self.global_key == TimelineRenderGlobalKey::from_options(options)
     }
 
-    fn restore_separator_on_last_visible_block(&mut self) {
-        let Some(block) = self
-            .blocks
-            .iter_mut()
-            .rev()
-            .find(|block| !block.lines.is_empty())
-        else {
+    fn restore_separator_on_block(&mut self, index: usize) {
+        let Some(block) = self.blocks.get_mut(index) else {
             return;
         };
         if block
@@ -451,6 +503,10 @@ fn push_separator(block: &mut RenderedTimelineBlock) {
     block.lines.push(line);
     block.plain_lines.push(plain);
     block.kind = TimelineBlockKind::EntryWithTrailingSeparator;
+}
+
+fn block_is_visible(block: &RenderedTimelineBlock) -> bool {
+    block.lines.iter().any(line_has_visible_content)
 }
 
 fn block_kind_for_lines(lines: &[Line<'_>]) -> TimelineBlockKind {

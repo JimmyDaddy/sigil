@@ -117,14 +117,14 @@ fn timeline_render_store_sequence_matches_full_rebuild_after_mixed_operations() 
     timeline[1].text = "assistant answer".to_owned();
     assert_eq!(
         store.rerender_entry(&timeline, 1, &narrow),
-        RerenderOutcome::Rerendered
+        RerenderOutcome::Rebuilt
     );
     assert_matches_full_rebuild(&store, &timeline, &narrow);
 
     timeline[1].text = "short".to_owned();
     assert_eq!(
         store.rerender_entry(&timeline, 1, &narrow),
-        RerenderOutcome::Rerendered
+        RerenderOutcome::Rebuilt
     );
     assert_matches_full_rebuild(&store, &timeline, &narrow);
 
@@ -133,7 +133,7 @@ fn timeline_render_store_sequence_matches_full_rebuild_after_mixed_operations() 
             .to_owned();
     assert_eq!(
         store.rerender_entry(&timeline, 1, &narrow),
-        RerenderOutcome::Rerendered
+        RerenderOutcome::Rebuilt
     );
     assert_matches_full_rebuild(&store, &timeline, &narrow);
 
@@ -304,6 +304,56 @@ fn timeline_render_store_entry_at_line_matches_ranges() {
             assert_eq!(snapshot.entry_at_line(line_index), Some(entry_index));
         }
     }
+}
+
+#[test]
+fn timeline_render_store_fast_paths_match_rebuild_across_hidden_tail_transitions() {
+    let options = render_options();
+    let mut timeline = (0..128)
+        .map(|index| entry(TimelineRole::Notice, &format!("notice {index}")))
+        .collect::<Vec<_>>();
+    let mut store = TimelineRenderStore::default();
+    store.rebuild(&timeline, &options);
+
+    timeline.push(entry(TimelineRole::Assistant, ""));
+    assert_eq!(
+        store.append_entry(&timeline, timeline.len() - 1, &options),
+        AppendOutcome::Appended
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
+    assert_eq!(
+        store.snapshot().range_for_entry(timeline.len() - 1),
+        Some(store.snapshot().total_lines()..store.snapshot().total_lines())
+    );
+
+    timeline.push(entry(TimelineRole::Assistant, "streaming"));
+    assert_eq!(
+        store.append_entry(&timeline, timeline.len() - 1, &options),
+        AppendOutcome::Appended
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
+
+    let tail_index = timeline.len() - 1;
+    timeline[tail_index].text = "streaming update\nwith more content".to_owned();
+    assert_eq!(
+        store.rerender_entry(&timeline, tail_index, &options),
+        RerenderOutcome::Rerendered
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
+
+    timeline[tail_index].text.clear();
+    assert_eq!(
+        store.rerender_entry(&timeline, tail_index, &options),
+        RerenderOutcome::Rerendered
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
+
+    timeline[tail_index].text = "visible again".to_owned();
+    assert_eq!(
+        store.rerender_entry(&timeline, tail_index, &options),
+        RerenderOutcome::Rerendered
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
 }
 
 #[test]
