@@ -195,5 +195,5 @@ pub(crate) fn relativize(workspace_root: &Path, path: &Path) -> Result<String> {
         .strip_prefix(workspace_root)
         .unwrap_or(path)
         .to_string_lossy()
-        .to_string())
+        .replace('\\', "/"))
 }

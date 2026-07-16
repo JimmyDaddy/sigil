@@ -5618,6 +5618,9 @@ fn windows_prefixed_workspace_paths_resolve_existing_and_missing_targets() -> Re
     let subject = super::tool_path_subject(&canonical_workspace, "existing.txt")?;
     assert_eq!(subject.scope, ToolSubjectScope::Workspace);
     assert_eq!(subject.normalized, "existing.txt");
+    let missing_subject = super::tool_path_subject(&canonical_workspace, "missing/child.txt")?;
+    assert_eq!(missing_subject.scope, ToolSubjectScope::Workspace);
+    assert_eq!(missing_subject.normalized, "missing/child.txt");
     Ok(())
 }
 
