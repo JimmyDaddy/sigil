@@ -37,6 +37,31 @@ python3 scripts/alpha-dogfood-campaign.py \
 
 Use repeated `--case` arguments to select a subset. `--list-cases` prints the stable case ids.
 
+## Stateful TUI campaign
+
+Run the stateful campaign separately after the default offline campaign. It requires the exact native binary plus the checksum-pinned DeepSeek V4 Flash `tokenizer.json`. Install the tokenizer first if needed; the command prints its verified path:
+
+```bash
+sigil tokenizer install deepseek-v4-flash
+
+python3 scripts/tui-stateful-pty-acceptance.py \
+  --binary /path/to/sigil \
+  --tokenizer-json /path/printed/by/tokenizer-install/tokenizer.json \
+  --expected-version 0.0.1-alpha.4 \
+  --expected-commit f4e6c5aeea86b3283988efe20db44a0f97454f97 \
+  --expected-binary-sha256 <sha256>
+```
+
+The campaign freezes both inputs into case-owned storage and runs three real TUI processes over one durable session family:
+
+1. a loopback provider creates four finalized turns, including one controlled `write_file` mutation and the facts-before-final continuation that previously risked a duplicate reply;
+2. after the loopback server is closed, a default-transport configuration with closed ambient proxies resumes the source session, applies locally admitted compaction, restores the controlled file through the Ctrl-R reverse-diff modal, and uses modal `F` to fork without changing the restored file;
+3. a fresh process starts on the source session and uses the visible `/resume` selector to switch to the unique non-current fork.
+
+Passing evidence requires the final reply to appear exactly once on both reconstructed VT screens and exactly once as a structured final-answer entry in each source/fork stream. It also requires one `compaction_applied_v2`, one `checkpoint_restored`, one `conversation_forked`, and unchanged file hashes across fork and resume. Custom provider routes are intentionally not used for local compaction admission.
+
+The safe `manifest.json` contains only public binary/tokenizer identity, counters, booleans, duration, and relative evidence paths/checksums. Byte-exact source/fork JSONL plus raw PTY logs remain in ignored local output for independent recounting and are never uploaded. Repository-local output is rejected unless Git ignores it; an explicitly selected path outside the repository is recorded as local-only. CI runs parser, admission, process-cleanup, durable-structure, and manifest-privacy contract tests; the real release-binary campaign remains an explicit local release check because it requires the installed tokenizer artifact.
+
 ## Evidence
 
 The default output is `.repo-local-dev/dogfood/offline-<timestamp>`. The aggregate `manifest.json`, `manifest.sha256`, and `summary.md` contain only timestamps, build identity, binary digest, case status, duration, and relative evidence paths. Raw case artifacts stay in the ignored local output directory for debugging and are never uploaded automatically. A custom output outside the repository is recorded as explicitly selected local output; a custom output inside the repository is rejected unless Git ignores it.

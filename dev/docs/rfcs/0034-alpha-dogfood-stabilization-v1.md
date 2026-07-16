@@ -1,6 +1,6 @@
 # RFC-0034 Alpha Dogfood Stabilization V1
 
-状态：accepted / R34.0-R34.2 complete / R34.3-R34.5 planned
+状态：accepted / R34.0-R34.3 complete / R34.4-R34.5 planned
 
 创建日期：2026-07-16
 
@@ -141,6 +141,7 @@ Only evidence-bound failures unlock fixes. A harness defect must be repaired in 
 ./scripts/test-published-distribution-smoke.sh
 python3 scripts/alpha-dogfood-campaign.py --help
 python3 scripts/test-alpha-dogfood-campaign.py
+python3 scripts/test-tui-stateful-pty-acceptance.py
 python3 scripts/alpha-dogfood-campaign.py \
   --binary <released-sigil-binary> \
   --expected-version 0.0.1-alpha.4
@@ -155,3 +156,4 @@ R34.3-R34.5 add their own targeted PTY, provider, docs and full-workspace gates 
 - R34.0 complete：RFC、execution slices、privacy/evidence contract、exact-binary admission and dependency order accepted on 2026-07-16.
 - R34.1 complete：[GitHub Actions run 29475042404](https://github.com/JimmyDaddy/sigil/actions/runs/29475042404) passed the exact `alpha.4` public distribution matrix: four npm platforms, two Homebrew architectures, GitHub archive checksums, artifact attestations and doctor build/privacy metadata.
 - R34.2 complete：the released `alpha.4` macOS ARM binary (`e4bfd6c96c099df2bda8abb3db07ad39b3cd05ca72702a01d3d9c407b2ae26c0`) passed Context, Web, Feedback, Attention and Image through the aggregate runner. The terminal manifest digest is `e8131b4cf7511af0f0f51e879717e6934d3d95936bb0df62630ff58c65d27905`. The first run exposed two `harness_defect` findings—an aggregate state/cache override and a cursor-repaint-sensitive feedback marker—which were fixed and covered before the successful rerun. Post-implementation review additionally tightened native-only frozen-binary execution, detached-descendant cleanup, loopback Feedback evidence, output ignore policy and terminal-failure contracts; no product regression was observed.
+- R34.3 complete：the same released `alpha.4` binary plus the checksum-pinned DeepSeek V4 Flash tokenizer passed the standalone stateful real-PTY campaign. The final safe manifest digest is `0380c21401b5106b1128857390424f1506cd2d9f14c54387bd81cdda6f48e0d7`. Three real TUI processes proved four finalized turns, facts-before-final reply deduplication, one locally admitted compaction, one controlled checkpoint restore, modal-owned `F` conversation fork, and explicit source-to-fork `/resume`; the resumed screen additionally proved the active session identity was the fork. After all processes exited, source/fork durable final answers were re-audited exactly once and byte-exact JSONL evidence was preserved with independent checksums; both reconstructed VT screens also contained the canary exactly once. Iteration found and fixed harness defects around viewport markers, durable timing/schema, the sixth facts-continuation request, custom-route compaction admission, transient notices, fork identity, terminal re-audit, ignored-output admission and detached-process cleanup. Real dogfood also exposed unnecessary absolute workspace paths in file-tool results; the product now emits workspace-relative user/model-visible paths. The final harness preserves rather than weakens each product boundary.
