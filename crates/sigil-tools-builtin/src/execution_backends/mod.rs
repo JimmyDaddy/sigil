@@ -31,6 +31,9 @@ use crate::process_group::{
     process_group_has_live_members as process_group_is_alive,
     send_process_group_signal as send_signal_to_process_group,
 };
+use crate::process_owner::ProcessTreeOwnerGuard;
+#[cfg(windows)]
+use crate::process_owner::terminate_owned_process_tree;
 
 mod bubblewrap;
 mod docker;
@@ -680,6 +683,16 @@ async fn command_output_to_receipt_with_limits(
 
     let mut child = command.spawn()?;
     let process_id = child.id();
+    let _process_owner = match ProcessTreeOwnerGuard::assign(process_id) {
+        Ok(owner) => owner,
+        Err(error) => {
+            let direct_kill = child.start_kill();
+            let direct_wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
+            bail!(
+                "failed to establish process-tree ownership before execution: {error}; direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
+            );
+        }
+    };
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -1325,23 +1338,17 @@ async fn cleanup_windows_process_tree(
             "process id unavailable; Windows process-tree cleanup could not be requested: direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
         ));
     };
-    let mut taskkill_command = Command::new("taskkill");
-    taskkill_command.args(["/PID", &process_id.to_string(), "/T", "/F"]);
-    let taskkill = run_cleanup_command(
-        taskkill_command,
-        format!("taskkill process tree {process_id}"),
-    )
-    .await;
-    if !matches!(&taskkill, Ok(status) if status.success()) {
+    let terminate = terminate_owned_process_tree(process_id);
+    if terminate.is_err() {
         let _ = child.start_kill();
     }
     let wait = tokio::time::timeout(PROCESS_KILL_VERIFY_GRACE, child.wait()).await;
-    match (&taskkill, &wait) {
-        (Ok(status), Ok(Ok(_))) if status.success() => ExecutionCleanupReceipt::completed(format!(
-            "taskkill terminated process tree {process_id} and direct child was reaped"
+    match (&terminate, &wait) {
+        (Ok(()), Ok(Ok(_))) => ExecutionCleanupReceipt::completed(format!(
+            "Windows Job Object terminated process tree {process_id} and direct child was reaped"
         )),
         _ => ExecutionCleanupReceipt::failed(format!(
-            "Windows process-tree cleanup could not be proven: taskkill={taskkill:?}, wait={wait:?}"
+            "Windows Job Object process-tree cleanup could not be proven: terminate={terminate:?}, wait={wait:?}"
         )),
     }
 }

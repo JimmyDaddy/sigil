@@ -6072,3 +6072,132 @@ fn non_posix_commands_do_not_reuse_posix_readonly_downgrades() -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_native_shell_reports_utf8_and_nonzero_exit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let tool = bash_tool(temp.path());
+    let ctx = ToolContext::new(workspace, 10);
+
+    let utf8 = tool
+        .execute(
+            ctx.clone(),
+            "windows-utf8".to_owned(),
+            json!({ "command": "Write-Output '你好，Sigil'" }),
+        )
+        .await?;
+    assert!(matches!(utf8.status, ToolResultStatus::Ok));
+    assert!(utf8.content.contains("你好，Sigil"));
+    assert_eq!(utf8.metadata.details["shell"]["dialect"], "powershell");
+
+    let failed = tool
+        .execute(
+            ctx,
+            "windows-exit".to_owned(),
+            json!({ "command": "Write-Output 'before failure'; exit 7" }),
+        )
+        .await?;
+    assert!(matches!(failed.status, ToolResultStatus::Error(_)));
+    assert_eq!(failed.metadata.details["shell"]["exit_code"], 7);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_job_object_reaps_one_shot_descendants_on_timeout() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let pid_file = temp.path().join("one-shot-child.pid");
+    let command = windows_descendant_command(&pid_file);
+    let result = bash_tool(temp.path())
+        .execute(
+            ToolContext::new(workspace, 10),
+            "windows-timeout".to_owned(),
+            json!({ "command": command, "timeout_secs": 1 }),
+        )
+        .await?;
+    let child_pid = read_windows_pid(&pid_file).await?;
+
+    assert!(matches!(result.status, ToolResultStatus::Error(_)));
+    assert_eq!(
+        result.metadata.details["execution"]["resources"]["cleanup"]["status"],
+        "completed"
+    );
+    assert!(!windows_process_is_alive(child_pid)?);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_job_object_reaps_terminal_process_and_pty_descendants() -> Result<()> {
+    for pty in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let pid_file = temp.path().join(if pty {
+            "pty-child.pid"
+        } else {
+            "process-child.pid"
+        });
+        let manager = super::TerminalProcessManager::new(temp.path())?;
+        let request = TerminalStartRequest::new(windows_descendant_command(&pid_file));
+        let entry = if pty {
+            manager.start_pty(request, None).await?
+        } else {
+            manager.start(request).await?
+        };
+        let child_pid = read_windows_pid(&pid_file).await?;
+        let cancelled = manager.cancel(&entry.handle.task_id).await?;
+
+        assert_eq!(cancelled.status, TerminalTaskStatus::Cancelled);
+        assert_eq!(
+            cancelled.cleanup.as_ref().map(|cleanup| cleanup.status),
+            Some(ExecutionCleanupStatus::Completed)
+        );
+        assert!(!windows_process_is_alive(child_pid)?);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_descendant_command(pid_file: &Path) -> String {
+    let path = pid_file.to_string_lossy().replace(char::from(39), "''");
+    format!(
+        "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru; Set-Content -NoNewline -LiteralPath '{path}' -Value $child.Id; Start-Sleep -Seconds 30"
+    )
+}
+
+#[cfg(windows)]
+async fn read_windows_pid(path: &Path) -> Result<u32> {
+    for _ in 0..200 {
+        if let Ok(contents) = tokio::fs::read_to_string(path).await
+            && let Ok(process_id) = contents.trim().parse()
+        {
+            return Ok(process_id);
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!(
+        "timed out waiting for Windows descendant pid at {}",
+        path.display()
+    )
+}
+
+#[cfg(windows)]
+fn windows_process_is_alive(process_id: u32) -> Result<bool> {
+    let script = format!(
+        "if (Get-Process -Id {process_id} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+    );
+    Ok(std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .status()?
+        .success())
+}

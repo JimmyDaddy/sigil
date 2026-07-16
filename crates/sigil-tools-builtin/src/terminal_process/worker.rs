@@ -2,8 +2,11 @@ use super::*;
 
 #[cfg(unix)]
 use crate::process_group::{process_group_has_live_members, send_process_group_signal};
+#[cfg(windows)]
+use crate::process_owner::terminate_owned_process_tree;
 
 pub(super) struct PtyRuntime {
+    pub(super) process_owner: ProcessTreeOwnerGuard,
     pub(super) input_tx: std_mpsc::SyncSender<Vec<u8>>,
     pub(super) master: Arc<StdMutex<Box<dyn MasterPty + Send>>>,
     pub(super) killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
@@ -43,6 +46,7 @@ impl TerminalCaptureEvidence {
 }
 
 pub(super) struct TerminalWorker {
+    pub(super) _process_owner: ProcessTreeOwnerGuard,
     pub(super) child: TokioChild,
     pub(super) process_id: Option<u32>,
     pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
@@ -57,6 +61,7 @@ pub(super) struct TerminalWorker {
 }
 
 pub(super) struct PtyWorker {
+    pub(super) _process_owner: ProcessTreeOwnerGuard,
     pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
     pub(super) artifacts: TerminalTaskArtifacts,
     pub(super) wait_task: JoinHandle<PtyWaitOutcome>,
@@ -167,6 +172,16 @@ pub(super) fn spawn_pty_runtime(
         .spawn_command(command)
         .with_context(|| format!("failed to start terminal pty command: {}", plan.command))?;
     let process_id = child.process_id();
+    let process_owner = match ProcessTreeOwnerGuard::assign(process_id) {
+        Ok(owner) => owner,
+        Err(error) => {
+            let direct_kill = child.kill();
+            let direct_wait = child.wait();
+            bail!(
+                "failed to establish terminal PTY process-tree ownership: {error}; direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
+            );
+        }
+    };
     let killer = Arc::new(StdMutex::new(child.clone_killer()));
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let (capture_failure_tx, capture_failure_rx) = mpsc::unbounded_channel();
@@ -192,6 +207,7 @@ pub(super) fn spawn_pty_runtime(
     });
 
     Ok(PtyRuntime {
+        process_owner,
         input_tx,
         master,
         killer,
@@ -830,30 +846,19 @@ async fn terminate_process_tree_after_capture_failure(
     process_id: Option<u32>,
     grace: Duration,
 ) -> ExecutionCleanupReceipt {
-    let taskkill = match process_id {
-        Some(process_id) => {
-            let process_id = process_id.to_string();
-            let mut command = Command::new("taskkill");
-            command.args(["/PID", process_id.as_str(), "/T", "/F"]);
-            run_terminal_cleanup_command(command, format!("taskkill process tree {process_id}"))
-                .await
-        }
-        None => Err(anyhow!("terminal process id unavailable")),
-    };
+    let terminate = process_id
+        .ok_or_else(|| anyhow!("terminal process id unavailable"))
+        .and_then(terminate_owned_process_tree);
     let wait = timeout(grace.max(Duration::from_millis(50)), child.wait()).await;
-    if taskkill
-        .as_ref()
-        .is_ok_and(std::process::ExitStatus::success)
-        && matches!(wait, Ok(Ok(_)))
-    {
+    if terminate.is_ok() && matches!(wait, Ok(Ok(_))) {
         return ExecutionCleanupReceipt::completed(
-            "terminal output capture failed; taskkill /T /F terminated the process tree and reaped the direct child",
+            "terminal output capture failed; Windows Job Object terminated the process tree and reaped the direct child",
         );
     }
     let direct_kill = child.start_kill();
     let direct_wait = timeout(TERMINAL_CLEANUP_WAIT_TIMEOUT, child.wait()).await;
     ExecutionCleanupReceipt::failed(format!(
-        "terminal output capture failed; taskkill /T /F process-tree cleanup was not proven: taskkill={taskkill:?}, wait={wait:?}, direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
+        "terminal output capture failed; Windows Job Object cleanup was not proven: terminate={terminate:?}, wait={wait:?}, direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
     ))
 }
 
@@ -947,16 +952,10 @@ async fn terminate_pty_after_capture_failure(
     worker: &mut PtyWorker,
 ) -> (PtyWaitOutcome, ExecutionCleanupReceipt) {
     #[cfg(windows)]
-    let taskkill = match worker.process_id {
-        Some(process_id) => {
-            let process_id = process_id.to_string();
-            let mut command = Command::new("taskkill");
-            command.args(["/PID", process_id.as_str(), "/T", "/F"]);
-            run_terminal_cleanup_command(command, format!("taskkill process tree {process_id}"))
-                .await
-        }
-        None => Err(anyhow!("terminal pty process id unavailable")),
-    };
+    let terminate = worker
+        .process_id
+        .ok_or_else(|| anyhow!("terminal pty process id unavailable"))
+        .and_then(terminate_owned_process_tree);
     let direct_kill = kill_pty_child(Arc::clone(&worker.killer)).await;
     let waited = timeout(
         worker.cancel_grace.max(Duration::from_millis(50)),
@@ -975,17 +974,13 @@ async fn terminate_pty_after_capture_failure(
         },
     };
     #[cfg(windows)]
-    let cleanup = if taskkill
-        .as_ref()
-        .is_ok_and(std::process::ExitStatus::success)
-        && wait_converged
-    {
+    let cleanup = if terminate.is_ok() && wait_converged {
         ExecutionCleanupReceipt::completed(
-            "terminal pty output capture failed; taskkill /T /F terminated the process tree and child was reaped",
+            "terminal pty output capture failed; Windows Job Object terminated the process tree and child was reaped",
         )
     } else {
         ExecutionCleanupReceipt::failed(format!(
-            "terminal pty output capture failed; taskkill /T /F cleanup was not proven: taskkill={taskkill:?}, direct_kill={direct_kill:?}, wait_converged={}",
+            "terminal pty output capture failed; Windows Job Object cleanup was not proven: terminate={terminate:?}, direct_kill={direct_kill:?}, wait_converged={}",
             wait_converged
         ))
     };
@@ -1036,16 +1031,12 @@ async fn cleanup_process_group_after_direct_exit(
             "terminal output capture failed after direct child exit; process id was unavailable",
         );
     };
-    let process_id = process_id.to_string();
-    let mut command = Command::new("taskkill");
-    command.args(["/PID", process_id.as_str(), "/T", "/F"]);
-    match run_terminal_cleanup_command(command, format!("taskkill process tree {process_id}")).await
-    {
-        Ok(status) if status.success() => ExecutionCleanupReceipt::completed(
-            "terminal output capture failed after direct child exit; taskkill /T /F terminated the remaining process tree",
+    match terminate_owned_process_tree(process_id) {
+        Ok(()) => ExecutionCleanupReceipt::completed(
+            "terminal output capture failed after direct child exit; Windows Job Object terminated the remaining process tree",
         ),
         result => ExecutionCleanupReceipt::failed(format!(
-            "terminal output capture failed after direct child exit; taskkill /T /F cleanup was not proven: {result:?}"
+            "terminal output capture failed after direct child exit; Windows Job Object cleanup was not proven: {result:?}"
         )),
     }
 }
@@ -1258,7 +1249,12 @@ async fn kill_pty_child(killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>
         .context("terminal pty kill task failed")?
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(super) async fn send_terminate_signal(process_id: u32) -> Result<()> {
+    terminate_owned_process_tree(process_id)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) async fn send_terminate_signal(_process_id: u32) -> Result<()> {
     Ok(())
 }

@@ -121,6 +121,16 @@ impl TerminalProcessManager {
             .spawn()
             .with_context(|| format!("failed to start terminal command: {}", plan.command))?;
         let process_id = child.id();
+        let process_owner = match ProcessTreeOwnerGuard::assign(process_id) {
+            Ok(owner) => owner,
+            Err(error) => {
+                let direct_kill = child.start_kill();
+                let direct_wait = timeout(TERMINAL_CLEANUP_WAIT_TIMEOUT, child.wait()).await;
+                bail!(
+                    "failed to establish terminal process-tree ownership: {error}; direct_kill={direct_kill:?}, direct_wait={direct_wait:?}"
+                );
+            }
+        };
         let output_file = Arc::new(Mutex::new(CombinedOutputWriter::new(
             open_append_file(&plan.artifacts.absolute_output).await?,
             self.artifact_limits.combined_bytes,
@@ -158,6 +168,7 @@ impl TerminalProcessManager {
             .insert(plan.task_id.clone(), managed);
         self.record_permission_context(&plan)?;
         tokio::spawn(run_terminal_worker(TerminalWorker {
+            _process_owner: process_owner,
             child,
             process_id,
             summary,
@@ -210,6 +221,7 @@ impl TerminalProcessManager {
             .insert(plan.task_id.clone(), managed);
         self.record_permission_context(&plan)?;
         tokio::spawn(run_pty_worker(PtyWorker {
+            _process_owner: pty_runtime.process_owner,
             summary,
             artifacts: plan.artifacts,
             wait_task: pty_runtime.wait_task,

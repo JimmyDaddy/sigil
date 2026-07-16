@@ -1250,6 +1250,7 @@ async fn terminal_reader_task_panic_triggers_live_cleanup_without_failure_signal
     let started = std::time::Instant::now();
 
     super::run_terminal_worker(super::TerminalWorker {
+        _process_owner: crate::process_owner::ProcessTreeOwnerGuard::assign(process_id)?,
         child,
         process_id,
         summary: Arc::clone(&summary),
@@ -1406,6 +1407,7 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         .arg("sleep 0.05")
         .spawn()?;
     super::run_terminal_worker(super::TerminalWorker {
+        _process_owner: crate::process_owner::ProcessTreeOwnerGuard::assign(None)?,
         child: worker_child,
         process_id: None,
         summary: Arc::clone(&worker_summary),
@@ -1591,6 +1593,7 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
     });
     aborted_wait_task.abort();
     super::run_pty_worker(super::PtyWorker {
+        _process_owner: crate::process_owner::ProcessTreeOwnerGuard::assign(None)?,
         summary: Arc::clone(&worker_summary),
         artifacts: worker_artifacts,
         wait_task: aborted_wait_task,

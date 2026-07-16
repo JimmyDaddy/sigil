@@ -191,3 +191,12 @@ Windows-only conformance 必须由 pushed hosted job 执行；非 Windows 本地
   `/d /s /c`。非 POSIX 命令不再复用 Bash AST、readonly downgrade 或 family grant；tool/terminal
   metadata 同时报告实际 program 与 dialect。tools 191/1 ignored、focused permission regression、
   strict Clippy、fmt 与 diff gate 通过；Windows 实际 argv/exit/UTF-8 仍由 R39.5 hosted 证明。
+- R39.3 implementation complete, hosted proof pending. 新的 Windows-only process owner 为每个
+  one-shot、non-PTY 与 PTY child 建立 kill-on-close Job Object；spawn 后 assignment 失败会先回收
+  direct child 再 fail closed，worker/guard drop 也会关闭 owner。取消、timeout、output-limit、reader
+  failure 与 direct-child-early-exit cleanup 均改用 `TerminateJobObject`，产品代码不再调用
+  `taskkill`；只有 Job termination 与 direct-child/wait convergence 同时成立才记录 completed。
+  `windows-sys` feature/owner/非 sandbox 边界已同步到供应链台账，并增加 UTF-8、non-zero exit、
+  one-shot timeout descendant、terminal process/PTY cancel descendant 的 Windows-only regression。
+  macOS tools 191/1 ignored 与 strict Clippy 通过；本地 Windows cross-check 因缺少 MinGW C compiler
+  无法完成，API 编译及真实 descendant proof 必须在 R39.5 pushed hosted job 收口。

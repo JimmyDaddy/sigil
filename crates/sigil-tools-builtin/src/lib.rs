@@ -5,6 +5,7 @@ mod file_tools;
 mod path;
 #[cfg(unix)]
 mod process_group;
+mod process_owner;
 mod registry;
 mod shell;
 mod shell_runtime;
