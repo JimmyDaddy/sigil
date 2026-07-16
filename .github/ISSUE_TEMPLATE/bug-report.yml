@@ -24,7 +24,7 @@ body:
     attributes:
       label: Sigil version
       description: Paste the complete output of `sigil --version`.
-      placeholder: sigil 0.0.1-alpha.3, commit, target, and profile
+      placeholder: sigil 0.0.1-alpha.4, commit, target, and profile
     validations:
       required: true
 

@@ -6,6 +6,12 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
+No user-facing changes have been added after `v0.0.1-alpha.4` yet.
+
+## v0.0.1-alpha.4 - 2026-07-16
+
+These changes are included in the packaged `v0.0.1-alpha.4` release.
+
 ### Added
 
 - Added default-off, privacy-bounded terminal attention notifications for completed long work, approvals, failures, and user-input requests, with automatic OSC 9/OSC 777/BEL selection.

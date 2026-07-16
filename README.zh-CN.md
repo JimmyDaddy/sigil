@@ -13,7 +13,7 @@ Sigil 是一个 TUI-first 的 Rust coding agent，用来在真实仓库里协助
 
 [网站](https://jimmydaddy.github.io/sigil/zh-CN/) · [文档站](https://jimmydaddy.github.io/sigil/zh-CN/docs/) · [快速上手](https://jimmydaddy.github.io/sigil/zh-CN/docs/quickstart/) · [视觉导览](https://jimmydaddy.github.io/sigil/zh-CN/docs/visual-tour/) · [支持状态](https://jimmydaddy.github.io/sigil/zh-CN/docs/status/)
 
-Sigil 的 alpha release 已通过 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 发布。`v0.0.1-alpha.3` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
+Sigil 的 alpha release 已通过 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 发布。`v0.0.1-alpha.4` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
 
 网站和用户文档跟随 `main`，可能比已发布 alpha 包更新。依赖新能力前请先查看 [Unreleased](docs/zh-CN/changelog.md#unreleased-main)；如果能力尚未进入 tagged release，请从源码安装。
 
@@ -36,7 +36,7 @@ brew install JimmyDaddy/sigil/sigil-ai
 ```
 
 ```bash
-cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.3 --locked sigil
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.0.1-alpha.4 --locked sigil
 ```
 
 如果你希望从源码安装，可以在 checkout 中运行：

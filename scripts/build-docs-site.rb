@@ -128,7 +128,7 @@ LOCALES = {
     search_results_label: "Search results",
     search_placeholder: "Search providers, config, approvals...",
     version_notice_label: "Development documentation",
-    version_notice_text: "These pages track main. The packaged alpha is v0.0.1-alpha.3; newer features may require a source install.",
+    version_notice_text: "These pages track main. The packaged alpha is v0.0.1-alpha.4; newer features may require a source install.",
     version_notice_link: "Review Unreleased"
   },
   "zh-CN" => {
@@ -155,7 +155,7 @@ LOCALES = {
     search_results_label: "搜索结果",
     search_placeholder: "搜索 provider、配置、审批...",
     version_notice_label: "开发版本文档",
-    version_notice_text: "这些页面跟随 main。已打包发布的 alpha 是 v0.0.1-alpha.3；较新的能力可能需要从源码安装。",
+    version_notice_text: "这些页面跟随 main。已打包发布的 alpha 是 v0.0.1-alpha.4；较新的能力可能需要从源码安装。",
     version_notice_link: "查看 Unreleased"
   }
 }.freeze

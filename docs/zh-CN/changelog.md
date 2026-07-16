@@ -6,6 +6,12 @@
 
 ## Unreleased - main
 
+`v0.0.1-alpha.4` 之后暂时还没有新增用户可见变更。
+
+## v0.0.1-alpha.4 - 2026-07-16
+
+以下变更已包含在打包发布的 `v0.0.1-alpha.4` 中。
+
 ### 新增
 
 - 增加默认关闭且有隐私边界的 terminal attention notification，用于长任务完成、等待审批、执行失败和需要用户输入，并可自动选择 OSC 9、OSC 777 或 BEL。
