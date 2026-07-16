@@ -57,7 +57,10 @@ use super::{
         McpActivationStatus, QueueMoveDirection, V2CompactionApplySource, WorkerApprovalCommand,
         WorkerCommand, WorkerMessage,
     },
-    session_flow::{load_session, load_session_with_runtime_attachments},
+    session_flow::{
+        CapturedSessionRuntimeAttachments, load_session,
+        load_session_with_captured_runtime_attachments, load_session_with_runtime_attachments,
+    },
 };
 
 mod active_run;

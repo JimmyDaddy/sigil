@@ -7,7 +7,7 @@ use sigil_kernel::{
     FrozenProviderRequestMaterial, InputTokenEvidence, JsonlSessionStore, ModelMessage,
     PortableTargetRequestMaterial, Provider, ProviderCapabilities, ProviderChunk,
     ProviderRequestRejection, ReasoningEffort, RequestFitProof, Session, SessionLogEntry,
-    TokenMeasurementBinding, TokenMeasurementScope, ToolRegistry, UsageStats,
+    StorageRoot, TokenMeasurementBinding, TokenMeasurementScope, ToolRegistry, UsageStats,
     VersionedProfileIdentity,
 };
 use std::{
@@ -476,6 +476,69 @@ fn compact_preview_is_read_only_and_reports_the_v2_fold_plan() -> Result<()> {
             if reason.contains("local exact target proof is unavailable")
     ));
     assert_eq!(std::fs::read(&session_log_path)?, before);
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn compact_preview_rehydrates_folded_image_from_captured_runtime_cache() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root)?;
+    let session_log_path = temp.path().join("sessions/session-compact-image.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.storage.state_root =
+        StorageRoot::Path(temp.path().join("state").display().to_string());
+    root_config.storage.cache_root =
+        StorageRoot::Path(temp.path().join("cache").display().to_string());
+    root_config.compaction.tail_messages = 2;
+    let paths = sigil_runtime::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
+        &workspace_root,
+    );
+    let cache = sigil_runtime::ControlledImageAttachmentCache::new(paths.attachments_root);
+    let encoded_png = crate::clipboard_image::encode_clipboard_rgba(1, 1, &[255, 0, 0, 255])?;
+    let attachment = cache.ingest_encoded_bytes("image_1", encoded_png)?;
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "planned".to_owned(),
+        model_name: "planned-model".to_owned(),
+    }))?;
+    let mut first = ModelMessage::user("inspect the older image");
+    first.image_attachments.push(attachment);
+    store.append(&SessionLogEntry::User(first))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("older image analysis".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user("three")))?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("four".to_owned()),
+        Vec::new(),
+    )))?;
+
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path,
+        Agent::new(PlannedProvider::new(vec![]), ToolRegistry::new()),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::PreviewV2Compaction)?;
+    let preview = worker
+        .recv_until(|message| matches!(message, WorkerMessage::V2CompactionPreviewed { .. }))?;
+    let WorkerMessage::V2CompactionPreviewed {
+        state: V2CompactionPreviewState::Review(review),
+    } = preview
+    else {
+        panic!("expected an image-aware V2 compaction review");
+    };
+    assert!(matches!(
+        review.admission,
+        V2CompactionAdmission::Unavailable { ref reason }
+            if reason.contains("local exact target proof is unavailable")
+    ));
 
     worker.shutdown()?;
     Ok(())

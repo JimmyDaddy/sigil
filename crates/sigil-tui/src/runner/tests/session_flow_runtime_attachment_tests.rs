@@ -5,7 +5,10 @@ use sigil_kernel::{
     ControlEntry, ImageAttachment, ImageAttachmentResolver, JsonlSessionStore, SessionLogEntry,
 };
 
-use super::load_session_with_runtime_attachments;
+use super::{
+    CapturedSessionRuntimeAttachments, load_session_with_captured_runtime_attachments,
+    load_session_with_runtime_attachments,
+};
 
 struct FixedImageResolver;
 
@@ -40,5 +43,27 @@ fn image_resolver_moves_across_reload_and_session_scope_changes() -> Result<()> 
         load_session_with_runtime_attachments("provider", "model", &second_path, Some(&first))?;
     assert_ne!(first.session_scope_id(), other_scope.session_scope_id());
     assert!(other_scope.image_attachment_resolver().is_some());
+    Ok(())
+}
+
+#[test]
+fn captured_runtime_attachments_survive_background_owner_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    identity_log(&session_path, "provider", "model")?;
+    let mut original =
+        load_session_with_runtime_attachments("provider", "model", &session_path, None)?;
+    original.try_attach_image_attachment_resolver(Arc::new(FixedImageResolver))?;
+    let captured = CapturedSessionRuntimeAttachments::from_session(Some(&original));
+    drop(original);
+
+    let reloaded = load_session_with_captured_runtime_attachments(
+        "provider",
+        "model",
+        &session_path,
+        &captured,
+    )?;
+    assert!(reloaded.user_url_capability_registrar().is_some());
+    assert!(reloaded.image_attachment_resolver().is_some());
     Ok(())
 }

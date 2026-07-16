@@ -616,6 +616,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             let tools = agent.tool_registry().specs();
                             let runtime_handle = runtime.handle().clone();
                             let overflow_context_resolver = context_resolver.clone();
+                            let runtime_attachments =
+                                CapturedSessionRuntimeAttachments::from_session(Some(session));
                             let preparation_agent = Arc::clone(&agent);
                             let source_logical_run_id = logical_run_id.to_owned();
                             let original_run_error = error.clone();
@@ -626,14 +628,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                 compaction_preparation_tx.clone(),
                                 move || {
                                     let preparation = (|| {
-                                        let store = JsonlSessionStore::new(&session_log_path)
+                                        let session =
+                                            load_session_with_captured_runtime_attachments(
+                                                &provider_name,
+                                                &model_name,
+                                                &session_log_path,
+                                                &runtime_attachments,
+                                            )
                                             .map_err(|error| format!("{error:#}"))?;
-                                        let session = Session::load_from_store(
-                                            provider_name,
-                                            model_name,
-                                            store,
-                                        )
-                                        .map_err(|error| format!("{error:#}"))?;
                                         if session.session_scope_id() != expected_session_scope_id {
                                             return Err(
                                                 "overflow recovery preparation loaded a different session scope"
@@ -729,6 +731,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
             let tools = agent.tool_registry().specs();
             let runtime_handle = runtime.handle().clone();
             let idle_context_resolver = context_resolver.clone();
+            let runtime_attachments =
+                CapturedSessionRuntimeAttachments::from_session(Some(session));
             let mut state = idle_auto_compaction.clone();
             idle_auto_compaction.cancel_requested_run();
             compaction_preparation_tasks.start_idle(
@@ -737,10 +741,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 expected_session_scope_id.clone(),
                 compaction_preparation_tx.clone(),
                 move || {
-                    let store = JsonlSessionStore::new(&session_log_path)
-                        .map_err(|error| format!("{error:#}"))?;
-                    let session = Session::load_from_store(provider_name, model_name, store)
-                        .map_err(|error| format!("{error:#}"))?;
+                    let session = load_session_with_captured_runtime_attachments(
+                        &provider_name,
+                        &model_name,
+                        &session_log_path,
+                        &runtime_attachments,
+                    )
+                    .map_err(|error| format!("{error:#}"))?;
                     if session.session_scope_id() != expected_session_scope_id {
                         return Err(
                             "automatic compaction preparation loaded a different session scope"
@@ -904,16 +911,21 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let tools = agent.tool_registry().specs();
                 let runtime_handle = runtime.handle().clone();
                 let queue_context_resolver = context_resolver.clone();
+                let runtime_attachments =
+                    CapturedSessionRuntimeAttachments::from_session(Some(session));
                 compaction_preparation_tasks.start_pre_turn(
                     &runtime,
                     request_id,
                     expected_session_scope_id.clone(),
                     compaction_preparation_tx.clone(),
                     move || {
-                        let store = JsonlSessionStore::new(&session_log_path)
-                            .map_err(|error| format!("{error:#}"))?;
-                        let session = Session::load_from_store(provider_name, model_name, store)
-                            .map_err(|error| format!("{error:#}"))?;
+                        let session = load_session_with_captured_runtime_attachments(
+                            &provider_name,
+                            &model_name,
+                            &session_log_path,
+                            &runtime_attachments,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
                         if session.session_scope_id() != expected_session_scope_id {
                             return Err(
                                 "queued pre-turn preparation loaded a different session scope"
@@ -2508,17 +2520,21 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         let tools = agent.tool_registry().specs();
                         let runtime_handle = runtime.handle().clone();
                         let manual_context_resolver = context_resolver.clone();
+                        let runtime_attachments =
+                            CapturedSessionRuntimeAttachments::from_session(Some(session));
                         compaction_preparation_tasks.start_manual(
                             &runtime,
                             request_id,
                             expected_session_scope_id.clone(),
                             compaction_preparation_tx.clone(),
                             move || {
-                                let store = JsonlSessionStore::new(&session_log_path)
-                                    .map_err(|error| format!("{error:#}"))?;
-                                let session =
-                                    Session::load_from_store(provider_name, model_name, store)
-                                        .map_err(|error| format!("{error:#}"))?;
+                                let session = load_session_with_captured_runtime_attachments(
+                                    &provider_name,
+                                    &model_name,
+                                    &session_log_path,
+                                    &runtime_attachments,
+                                )
+                                .map_err(|error| format!("{error:#}"))?;
                                 if session.session_scope_id() != expected_session_scope_id {
                                     return Err(
                                         "V2 compaction preparation loaded a different session scope"
