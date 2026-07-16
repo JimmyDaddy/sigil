@@ -6,12 +6,12 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentHostedTurn, AgentHostedTurnPreparer, AgentRunInput, AgentRunInputPreparer, ApprovalMode,
     EgressAuditRecorder, EgressDataCategory, EgressDisclosureKind, EgressDisclosurePresenter,
-    EgressNetworkRoute, FinalizedHostedTurn, HostedConstraintEnforcement, HostedEvidenceProcessor,
-    HostedFinalizationContext, HostedToolAuthorization, HostedToolKind, HostedToolLimits,
-    HostedToolRequest, HostedToolTerminalStatus, HostedTurnBuffer, HostedTurnError,
-    HostedWebSearchCapability, NetworkPolicy, PreEgressDisclosure, Provider, RootConfig, Session,
-    WebBudgetReservationKind, WebBudgetReservationRequest, WebSearchRoute, WebTaskTreeBudget,
-    validate_disclosure_receipt,
+    EgressNetworkRoute, FinalizedHostedTurn, HostedConstraintEnforcement,
+    HostedCustomToolCompatibility, HostedEvidenceProcessor, HostedFinalizationContext,
+    HostedToolAuthorization, HostedToolKind, HostedToolLimits, HostedToolRequest,
+    HostedToolTerminalStatus, HostedTurnBuffer, HostedTurnError, HostedWebSearchCapability,
+    NetworkPolicy, PreEgressDisclosure, Provider, RootConfig, Session, WebBudgetReservationKind,
+    WebBudgetReservationRequest, WebSearchRoute, WebTaskTreeBudget, validate_disclosure_receipt,
 };
 use url::Url;
 
@@ -65,6 +65,13 @@ impl AgentRunInputPreparer for HostedWebSearchInputPreparer {
         }
         let capability = provider.hosted_web_search_capability(&self.root_config.agent.model);
         if !capability.is_supported() {
+            return Ok(input);
+        }
+        if !provider_hosted_route_enabled(
+            self.root_config.web.search_route,
+            capability,
+            provider.name(),
+        )? {
             return Ok(input);
         }
         // Hosted requests do not pass through an ordinary client-tool approval round trip. Keep
@@ -168,6 +175,22 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
             evidence_processor: processor,
         })
     }
+}
+
+fn provider_hosted_route_enabled(
+    route: WebSearchRoute,
+    capability: HostedWebSearchCapability,
+    provider_name: &str,
+) -> Result<bool> {
+    if capability.custom_tool_compatibility == HostedCustomToolCompatibility::Supported {
+        return Ok(true);
+    }
+    if route == WebSearchRoute::ProviderHosted {
+        bail!(
+            "provider-hosted web search for {provider_name} cannot be combined with Sigil custom tools"
+        );
+    }
+    Ok(false)
 }
 
 fn provider_hosted_safe_destination(root: &RootConfig, provider_name: &str) -> Result<String> {

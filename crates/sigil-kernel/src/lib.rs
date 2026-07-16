@@ -201,11 +201,12 @@ pub use external::{
 };
 pub use hosted::{
     FinalizedHostedCitation, FinalizedHostedTurn, HostedCitationCandidate, HostedCitationFidelity,
-    HostedConstraintEnforcement, HostedEvidence, HostedEvidenceProcessor,
-    HostedFinalizationContext, HostedQueryVisibility, HostedRequestWireState,
-    HostedSourceCandidate, HostedSourceFidelity, HostedToolKind, HostedToolLimits,
-    HostedToolRequest, HostedToolRequestError, HostedToolSupport, HostedTurnBuffer,
-    HostedTurnBufferLimits, HostedTurnError, HostedWebSearchCapability, HostedWireStateError,
+    HostedConstraintEnforcement, HostedCustomToolCompatibility, HostedEvidence,
+    HostedEvidenceProcessor, HostedFinalizationContext, HostedQueryVisibility,
+    HostedRequestWireState, HostedSourceCandidate, HostedSourceFidelity, HostedToolKind,
+    HostedToolLimits, HostedToolRequest, HostedToolRequestError, HostedToolSupport,
+    HostedTurnBuffer, HostedTurnBufferLimits, HostedTurnError, HostedWebSearchCapability,
+    HostedWireStateError,
 };
 pub use image_attachment::{
     ImageAttachment, ImageAttachmentResolver, ImageInputCapability, ImageMimeType,

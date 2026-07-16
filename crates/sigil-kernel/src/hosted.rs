@@ -266,6 +266,14 @@ pub enum HostedConstraintEnforcement {
     Hard,
 }
 
+/// Whether provider-native hosted tools may share one request with ordinary custom tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostedCustomToolCompatibility {
+    #[default]
+    Unsupported,
+    Supported,
+}
+
 /// Model-specific declaration for native provider web search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostedWebSearchCapability {
@@ -275,6 +283,7 @@ pub struct HostedWebSearchCapability {
     pub citation_fidelity: HostedCitationFidelity,
     pub max_uses_enforcement: HostedConstraintEnforcement,
     pub domain_filter_enforcement: HostedConstraintEnforcement,
+    pub custom_tool_compatibility: HostedCustomToolCompatibility,
 }
 
 impl HostedWebSearchCapability {

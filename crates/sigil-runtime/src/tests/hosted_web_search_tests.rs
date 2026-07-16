@@ -1,8 +1,13 @@
 use anyhow::Result;
 use serde_json::json;
-use sigil_kernel::RootConfig;
+use sigil_kernel::{
+    HostedCustomToolCompatibility, HostedToolSupport, HostedWebSearchCapability, RootConfig,
+    WebSearchRoute,
+};
 
-use super::{provider_hosted_safe_destination, safe_provider_origin};
+use super::{
+    provider_hosted_route_enabled, provider_hosted_safe_destination, safe_provider_origin,
+};
 
 #[test]
 fn safe_provider_origin_strips_request_paths_and_default_ports() -> Result<()> {
@@ -42,5 +47,34 @@ fn hosted_destination_uses_the_resolved_provider_base_url() -> Result<()> {
         provider_hosted_safe_destination(&config, "gemini")?,
         "http://127.0.0.1:4317/"
     );
+    Ok(())
+}
+
+#[test]
+fn hosted_route_falls_back_in_auto_and_rejects_forced_incompatible_composition() -> Result<()> {
+    let incompatible = HostedWebSearchCapability {
+        support: HostedToolSupport::ServerManaged,
+        ..HostedWebSearchCapability::default()
+    };
+    assert!(!provider_hosted_route_enabled(
+        WebSearchRoute::Auto,
+        incompatible,
+        "gemini"
+    )?);
+    assert!(
+        provider_hosted_route_enabled(WebSearchRoute::ProviderHosted, incompatible, "gemini")
+            .is_err()
+    );
+
+    let compatible = HostedWebSearchCapability {
+        support: HostedToolSupport::ServerManaged,
+        custom_tool_compatibility: HostedCustomToolCompatibility::Supported,
+        ..HostedWebSearchCapability::default()
+    };
+    assert!(provider_hosted_route_enabled(
+        WebSearchRoute::Auto,
+        compatible,
+        "anthropic"
+    )?);
     Ok(())
 }

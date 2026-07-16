@@ -1,7 +1,7 @@
 use serde_json::json;
 use sigil_kernel::{
-    HostedConstraintEnforcement, HostedToolKind, HostedToolLimits, HostedToolRequest,
-    HostedToolSupport,
+    HostedConstraintEnforcement, HostedCustomToolCompatibility, HostedToolKind, HostedToolLimits,
+    HostedToolRequest, HostedToolSupport,
 };
 
 use super::*;
@@ -43,6 +43,10 @@ fn hosted_search_capability_matrix_is_exact_and_conservative() {
         assert_eq!(
             capability.domain_filter_enforcement,
             HostedConstraintEnforcement::Hard
+        );
+        assert_eq!(
+            capability.custom_tool_compatibility,
+            HostedCustomToolCompatibility::Supported
         );
     }
     for model in [

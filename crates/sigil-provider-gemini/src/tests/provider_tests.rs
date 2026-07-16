@@ -6,9 +6,10 @@ use std::{
 
 use futures::StreamExt;
 use sigil_kernel::{
-    CompletionRequest, HostedCitationFidelity, HostedEvidence, HostedQueryVisibility,
-    HostedSourceFidelity, HostedToolKind, HostedToolLimits, HostedToolRequest, HostedToolSupport,
-    ImageInputCapability, ModelMessage, ModelRequestTimeouts, Provider, ProviderChunk,
+    CompletionRequest, HostedCitationFidelity, HostedCustomToolCompatibility, HostedEvidence,
+    HostedQueryVisibility, HostedSourceFidelity, HostedToolKind, HostedToolLimits,
+    HostedToolRequest, HostedToolSupport, ImageInputCapability, ModelMessage, ModelRequestTimeouts,
+    Provider, ProviderChunk,
 };
 
 use super::*;
@@ -92,6 +93,16 @@ fn provider_hosted_search_capability_uses_exact_model_matrix() -> anyhow::Result
         HostedQueryVisibility::ProviderReportedPostExecution
     );
     assert_eq!(supported.source_fidelity, HostedSourceFidelity::UrlAndTitle);
+    assert_eq!(
+        supported.custom_tool_compatibility,
+        HostedCustomToolCompatibility::Unsupported
+    );
+    assert_eq!(
+        provider
+            .hosted_web_search_capability("gemini-3.5-flash")
+            .custom_tool_compatibility,
+        HostedCustomToolCompatibility::Supported
+    );
     assert_eq!(
         supported.citation_fidelity,
         HostedCitationFidelity::OutputSpan

@@ -6,11 +6,12 @@ use futures::{Stream, stream};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 
 use sigil_kernel::{
-    CompletionRequest, HostedCitationFidelity, HostedConstraintEnforcement, HostedQueryVisibility,
-    HostedRequestWireState, HostedSourceFidelity, HostedToolSupport, HostedWebSearchCapability,
-    ImageInputCapability, ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata,
-    ProviderTimeoutPhase, SecretRedactor, read_provider_error_body, timeout_provider_request,
+    CompletionRequest, HostedCitationFidelity, HostedConstraintEnforcement,
+    HostedCustomToolCompatibility, HostedQueryVisibility, HostedRequestWireState,
+    HostedSourceFidelity, HostedToolSupport, HostedWebSearchCapability, ImageInputCapability,
+    ModelRequestTimeouts, PROVIDER_ERROR_BODY_LIMIT_BYTES, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderStreamTimeoutState, ProviderTimeoutMetadata, ProviderTimeoutPhase,
+    SecretRedactor, read_provider_error_body, timeout_provider_request,
     timeout_provider_stream_next,
 };
 
@@ -19,7 +20,9 @@ use crate::{
     client::build_http_client,
     config::GeminiProviderConfig,
     errors::{GeminiProviderError, classify_status},
-    hosted_search::{gemini_hosted_web_search_supported, hosted_invocation},
+    hosted_search::{
+        gemini_hosted_custom_tools_supported, gemini_hosted_web_search_supported, hosted_invocation,
+    },
     mapper::StreamMapper,
     models::GeminiStreamEnvelope,
     request::{build_generate_content_request, gemini_image_input_capability},
@@ -102,6 +105,11 @@ impl Provider for GeminiProvider {
                 citation_fidelity: HostedCitationFidelity::OutputSpan,
                 max_uses_enforcement: HostedConstraintEnforcement::Unsupported,
                 domain_filter_enforcement: HostedConstraintEnforcement::Unsupported,
+                custom_tool_compatibility: if gemini_hosted_custom_tools_supported(model_name) {
+                    HostedCustomToolCompatibility::Supported
+                } else {
+                    HostedCustomToolCompatibility::Unsupported
+                },
             }
         } else {
             HostedWebSearchCapability::default()

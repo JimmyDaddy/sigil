@@ -7,9 +7,9 @@ use std::{
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use sigil_kernel::{
-    HostedCitationFidelity, HostedConstraintEnforcement, HostedQueryVisibility,
-    HostedSourceFidelity, HostedToolKind, HostedToolRequest, HostedToolSupport,
-    HostedWebSearchCapability, ProviderContinuationState,
+    HostedCitationFidelity, HostedConstraintEnforcement, HostedCustomToolCompatibility,
+    HostedQueryVisibility, HostedSourceFidelity, HostedToolKind, HostedToolRequest,
+    HostedToolSupport, HostedWebSearchCapability, ProviderContinuationState,
 };
 
 pub(crate) const ANTHROPIC_WEB_SEARCH_TOOL_TYPE: &str = "web_search_20250305";
@@ -54,6 +54,7 @@ pub(crate) fn hosted_web_search_capability(
         citation_fidelity: HostedCitationFidelity::OutputSpan,
         max_uses_enforcement: HostedConstraintEnforcement::Hard,
         domain_filter_enforcement: HostedConstraintEnforcement::Hard,
+        custom_tool_compatibility: HostedCustomToolCompatibility::Supported,
     }
 }
 
