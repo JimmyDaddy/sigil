@@ -5,3 +5,4 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
 
 ./scripts/check-staged-coverage.py
+python3 scripts/check-test-layout.py

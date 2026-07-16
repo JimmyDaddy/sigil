@@ -14,6 +14,8 @@ on:
       - "scripts/coverage.sh"
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
+      - "scripts/check-test-layout.py"
+      - "scripts/test-check-test-layout.py"
       - "scripts/tui-stateful-pty-acceptance.py"
       - "scripts/test-tui-stateful-pty-acceptance.py"
       - "scripts/context-v1-binary-acceptance.py"
@@ -32,6 +34,8 @@ on:
       - "scripts/coverage.sh"
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
+      - "scripts/check-test-layout.py"
+      - "scripts/test-check-test-layout.py"
       - "scripts/tui-stateful-pty-acceptance.py"
       - "scripts/test-tui-stateful-pty-acceptance.py"
       - "scripts/context-v1-binary-acceptance.py"
@@ -66,6 +70,11 @@ jobs:
         run: |
           python3 scripts/test-alpha-dogfood-campaign.py
           python3 scripts/test-tui-stateful-pty-acceptance.py
+
+      - name: Enforce physical Rust test layout
+        run: |
+          python3 scripts/test-check-test-layout.py
+          python3 scripts/check-test-layout.py
 
   fmt:
     runs-on: ubuntu-latest
