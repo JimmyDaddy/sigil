@@ -1,6 +1,6 @@
 # RFC-0038 Alpha Long-session Performance V1
 
-状态：accepted / R38.0 done, R38.1 ready
+状态：complete / R38.0-R38.5
 
 创建日期：2026-07-17
 
@@ -115,9 +115,9 @@ Harness 必须拒绝重复/缺失 scenario、错误 schema、负数或非整数 
 ```bash
 python3 scripts/test-long-session-evidence.py
 python3 scripts/long-session-evidence.py --output target/long-session-evidence.json
-cargo test -p sigil-kernel session_writer_long_session
-cargo test -p sigil-kernel portable_compaction_long_session
-cargo test -p sigil-tui timeline_render_store
+cargo test -p sigil-kernel session_writer_long_session_evidence -- --ignored
+cargo test -p sigil-kernel portable_compaction_long_session_evidence -- --ignored
+cargo test -p sigil-tui timeline_render_store_long_session_evidence -- --ignored
 cargo fmt --all --check
 cargo clippy -p sigil-kernel -p sigil-tui --all-targets -- -D warnings
 ./scripts/check-docs.sh
@@ -131,4 +131,32 @@ Release-profile evidence 只在显式 harness/workflow 中运行，不进入每�
 - R38.0 complete. Baseline confirms the linear writer has a 64-event scan-count test but no
   10k report; compaction has deep correctness coverage but no scale artifact; timeline append and
   rerender currently repair separators and rebuild all prefix/hash indexes. Evidence schema,
-  scenario scale, fast-path boundary and non-goals are frozen above. R38.1 is ready.
+  scenario scale, fast-path boundary and non-goals are frozen above.
+- R38.1 complete. Three ignored release-profile scenarios now emit schema-versioned evidence for
+  10,000 durable records, 1,000 completed turns and 5,000 timeline entries. The collector rejects
+  missing or duplicate scenarios, invalid schema and non-integer or negative measurements. The
+  pre-optimization local baseline recorded one writer full scan, 10,000 replayed records, 2,000
+  compaction source records with 1,999 folded events and unchanged raw bytes, plus a 2,225 ms
+  timeline scenario whose 2,013 ms append and 200 ms tail-rerender phases dominated the 12 ms
+  initial rebuild.
+- R38.2 complete. Sequential visible append now repairs only the prior visible separator, appends
+  suffix lines/ranges and extends prefix/hash indexes; hidden append records a zero-length range.
+  Length drift and non-sequential shapes fail safe to a full rebuild, and regression tests compare
+  the result with a fresh store.
+- R38.3 complete. Tail rerender now rebuilds only the affected visible suffix while arbitrary
+  rerender and global render-key changes retain the full-rebuild path. Mixed visible/hidden tail,
+  separator, hash, range and explicit length-drift tests preserve full-rebuild equivalence.
+- R38.4 complete. The weekly/manual `Long-session Evidence` workflow runs the collector in release
+  mode and uploads its JSON artifact without an absolute time threshold. Hosted run
+  [29519936563](https://github.com/JimmyDaddy/sigil/actions/runs/29519936563) passed with 10,000
+  writer records and one full scan, 2,000 compaction source records/1,999 folds and unchanged raw
+  bytes, and a 23 ms timeline scenario (11 ms rebuild, 12 ms sequential append and sub-millisecond
+  250 tail rerenders).
+- R38.5 complete. The local baseline and hosted result use different machines, so their total
+  elapsed values are not treated as a hard speedup ratio. The nearly unchanged 12/11 ms rebuild
+  calibration, together with append 2,013/12 ms and tail rerender 200/<1 ms, supports the intended
+  algorithmic-shape conclusion. Final main-CI run
+  [29531567548](https://github.com/JimmyDaddy/sigil/actions/runs/29531567548) passes contract,
+  formatting, check, Clippy, rustdoc, all Linux test/coverage partitions, TUI PTY acceptance and the
+  complete hosted macOS/Windows platform jobs. The completion audit found no remaining R38 slice;
+  V1 keeps wall-clock values as trend evidence and unlocks no gated product capability.

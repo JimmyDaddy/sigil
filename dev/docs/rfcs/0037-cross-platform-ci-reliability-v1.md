@@ -95,7 +95,7 @@ supply-chain gates still decide whether a proposal is acceptable.
 - Advisory exceptions are identical to the committed policy/ledger and carry no wildcard bypass.
 - Dependabot monitors Cargo and GitHub Actions weekly with bounded PR concurrency.
 - Workflow and Dependabot YAML parse locally; local macOS commands pass.
-- Status text distinguishes local/static evidence from the first future hosted Windows run.
+- Status text distinguishes local/static evidence from actual hosted macOS/Windows runs.
 - No user documentation or site update is required because product behavior is unchanged.
 
 ## 9. Validation
@@ -110,8 +110,8 @@ cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2024-0436
 git diff --check
 ```
 
-The equivalent Windows hosted commands become externally verified only after the workflow is
-pushed and GitHub Actions runs it.
+The equivalent Windows hosted commands are externally verified by final main-CI run
+[29531567548](https://github.com/JimmyDaddy/sigil/actions/runs/29531567548).
 
 ## 10. Progress
 
@@ -141,6 +141,9 @@ pushed and GitHub Actions runs it.
   added a tested consistency gate for `deny.toml`, cargo-audit and the dependency ledger. The
   affected standard gate passes with 184 tool tests and strict Clippy; actionlint, all YAML parsing,
   policy tests, cargo-deny, cargo-audit, docs and diff checks pass. The completeness audit found all
-  RFC acceptance criteria implemented with no remaining local finding. macOS has direct local
-  execution evidence; Windows hosted execution remains pending a future push and is not claimed as
-  complete external evidence here.
+  RFC acceptance criteria implemented with no remaining local finding. Pushed runs then exposed
+  and closed Windows durable-path, MCP activation, model-eval publication, path-prefix and portable
+  relative-path defects plus two macOS Docker-cleanup timing/proof defects. Final main-CI run
+  [29531567548](https://github.com/JimmyDaddy/sigil/actions/runs/29531567548) passes the complete
+  macOS and Windows platform jobs, including Windows workspace compilation, kernel, MCP, builtin
+  file paths, runtime integration and HTTP durable-journal tests.
