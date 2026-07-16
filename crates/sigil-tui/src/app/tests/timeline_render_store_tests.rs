@@ -195,6 +195,37 @@ fn timeline_render_store_rebuilds_append_when_global_options_change() {
 }
 
 #[test]
+fn timeline_render_store_rebuilds_when_append_skips_a_timeline_entry() {
+    let options = render_options();
+    let mut timeline = vec![entry(TimelineRole::Assistant, "first")];
+    let mut store = TimelineRenderStore::default();
+    store.rebuild(&timeline, &options);
+
+    timeline.push(entry(TimelineRole::Notice, "skipped"));
+    timeline.push(entry(TimelineRole::Assistant, "requested"));
+    assert_eq!(
+        store.append_entry(&timeline, 1, &options),
+        AppendOutcome::Rebuilt
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
+}
+
+#[test]
+fn timeline_render_store_rebuilds_tail_rerender_when_timeline_length_drifted() {
+    let options = render_options();
+    let mut timeline = vec![entry(TimelineRole::Assistant, "first")];
+    let mut store = TimelineRenderStore::default();
+    store.rebuild(&timeline, &options);
+
+    timeline.push(entry(TimelineRole::Notice, "unindexed"));
+    assert_eq!(
+        store.rerender_entry(&timeline, 0, &options),
+        RerenderOutcome::Rebuilt
+    );
+    assert_matches_full_rebuild(&store, &timeline, &options);
+}
+
+#[test]
 fn timeline_render_store_trims_separator_without_stale_range() {
     let options = render_options();
     let timeline = vec![

@@ -131,6 +131,7 @@ impl TimelineRenderStore {
         options: &crate::ui::TimelineRenderOptions,
     ) -> AppendOutcome {
         if index != self.blocks.len()
+            || timeline.len() != self.blocks.len().saturating_add(1)
             || index >= timeline.len()
             || !self.global_key_matches(options)
         {
@@ -166,6 +167,7 @@ impl TimelineRenderStore {
             return RerenderOutcome::Rebuilt;
         };
         if self.blocks.get(index).is_none()
+            || timeline.len() != self.blocks.len()
             || index.saturating_add(1) != self.blocks.len()
             || !self.global_key_matches(options)
         {
