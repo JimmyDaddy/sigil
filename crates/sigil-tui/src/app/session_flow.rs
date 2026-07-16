@@ -284,8 +284,8 @@ impl AppState {
 
     pub(super) fn sync_current_session_state(&mut self, entries: Vec<SessionLogEntry>) {
         (
-            self.latest_checkpoint_restore_sequence,
-            self.readiness_sequences_by_scope,
+            self.review.latest_checkpoint_restore_sequence,
+            self.review.readiness_sequences_by_scope,
         ) = super::session_review::checkpoint_verification_order(&self.session_log_path);
         let entries =
             preserve_local_ui_control_entries(&self.session_browser.current_entries, entries);
@@ -304,8 +304,8 @@ impl AppState {
             .current_entries
             .push(SessionLogEntry::Control(control));
         (
-            self.latest_checkpoint_restore_sequence,
-            self.readiness_sequences_by_scope,
+            self.review.latest_checkpoint_restore_sequence,
+            self.review.readiness_sequences_by_scope,
         ) = super::session_review::checkpoint_verification_order(&self.session_log_path);
         self.runtime.stats = session_stats_from_entries(&self.session_browser.current_entries);
         self.tool_preview_snapshots =
@@ -475,10 +475,10 @@ impl AppState {
         entries: Vec<SessionLogEntry>,
         notice: &str,
     ) {
-        self.checkpoint_restore_preview = None;
-        self.checkpoint_expected_request = None;
-        self.checkpoint_request_id = None;
-        self.checkpoint_action_pending = false;
+        self.review.checkpoint_restore_preview = None;
+        self.review.checkpoint_expected_request = None;
+        self.review.checkpoint_request_id = None;
+        self.review.checkpoint_action_pending = false;
         if self.checkpoint_restore_modal_open() {
             self.modal_state = None;
         }
@@ -487,18 +487,18 @@ impl AppState {
         self.runtime.model_name = model_name;
         self.session_id = session_id_from_path(&self.session_log_path)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        self.active_agent_view = super::AgentView::Main;
-        self.active_agent_child_transcript = None;
+        self.agent_panel.active_view = super::AgentView::Main;
+        self.agent_panel.active_child_transcript = None;
         self.sync_current_session_state(entries.clone());
         self.approval.pending = None;
         self.runtime.run_phase = RunPhase::Idle;
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);
         self.timeline.clear();
-        self.tool_activity_cache.clear();
-        self.tool_activity_visible_rows.clear();
-        self.expanded_thinking_entry_indices.clear();
-        self.collapsed_thinking_entry_indices.clear();
+        self.timeline_state.tool_activity_cache.clear();
+        self.timeline_state.tool_activity_visible_rows.clear();
+        self.timeline_state.expanded_thinking_entry_indices.clear();
+        self.timeline_state.collapsed_thinking_entry_indices.clear();
         self.events.clear();
         self.reset_scroll();
 
@@ -650,7 +650,7 @@ impl AppState {
             }
         }
 
-        self.streaming_reasoning_index = None;
+        self.timeline_state.streaming_reasoning_index = None;
         self.last_notice = Some(notice.to_owned());
         self.refresh_session_history();
     }

@@ -297,10 +297,10 @@ impl AppState {
             return;
         }
         let last = rows.len().saturating_sub(1);
-        self.sidebar_agent_selected = if next {
-            (self.sidebar_agent_selected + 1).min(last)
+        self.agent_panel.selected = if next {
+            (self.agent_panel.selected + 1).min(last)
         } else {
-            self.sidebar_agent_selected.saturating_sub(1)
+            self.agent_panel.selected.saturating_sub(1)
         };
     }
 }

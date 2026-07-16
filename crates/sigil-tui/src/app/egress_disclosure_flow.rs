@@ -134,7 +134,8 @@ impl AppState {
         disclosure: PreEgressDisclosure,
         receipt_tx: EgressDisclosureReceiptTx,
     ) {
-        self.pending_egress_disclosures
+        self.egress_disclosure
+            .pending
             .push_back(PendingEgressDisclosure::new(disclosure, receipt_tx));
         self.last_notice = Some("network disclosure pending render".to_owned());
         self.push_event("network:disclosure", "pending frame render");
@@ -142,10 +143,11 @@ impl AppState {
 
     pub(crate) fn active_egress_disclosure_card(&self) -> Option<EgressDisclosureCard> {
         let pending = self
-            .pending_egress_disclosures
+            .egress_disclosure
+            .pending
             .front()
             .map(PendingEgressDisclosure::card);
-        match (self.recent_egress_disclosure.clone(), pending) {
+        match (self.egress_disclosure.recent.clone(), pending) {
             (Some(recent), Some(pending)) => Some(recent.merge(pending)),
             (Some(recent), None) => Some(recent),
             (None, pending) => pending,
@@ -153,20 +155,20 @@ impl AppState {
     }
 
     pub(crate) fn begin_egress_disclosure_frame(&self) {
-        self.egress_disclosure_rendered.set(false);
+        self.egress_disclosure.rendered.set(false);
     }
 
     pub(crate) fn mark_egress_disclosure_rendered(&self) {
-        self.egress_disclosure_rendered.set(true);
+        self.egress_disclosure.rendered.set(true);
     }
 
     /// Acknowledges only the disclosure card that was included in a successfully completed frame.
     pub(crate) fn acknowledge_active_egress_disclosure_frame(&mut self) -> bool {
-        if !self.egress_disclosure_rendered.replace(false) {
+        if !self.egress_disclosure.rendered.replace(false) {
             return false;
         }
         let rendered_card = self.active_egress_disclosure_card();
-        let Some(mut pending) = self.pending_egress_disclosures.pop_front() else {
+        let Some(mut pending) = self.egress_disclosure.pending.pop_front() else {
             return false;
         };
         let result = pending
@@ -177,7 +179,7 @@ impl AppState {
             .take()
             .is_some_and(|receipt_tx| receipt_tx.send(result).is_ok());
         if sent {
-            self.recent_egress_disclosure = rendered_card;
+            self.egress_disclosure.recent = rendered_card;
             self.last_notice = Some("network disclosure rendered".to_owned());
             self.push_event("network:disclosure", "frame rendered");
         }
@@ -185,8 +187,8 @@ impl AppState {
     }
 
     pub(super) fn clear_recent_egress_disclosure(&mut self) {
-        self.recent_egress_disclosure = None;
-        self.egress_disclosure_rendered.set(false);
+        self.egress_disclosure.recent = None;
+        self.egress_disclosure.rendered.set(false);
     }
 }
 

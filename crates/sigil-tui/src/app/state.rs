@@ -1,8 +1,12 @@
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+};
 
 use sigil_kernel::{
-    ConversationInputQueueId, ConversationInputQueuedEntry, ImageAttachment, ReasoningEffort,
-    SessionLogEntry, SessionStats,
+    ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest,
+    ConversationInputQueueId, ConversationInputQueuedEntry, EvidenceScope, ImageAttachment,
+    ReasoningEffort, SessionLogEntry, SessionStats,
 };
 use sigil_runtime::BalanceSnapshot;
 
@@ -14,12 +18,70 @@ use crate::{
 };
 
 use super::{
-    ComposerMode, ComposerPasteSpan, ComposerQueueAction, MutationArtifactRetentionPreview,
-    PendingPlanApproval, SessionViewCache,
+    ActiveAgentChildTranscript, AgentView, ComposerMode, ComposerPasteSpan, ComposerQueueAction,
+    MutationArtifactRetentionPreview, PendingPlanApproval, SessionViewCache, TimelineRenderStore,
+    TimelineTextSelection, ToolActivityCacheEntry,
+    egress_disclosure_flow::{EgressDisclosureCard, PendingEgressDisclosure},
     modal_flow::PendingModelPickerRefresh,
     runtime_status::{McpProgressState, McpServerRuntimeStatus},
     session_lifecycle_flow::SessionRetentionMaintenancePreview,
 };
+
+#[derive(Debug, Default)]
+pub(crate) struct TimelineState {
+    pub(in crate::app) expanded_thinking_entry_indices: BTreeSet<usize>,
+    pub(in crate::app) collapsed_thinking_entry_indices: BTreeSet<usize>,
+    pub(in crate::app) selected_tool_activity_key: Option<String>,
+    pub(in crate::app) expanded_tool_activity_keys: BTreeSet<String>,
+    pub(in crate::app) collapsed_tool_activity_keys: BTreeSet<String>,
+    pub(in crate::app) tool_activity_visible_rows: BTreeMap<String, usize>,
+    pub(in crate::app) streaming_assistant_index: Option<usize>,
+    pub(in crate::app) streaming_reasoning_index: Option<usize>,
+    pub(in crate::app) render_store: TimelineRenderStore,
+    pub(in crate::app) text_selection: Option<TimelineTextSelection>,
+    pub(in crate::app) text_selection_anchor: Option<usize>,
+    pub(in crate::app) text_selection_anchor_column: Option<usize>,
+    pub(in crate::app) revision: u64,
+    pub(in crate::app) defer_renders: bool,
+    pub(in crate::app) deferred_render_indexes: BTreeSet<usize>,
+    pub(in crate::app) tool_activity_cache: Vec<ToolActivityCacheEntry>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ReviewState {
+    pub(in crate::app) checkpoint_restore_preview: Option<ControlledCheckpointRestorePreview>,
+    pub(in crate::app) checkpoint_expected_request: Option<ControlledCheckpointRestoreRequest>,
+    pub(in crate::app) checkpoint_request_id: Option<u64>,
+    pub(in crate::app) checkpoint_action_pending: bool,
+    pub(in crate::app) latest_checkpoint_restore_sequence: Option<u64>,
+    pub(in crate::app) readiness_sequences_by_scope: BTreeMap<EvidenceScope, u64>,
+    pub(in crate::app) verification_card_focused: bool,
+    pub(in crate::app) verification_inspect_open: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct AgentPanelState {
+    pub(in crate::app) selected: usize,
+    pub(in crate::app) active_view: AgentView,
+    pub(in crate::app) active_child_transcript: Option<ActiveAgentChildTranscript>,
+}
+
+impl Default for AgentPanelState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            active_view: AgentView::Main,
+            active_child_transcript: None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EgressDisclosureState {
+    pub(in crate::app) pending: VecDeque<PendingEgressDisclosure>,
+    pub(in crate::app) recent: Option<EgressDisclosureCard>,
+    pub(in crate::app) rendered: Cell<bool>,
+}
 
 #[derive(Debug)]
 pub(crate) struct RuntimeStatusState {

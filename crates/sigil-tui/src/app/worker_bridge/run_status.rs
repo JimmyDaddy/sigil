@@ -30,7 +30,7 @@ impl AppState {
     }
 
     pub(super) fn discard_worker_streaming_assistant_and_finish_reasoning(&mut self) {
-        self.streaming_assistant_index = None;
+        self.timeline_state.streaming_assistant_index = None;
         self.finish_streaming_reasoning_entry();
     }
 }

@@ -79,12 +79,12 @@ fn product_smoke_down_selects_visible_composer_agent_row() -> Result<()> {
     app.active_pane = PaneFocus::Composer;
     app.composer.input.clear();
     app.composer.agent_panel_focused = false;
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
     assert!(app.is_composer_agent_panel_focused());
-    assert_eq!(app.sidebar_agent_selected, 1);
+    assert_eq!(app.agent_panel.selected, 1);
     assert_eq!(app.last_notice.as_deref(), Some("agent list focused"));
     Ok(())
 }

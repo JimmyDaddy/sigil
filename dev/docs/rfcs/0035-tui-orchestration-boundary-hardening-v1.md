@@ -1,6 +1,6 @@
 # RFC-0035 TUI Orchestration Boundary Hardening V1
 
-状态：accepted / R35.0-R35.3 complete; R35.4 in progress
+状态：accepted / R35.0-R35.4 complete; R35.5 in progress
 
 创建日期：2026-07-16
 
@@ -181,4 +181,8 @@ The stateful campaign uses only its loopback fixtures. No paid provider or publi
   commits the target path only after fallible loading/trust work, preserves
   exact prompts only for the same durable scope and resets/rebuilds all frozen
   session-scoped scheduler state while retaining best-effort queue recovery.
-- R35.4 in progress.
+- R35.4 complete. Private timeline presentation, review/checkpoint,
+  agent-panel and egress-disclosure state now live in four focused bundles.
+  The public timeline/event/scroll fields remain on `AppState`, and focused
+  app/view/tool/checkpoint/egress regression suites preserve UI behavior.
+- R35.5 in progress.

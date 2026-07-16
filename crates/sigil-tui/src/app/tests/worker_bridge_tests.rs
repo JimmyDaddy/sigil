@@ -497,7 +497,7 @@ fn plan_approved_message_syncs_session_and_clears_pending_surface() -> Result<()
 #[test]
 fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.checkpoint_action_pending = true;
+    app.review.checkpoint_action_pending = true;
 
     app.handle_worker_message(WorkerMessage::RunFailed(
         "deepseek request failed\n\nCaused by:\n    0: failed to send DeepSeek request\n    1: error sending request for url (https://api.example.com)"
@@ -508,7 +508,7 @@ fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
         app.last_notice(),
         Some("error sending request for url (https://api.example.com)")
     );
-    assert!(!app.checkpoint_action_pending);
+    assert!(!app.review.checkpoint_action_pending);
     assert!(app.timeline.iter().any(|entry| {
         entry
             .text
@@ -1195,7 +1195,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         preview: None,
     });
     app.modal_state = Some(ModalState::KeyboardHelp);
-    app.streaming_reasoning_index = Some(0);
+    app.timeline_state.streaming_reasoning_index = Some(0);
 
     app.handle_worker_message(WorkerMessage::RunFinished {
         result: sigil_kernel::AgentRunResult {
@@ -1508,15 +1508,15 @@ fn agent_thread_event_updates_only_focused_child_transcript() -> Result<()> {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::TextDelta("main ignored".to_owned())),
     })?;
-    assert!(app.active_agent_child_transcript.is_none());
+    assert!(app.agent_panel.active_child_transcript.is_none());
 
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: thread_id.as_str().to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative(
             "children/agent_chat_live.jsonl",
         )?,
     };
-    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: Path::new("children/agent_chat_live.jsonl").to_path_buf(),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
         timeline_entries: Vec::new(),
@@ -1536,7 +1536,8 @@ fn agent_thread_event_updates_only_focused_child_transcript() -> Result<()> {
     })?;
 
     let transcript = app
-        .active_agent_child_transcript
+        .agent_panel
+        .active_child_transcript
         .as_ref()
         .expect("focused child transcript should exist");
     assert_eq!(transcript.timeline_entries.len(), 1);
@@ -1550,7 +1551,8 @@ fn agent_thread_event_updates_only_focused_child_transcript() -> Result<()> {
         event: Box::new(RunEvent::Notice("ignore me".to_owned())),
     })?;
     let transcript = app
-        .active_agent_child_transcript
+        .agent_panel
+        .active_child_transcript
         .as_ref()
         .expect("focused child transcript should remain loaded");
     assert_eq!(transcript.timeline_entries.len(), 1);
@@ -1567,7 +1569,7 @@ fn agent_thread_event_updates_only_focused_child_transcript() -> Result<()> {
 fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_events")?;
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: thread_id.as_str().to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative(
             "children/agent_chat_events.jsonl",
@@ -1693,7 +1695,8 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     })?;
 
     let transcript = app
-        .active_agent_child_transcript
+        .agent_panel
+        .active_child_transcript
         .as_ref()
         .expect("live event should initialize child transcript");
     assert!(transcript.load_error.is_none());
@@ -1760,7 +1763,8 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     })?;
 
     assert_eq!(
-        app.active_agent_child_transcript
+        app.agent_panel
+            .active_child_transcript
             .as_ref()
             .expect("transcript should remain loaded")
             .timeline_entries
@@ -2678,7 +2682,7 @@ fn terminal_tool_results_replace_existing_task_card() -> Result<()> {
         "exited"
     );
     assert_eq!(
-        app.selected_tool_activity_key.as_deref(),
+        app.timeline_state.selected_tool_activity_key.as_deref(),
         Some("terminal_task:terminal-1")
     );
     Ok(())
@@ -2729,7 +2733,7 @@ fn terminal_progress_updates_existing_task_card() -> Result<()> {
     assert!(terminal_cards[0].text.contains("phase two"));
     assert!(!terminal_cards[0].text.contains("phase one"));
     assert_eq!(
-        app.selected_tool_activity_key.as_deref(),
+        app.timeline_state.selected_tool_activity_key.as_deref(),
         Some("terminal_task:terminal-progress")
     );
     Ok(())

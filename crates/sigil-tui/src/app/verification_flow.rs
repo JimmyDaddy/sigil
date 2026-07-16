@@ -5,14 +5,14 @@ use crate::app::task_sidebar::VerificationCardAction;
 
 impl AppState {
     pub(crate) fn verification_card_focused(&self) -> bool {
-        self.verification_card_focused
+        self.review.verification_card_focused
             && self
                 .task_strip_view()
                 .is_some_and(|view| view.verification.is_some())
     }
 
     pub(crate) fn verification_inspect_open(&self) -> bool {
-        self.verification_card_focused() && self.verification_inspect_open
+        self.verification_card_focused() && self.review.verification_inspect_open
     }
 
     pub(crate) fn verification_card_has_action(&self) -> bool {
@@ -30,7 +30,7 @@ impl AppState {
             self.last_notice = Some("no task verification card available".to_owned());
             return false;
         }
-        self.verification_card_focused = true;
+        self.review.verification_card_focused = true;
         self.active_pane = PaneFocus::Activity;
         self.blur_composer_aux_panels();
         self.last_notice = Some("verification card focused".to_owned());
@@ -38,15 +38,15 @@ impl AppState {
     }
 
     pub(super) fn blur_verification_card(&mut self) {
-        self.verification_card_focused = false;
-        self.verification_inspect_open = false;
+        self.review.verification_card_focused = false;
+        self.review.verification_inspect_open = false;
     }
 
     pub(super) fn handle_verification_card_key_event(
         &mut self,
         key: KeyEvent,
     ) -> Option<Option<AppAction>> {
-        if !self.verification_card_focused || !key.modifiers.is_empty() {
+        if !self.review.verification_card_focused || !key.modifiers.is_empty() {
             return None;
         }
         if self
@@ -61,8 +61,8 @@ impl AppState {
         match key.code {
             KeyCode::Enter => Some(self.activate_verification_card()),
             KeyCode::Char('i' | 'I') => {
-                self.verification_inspect_open = !self.verification_inspect_open;
-                self.last_notice = Some(if self.verification_inspect_open {
+                self.review.verification_inspect_open = !self.review.verification_inspect_open;
+                self.last_notice = Some(if self.review.verification_inspect_open {
                     "verification evidence expanded".to_owned()
                 } else {
                     "verification evidence collapsed".to_owned()

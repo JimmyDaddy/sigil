@@ -42,24 +42,47 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     let first_key = "call:call-first".to_owned();
     let second_key = "call:call-second".to_owned();
 
-    assert_eq!(app.selected_tool_activity_key, Some(second_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(second_key.clone())
+    );
 
-    app.selected_tool_activity_key = None;
+    app.timeline_state.selected_tool_activity_key = None;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.selected_tool_activity_key, Some(second_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(second_key.clone())
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))?;
-    assert_eq!(app.selected_tool_activity_key, Some(first_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(first_key.clone())
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
-    assert_eq!(app.selected_tool_activity_key, Some(second_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(second_key.clone())
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))?;
-    assert_eq!(app.selected_tool_activity_key, Some(first_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(first_key.clone())
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
-    assert!(app.expanded_tool_activity_keys.contains(&first_key));
-    assert!(!app.expanded_tool_activity_keys.contains(&second_key));
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&first_key)
+    );
+    assert!(
+        !app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&second_key)
+    );
 
     let lines = app.transcript_lines(40);
     assert!(lines.iter().any(|line| {
@@ -76,11 +99,14 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     app.composer.input = "draft".to_owned();
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
     assert_eq!(app.composer.input, "draft");
-    assert_eq!(app.selected_tool_activity_key, Some(first_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(first_key.clone())
+    );
 
     app.composer.input.clear();
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
-    assert_eq!(app.selected_tool_activity_key, None);
+    assert_eq!(app.timeline_state.selected_tool_activity_key, None);
     assert_eq!(app.last_notice(), Some("activity focus cleared"));
     Ok(())
 }
@@ -117,8 +143,16 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
     assert!(app.tool_timeline_entry_indices().is_some());
     let tool_key = "call:call-diff".to_owned();
 
-    assert!(!app.expanded_tool_activity_keys.contains(&tool_key));
-    assert!(!app.collapsed_tool_activity_keys.contains(&tool_key));
+    assert!(
+        !app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&tool_key)
+    );
+    assert!(
+        !app.timeline_state
+            .collapsed_tool_activity_keys
+            .contains(&tool_key)
+    );
     assert!(app.tool_card_status_line().contains("open"));
     let default_open = app.transcript_lines(40);
     assert!(default_open.iter().any(|line| {
@@ -129,7 +163,11 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
 
-    assert!(app.collapsed_tool_activity_keys.contains(&tool_key));
+    assert!(
+        app.timeline_state
+            .collapsed_tool_activity_keys
+            .contains(&tool_key)
+    );
     assert!(app.tool_card_status_line().contains("brief"));
     let collapsed = app.transcript_lines(40);
     assert!(collapsed.iter().any(|line| {
@@ -150,7 +188,11 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
 
-    assert!(!app.collapsed_tool_activity_keys.contains(&tool_key));
+    assert!(
+        !app.timeline_state
+            .collapsed_tool_activity_keys
+            .contains(&tool_key)
+    );
     assert!(app.tool_card_status_line().contains("open"));
     Ok(())
 }
@@ -175,30 +217,49 @@ fn non_default_tool_card_toggle_pages_large_preview_before_closing() -> Result<(
         .to_string(),
     );
     let tool_key = "call:call-large".to_owned();
-    assert_eq!(app.selected_tool_activity_key, Some(tool_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(tool_key.clone())
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&64));
+    assert_eq!(
+        app.timeline_state.tool_activity_visible_rows.get(&tool_key),
+        Some(&64)
+    );
     let first_page = full_plain_timeline(&app);
     assert!(first_page.contains("line-062"));
     assert!(!first_page.contains("line-063"));
     assert!(first_page.contains("more lines hidden"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&128));
+    assert_eq!(
+        app.timeline_state.tool_activity_visible_rows.get(&tool_key),
+        Some(&128)
+    );
     let second_page = full_plain_timeline(&app);
     assert!(second_page.contains("line-126"));
     assert!(!second_page.contains("line-127"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&192));
+    assert_eq!(
+        app.timeline_state.tool_activity_visible_rows.get(&tool_key),
+        Some(&192)
+    );
     let full_page = full_plain_timeline(&app);
     assert!(full_page.contains("line-139"));
     assert!(!full_page.contains("more lines hidden"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), None);
-    assert!(!app.expanded_tool_activity_keys.contains(&tool_key));
+    assert_eq!(
+        app.timeline_state.tool_activity_visible_rows.get(&tool_key),
+        None
+    );
+    assert!(
+        !app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&tool_key)
+    );
     let closed = full_plain_timeline(&app);
     assert!(!closed.contains("line-139"));
     Ok(())
@@ -247,6 +308,7 @@ fn terminal_task_tool_card_pages_from_safe_log_artifact() -> Result<()> {
         .to_string(),
     );
     let tool_key = app
+        .timeline_state
         .selected_tool_activity_key
         .clone()
         .expect("terminal tool card should be selected");
@@ -255,7 +317,10 @@ fn terminal_task_tool_card_pages_from_safe_log_artifact() -> Result<()> {
         .expect("terminal tool card should have a timeline entry");
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&64));
+    assert_eq!(
+        app.timeline_state.tool_activity_visible_rows.get(&tool_key),
+        Some(&64)
+    );
     let payload: serde_json::Value = serde_json::from_str(&app.timeline[entry_index].text)?;
     let preview_lines = payload["preview_lines"]
         .as_array()
@@ -269,7 +334,10 @@ fn terminal_task_tool_card_pages_from_safe_log_artifact() -> Result<()> {
     assert!(first_page.contains("more lines hidden"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.tool_activity_visible_rows.get(&tool_key), Some(&128));
+    assert_eq!(
+        app.timeline_state.tool_activity_visible_rows.get(&tool_key),
+        Some(&128)
+    );
     let payload: serde_json::Value = serde_json::from_str(&app.timeline[entry_index].text)?;
     let preview_lines = payload["preview_lines"]
         .as_array()
@@ -304,7 +372,10 @@ fn ctrl_t_tool_toggle_preserves_live_tail_when_already_at_latest() -> Result<()>
         app.push_timeline(TimelineRole::Assistant, format!("tail message {index}"));
     }
     let tool_key = "call:call-old".to_owned();
-    assert_eq!(app.selected_tool_activity_key, Some(tool_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(tool_key.clone())
+    );
     assert_eq!(app.timeline_scroll_back, 0);
     assert!(
         app.max_timeline_scroll_back() > 0,
@@ -313,7 +384,11 @@ fn ctrl_t_tool_toggle_preserves_live_tail_when_already_at_latest() -> Result<()>
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
 
-    assert!(app.expanded_tool_activity_keys.contains(&tool_key));
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&tool_key)
+    );
     assert_eq!(app.timeline_scroll_back, 0);
     let lines = app.transcript_lines(20);
     assert!(lines.iter().any(|line| {
@@ -425,6 +500,7 @@ fn tool_activity_metadata_is_cached_after_append() {
     );
 
     let activity = app
+        .timeline_state
         .tool_activity_cache
         .first()
         .expect("tool activity should be cached")
@@ -449,7 +525,7 @@ fn tool_activity_metadata_is_cached_after_append() {
 fn tool_card_interaction_commands_are_noop_without_tool_cards() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     assert_eq!(app.tool_card_status_line(), "activities: none");
-    assert_eq!(app.selected_tool_activity_key, None);
+    assert_eq!(app.timeline_state.selected_tool_activity_key, None);
 
     assert!(!app.has_tool_cards());
     assert!(app.tool_activity_entry_indices().is_empty());
@@ -473,7 +549,7 @@ fn tool_card_interaction_commands_are_noop_without_tool_cards() -> Result<()> {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))?
             .is_none()
     );
-    assert_eq!(app.selected_tool_activity_key, None);
+    assert_eq!(app.timeline_state.selected_tool_activity_key, None);
     Ok(())
 }
 
@@ -482,14 +558,17 @@ fn tool_card_interaction_private_helpers_cover_stale_selection_and_reveal_guards
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let entries = vec![(2, "first".to_owned()), (5, "second".to_owned())];
 
-    app.selected_tool_activity_key = Some("missing".to_owned());
+    app.timeline_state.selected_tool_activity_key = Some("missing".to_owned());
     assert_eq!(
         app.ensure_selected_tool_entry(&entries),
         (5, "second".to_owned())
     );
-    assert_eq!(app.selected_tool_activity_key.as_deref(), Some("second"));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key.as_deref(),
+        Some("second")
+    );
 
-    app.selected_tool_activity_key = Some("first".to_owned());
+    app.timeline_state.selected_tool_activity_key = Some("first".to_owned());
     assert_eq!(
         app.next_tool_entry(&entries, false),
         (5, "second".to_owned())

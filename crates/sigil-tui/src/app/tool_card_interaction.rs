@@ -38,11 +38,12 @@ const TERMINAL_TASK_LOG_PREVIEW_MAX_BYTES: usize = 512 * 1024;
 
 impl AppState {
     pub(crate) fn has_tool_cards(&self) -> bool {
-        !self.tool_activity_cache.is_empty()
+        !self.timeline_state.tool_activity_cache.is_empty()
     }
 
     pub(crate) fn tool_activity_entry_indices(&self) -> Vec<usize> {
-        self.tool_activity_cache
+        self.timeline_state
+            .tool_activity_cache
             .iter()
             .map(|activity| activity.index)
             .collect()
@@ -74,7 +75,8 @@ impl AppState {
             | crate::mouse::HitTarget::ToolCard { entry_index } => entry_index,
             _ => return None,
         };
-        self.tool_activity_cache
+        self.timeline_state
+            .tool_activity_cache
             .iter()
             .find_map(|activity| (activity.index == entry_index).then(|| activity.key.clone()))
     }
@@ -149,7 +151,7 @@ impl AppState {
             return false;
         };
         let previous_index = self.selected_tool_entry_index(&entries);
-        self.selected_tool_activity_key = Some(selected_key.clone());
+        self.timeline_state.selected_tool_activity_key = Some(selected_key.clone());
         self.active_pane = PaneFocus::Activity;
         self.rerender_tool_selection_change(previous_index, *selected_index);
         self.apply_tool_card_reveal_policy(*selected_index, reveal_policy, false);
@@ -171,13 +173,18 @@ impl AppState {
         let was_at_tail = self.timeline_scroll_back == 0;
         self.active_pane = PaneFocus::Activity;
         if self.tool_entry_is_open_by_key(selected_index, &selected_key) {
-            if let Some(visible_rows) = self.tool_activity_visible_rows.get(&selected_key).copied()
+            if let Some(visible_rows) = self
+                .timeline_state
+                .tool_activity_visible_rows
+                .get(&selected_key)
+                .copied()
             {
                 if self.tool_entry_has_expandable_terminal_log(selected_index)
                     || !self.tool_entry_visible_rows_are_complete(selected_index, visible_rows)
                 {
                     let visible_rows = visible_rows.saturating_add(TOOL_CARD_VISIBLE_ROWS_STEP);
-                    self.tool_activity_visible_rows
+                    self.timeline_state
+                        .tool_activity_visible_rows
                         .insert(selected_key.clone(), visible_rows);
                     self.expand_terminal_task_preview_to_rows(selected_index, visible_rows);
                 } else {
@@ -187,17 +194,29 @@ impl AppState {
                 self.close_tool_entry_by_key(selected_index, &selected_key);
             }
         } else if self.tool_entry_defaults_to_expanded(selected_index) {
-            self.collapsed_tool_activity_keys.remove(&selected_key);
-            self.tool_activity_visible_rows.remove(&selected_key);
+            self.timeline_state
+                .collapsed_tool_activity_keys
+                .remove(&selected_key);
+            self.timeline_state
+                .tool_activity_visible_rows
+                .remove(&selected_key);
         } else if !self
+            .timeline_state
             .expanded_tool_activity_keys
             .insert(selected_key.clone())
         {
-            self.expanded_tool_activity_keys.remove(&selected_key);
-            self.tool_activity_visible_rows.remove(&selected_key);
+            self.timeline_state
+                .expanded_tool_activity_keys
+                .remove(&selected_key);
+            self.timeline_state
+                .tool_activity_visible_rows
+                .remove(&selected_key);
         } else {
-            self.collapsed_tool_activity_keys.remove(&selected_key);
-            self.tool_activity_visible_rows
+            self.timeline_state
+                .collapsed_tool_activity_keys
+                .remove(&selected_key);
+            self.timeline_state
+                .tool_activity_visible_rows
                 .insert(selected_key.clone(), TOOL_CARD_VISIBLE_ROWS_STEP);
             self.expand_terminal_task_preview_to_rows(selected_index, TOOL_CARD_VISIBLE_ROWS_STEP);
         }
@@ -211,10 +230,16 @@ impl AppState {
 
     pub(super) fn clear_tool_card_focus(&mut self) -> bool {
         let previous_index = self
+            .timeline_state
             .selected_tool_activity_key
             .as_deref()
             .and_then(|key| self.timeline_entry_index_for_activity_key(key));
-        if self.selected_tool_activity_key.take().is_none() {
+        if self
+            .timeline_state
+            .selected_tool_activity_key
+            .take()
+            .is_none()
+        {
             return false;
         }
         if let Some(index) = previous_index {
@@ -235,6 +260,7 @@ impl AppState {
 
     pub(super) fn tool_activity_entries(&self) -> Option<Vec<(usize, String)>> {
         let entries = self
+            .timeline_state
             .tool_activity_cache
             .iter()
             .map(|activity| (activity.index, activity.key.clone()))
@@ -246,7 +272,8 @@ impl AppState {
         &self,
         activity_key: &str,
     ) -> Option<usize> {
-        self.tool_activity_cache
+        self.timeline_state
+            .tool_activity_cache
             .iter()
             .find_map(|activity| (activity.key == activity_key).then_some(activity.index))
     }
@@ -267,8 +294,8 @@ impl AppState {
     }
 
     pub(super) fn rebuild_tool_activity_cache(&mut self) {
-        let selected_key = self.selected_tool_activity_key.clone();
-        self.tool_activity_cache = self
+        let selected_key = self.timeline_state.selected_tool_activity_key.clone();
+        self.timeline_state.tool_activity_cache = self
             .timeline
             .iter()
             .enumerate()
@@ -276,14 +303,16 @@ impl AppState {
             .collect();
         if let Some(selected_key) = selected_key.as_deref()
             && self
+                .timeline_state
                 .tool_activity_cache
                 .iter()
                 .any(|activity| activity.key == selected_key)
         {
-            self.selected_tool_activity_key = Some(selected_key.to_owned());
+            self.timeline_state.selected_tool_activity_key = Some(selected_key.to_owned());
             return;
         }
-        self.selected_tool_activity_key = self
+        self.timeline_state.selected_tool_activity_key = self
+            .timeline_state
             .tool_activity_cache
             .last()
             .map(|activity| activity.key.clone());
@@ -293,7 +322,7 @@ impl AppState {
         &mut self,
         entries: &[(usize, String)],
     ) -> (usize, String) {
-        if let Some(selected_key) = self.selected_tool_activity_key.as_deref()
+        if let Some(selected_key) = self.timeline_state.selected_tool_activity_key.as_deref()
             && let Some((index, key)) = entries.iter().find(|(_, key)| key == selected_key)
         {
             return (*index, key.clone());
@@ -302,7 +331,7 @@ impl AppState {
             .last()
             .cloned()
             .expect("tool activity entries are non-empty");
-        self.selected_tool_activity_key = Some(latest.1.clone());
+        self.timeline_state.selected_tool_activity_key = Some(latest.1.clone());
         latest
     }
 
@@ -327,7 +356,7 @@ impl AppState {
     }
 
     fn selected_tool_entry_index(&self, entries: &[(usize, String)]) -> Option<usize> {
-        let selected_key = self.selected_tool_activity_key.as_deref()?;
+        let selected_key = self.timeline_state.selected_tool_activity_key.as_deref()?;
         entries
             .iter()
             .find_map(|(index, key)| (key == selected_key).then_some(*index))
@@ -385,12 +414,14 @@ impl AppState {
             return "activities: none".to_owned();
         };
         let selected = self
+            .timeline_state
             .selected_tool_activity_key
             .as_deref()
             .and_then(|selected_key| entries.iter().position(|(_, key)| key == selected_key))
             .map(|position| position + 1)
             .unwrap_or(entries.len());
         let (selected_entry, selected_key) = self
+            .timeline_state
             .selected_tool_activity_key
             .as_deref()
             .and_then(|selected_key| {
@@ -409,16 +440,23 @@ impl AppState {
     }
 
     fn tool_entry_is_open_by_key(&self, entry_index: usize, key: &str) -> bool {
-        self.expanded_tool_activity_keys.contains(key)
+        self.timeline_state
+            .expanded_tool_activity_keys
+            .contains(key)
             || (self.tool_entry_defaults_to_expanded(entry_index)
-                && !self.collapsed_tool_activity_keys.contains(key))
+                && !self
+                    .timeline_state
+                    .collapsed_tool_activity_keys
+                    .contains(key))
     }
 
     fn close_tool_entry_by_key(&mut self, entry_index: usize, key: &str) {
-        self.expanded_tool_activity_keys.remove(key);
-        self.tool_activity_visible_rows.remove(key);
+        self.timeline_state.expanded_tool_activity_keys.remove(key);
+        self.timeline_state.tool_activity_visible_rows.remove(key);
         if self.tool_entry_defaults_to_expanded(entry_index) {
-            self.collapsed_tool_activity_keys.insert(key.to_owned());
+            self.timeline_state
+                .collapsed_tool_activity_keys
+                .insert(key.to_owned());
         }
     }
 
@@ -558,7 +596,8 @@ impl AppState {
     }
 
     fn tool_entry_defaults_to_expanded(&self, entry_index: usize) -> bool {
-        self.tool_activity_cache
+        self.timeline_state
+            .tool_activity_cache
             .iter()
             .find(|activity| activity.index == entry_index)
             .map(|activity| activity.defaults_expanded)

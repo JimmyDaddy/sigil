@@ -95,10 +95,12 @@ impl AppState {
         let mut view = self.session_view_cache().task_strip_view.clone()?;
         if let Some(verification) = view.verification.as_mut()
             && self
+                .review
                 .latest_checkpoint_restore_sequence
                 .is_some_and(|restore| {
                     restore
                         > self
+                            .review
                             .readiness_sequences_by_scope
                             .get(&verification.scope)
                             .copied()

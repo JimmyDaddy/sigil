@@ -53,7 +53,7 @@ impl AppState {
     }
 
     pub(super) fn active_conversation_queue_target(&self) -> Option<ConversationInputTarget> {
-        match &self.active_agent_view {
+        match &self.agent_panel.active_view {
             AgentView::Main => Some(ConversationInputTarget::MainThread),
             AgentView::Child { .. } => self.active_agent_thread_projection().map(|thread| {
                 ConversationInputTarget::AgentThread {

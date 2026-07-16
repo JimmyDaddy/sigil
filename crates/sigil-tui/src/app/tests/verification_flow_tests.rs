@@ -105,8 +105,9 @@ fn verification_card_focus_clears_when_the_card_disappears() {
 #[test]
 fn checkpoint_restore_marks_existing_verification_card_stale_without_old_action() {
     let mut app = verification_app();
-    app.latest_checkpoint_restore_sequence = Some(10);
-    app.readiness_sequences_by_scope
+    app.review.latest_checkpoint_restore_sequence = Some(10);
+    app.review
+        .readiness_sequences_by_scope
         .insert(EvidenceScope::Run("unrelated".to_owned()), 11);
 
     let card = app
@@ -122,7 +123,8 @@ fn checkpoint_restore_marks_existing_verification_card_stale_without_old_action(
     assert!(card.action.is_none());
     assert!(card.inspect_lines.iter().any(|line| line.contains("newer")));
 
-    app.readiness_sequences_by_scope
+    app.review
+        .readiness_sequences_by_scope
         .insert(EvidenceScope::Step("task_1:step_1".to_owned()), 12);
     let refreshed = app
         .task_strip_view()

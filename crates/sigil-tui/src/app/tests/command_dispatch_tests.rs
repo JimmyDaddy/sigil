@@ -111,7 +111,7 @@ fn focused_terminal_task_cancel_rejects_missing_busy_and_inactive_tasks() -> Res
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
         dispatch_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Running)?,
     ))]);
-    app.selected_tool_activity_key = Some("terminal_task:terminal-1".to_owned());
+    app.timeline_state.selected_tool_activity_key = Some("terminal_task:terminal-1".to_owned());
     app.runtime.is_busy = true;
     let busy = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
     assert!(busy.is_none());

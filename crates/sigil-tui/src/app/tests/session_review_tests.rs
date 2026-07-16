@@ -223,7 +223,7 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
     )?;
     app.session_log_path = session_path.clone();
     app.sync_current_session_state(JsonlSessionStore::read_entries(&session_path)?);
-    app.verification_card_focused = true;
+    app.review.verification_card_focused = true;
     app.composer.input = "keep this draft".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
     app.set_terminal_size(120, 36);
@@ -234,7 +234,7 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
             crossterm::event::KeyModifiers::CONTROL,
         ))?
         .expect("Ctrl-R should request an exact preview immediately");
-    assert!(!app.verification_card_focused);
+    assert!(!app.review.verification_card_focused);
     assert!(app.checkpoint_restore_modal_open());
     assert_eq!(app.composer.input, "keep this draft");
     assert_eq!(
@@ -367,7 +367,7 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
     blocked_preview.ready = false;
     blocked_preview.files[0].conflict_reason =
         Some(sigil_kernel::CheckpointRestoreConflictReason::CurrentHashMismatch);
-    app.checkpoint_restore_preview = Some(blocked_preview);
+    app.review.checkpoint_restore_preview = Some(blocked_preview);
     let blocked = app
         .checkpoint_restore_modal_view()
         .expect("blocked restore modal");
@@ -377,7 +377,7 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
             .iter()
             .any(|line| line.contains("note.txt · current file changed"))
     );
-    app.checkpoint_restore_preview = Some(preview_for_completion.clone());
+    app.review.checkpoint_restore_preview = Some(preview_for_completion.clone());
 
     let second_enter = app
         .handle_key_event(crossterm::event::KeyEvent::new(
@@ -456,8 +456,8 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
         panic!("latest action must preview");
     };
     app.apply_checkpoint_restore_preview(reopen_request_id, preview_for_completion);
-    assert_eq!(app.checkpoint_request_id, Some(latest_request_id));
-    assert!(app.checkpoint_action_pending);
+    assert_eq!(app.review.checkpoint_request_id, Some(latest_request_id));
+    assert!(app.review.checkpoint_action_pending);
     assert_eq!(
         app.checkpoint_restore_modal_view().map(|view| view.phase),
         Some(super::super::checkpoint_flow::CheckpointRestoreModalPhase::Loading)

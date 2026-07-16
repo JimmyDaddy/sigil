@@ -881,7 +881,7 @@ fn composer_agent_up_at_first_item_returns_to_composer() -> Result<()> {
     app.active_pane = PaneFocus::Composer;
 
     assert!(app.focus_composer_agent_panel());
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
 
@@ -889,7 +889,7 @@ fn composer_agent_up_at_first_item_returns_to_composer() -> Result<()> {
     assert!(!app.is_composer_agent_panel_focused());
     assert!(!app.is_composer_queue_panel_focused());
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
     Ok(())
 }
 
@@ -908,13 +908,13 @@ fn main_queue_is_hidden_while_child_agent_transcript_is_active() -> Result<()> {
     assert_eq!(app.queue_strip_rows(), 3);
 
     assert!(app.activate_agent_view_at_index(1));
-    assert!(app.active_agent_child_transcript.is_some());
+    assert!(app.agent_panel.active_child_transcript.is_some());
     assert!(app.composer_queue_rows().is_empty());
     assert_eq!(app.queue_strip_rows(), 0);
     assert!(!app.focus_composer_queue_panel());
 
     assert!(app.activate_agent_view_at_index(0));
-    assert!(app.active_agent_child_transcript.is_none());
+    assert!(app.agent_panel.active_child_transcript.is_none());
     assert_eq!(app.composer_queue_rows().len(), 1);
     Ok(())
 }
@@ -1237,7 +1237,7 @@ fn queue_edit_escape_cancels_without_submitting() -> Result<()> {
 #[test]
 fn agent_message_command_reports_unavailable_child_view_without_thread_id() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: "orphan_child".to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative("children/orphan.jsonl")?,
     };
@@ -1259,7 +1259,7 @@ fn composer_agent_panel_missing_selection_rejects_message_and_close() -> Result<
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
     app.composer.agent_panel_focused = true;
-    app.sidebar_agent_selected = usize::MAX;
+    app.agent_panel.selected = usize::MAX;
 
     let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT))?;
     assert!(close.is_none());
@@ -1565,7 +1565,7 @@ fn composer_history_reaches_newest_before_down_focuses_agent_panel() -> Result<(
     app.composer.input.clear();
     app.composer.input_cursor = 0;
     app.composer.agent_panel_focused = false;
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.composer.input, "second");
@@ -1579,7 +1579,7 @@ fn composer_history_reaches_newest_before_down_focuses_agent_panel() -> Result<(
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert!(app.is_composer_agent_panel_focused());
-    assert_eq!(app.sidebar_agent_selected, 1);
+    assert_eq!(app.agent_panel.selected, 1);
     Ok(())
 }
 
@@ -1591,13 +1591,13 @@ fn composer_empty_down_focuses_visible_agent_list_and_selects_child() -> Result<
     app.composer.input.clear();
     app.composer.input_cursor = 0;
     app.composer.agent_panel_focused = false;
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
     assert!(app.is_composer_agent_panel_focused());
-    assert_eq!(app.sidebar_agent_selected, 1);
+    assert_eq!(app.agent_panel.selected, 1);
     assert_eq!(app.last_notice(), Some("agent list focused"));
     Ok(())
 }
@@ -1656,10 +1656,10 @@ fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
     app.composer.input_cursor = 0;
 
     app.composer.agent_panel_focused = true;
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
 
     assert!(app.is_composer_agent_panel_focused());
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
     let view_model = crate::view_model::UiViewModel::from_app(&app);
     assert!(view_model.footer.hints.contains("Enter switch"));
     assert!(!view_model.footer.hints.contains("Alt-C close"));
@@ -1667,7 +1667,7 @@ fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
     assert!(view_model.composer.agent_panel_focused);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.sidebar_agent_selected, 1);
+    assert_eq!(app.agent_panel.selected, 1);
     let child_view_model = crate::view_model::UiViewModel::from_app(&app);
     assert!(child_view_model.footer.hints.contains("Alt-C close"));
     assert!(child_view_model.footer.hints.contains("Alt-M message"));
@@ -1688,9 +1688,9 @@ fn composer_agent_panel_message_key_prefills_agent_message_command() -> Result<(
     app.composer.input_cursor = 0;
 
     app.composer.agent_panel_focused = true;
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.sidebar_agent_selected, 1);
+    assert_eq!(app.agent_panel.selected, 1);
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))?;
 
@@ -1714,8 +1714,8 @@ fn composer_agent_panel_main_row_rejects_close_and_message_actions() -> Result<(
     app.composer.input_cursor = 0;
 
     app.composer.agent_panel_focused = true;
-    app.sidebar_agent_selected = 0;
-    assert_eq!(app.sidebar_agent_selected, 0);
+    app.agent_panel.selected = 0;
+    assert_eq!(app.agent_panel.selected, 0);
 
     let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT))?;
     assert!(close.is_none());
@@ -1741,7 +1741,7 @@ fn composer_agent_panel_close_key_requests_selected_terminal_agent_close() -> Re
     app.composer.input_cursor = 0;
 
     app.composer.agent_panel_focused = true;
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT))?;
@@ -1768,11 +1768,11 @@ fn composer_agent_panel_down_wraps_from_last_agent_to_first() -> Result<()> {
 
     assert!(app.focus_composer_agent_panel());
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.sidebar_agent_selected, 1);
+    assert_eq!(app.agent_panel.selected, 1);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
 
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
     assert!(app.is_composer_agent_panel_focused());
     Ok(())
 }
@@ -1809,7 +1809,7 @@ fn composer_agent_panel_up_at_first_item_returns_to_input() -> Result<()> {
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert!(!app.is_composer_agent_panel_focused());
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
     assert!(!app.is_composer_queue_panel_focused());
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert!(app.composer.input.is_empty());

@@ -31,7 +31,7 @@ const CHILD_AGENT_TRANSCRIPT_TAIL_CHUNK_SIZE: usize = 32 * 1024;
 
 impl AppState {
     pub(crate) fn active_agent_label(&self) -> String {
-        match &self.active_agent_view {
+        match &self.agent_panel.active_view {
             AgentView::Main => "main".to_owned(),
             AgentView::Child { child_task_id, .. } => self
                 .agent_sidebar_items()
@@ -39,7 +39,7 @@ impl AppState {
                 .find(|item| {
                     item.target
                         .as_ref()
-                        .is_some_and(|target| target == &self.active_agent_view)
+                        .is_some_and(|target| target == &self.agent_panel.active_view)
                 })
                 .map(|item| agent_display_label(&item).to_owned())
                 .unwrap_or_else(|| child_task_id.clone()),
@@ -54,10 +54,10 @@ impl AppState {
                 active: item
                     .target
                     .as_ref()
-                    .is_some_and(|target| target == &self.active_agent_view),
+                    .is_some_and(|target| target == &self.agent_panel.active_view),
                 label: item.label,
                 detail: item.detail,
-                selected: index == self.sidebar_agent_selected,
+                selected: index == self.agent_panel.selected,
                 muted: item.muted,
             })
             .collect()
@@ -114,13 +114,13 @@ impl AppState {
         }
         let current = selectable
             .iter()
-            .position(|index| *index == self.sidebar_agent_selected)
+            .position(|index| *index == self.agent_panel.selected)
             .or_else(|| {
                 selectable.iter().position(|index| {
                     items[*index]
                         .target
                         .as_ref()
-                        .is_some_and(|target| target == &self.active_agent_view)
+                        .is_some_and(|target| target == &self.agent_panel.active_view)
                 })
             })
             .unwrap_or(0);
@@ -132,7 +132,7 @@ impl AppState {
         if next_position == current {
             return false;
         }
-        self.sidebar_agent_selected = selectable[next_position];
+        self.agent_panel.selected = selectable[next_position];
         true
     }
 
@@ -161,7 +161,7 @@ impl AppState {
             let active = item
                 .target
                 .as_ref()
-                .is_some_and(|target| target == &self.active_agent_view);
+                .is_some_and(|target| target == &self.agent_panel.active_view);
             let symbol = if active {
                 "◉"
             } else {
@@ -329,13 +329,13 @@ impl AppState {
         entries: Vec<SessionLogEntry>,
     ) {
         let closing_active = self
-            .agent_thread_id_for_view(&self.active_agent_view)
+            .agent_thread_id_for_view(&self.agent_panel.active_view)
             .as_ref()
             .is_some_and(|active_thread_id| active_thread_id == &thread_id);
         self.sync_current_session_state(entries);
         if closing_active {
-            self.active_agent_view = AgentView::Main;
-            self.active_agent_child_transcript = None;
+            self.agent_panel.active_view = AgentView::Main;
+            self.agent_panel.active_child_transcript = None;
         }
         self.last_notice = Some(format!("agent closed: {}", thread_id.as_str()));
         self.push_event("agent:close", thread_id.as_str());
@@ -391,7 +391,7 @@ impl AppState {
                 items[*index]
                     .target
                     .as_ref()
-                    .is_some_and(|target| target == &self.active_agent_view)
+                    .is_some_and(|target| target == &self.agent_panel.active_view)
             })
             .unwrap_or(0);
         let next_position = if reverse {
@@ -405,7 +405,7 @@ impl AppState {
     }
 
     pub(super) fn activate_selected_agent_view(&mut self) {
-        if !self.activate_agent_view_at_index(self.sidebar_agent_selected) {
+        if !self.activate_agent_view_at_index(self.agent_panel.selected) {
             self.push_timeline(
                 TimelineRole::Notice,
                 self.last_notice
@@ -447,28 +447,29 @@ impl AppState {
 
     pub(super) fn refresh_active_agent_view_after_parent_sync(&mut self) {
         let items = self.agent_sidebar_items();
-        if self.sidebar_agent_selected >= items.len() {
-            self.sidebar_agent_selected = items.len().saturating_sub(1);
+        if self.agent_panel.selected >= items.len() {
+            self.agent_panel.selected = items.len().saturating_sub(1);
         }
         if !self.composer_agent_panel_available() {
             self.composer.agent_panel_focused = false;
         }
-        if self.active_agent_view == AgentView::Main {
-            self.active_agent_child_transcript = None;
+        if self.agent_panel.active_view == AgentView::Main {
+            self.agent_panel.active_child_transcript = None;
             return;
         }
         let still_available = items
             .iter()
             .filter_map(|item| item.target.as_ref())
-            .any(|target| target == &self.active_agent_view);
+            .any(|target| target == &self.agent_panel.active_view);
         if still_available {
-            if self.active_agent_child_transcript.is_none() || self.active_agent_view_is_terminal()
+            if self.agent_panel.active_child_transcript.is_none()
+                || self.active_agent_view_is_terminal()
             {
                 self.reload_active_agent_child_transcript();
             }
         } else {
-            self.active_agent_view = AgentView::Main;
-            self.active_agent_child_transcript = None;
+            self.agent_panel.active_view = AgentView::Main;
+            self.agent_panel.active_child_transcript = None;
         }
     }
 
@@ -492,7 +493,7 @@ impl AppState {
         let AgentView::Child {
             child_task_id,
             child_session_ref,
-        } = &self.active_agent_view
+        } = &self.agent_panel.active_view
         else {
             return None;
         };
@@ -533,8 +534,8 @@ impl AppState {
             self.last_notice = Some(format!("agent focus unavailable: {}", item.detail));
             return false;
         };
-        self.sidebar_agent_selected = index;
-        self.active_agent_view = target;
+        self.agent_panel.selected = index;
+        self.agent_panel.active_view = target;
         self.blur_composer_queue_panel();
         self.refresh_conversation_queue_selection();
         if self.active_pane == super::PaneFocus::Composer && self.composer_agent_panel_available() {
@@ -598,7 +599,7 @@ impl AppState {
 
     fn agent_view_for_action_target(&self, target: &str) -> Option<AgentView> {
         if matches!(target.to_ascii_lowercase().as_str(), "current" | ".") {
-            return match &self.active_agent_view {
+            return match &self.agent_panel.active_view {
                 AgentView::Main => None,
                 view => Some(view.clone()),
             };
@@ -648,7 +649,7 @@ impl AppState {
     }
 
     pub(crate) fn active_agent_thread_projection(&self) -> Option<AgentThreadProjection> {
-        self.agent_thread_projection_for_view(&self.active_agent_view)
+        self.agent_thread_projection_for_view(&self.agent_panel.active_view)
     }
 
     fn agent_thread_projection_for_view(&self, view: &AgentView) -> Option<AgentThreadProjection> {
@@ -665,25 +666,25 @@ impl AppState {
         if let Some(index) = self.agent_sidebar_items().iter().position(|item| {
             item.target
                 .as_ref()
-                .is_some_and(|target| target == &self.active_agent_view)
+                .is_some_and(|target| target == &self.agent_panel.active_view)
         }) {
-            self.sidebar_agent_selected = index;
+            self.agent_panel.selected = index;
         }
     }
 
     fn selected_agent_command_value(&self) -> Option<String> {
         self.agent_sidebar_items()
-            .get(self.sidebar_agent_selected)
+            .get(self.agent_panel.selected)
             .and_then(agent_command_value)
     }
 
     pub(super) fn reload_active_agent_child_transcript(&mut self) -> bool {
         let AgentView::Child {
             child_session_ref, ..
-        } = &self.active_agent_view
+        } = &self.agent_panel.active_view
         else {
-            let changed = self.active_agent_child_transcript.is_some();
-            self.active_agent_child_transcript = None;
+            let changed = self.agent_panel.active_child_transcript.is_some();
+            self.agent_panel.active_child_transcript = None;
             return changed;
         };
         let parent_dir = self
@@ -695,19 +696,18 @@ impl AppState {
             Ok(file_signature) => file_signature,
             Err(error) => {
                 let error = error.to_string();
-                let changed =
-                    !self
-                        .active_agent_child_transcript
-                        .as_ref()
-                        .is_some_and(|transcript| {
-                            transcript.path == path
-                                && transcript.file_signature
-                                    == ChildTranscriptFileSignature::empty()
-                                && transcript.load_error.as_deref() == Some(error.as_str())
-                                && transcript.timeline_entries.is_empty()
-                                && transcript.rendered_body_lines.is_empty()
-                        });
-                self.active_agent_child_transcript = Some(ActiveAgentChildTranscript {
+                let changed = !self
+                    .agent_panel
+                    .active_child_transcript
+                    .as_ref()
+                    .is_some_and(|transcript| {
+                        transcript.path == path
+                            && transcript.file_signature == ChildTranscriptFileSignature::empty()
+                            && transcript.load_error.as_deref() == Some(error.as_str())
+                            && transcript.timeline_entries.is_empty()
+                            && transcript.rendered_body_lines.is_empty()
+                    });
+                self.agent_panel.active_child_transcript = Some(ActiveAgentChildTranscript {
                     path: path.clone(),
                     file_signature: ChildTranscriptFileSignature::empty(),
                     timeline_entries: Vec::new(),
@@ -720,7 +720,8 @@ impl AppState {
             }
         };
         if self
-            .active_agent_child_transcript
+            .agent_panel
+            .active_child_transcript
             .as_ref()
             .is_some_and(|transcript| {
                 transcript.path == path && transcript.file_signature == file_signature
@@ -733,7 +734,7 @@ impl AppState {
             CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT,
             file_signature.clone(),
         );
-        self.active_agent_child_transcript = Some(match load_result {
+        self.agent_panel.active_child_transcript = Some(match load_result {
             Ok(recent) => {
                 let (timeline_entries, total_timeline_entries) =
                     self.bounded_child_timeline_entries(&recent.entries);
@@ -763,14 +764,15 @@ impl AppState {
 
     pub(super) fn rerender_active_agent_child_transcript(&mut self) {
         let Some(timeline_entries) = self
-            .active_agent_child_transcript
+            .agent_panel
+            .active_child_transcript
             .as_ref()
             .map(|transcript| transcript.timeline_entries.clone())
         else {
             return;
         };
         let rendered_body_lines = self.render_child_timeline_body_lines(&timeline_entries);
-        if let Some(transcript) = self.active_agent_child_transcript.as_mut() {
+        if let Some(transcript) = self.agent_panel.active_child_transcript.as_mut() {
             transcript.rendered_body_lines = rendered_body_lines;
         }
     }

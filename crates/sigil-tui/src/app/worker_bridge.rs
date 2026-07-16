@@ -85,13 +85,14 @@ impl AppState {
             && let Some(activity) = self.tool_activity_cache_entry(index, entry)
         {
             if let Some(cached) = self
+                .timeline_state
                 .tool_activity_cache
                 .iter_mut()
                 .find(|cached| cached.index == index)
             {
                 *cached = activity;
             } else {
-                self.tool_activity_cache.push(activity);
+                self.timeline_state.tool_activity_cache.push(activity);
             }
         }
         self.rerender_timeline_entry(index);

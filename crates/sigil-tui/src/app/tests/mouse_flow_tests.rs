@@ -825,10 +825,10 @@ fn timeline_text_selection_helpers_cover_invalid_and_empty_states() {
     assert!(!app.update_timeline_text_selection_at(0, 0));
     app.timeline.clear();
     app.rebuild_timeline_render_store();
-    app.timeline_text_selection_anchor = Some(0);
+    app.timeline_state.text_selection_anchor = Some(0);
     assert!(!app.update_timeline_text_selection(0));
     assert!(!app.update_timeline_text_selection_at(0, 0));
-    app.timeline_text_selection_anchor_column = Some(0);
+    app.timeline_state.text_selection_anchor_column = Some(0);
     assert!(!app.update_timeline_text_selection_at(0, 0));
 
     app.push_timeline(TimelineRole::User, "line");
@@ -901,13 +901,13 @@ fn mouse_press_tool_card_body_selects_without_toggling() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
-        app.selected_tool_activity_key,
+        app.timeline_state.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert_eq!(app.composer.input, "draft");
-    assert!(app.expanded_tool_activity_keys.is_empty());
-    assert!(app.collapsed_tool_activity_keys.is_empty());
+    assert!(app.timeline_state.expanded_tool_activity_keys.is_empty());
+    assert!(app.timeline_state.collapsed_tool_activity_keys.is_empty());
     Ok(())
 }
 
@@ -922,17 +922,21 @@ fn mouse_click_tool_card_body_toggles_card_on_release() -> Result<()> {
 
     let down = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
     assert!(matches!(down, AppMouseOutcome::Redraw));
-    assert!(app.expanded_tool_activity_keys.is_empty());
+    assert!(app.timeline_state.expanded_tool_activity_keys.is_empty());
 
     let up = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, column, row), &layout)?;
 
     assert!(matches!(up, AppMouseOutcome::Redraw));
     assert_eq!(
-        app.selected_tool_activity_key,
+        app.timeline_state.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
-    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains("call:call-first")
+    );
     Ok(())
 }
 
@@ -965,7 +969,7 @@ fn mouse_drag_tool_card_body_does_not_toggle_card() -> Result<()> {
         up,
         AppMouseOutcome::Noop | AppMouseOutcome::Redraw
     ));
-    assert!(app.expanded_tool_activity_keys.is_empty());
+    assert!(app.timeline_state.expanded_tool_activity_keys.is_empty());
     Ok(())
 }
 
@@ -982,11 +986,15 @@ fn mouse_click_tool_card_header_toggles_card() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
-        app.selected_tool_activity_key,
+        app.timeline_state.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
-    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains("call:call-first")
+    );
     assert_eq!(
         app.mouse_hover_target,
         Some(HitTarget::ToolCardHeader {
@@ -1009,11 +1017,15 @@ fn mouse_release_only_tool_card_header_toggles_card() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
-        app.selected_tool_activity_key,
+        app.timeline_state.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
-    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains("call:call-first")
+    );
     Ok(())
 }
 
@@ -1031,7 +1043,11 @@ fn mouse_click_tool_card_header_keeps_expanded_card_visible() -> Result<()> {
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
-    assert!(app.expanded_tool_activity_keys.contains("call:call-long"));
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains("call:call-long")
+    );
     let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 20), &app);
     let expanded_hit_area = expanded_layout
         .tool_cards
@@ -1055,11 +1071,15 @@ fn mouse_click_tool_card_hidden_preview_toggles_card() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(
-        app.selected_tool_activity_key,
+        app.timeline_state.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
     assert_eq!(app.active_pane, PaneFocus::Activity);
-    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    assert!(
+        app.timeline_state
+            .expanded_tool_activity_keys
+            .contains("call:call-first")
+    );
     assert_eq!(
         app.mouse_hover_target,
         Some(HitTarget::ToolCardHiddenPreview {
@@ -1415,7 +1435,7 @@ fn mouse_click_tool_card_is_noop_when_approval_is_pending() -> Result<()> {
     app.set_terminal_size(120, 20);
     push_sample_tool_cards(&mut app);
     inject_write_file_approval(&mut app, sample_approval_preview())?;
-    let previous_selected_tool_activity_key = app.selected_tool_activity_key.clone();
+    let previous_selected_tool_activity_key = app.timeline_state.selected_tool_activity_key.clone();
     let first_entry_index = app.tool_activity_entry_indices()[0];
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = tool_card_point(&layout, first_entry_index);
@@ -1424,7 +1444,7 @@ fn mouse_click_tool_card_is_noop_when_approval_is_pending() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Noop));
     assert_eq!(
-        app.selected_tool_activity_key,
+        app.timeline_state.selected_tool_activity_key,
         previous_selected_tool_activity_key
     );
     Ok(())
@@ -1667,12 +1687,15 @@ fn mouse_click_unknown_tool_card_is_noop() -> Result<()> {
     let mut layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     layout.tool_cards[0].entry_index = 99;
     let (column, row) = point_in(layout.tool_cards[0].area);
-    let previous_selected = app.selected_tool_activity_key.clone();
+    let previous_selected = app.timeline_state.selected_tool_activity_key.clone();
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Noop));
-    assert_eq!(app.selected_tool_activity_key, previous_selected);
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        previous_selected
+    );
     Ok(())
 }
 

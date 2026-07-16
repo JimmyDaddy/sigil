@@ -13,6 +13,25 @@ fn app_uses_provider_supported_default_reasoning_effort() {
 }
 
 #[test]
+fn app_state_domain_bundles_start_clean_without_hiding_public_timeline_fields() {
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    assert!(!app.timeline.is_empty());
+    assert!(!app.events.is_empty());
+    assert_eq!(app.timeline_scroll_back, 0);
+    assert_eq!(app.activity_scroll_back, 0);
+    assert!(app.timeline_revision() > 0);
+    assert!(app.timeline_state.tool_activity_cache.is_empty());
+    assert!(app.review.checkpoint_restore_preview.is_none());
+    assert!(!app.review.verification_card_focused);
+    assert_eq!(app.agent_panel.active_view, super::super::AgentView::Main);
+    assert!(app.agent_panel.active_child_transcript.is_none());
+    assert!(app.egress_disclosure.pending.is_empty());
+    assert!(app.egress_disclosure.recent.is_none());
+    assert!(!app.egress_disclosure.rendered.get());
+}
+
+#[test]
 fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     assert_eq!(ComposerMode::Build.notice(), "thinking");
     assert_eq!(ComposerMode::Plan.notice(), "planning");
@@ -264,7 +283,7 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
     assert_eq!(app.last_notice(), Some("agent not found: missing"));
     app.activate_agent_from_command("next")?;
     assert_eq!(app.last_notice(), Some("no child agents to switch"));
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: "orphan".to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative("children/orphan.jsonl")?,
     };
@@ -272,7 +291,7 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
     assert_eq!(app.last_notice(), Some("agent close unavailable: current"));
     app.activate_agent_from_command("cancel current")?;
     assert_eq!(app.last_notice(), Some("agent cancel unavailable: current"));
-    app.active_agent_view = super::super::AgentView::Main;
+    app.agent_panel.active_view = super::super::AgentView::Main;
     app.activate_agent_from_command("rename current Main Agent")?;
     assert_eq!(app.last_notice(), Some("agent not found: current"));
     app.activate_agent_from_command("message")?;
@@ -298,7 +317,7 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
     assert!(!rows.iter().any(|row| row.label == "agents"));
     app.active_pane = PaneFocus::Activity;
     app.sidebar_selected_card = SidebarCard::Agents;
-    app.sidebar_agent_selected = 1;
+    app.agent_panel.selected = 1;
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("no agent selected"));
     assert!(
@@ -406,13 +425,13 @@ fn agent_flow_selection_refresh_and_rename_edges_cover_private_guards() -> Resul
     app.activate_agent_from_command("child_1")?;
     assert_eq!(app.active_agent_label(), "Repo Read");
 
-    app.sidebar_agent_selected = 99;
+    app.agent_panel.selected = 99;
     assert!(app.move_composer_agent_selection(false));
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
 
-    app.sidebar_agent_selected = 1;
+    app.agent_panel.selected = 1;
     assert!(app.move_composer_agent_selection(false));
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
 
     app.activate_agent_from_command("prev")?;
     assert_eq!(app.active_agent_label(), "main");
@@ -422,11 +441,11 @@ fn agent_flow_selection_refresh_and_rename_edges_cover_private_guards() -> Resul
     );
     assert!(!app.agent_selector_allows_popup("rename child_1 Repo Read"));
 
-    app.sidebar_agent_selected = 99;
+    app.agent_panel.selected = 99;
     app.refresh_active_agent_view_after_parent_sync();
-    assert!(app.sidebar_agent_selected < app.agent_sidebar_rows().len());
+    assert!(app.agent_panel.selected < app.agent_sidebar_rows().len());
 
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: "missing_child".to_owned(),
         child_session_ref: child_ref,
     };
@@ -535,7 +554,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     }));
     app.active_pane = PaneFocus::Activity;
     app.sidebar_selected_card = SidebarCard::Agents;
-    app.sidebar_agent_selected = 1;
+    app.agent_panel.selected = 1;
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let focus_lines = app
         .transcript_lines(8)
@@ -567,7 +586,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
             .iter()
             .any(|line| line.contains("PARENT_MAIN_TRANSCRIPT"))
     );
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let main_lines = app
         .transcript_lines(8)
@@ -2090,7 +2109,7 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
     assert_eq!(app.sidebar_selected_card, SidebarCard::Review);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Agents);
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert_eq!(app.agent_panel.selected, 0);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Review);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -2108,7 +2127,7 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
     assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
 
     app.sidebar_selected_card = SidebarCard::Agents;
-    app.sidebar_agent_selected = 99;
+    app.agent_panel.selected = 99;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("no agent selected"));
     assert!(

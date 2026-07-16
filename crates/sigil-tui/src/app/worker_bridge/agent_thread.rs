@@ -11,13 +11,13 @@ impl AppState {
         thread_id: &sigil_kernel::AgentThreadId,
         event: RunEvent,
     ) {
-        let AgentView::Child { child_task_id, .. } = &self.active_agent_view else {
+        let AgentView::Child { child_task_id, .. } = &self.agent_panel.active_view else {
             return;
         };
         if child_task_id != thread_id.as_str() {
             return;
         }
-        if self.active_agent_child_transcript.is_none() {
+        if self.agent_panel.active_child_transcript.is_none() {
             self.reload_active_agent_child_transcript();
         }
         if self.append_live_agent_thread_event(event) {
@@ -87,7 +87,7 @@ impl AppState {
         if delta.is_empty() {
             return false;
         }
-        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
+        let Some(transcript) = self.agent_panel.active_child_transcript.as_mut() else {
             return false;
         };
         transcript.load_error = None;
@@ -115,7 +115,7 @@ impl AppState {
     }
 
     fn push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
-        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
+        let Some(transcript) = self.agent_panel.active_child_transcript.as_mut() else {
             return false;
         };
         transcript.load_error = None;
@@ -129,7 +129,7 @@ impl AppState {
     }
 
     fn replace_or_push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
-        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
+        let Some(transcript) = self.agent_panel.active_child_transcript.as_mut() else {
             return false;
         };
         transcript.load_error = None;

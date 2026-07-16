@@ -18,13 +18,13 @@ impl AppState {
             SidebarCard::Agents => {
                 let last_index = self.agent_sidebar_rows().len().saturating_sub(1);
                 if next {
-                    if self.sidebar_agent_selected < last_index {
-                        self.sidebar_agent_selected += 1;
+                    if self.agent_panel.selected < last_index {
+                        self.agent_panel.selected += 1;
                     } else {
                         self.sidebar_selected_card = SidebarCard::Review;
                     }
-                } else if self.sidebar_agent_selected > 0 {
-                    self.sidebar_agent_selected -= 1;
+                } else if self.agent_panel.selected > 0 {
+                    self.agent_panel.selected -= 1;
                 } else {
                     self.sidebar_selected_card = SidebarCard::Permission;
                 }

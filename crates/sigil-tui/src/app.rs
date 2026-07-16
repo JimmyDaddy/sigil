@@ -1,6 +1,5 @@
 use std::{
-    cell::Cell,
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -51,12 +50,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, AgentThreadStateProjection, CompactionConfig, CompactionThresholdStatus,
-    ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
-    ConversationInputQueueId, ConversationInputTarget, ImageAttachment, InteractionMode,
-    MemoryConfig, MutationArtifactCleanupTarget, MutationArtifactInventoryItem,
-    MutationArtifactRetentionReport, PermissionMode, PlanApprovalPermission, PlanTaskStartMode,
-    ReasoningEffort, RootConfig, SecretRedactor, SessionConfig, SessionStats, StorageConfig,
-    TaskStateProjection, ToolPreviewSnapshot, resolve_workspace_root,
+    ControlledCheckpointRestoreRequest, ConversationInputKind, ConversationInputQueueId,
+    ConversationInputTarget, ImageAttachment, InteractionMode, MemoryConfig,
+    MutationArtifactCleanupTarget, MutationArtifactInventoryItem, MutationArtifactRetentionReport,
+    PermissionMode, PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig,
+    SecretRedactor, SessionConfig, SessionStats, StorageConfig, TaskStateProjection,
+    ToolPreviewSnapshot, resolve_workspace_root,
 };
 use sigil_runtime::{
     BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths, build_run_options,
@@ -86,7 +85,6 @@ pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
 pub(crate) use self::checkpoint_flow::{CheckpointRestoreModalPhase, CheckpointRestoreModalView};
 pub(crate) use self::egress_disclosure_flow::EGRESS_DISCLOSURE_HEIGHT;
-use self::egress_disclosure_flow::{EgressDisclosureCard, PendingEgressDisclosure};
 use self::formatting::*;
 use self::modal_flow::{ModalState, ModelPickerRefresh};
 use self::runtime_status::McpProgressState;
@@ -94,7 +92,10 @@ pub(crate) use self::runtime_status::{
     McpServerRuntimeStatus, TimelineTextSelection, code_intelligence_config_status,
     diagnostic_summary_label, initial_mcp_server_status, initial_mcp_server_statuses,
 };
-use self::state::{ApprovalState, ComposerState, RuntimeStatusState, SessionBrowserState};
+use self::state::{
+    AgentPanelState, ApprovalState, ComposerState, EgressDisclosureState, ReviewState,
+    RuntimeStatusState, SessionBrowserState, TimelineState,
+};
 use self::timeline_render_store::TimelineRenderStore;
 #[cfg(test)]
 pub(crate) use self::usage_sidebar_flow::context_window_source_label;
@@ -288,12 +289,7 @@ pub struct AppState {
     pub timeline_scroll_back: usize,
     pub activity_scroll_back: usize,
     info_rail_detail: bool,
-    checkpoint_restore_preview: Option<ControlledCheckpointRestorePreview>,
-    checkpoint_expected_request: Option<ControlledCheckpointRestoreRequest>,
-    checkpoint_request_id: Option<u64>,
-    checkpoint_action_pending: bool,
-    latest_checkpoint_restore_sequence: Option<u64>,
-    readiness_sequences_by_scope: BTreeMap<sigil_kernel::EvidenceScope, u64>,
+    review: ReviewState,
     config_snapshot: Option<RootConfig>,
     terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
@@ -305,38 +301,17 @@ pub struct AppState {
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
     thinking_block_mode: ThinkingBlockMode,
-    expanded_thinking_entry_indices: BTreeSet<usize>,
-    collapsed_thinking_entry_indices: BTreeSet<usize>,
-    selected_tool_activity_key: Option<String>,
-    expanded_tool_activity_keys: BTreeSet<String>,
-    collapsed_tool_activity_keys: BTreeSet<String>,
-    tool_activity_visible_rows: BTreeMap<String, usize>,
+    timeline_state: TimelineState,
     pending_terminal_cancel_confirmation: Option<String>,
-    verification_card_focused: bool,
-    verification_inspect_open: bool,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
     pending_mouse_left_down: bool,
     pending_tool_card_body_click_entry: Option<usize>,
     last_notice: Option<String>,
-    streaming_assistant_index: Option<usize>,
-    streaming_reasoning_index: Option<usize>,
-    timeline_render_store: TimelineRenderStore,
-    timeline_text_selection: Option<TimelineTextSelection>,
-    timeline_text_selection_anchor: Option<usize>,
-    timeline_text_selection_anchor_column: Option<usize>,
-    timeline_revision: u64,
-    defer_timeline_renders: bool,
-    deferred_timeline_render_indexes: BTreeSet<usize>,
-    tool_activity_cache: Vec<ToolActivityCacheEntry>,
     usage_sidebar_cache: Vec<String>,
     sidebar_selected_card: SidebarCard,
-    sidebar_agent_selected: usize,
-    active_agent_view: AgentView,
-    active_agent_child_transcript: Option<ActiveAgentChildTranscript>,
-    pending_egress_disclosures: VecDeque<PendingEgressDisclosure>,
-    recent_egress_disclosure: Option<EgressDisclosureCard>,
-    egress_disclosure_rendered: Cell<bool>,
+    agent_panel: AgentPanelState,
+    egress_disclosure: EgressDisclosureState,
     terminal_width: u16,
     terminal_height: u16,
     slash_selector_index: usize,
@@ -612,12 +587,7 @@ impl AppState {
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_detail: false,
-            checkpoint_restore_preview: None,
-            checkpoint_expected_request: None,
-            checkpoint_request_id: None,
-            checkpoint_action_pending: false,
-            latest_checkpoint_restore_sequence: None,
-            readiness_sequences_by_scope: BTreeMap::new(),
+            review: ReviewState::default(),
             config_snapshot: Some(root_config.clone()),
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
@@ -629,38 +599,17 @@ impl AppState {
             compaction_config: root_config.compaction.clone(),
             memory_config: root_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
-            expanded_thinking_entry_indices: BTreeSet::new(),
-            collapsed_thinking_entry_indices: BTreeSet::new(),
-            selected_tool_activity_key: None,
-            expanded_tool_activity_keys: BTreeSet::new(),
-            collapsed_tool_activity_keys: BTreeSet::new(),
-            tool_activity_visible_rows: BTreeMap::new(),
+            timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
-            verification_card_focused: false,
-            verification_inspect_open: false,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: None,
-            streaming_assistant_index: None,
-            streaming_reasoning_index: None,
-            timeline_render_store: TimelineRenderStore::default(),
-            timeline_text_selection: None,
-            timeline_text_selection_anchor: None,
-            timeline_text_selection_anchor_column: None,
-            timeline_revision: 0,
-            defer_timeline_renders: false,
-            deferred_timeline_render_indexes: BTreeSet::new(),
-            tool_activity_cache: Vec::new(),
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
-            sidebar_agent_selected: 0,
-            active_agent_view: AgentView::Main,
-            active_agent_child_transcript: None,
-            pending_egress_disclosures: VecDeque::new(),
-            recent_egress_disclosure: None,
-            egress_disclosure_rendered: Cell::new(false),
+            agent_panel: AgentPanelState::default(),
+            egress_disclosure: EgressDisclosureState::default(),
             terminal_width: 120,
             terminal_height: 32,
             slash_selector_index: 0,
@@ -739,12 +688,7 @@ impl AppState {
             timeline_scroll_back: 0,
             activity_scroll_back: 0,
             info_rail_detail: false,
-            checkpoint_restore_preview: None,
-            checkpoint_expected_request: None,
-            checkpoint_request_id: None,
-            checkpoint_action_pending: false,
-            latest_checkpoint_restore_sequence: None,
-            readiness_sequences_by_scope: BTreeMap::new(),
+            review: ReviewState::default(),
             config_snapshot: None,
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: SecretRedactor::default(),
@@ -756,38 +700,17 @@ impl AppState {
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
-            expanded_thinking_entry_indices: BTreeSet::new(),
-            collapsed_thinking_entry_indices: BTreeSet::new(),
-            selected_tool_activity_key: None,
-            expanded_tool_activity_keys: BTreeSet::new(),
-            collapsed_tool_activity_keys: BTreeSet::new(),
-            tool_activity_visible_rows: BTreeMap::new(),
+            timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
-            verification_card_focused: false,
-            verification_inspect_open: false,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
             pending_tool_card_body_click_entry: None,
             last_notice: startup_error,
-            streaming_assistant_index: None,
-            streaming_reasoning_index: None,
-            timeline_render_store: TimelineRenderStore::default(),
-            timeline_text_selection: None,
-            timeline_text_selection_anchor: None,
-            timeline_text_selection_anchor_column: None,
-            timeline_revision: 0,
-            defer_timeline_renders: false,
-            deferred_timeline_render_indexes: BTreeSet::new(),
-            tool_activity_cache: Vec::new(),
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
-            sidebar_agent_selected: 0,
-            active_agent_view: AgentView::Main,
-            active_agent_child_transcript: None,
-            pending_egress_disclosures: VecDeque::new(),
-            recent_egress_disclosure: None,
-            egress_disclosure_rendered: Cell::new(false),
+            agent_panel: AgentPanelState::default(),
+            egress_disclosure: EgressDisclosureState::default(),
             terminal_width: 120,
             terminal_height: 32,
             slash_selector_index: 0,
@@ -863,8 +786,8 @@ impl AppState {
 
     fn bootstrap(&mut self) {
         self.timeline.clear();
-        self.tool_activity_cache.clear();
-        self.tool_activity_visible_rows.clear();
+        self.timeline_state.tool_activity_cache.clear();
+        self.timeline_state.tool_activity_visible_rows.clear();
         self.events.clear();
         self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "sigil ready.");
@@ -897,8 +820,8 @@ impl AppState {
 
     fn bootstrap_setup(&mut self) {
         self.timeline.clear();
-        self.tool_activity_cache.clear();
-        self.tool_activity_visible_rows.clear();
+        self.timeline_state.tool_activity_cache.clear();
+        self.timeline_state.tool_activity_visible_rows.clear();
         self.events.clear();
         self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "quick setup");
@@ -949,26 +872,26 @@ impl AppState {
         self.tool_preview_snapshots.clear();
         self.runtime.run_phase = RunPhase::Idle;
         self.runtime.last_phase_marker = None;
-        self.streaming_assistant_index = None;
-        self.streaming_reasoning_index = None;
+        self.timeline_state.streaming_assistant_index = None;
+        self.timeline_state.streaming_reasoning_index = None;
         self.approval.metadata_collapsed = false;
         self.approval.selected_file_index = 0;
         self.approval.selected_hunk_index = 0;
         self.approval.diff_mode = ApprovalDiffMode::Full;
         self.approval.selected_action = ApprovalAction::Deny;
-        self.selected_tool_activity_key = None;
-        self.expanded_thinking_entry_indices.clear();
-        self.collapsed_thinking_entry_indices.clear();
-        self.expanded_tool_activity_keys.clear();
-        self.collapsed_tool_activity_keys.clear();
-        self.tool_activity_visible_rows.clear();
+        self.timeline_state.selected_tool_activity_key = None;
+        self.timeline_state.expanded_thinking_entry_indices.clear();
+        self.timeline_state.collapsed_thinking_entry_indices.clear();
+        self.timeline_state.expanded_tool_activity_keys.clear();
+        self.timeline_state.collapsed_tool_activity_keys.clear();
+        self.timeline_state.tool_activity_visible_rows.clear();
         self.pending_terminal_cancel_confirmation = None;
         self.pending_mouse_slash_confirmation = None;
         self.mouse_hover_target = None;
         self.pending_mouse_left_down = false;
         self.pending_tool_card_body_click_entry = None;
-        self.active_agent_view = AgentView::Main;
-        self.active_agent_child_transcript = None;
+        self.agent_panel.active_view = AgentView::Main;
+        self.agent_panel.active_child_transcript = None;
         self.composer.agent_panel_focused = false;
         self.composer.cleared_input_draft = None;
         self.composer.input_kill_buffer = None;
@@ -1211,7 +1134,9 @@ impl AppState {
                     self.toggle_thinking_block_mode();
                     return Ok(None);
                 }
-                if self.selected_tool_activity_key.is_some() && self.toggle_selected_tool_card() {
+                if self.timeline_state.selected_tool_activity_key.is_some()
+                    && self.toggle_selected_tool_card()
+                {
                     return Ok(None);
                 }
                 if self.has_collapsible_thinking_blocks() {

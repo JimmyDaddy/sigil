@@ -73,8 +73,8 @@ impl AppState {
         self.modal_state = Some(ModalState::CheckpointRestore(
             CheckpointRestoreModalState::default(),
         ));
-        if self.checkpoint_action_pending
-            && self.checkpoint_expected_request.is_some()
+        if self.review.checkpoint_action_pending
+            && self.review.checkpoint_expected_request.is_some()
             && let Some(state) = self.checkpoint_restore_modal_state_mut()
         {
             state.operation = CheckpointModalOperation::Previewing;
@@ -87,7 +87,7 @@ impl AppState {
     }
 
     pub(super) fn checkpoint_request_matches(&self, request_id: u64) -> bool {
-        self.checkpoint_request_id == Some(request_id)
+        self.review.checkpoint_request_id == Some(request_id)
     }
 
     pub(super) fn handle_checkpoint_restore_modal_key_event(
@@ -156,8 +156,9 @@ impl AppState {
         request_id: u64,
         preview: ControlledCheckpointRestorePreview,
     ) {
-        let response_matches = self.checkpoint_request_id == Some(request_id)
+        let response_matches = self.review.checkpoint_request_id == Some(request_id)
             && self
+                .review
                 .checkpoint_expected_request
                 .as_ref()
                 .is_some_and(|request| {
@@ -171,11 +172,11 @@ impl AppState {
             );
             return;
         }
-        self.checkpoint_action_pending = false;
+        self.review.checkpoint_action_pending = false;
         if !self.checkpoint_restore_modal_open() {
-            self.checkpoint_restore_preview = None;
-            self.checkpoint_expected_request = None;
-            self.checkpoint_request_id = None;
+            self.review.checkpoint_restore_preview = None;
+            self.review.checkpoint_expected_request = None;
+            self.review.checkpoint_request_id = None;
             return;
         }
         let file_count = preview.files.len();
@@ -193,7 +194,7 @@ impl AppState {
         } else {
             self.last_notice = Some("checkpoint restore blocked by preflight conflicts".to_owned());
         }
-        self.checkpoint_restore_preview = Some(preview);
+        self.review.checkpoint_restore_preview = Some(preview);
     }
 
     pub(super) fn apply_checkpoint_restore_completed(
@@ -201,13 +202,13 @@ impl AppState {
         request_id: u64,
         preview: &ControlledCheckpointRestorePreview,
     ) -> bool {
-        if self.checkpoint_request_id != Some(request_id) {
+        if self.review.checkpoint_request_id != Some(request_id) {
             return false;
         }
-        self.checkpoint_action_pending = false;
-        self.checkpoint_restore_preview = None;
-        self.checkpoint_expected_request = None;
-        self.checkpoint_request_id = None;
+        self.review.checkpoint_action_pending = false;
+        self.review.checkpoint_restore_preview = None;
+        self.review.checkpoint_expected_request = None;
+        self.review.checkpoint_request_id = None;
         if self.checkpoint_restore_modal_open() {
             self.modal_state = None;
         }
@@ -222,10 +223,10 @@ impl AppState {
     }
 
     pub(super) fn clear_checkpoint_interaction(&mut self) {
-        self.checkpoint_action_pending = false;
-        self.checkpoint_restore_preview = None;
-        self.checkpoint_expected_request = None;
-        self.checkpoint_request_id = None;
+        self.review.checkpoint_action_pending = false;
+        self.review.checkpoint_restore_preview = None;
+        self.review.checkpoint_expected_request = None;
+        self.review.checkpoint_request_id = None;
         if self.checkpoint_restore_modal_open() {
             self.modal_state = None;
         }
@@ -236,16 +237,16 @@ impl AppState {
         request_id: u64,
         error: &str,
     ) -> bool {
-        if self.checkpoint_request_id != Some(request_id) {
+        if self.review.checkpoint_request_id != Some(request_id) {
             return false;
         }
-        if !self.checkpoint_action_pending || !self.checkpoint_restore_modal_open() {
+        if !self.review.checkpoint_action_pending || !self.checkpoint_restore_modal_open() {
             self.clear_checkpoint_interaction();
             return false;
         }
-        self.checkpoint_action_pending = false;
-        self.checkpoint_expected_request = None;
-        self.checkpoint_request_id = None;
+        self.review.checkpoint_action_pending = false;
+        self.review.checkpoint_expected_request = None;
+        self.review.checkpoint_request_id = None;
         let preview_failed = matches!(
             self.modal_state,
             Some(ModalState::CheckpointRestore(CheckpointRestoreModalState {
@@ -254,7 +255,7 @@ impl AppState {
             }))
         );
         if preview_failed {
-            self.checkpoint_restore_preview = None;
+            self.review.checkpoint_restore_preview = None;
         }
         if let Some(state) = self.checkpoint_restore_modal_state_mut() {
             if preview_failed {
@@ -271,23 +272,23 @@ impl AppState {
             self.set_checkpoint_modal_error("wait for the active run before checkpoint restore");
             return None;
         }
-        if self.checkpoint_action_pending {
+        if self.review.checkpoint_action_pending {
             self.last_notice = Some("checkpoint operation already in progress".to_owned());
             return None;
         }
         let request = match self.latest_checkpoint_request() {
             Ok(request) => request,
             Err(error) => {
-                self.checkpoint_restore_preview = None;
+                self.review.checkpoint_restore_preview = None;
                 self.set_checkpoint_modal_error(&error);
                 return None;
             }
         };
-        self.checkpoint_restore_preview = None;
-        self.checkpoint_expected_request = Some(request.clone());
+        self.review.checkpoint_restore_preview = None;
+        self.review.checkpoint_expected_request = Some(request.clone());
         let request_id = self.next_background_request_id();
-        self.checkpoint_request_id = Some(request_id);
-        self.checkpoint_action_pending = true;
+        self.review.checkpoint_request_id = Some(request_id);
+        self.review.checkpoint_action_pending = true;
         if let Some(state) = self.checkpoint_restore_modal_state_mut() {
             state.context = CheckpointDisplayContext::default();
             state.operation = CheckpointModalOperation::Previewing;
@@ -306,11 +307,11 @@ impl AppState {
     }
 
     fn execute_checkpoint_restore(&mut self) -> Option<AppAction> {
-        if self.checkpoint_action_pending {
+        if self.review.checkpoint_action_pending {
             self.last_notice = Some("checkpoint operation already in progress".to_owned());
             return None;
         }
-        let Some(preview) = self.checkpoint_restore_preview.as_ref() else {
+        let Some(preview) = self.review.checkpoint_restore_preview.as_ref() else {
             self.last_notice = Some("restore preview is not ready yet".to_owned());
             return None;
         };
@@ -323,10 +324,10 @@ impl AppState {
             checkpoint_id: preview.checkpoint_id.clone(),
             checkpoint_digest: preview.checkpoint_digest.clone(),
         };
-        self.checkpoint_expected_request = Some(request.clone());
+        self.review.checkpoint_expected_request = Some(request.clone());
         let request_id = self.next_background_request_id();
-        self.checkpoint_request_id = Some(request_id);
-        self.checkpoint_action_pending = true;
+        self.review.checkpoint_request_id = Some(request_id);
+        self.review.checkpoint_action_pending = true;
         if let Some(state) = self.checkpoint_restore_modal_state_mut() {
             state.operation = CheckpointModalOperation::Restoring;
             state.error = None;
@@ -343,11 +344,11 @@ impl AppState {
             self.last_notice = Some("wait for the active run before conversation fork".to_owned());
             return None;
         }
-        if self.checkpoint_action_pending {
+        if self.review.checkpoint_action_pending {
             self.last_notice = Some("checkpoint operation already in progress".to_owned());
             return None;
         }
-        let Some(preview) = self.checkpoint_restore_preview.as_ref() else {
+        let Some(preview) = self.review.checkpoint_restore_preview.as_ref() else {
             self.last_notice = Some("wait for the exact restore preview before forking".to_owned());
             return None;
         };
@@ -355,10 +356,10 @@ impl AppState {
             checkpoint_id: preview.checkpoint_id.clone(),
             checkpoint_digest: preview.checkpoint_digest.clone(),
         };
-        self.checkpoint_expected_request = Some(request.clone());
+        self.review.checkpoint_expected_request = Some(request.clone());
         let request_id = self.next_background_request_id();
-        self.checkpoint_request_id = Some(request_id);
-        self.checkpoint_action_pending = true;
+        self.review.checkpoint_request_id = Some(request_id);
+        self.review.checkpoint_action_pending = true;
         if let Some(state) = self.checkpoint_restore_modal_state_mut() {
             state.operation = CheckpointModalOperation::Forking;
             state.error = None;
@@ -376,7 +377,7 @@ impl AppState {
         let ModalState::CheckpointRestore(state) = self.modal_state.as_ref()? else {
             return None;
         };
-        let preview = self.checkpoint_restore_preview.as_ref();
+        let preview = self.review.checkpoint_restore_preview.as_ref();
         let phase = match state.operation {
             CheckpointModalOperation::Previewing => CheckpointRestoreModalPhase::Loading,
             CheckpointModalOperation::Restoring => CheckpointRestoreModalPhase::Restoring,
@@ -593,9 +594,9 @@ impl AppState {
     }
 
     fn set_checkpoint_modal_error(&mut self, error: &str) {
-        self.checkpoint_action_pending = false;
-        self.checkpoint_expected_request = None;
-        self.checkpoint_request_id = None;
+        self.review.checkpoint_action_pending = false;
+        self.review.checkpoint_expected_request = None;
+        self.review.checkpoint_request_id = None;
         if let Some(state) = self.checkpoint_restore_modal_state_mut() {
             state.operation = CheckpointModalOperation::Idle;
             state.error = Some(error.to_owned());
@@ -605,10 +606,10 @@ impl AppState {
 
     fn close_checkpoint_restore_modal(&mut self) {
         self.modal_state = None;
-        self.checkpoint_restore_preview = None;
-        if !self.checkpoint_action_pending {
-            self.checkpoint_expected_request = None;
-            self.checkpoint_request_id = None;
+        self.review.checkpoint_restore_preview = None;
+        if !self.review.checkpoint_action_pending {
+            self.review.checkpoint_expected_request = None;
+            self.review.checkpoint_request_id = None;
         }
         self.active_pane = PaneFocus::Composer;
         self.last_notice = Some("checkpoint restore closed".to_owned());

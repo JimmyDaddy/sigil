@@ -49,7 +49,7 @@ fn sync_child(
             },
         )),
     ]);
-    app.active_agent_view = AgentView::Child {
+    app.agent_panel.active_view = AgentView::Child {
         child_task_id: "child_1".to_owned(),
         child_session_ref: child_ref,
     };
@@ -75,7 +75,8 @@ fn active_agent_terminal_status_and_transcript_error_paths_are_bounded() -> anyh
     assert!(app.active_agent_view_is_terminal());
     app.reload_active_agent_child_transcript();
     let transcript = app
-        .active_agent_child_transcript
+        .agent_panel
+        .active_child_transcript
         .as_ref()
         .expect("load error should still create a transcript state");
     assert!(transcript.load_error.is_some());
@@ -84,7 +85,8 @@ fn active_agent_terminal_status_and_transcript_error_paths_are_bounded() -> anyh
 
     app.rerender_active_agent_child_transcript();
     assert!(
-        app.active_agent_child_transcript
+        app.agent_panel
+            .active_child_transcript
             .as_ref()
             .expect("transcript should remain available")
             .rendered_body_lines
@@ -104,12 +106,13 @@ fn active_agent_terminal_status_and_transcript_error_paths_are_bounded() -> anyh
             sigil_kernel::TaskChildSessionStatus::Completed,
             blocked_ref,
         )?;
-        app.active_agent_child_transcript = None;
+        app.agent_panel.active_child_transcript = None;
         app.reload_active_agent_child_transcript();
         fs::set_permissions(&blocked_dir, fs::Permissions::from_mode(0o700))?;
 
         let transcript = app
-            .active_agent_child_transcript
+            .agent_panel
+            .active_child_transcript
             .as_ref()
             .expect("metadata error should still create transcript state");
         assert!(transcript.load_error.is_some());

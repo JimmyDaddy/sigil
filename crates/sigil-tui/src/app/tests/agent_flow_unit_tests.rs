@@ -155,7 +155,7 @@ fn active_agent_view_terminal_uses_child_session_status() -> anyhow::Result<()> 
             },
         )),
     ]);
-    app.active_agent_view = AgentView::Child {
+    app.agent_panel.active_view = AgentView::Child {
         child_task_id: "child_1".to_owned(),
         child_session_ref: child_ref,
     };

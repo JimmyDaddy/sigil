@@ -112,8 +112,8 @@ impl AppState {
                 ComposerMode::Plan.phase_marker(),
                 self.runtime.model_name
             ));
-            self.streaming_assistant_index = None;
-            self.streaming_reasoning_index = None;
+            self.timeline_state.streaming_assistant_index = None;
+            self.timeline_state.streaming_reasoning_index = None;
             self.composer.mode = ComposerMode::Build;
             self.refresh_usage_sidebar_cache();
             return Ok(Some(AppAction::SubmitPlanPrompt(prompt)));
@@ -146,8 +146,8 @@ impl AppState {
         self.last_notice = Some("thinking".to_owned());
         self.runtime.last_phase_marker = None;
         self.push_phase_marker(format!("thinking|{}", self.runtime.model_name));
-        self.streaming_assistant_index = None;
-        self.streaming_reasoning_index = None;
+        self.timeline_state.streaming_assistant_index = None;
+        self.timeline_state.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
         if attachments.is_empty() {
             Ok(Some(AppAction::SubmitPrompt(prompt)))
@@ -270,8 +270,8 @@ impl AppState {
             ComposerMode::Plan.phase_marker(),
             self.runtime.model_name
         ));
-        self.streaming_assistant_index = None;
-        self.streaming_reasoning_index = None;
+        self.timeline_state.streaming_assistant_index = None;
+        self.timeline_state.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
         Ok(Some(AppAction::SubmitPlanPrompt(plan_prompt)))
     }
@@ -297,8 +297,8 @@ impl AppState {
             self.last_notice = Some("continuing task".to_owned());
             self.runtime.last_phase_marker = None;
             self.push_phase_marker(format!("task|{}", self.runtime.model_name));
-            self.streaming_assistant_index = None;
-            self.streaming_reasoning_index = None;
+            self.timeline_state.streaming_assistant_index = None;
+            self.timeline_state.streaming_reasoning_index = None;
             self.refresh_usage_sidebar_cache();
             return Ok(Some(AppAction::ContinueTask {
                 task_id: None,
@@ -319,8 +319,8 @@ impl AppState {
         self.last_notice = Some("planning task".to_owned());
         self.runtime.last_phase_marker = None;
         self.push_phase_marker(format!("task|{}", self.runtime.model_name));
-        self.streaming_assistant_index = None;
-        self.streaming_reasoning_index = None;
+        self.timeline_state.streaming_assistant_index = None;
+        self.timeline_state.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
         Ok(Some(AppAction::SubmitTask(objective)))
     }
@@ -397,8 +397,8 @@ impl AppState {
         self.last_notice = Some(format!("waiting for agent @{profile_id}"));
         self.runtime.last_phase_marker = None;
         self.push_phase_marker(format!("agent|{profile_id}"));
-        self.streaming_assistant_index = None;
-        self.streaming_reasoning_index = None;
+        self.timeline_state.streaming_assistant_index = None;
+        self.timeline_state.streaming_reasoning_index = None;
         self.composer.mode = ComposerMode::Build;
         self.refresh_usage_sidebar_cache();
         AppAction::InvokeAgentProfile {
@@ -461,8 +461,8 @@ impl AppState {
         self.runtime.is_busy = true;
         self.runtime.run_phase = RunPhase::Thinking;
         self.runtime.last_phase_marker = None;
-        self.streaming_assistant_index = None;
-        self.streaming_reasoning_index = None;
+        self.timeline_state.streaming_assistant_index = None;
+        self.timeline_state.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
 
         let arguments = command.arg.trim().to_owned();

@@ -74,7 +74,8 @@ impl AppState {
     }
 
     pub(crate) fn focused_terminal_task_id(&self) -> Option<String> {
-        self.selected_tool_activity_key
+        self.timeline_state
+            .selected_tool_activity_key
             .as_deref()
             .and_then(|key| key.strip_prefix("terminal_task:"))
             .map(str::to_owned)

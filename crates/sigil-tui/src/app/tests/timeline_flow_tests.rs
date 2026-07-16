@@ -459,7 +459,7 @@ fn ctrl_t_toggles_thinking_from_activity_without_tool_selection() -> Result<()> 
         args_json: "{}".to_owned(),
     }))?;
     app.active_pane = PaneFocus::Activity;
-    app.selected_tool_activity_key = None;
+    app.timeline_state.selected_tool_activity_key = None;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
 
@@ -584,7 +584,10 @@ fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<
 }"##,
     );
     let tool_key = "call:call-first".to_owned();
-    assert_eq!(app.selected_tool_activity_key, Some(tool_key.clone()));
+    assert_eq!(
+        app.timeline_state.selected_tool_activity_key,
+        Some(tool_key.clone())
+    );
     assert_eq!(app.active_pane, PaneFocus::Composer);
 
     app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
@@ -606,7 +609,11 @@ fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<
     app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
 
     assert_eq!(app.last_notice(), Some("thinking expanded"));
-    assert!(!app.expanded_tool_activity_keys.contains(&tool_key));
+    assert!(
+        !app.timeline_state
+            .expanded_tool_activity_keys
+            .contains(&tool_key)
+    );
     let expanded = app.transcript_lines(20);
     assert!(expanded.iter().any(|line| {
         line.spans
@@ -1158,7 +1165,7 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
     app.timeline.clear();
     app.rebuild_timeline_render_store();
     app.push_timeline(TimelineRole::Assistant, "streaming answer");
-    app.streaming_assistant_index = Some(0);
+    app.timeline_state.streaming_assistant_index = Some(0);
     app.runtime.is_busy = true;
     assert_eq!(app.scrollback_cutoff_line(), 0);
     Ok(())
@@ -1174,7 +1181,7 @@ fn parent_scrollback_clamps_stale_parent_cache_while_child_view_is_active() -> R
         text: "parent prompt".to_owned(),
     }];
     app.rebuild_timeline_render_store();
-    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
         timeline_entries: Vec::new(),
@@ -1208,12 +1215,12 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
     assert!(header_only.contains("agent view"));
     assert!(!header_only.contains("session:"));
 
-    app.active_agent_child_transcript = None;
+    app.agent_panel.active_child_transcript = None;
     let unloaded = transcript_plain(app.transcript_lines(8));
     assert!(unloaded.contains("repo read"));
     assert!(unloaded.contains("child session not loaded"));
 
-    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
         timeline_entries: Vec::new(),
@@ -1226,7 +1233,7 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
     assert!(load_error.contains("load error: permission denied"));
     assert!(load_error.contains("path: children/task_1/step_1-child_1.jsonl"));
 
-    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
         timeline_entries: Vec::new(),
@@ -1238,7 +1245,7 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
     let empty = transcript_plain(app.transcript_lines(8));
     assert!(empty.contains("child session has no transcript messages yet"));
 
-    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
         timeline_entries: vec![
@@ -1271,7 +1278,7 @@ fn running_child_agent_transcript_keeps_latest_thinking_active() -> Result<()> {
         text: "child step 1\nchild step 2\nchild step 3\nchild step 4".to_owned(),
     }];
     let rendered_body_lines = app.render_child_timeline_body_lines(&timeline_entries);
-    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
         timeline_entries,
@@ -1299,7 +1306,7 @@ fn child_agent_transcript_uses_cached_bounded_timeline_entries() -> Result<()> {
             text: format!("child entry {index}"),
         })
         .collect::<Vec<_>>();
-    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+    app.agent_panel.active_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),
         timeline_entries: entries[16..].to_vec(),
@@ -1343,7 +1350,8 @@ fn child_agent_transcript_reload_uses_tail_and_skips_unchanged_files() -> Result
     assert!(rendered.contains("child message 95"));
 
     let transcript = app
-        .active_agent_child_transcript
+        .agent_panel
+        .active_child_transcript
         .as_mut()
         .expect("child transcript");
     transcript.rendered_body_lines = vec![Line::from("cached sentinel")];
@@ -1368,7 +1376,8 @@ fn running_child_agent_parent_sync_does_not_reload_changing_transcript() -> Resu
     )))?;
     app.reload_active_agent_child_transcript();
     let transcript = app
-        .active_agent_child_transcript
+        .agent_panel
+        .active_child_transcript
         .as_mut()
         .expect("child transcript");
     transcript.rendered_body_lines = vec![Line::from("running cached transcript")];
@@ -1395,14 +1404,15 @@ fn missing_child_agent_transcript_load_error_is_cached() -> Result<()> {
     std::fs::write(temp.path().join("children"), "not a directory")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_log_path = temp.path().join("parent.jsonl");
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: "missing_child".to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative("children/missing.jsonl")?,
     };
 
     assert!(app.reload_active_agent_child_transcript());
     let transcript = app
-        .active_agent_child_transcript
+        .agent_panel
+        .active_child_transcript
         .as_ref()
         .expect("missing child transcript should record load error");
     assert!(transcript.load_error.is_some());
@@ -2296,10 +2306,10 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
     sync_child_agent_for_transcript_tests(&mut app)?;
     app.active_pane = PaneFocus::Activity;
     app.sidebar_selected_card = SidebarCard::Agents;
-    app.sidebar_agent_selected = 0;
+    app.agent_panel.selected = 0;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Agents);
-    assert_eq!(app.sidebar_agent_selected, 1);
+    assert_eq!(app.agent_panel.selected, 1);
 
     app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
@@ -2503,7 +2513,7 @@ fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
             },
         )),
     ]);
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: "agent_chat_terminal".to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative(
             "children/agent_chat_terminal.jsonl",
@@ -2549,7 +2559,7 @@ fn terminal_task_child_view_does_not_render_working_progress() -> Result<()> {
         },
     )));
     app.sync_current_session_state(entries);
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: "child_1".to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative(
             "children/task_1/step_1-child_1.jsonl",
@@ -2572,7 +2582,7 @@ fn child_agent_view_live_activity_falls_back_to_task_child_entry() -> Result<()>
         },
     )));
     app.sync_current_session_state(entries);
-    app.active_agent_view = super::super::AgentView::Child {
+    app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: "child_1".to_owned(),
         child_session_ref: sigil_kernel::SessionRef::new_relative(
             "children/task_1/step_1-child_1.jsonl",
