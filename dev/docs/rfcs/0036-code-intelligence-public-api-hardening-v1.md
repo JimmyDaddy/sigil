@@ -122,3 +122,6 @@ git diff --check
   graceful shutdown/status helpers used only by process-lifecycle tests are explicitly test-only.
   Strict rustdoc, 144 code-intel tests, runtime context/Doctor tests and strict affected-crate
   Clippy pass without lint suppression.
+- R36.3 complete. The main CI workflow now runs the same locked strict-rustdoc command after the
+  workspace check, so crate, runtime, manifest and workflow changes cannot silently expand the
+  undocumented code-intelligence surface.

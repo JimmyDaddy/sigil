@@ -104,6 +104,26 @@ jobs:
       - name: cargo check --locked
         run: cargo check --locked
 
+  code-intel-rustdoc:
+    name: Code intelligence public API docs
+    needs: check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Enforce documented code-intelligence façade
+        run: cargo rustdoc --locked -p sigil-code-intel -- -D missing-docs
+
   test:
     needs: check
     runs-on: ubuntu-latest
