@@ -173,9 +173,17 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test --locked -p sigil-kernel -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib
 
-      - name: Test Windows runtime and transport surfaces
+      - name: Test Windows kernel durability
         if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-kernel -p sigil-mcp -p sigil-runtime --lib
+        run: cargo test --locked -p sigil-kernel --lib
+
+      - name: Test Windows MCP transport
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p sigil-mcp --lib
+
+      - name: Test Windows runtime integration
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p sigil-runtime --lib
 
       - name: Test Windows HTTP durable journal
         if: runner.os == 'Windows'
