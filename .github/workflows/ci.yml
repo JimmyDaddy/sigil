@@ -124,6 +124,47 @@ jobs:
       - name: Enforce documented code-intelligence façade
         run: cargo rustdoc --locked -p sigil-code-intel -- -D missing-docs
 
+  platform-check:
+    name: Platform reliability (${{ matrix.name }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile complete workspace and targets
+        run: cargo check --locked --workspace --all-targets
+
+      - name: Test macOS runtime and execution surfaces
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p sigil-kernel -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib
+
+      - name: Test Windows runtime and transport surfaces
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p sigil-kernel -p sigil-mcp -p sigil-runtime --lib
+
+      - name: Test Windows HTTP durable journal
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p sigil-http --all-targets
+
   test:
     needs: check
     runs-on: ubuntu-latest
@@ -175,26 +216,6 @@ jobs:
           path: coverage-${{ matrix.name }}.tar.gz
           if-no-files-found: error
           retention-days: 1
-
-  windows-http-durable-journal:
-    name: Windows HTTP durable journal
-    needs: check
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Test HTTP durable replace and reopen
-        run: cargo test --locked -p sigil-http --all-targets
 
   clippy:
     needs: check

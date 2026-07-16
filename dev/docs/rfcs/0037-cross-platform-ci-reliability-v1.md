@@ -120,3 +120,10 @@ pushed and GitHub Actions runs it.
   normal supply-chain workflow or Dependabot configuration. The design preserves the Windows
   durability suite, sets exact platform package scopes and treats future hosted execution as
   delivery evidence rather than local completion evidence.
+- R37.1 complete. Main CI now has a fail-fast-disabled macOS/Windows matrix that compiles the
+  complete workspace and all targets, runs the RFC platform package suites, and preserves the
+  Windows HTTP durable-journal suite without the previous duplicate job. The first local macOS
+  run exposed a PID-publication race in two cancellation tests; both now wait for a complete PID
+  rather than mere file existence. Five focused Bash and three terminal cancellation repetitions,
+  the complete workspace/all-target check, and the full macOS package set pass (144 code-intel,
+  1,090 kernel, 570 runtime and 184 tools tests; one Docker conformance test remains opt-in).

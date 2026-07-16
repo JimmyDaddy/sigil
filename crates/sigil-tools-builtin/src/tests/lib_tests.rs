@@ -42,6 +42,19 @@ fn bash_tool(test_root: &Path) -> BashTool {
     }
 }
 
+#[cfg(unix)]
+async fn wait_for_published_pid(path: &Path) -> Result<u32> {
+    for _ in 0..200 {
+        if let Ok(contents) = fs::read_to_string(path)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+        {
+            return Ok(pid);
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!("timed out waiting for a complete pid in {}", path.display())
+}
+
 fn sandbox_execution_config(
     backend: ExecutionBackendKind,
     profile: ExecutionSandboxProfile,
@@ -3020,13 +3033,7 @@ async fn terminal_start_foreground_cancellation_reaps_process_tree() -> Result<(
             )
             .await
     });
-    for _ in 0..100 {
-        if pid_file.exists() {
-            break;
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-    let descendant_pid = fs::read_to_string(&pid_file)?.trim().parse::<u32>()?;
+    let descendant_pid = wait_for_published_pid(&pid_file).await?;
     assert!(owner.request_cancel());
     let result = task.await??;
     let ToolResultStatus::Error(error) = result.status else {
@@ -3701,13 +3708,7 @@ async fn bash_inflight_cancellation_reaps_the_process_group() -> Result<()> {
             )
             .await
     });
-    for _ in 0..100 {
-        if pid_file.exists() {
-            break;
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-    let descendant_pid = fs::read_to_string(&pid_file)?.trim().parse::<u32>()?;
+    let descendant_pid = wait_for_published_pid(&pid_file).await?;
     assert!(owner.request_cancel());
     let result = task.await??;
     let ToolResultStatus::Error(error) = result.status else {
