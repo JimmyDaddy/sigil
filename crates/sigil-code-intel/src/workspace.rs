@@ -16,18 +16,29 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
+/// Effective language-server configuration and discovery status for Doctor output.
 pub struct EffectiveServerPlan {
+    /// Language servers that would be eligible for the workspace.
     pub servers: Vec<LanguageServerConfig>,
+    /// Per-server discovery and configuration status.
     pub statuses: Vec<PlannedServerStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Provider-neutral status for one planned language server.
 pub struct PlannedServerStatus {
+    /// Stable server name.
     pub server: String,
+    /// Language identifiers served by the process.
     pub languages: Vec<String>,
+    /// Human-readable discovery or configuration state.
     pub status: String,
 }
 
+/// Computes the language-server plan for a workspace without starting any process.
+///
+/// Discovery failures are represented as a degraded status so Doctor remains diagnostic rather
+/// than failing the entire command.
 pub fn effective_server_plan(
     config: &CodeIntelligenceConfig,
     workspace_root: &Path,
@@ -73,6 +84,7 @@ fn fallback_rust_analyzer_server() -> LanguageServerConfig {
     }
 }
 
+/// Returns whether code intelligence is both enabled and permitted to start on demand.
 pub fn config_enabled(config: &CodeIntelligenceConfig) -> bool {
     config.enabled && config.server_startup != CodeIntelStartup::Off
 }

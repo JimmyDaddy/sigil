@@ -77,6 +77,7 @@ pub(super) fn server_plan_state_from_effective(
 }
 
 impl ProcessLanguageServer {
+    #[cfg(test)]
     pub(super) async fn shutdown(&mut self, timeout: Duration) {
         let _ = self.client.shutdown(timeout).await;
         let _ = self.child.kill().await;

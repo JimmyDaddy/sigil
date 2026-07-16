@@ -14,6 +14,11 @@ pub struct CodeEditPlan {
 }
 
 #[derive(Clone)]
+/// Shared code-intelligence state exposed to runtime context assembly.
+///
+/// Construction and active LSP requests stay inside this crate so callers cannot bypass tool
+/// trust and prepared-mutation boundaries. External callers can only read an already-warm,
+/// bounded snapshot through [`Self::warm_lsp_context_snapshot`].
 pub struct CodeIntelligenceService {
     pub(super) inner: Arc<ServiceInner>,
 }
@@ -32,11 +37,12 @@ pub(super) struct ServiceInner {
 }
 
 impl CodeIntelligenceService {
-    pub fn new(workspace_root: PathBuf, config: CodeIntelligenceConfig) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(workspace_root: PathBuf, config: CodeIntelligenceConfig) -> Self {
         Self::new_with_workspace_trust(workspace_root, config, WorkspaceTrust::Unknown)
     }
 
-    pub fn new_with_workspace_trust(
+    pub(crate) fn new_with_workspace_trust(
         workspace_root: PathBuf,
         config: CodeIntelligenceConfig,
         workspace_trust: WorkspaceTrust,
@@ -69,19 +75,21 @@ impl CodeIntelligenceService {
         }
     }
 
-    pub fn config(&self) -> &CodeIntelligenceConfig {
+    pub(crate) fn config(&self) -> &CodeIntelligenceConfig {
         &self.inner.config
     }
 
-    pub fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         config_enabled(&self.inner.config)
     }
 
-    pub async fn status(&self) -> CodeIntelStatus {
+    #[cfg(test)]
+    pub(crate) async fn status(&self) -> CodeIntelStatus {
         self.inner.status.lock().await.clone()
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn shutdown(&self) -> Result<()> {
         let started = Instant::now();
         let handles = {
             let mut clients = self.inner.clients.lock().await;
@@ -104,7 +112,8 @@ impl CodeIntelligenceService {
         Ok(())
     }
 
-    pub fn configured_status_line(config: &CodeIntelligenceConfig) -> String {
+    #[cfg(test)]
+    pub(crate) fn configured_status_line(config: &CodeIntelligenceConfig) -> String {
         if !config.enabled || config.server_startup == sigil_kernel::CodeIntelStartup::Off {
             "off".to_owned()
         } else {
@@ -112,14 +121,17 @@ impl CodeIntelligenceService {
         }
     }
 
-    pub fn workspace_root(&self) -> &Path {
+    pub(crate) fn workspace_root(&self) -> &Path {
         &self.inner.workspace_root
     }
 
-    pub fn resolve_file(&self, requested: &str) -> Result<PathBuf> {
+    pub(crate) fn resolve_file(&self, requested: &str) -> Result<PathBuf> {
         resolve_workspace_file(&self.inner.workspace_root, requested)
     }
 
+    /// Reads a bounded snapshot from warm LSP caches without starting a server or issuing a query.
+    ///
+    /// Returns an unavailable or timed-out snapshot instead of blocking context assembly.
     pub async fn warm_lsp_context_snapshot(
         &self,
         _query: &str,
@@ -256,7 +268,7 @@ impl CodeIntelligenceService {
         statuses.into_values().collect()
     }
 
-    pub async fn document_symbols(
+    pub(crate) async fn document_symbols(
         &self,
         requested: &str,
         query: Option<&str>,
@@ -323,7 +335,7 @@ impl CodeIntelligenceService {
         }
     }
 
-    pub async fn workspace_symbols(
+    pub(crate) async fn workspace_symbols(
         &self,
         query: &str,
         max_results: usize,
@@ -411,7 +423,7 @@ impl CodeIntelligenceService {
         Ok(result)
     }
 
-    pub async fn definition(
+    pub(crate) async fn definition(
         &self,
         requested: &str,
         line: u64,
@@ -442,7 +454,7 @@ impl CodeIntelligenceService {
         )))
     }
 
-    pub async fn references(
+    pub(crate) async fn references(
         &self,
         requested: &str,
         line: u64,
@@ -489,7 +501,7 @@ impl CodeIntelligenceService {
         Ok(result)
     }
 
-    pub async fn code_actions(
+    pub(crate) async fn code_actions(
         &self,
         requested: &str,
         line: u64,
@@ -540,7 +552,7 @@ impl CodeIntelligenceService {
         )))
     }
 
-    pub async fn code_action_edit_plan(
+    pub(crate) async fn code_action_edit_plan(
         &self,
         requested: &str,
         line: u64,
@@ -608,7 +620,7 @@ impl CodeIntelligenceService {
         })
     }
 
-    pub async fn rename_edit_plan(
+    pub(crate) async fn rename_edit_plan(
         &self,
         requested: &str,
         line: u64,
@@ -644,7 +656,7 @@ impl CodeIntelligenceService {
         })
     }
 
-    pub async fn diagnostics(
+    pub(crate) async fn diagnostics(
         &self,
         requested_paths: &[String],
         severity: Option<&str>,

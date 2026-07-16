@@ -48,8 +48,9 @@ The crate-root façade contains four groups:
 
 1. Context and RepoMap: `CodeContextBuilder`, context snapshot/row types,
    `RepoMapLite`/options/rows and `build_repo_map_lite`.
-2. Service: `CodeIntelligenceService`, response/status/query DTOs, code symbol/location/diagnostic
-   DTOs and prepared edit-plan summary types required by service methods.
+2. Runtime context bridge: `CodeIntelligenceService` exposes only a bounded warm-cache snapshot;
+   code symbol/location/diagnostic DTOs remain nameable for context rows. Active LSP request,
+   status, shutdown and edit-plan types stay internal to tool registration.
 3. Tool registration: the default and workspace-trust-aware registration functions.
 4. Doctor planning: `EffectiveServerPlan`, `PlannedServerStatus`, `config_enabled` and
    `effective_server_plan`.
@@ -115,3 +116,9 @@ git diff --check
   unused cache removal and discovery states were removed, the test-only LSP encoder is now
   test-only, and the redundant server-list helper test now exercises the supported plan result.
   Code-intel 144 tests and runtime context/code-intel focused suites pass.
+- R36.2 complete. The crate root now denies missing documentation, every supported façade item has
+  boundary-oriented rustdoc, and the service façade exposes only warm bounded context snapshots.
+  The stricter visibility also revealed unused edit-preview helpers, which were removed, while
+  graceful shutdown/status helpers used only by process-lifecycle tests are explicitly test-only.
+  Strict rustdoc, 144 code-intel tests, runtime context/Doctor tests and strict affected-crate
+  Clippy pass without lint suppression.

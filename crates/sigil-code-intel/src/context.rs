@@ -19,22 +19,31 @@ use crate::repo_language::{
 };
 use crate::service::{CodeDiagnostic, CodeLocation, CodeRange, CodeSymbol};
 
+/// One bounded code-intelligence result projected into Sigil's context contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct CodeContextHit {
+    /// Provider-neutral context item with trust, sensitivity, source, and token metadata.
     pub item: ContextItem,
+    /// Workspace-relative path associated with the result.
     pub path: PathBuf,
+    /// Source range when the underlying result identifies one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<CodeRange>,
+    /// Bounded human-readable snippet selected for prompt projection.
     pub snippet: String,
 }
 
 /// Cached LSP context made available to prompt assembly without starting or querying LSP.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspContextSnapshot {
+    /// Whether the warm cache was ready, unavailable, or exceeded its read deadline.
     pub status: LspContextSnapshotStatus,
+    /// Bounded symbols already present in the warm LSP cache.
     pub symbols: Vec<CodeSymbol>,
+    /// Bounded diagnostics already present in the warm LSP cache.
     pub diagnostics: Vec<CodeDiagnostic>,
+    /// Bounded reference locations already present in the warm LSP cache.
     pub references: Vec<CodeLocation>,
 }
 
@@ -45,6 +54,7 @@ impl Default for LspContextSnapshot {
 }
 
 impl LspContextSnapshot {
+    /// Creates an empty snapshot whose cache read completed successfully.
     #[must_use]
     pub fn ready() -> Self {
         Self {
@@ -55,6 +65,7 @@ impl LspContextSnapshot {
         }
     }
 
+    /// Creates a snapshot that records why the warm cache could not be used.
     #[must_use]
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
@@ -67,6 +78,7 @@ impl LspContextSnapshot {
         }
     }
 
+    /// Creates a snapshot that records the bounded cache-read timeout.
     #[must_use]
     pub fn timed_out(timeout_ms: u64) -> Self {
         Self {
@@ -77,18 +89,21 @@ impl LspContextSnapshot {
         }
     }
 
+    /// Replaces the snapshot's bounded symbol rows.
     #[must_use]
     pub fn with_symbols(mut self, symbols: Vec<CodeSymbol>) -> Self {
         self.symbols = symbols;
         self
     }
 
+    /// Replaces the snapshot's bounded diagnostic rows.
     #[must_use]
     pub fn with_diagnostics(mut self, diagnostics: Vec<CodeDiagnostic>) -> Self {
         self.diagnostics = diagnostics;
         self
     }
 
+    /// Replaces the snapshot's bounded reference rows.
     #[must_use]
     pub fn with_references(mut self, references: Vec<CodeLocation>) -> Self {
         self.references = references;
@@ -96,99 +111,172 @@ impl LspContextSnapshot {
     }
 }
 
+/// Outcome of reading the existing warm LSP cache for prompt assembly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LspContextSnapshotStatus {
+    /// The cache read completed and the rows in the snapshot are usable.
     Ready,
-    Unavailable { reason: String },
-    TimedOut { timeout_ms: u64 },
+    /// The shared service or cache was unavailable without blocking fallback context collection.
+    Unavailable {
+        /// Safe diagnostic reason for the unavailable cache.
+        reason: String,
+    },
+    /// The warm cache did not respond within the request-local deadline.
+    TimedOut {
+        /// Deadline in milliseconds used for the bounded read.
+        timeout_ms: u64,
+    },
 }
 
 /// Bounded, request-local repository source map for Context V1 candidate selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoMapLite {
+    /// Best-effort revision identity for the scanned workspace.
     pub repo_revision: Option<ContextRepoRevision>,
+    /// Number of directory entries visited before ignore and traversal caps completed.
     pub entries_walked: usize,
+    /// Number of source files parsed into the request-local map.
     pub files_scanned: usize,
+    /// Bounded symbol definitions extracted from supported languages.
     pub symbols: Vec<RepoSymbolRef>,
+    /// Bounded lexical reference candidates extracted from supported languages.
     pub references: Vec<RepoReferenceRef>,
+    /// Bounded source rows retained for request-local scoring and snippets.
     pub source_files: Vec<RepoSourceFileRef>,
+    /// Heuristic, non-authoritative relationships between map rows.
     pub edges: Vec<RepoMapEdge>,
 }
 
+/// One bounded source file retained by the request-local repository map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSourceFileRef {
+    /// Workspace-relative path.
     pub path: PathBuf,
+    /// Normalized language identifier used by the parser adapter.
     pub language: String,
+    /// Conservative token-cost hint for scheduling the row into context.
     pub token_cost_hint: usize,
+    /// Bounded source text used only for local ranking and snippet selection.
     pub indexed_text: String,
+    /// Whether the source text was cut at the configured per-file byte cap.
     pub truncated: bool,
 }
 
+/// One symbol definition extracted into the request-local repository map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSymbolRef {
+    /// Stable request-local symbol identifier.
     pub symbol_id: String,
+    /// Source-level symbol name.
     pub name: String,
+    /// Normalized parser language.
     pub language: String,
+    /// Provider-neutral symbol category.
     pub kind: RepoSymbolKind,
+    /// Workspace-relative source path.
     pub path: PathBuf,
+    /// Source range when the parser can determine it.
     pub range: Option<CodeRange>,
+    /// Source-language visibility label when available.
     pub visibility: Option<String>,
+    /// Conservative token-cost hint for context scheduling.
     pub token_cost_hint: usize,
 }
 
+/// One lexical reference candidate extracted into the request-local repository map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoReferenceRef {
+    /// Referenced source-level name.
     pub name: String,
+    /// Normalized parser language.
     pub language: String,
+    /// Workspace-relative source path.
     pub path: PathBuf,
+    /// Exact source range of the reference candidate.
     pub range: CodeRange,
 }
 
+/// Provider-neutral category for a repository-map symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RepoSymbolKind {
+    /// Free function.
     Function,
+    /// Method associated with a type or receiver.
     Method,
+    /// Class declaration.
     Class,
+    /// Interface declaration.
     Interface,
+    /// Struct declaration.
     Struct,
+    /// Enum declaration.
     Enum,
+    /// Trait declaration.
     Trait,
+    /// Type alias or language-level type declaration.
     Type,
+    /// Constant declaration.
     Const,
+    /// Static declaration.
     Static,
+    /// Module or namespace declaration.
     Module,
+    /// Implementation block.
     Impl,
+    /// Variable declaration.
     Variable,
+    /// Symbol not represented by a more specific category.
     Other,
 }
 
+/// One heuristic relationship emitted by the request-local repository map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoMapEdge {
+    /// Source row identifier.
     pub from: String,
+    /// Target row identifier.
     pub to: String,
+    /// Heuristic relationship category.
     pub kind: RepoMapEdgeKind,
 }
 
+/// Heuristic relationship categories; none of these claims a resolved call graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepoMapEdgeKind {
+    /// Rows occur in the same source file.
     SameFile,
+    /// Rows occur in the same source module.
     SameModule,
+    /// A row is declared by the target row or scope.
     DeclaredIn,
+    /// A source import mentions the target.
     Imports,
+    /// A bounded lexical reference points at a unique same-language definition.
     References,
+    /// A test source is associated with the target source.
     TestTarget,
+    /// A row is associated with a recently changed source.
     RecentlyChanged,
 }
 
+/// Hard caps for one request-local repository-map build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoMapLiteOptions {
+    /// Maximum directory entries visited before stopping traversal.
     pub max_walked_entries: usize,
+    /// Maximum source files retained for parsing and ranking.
     pub max_source_files: usize,
+    /// Maximum source bytes indexed from one file.
     pub max_index_bytes_per_file: usize,
+    /// Maximum definitions retained from one file.
     pub max_definitions_per_file: usize,
+    /// Maximum reference candidates retained from one file.
     pub max_references_per_file: usize,
+    /// Maximum definitions retained across the map.
     pub max_definitions: usize,
+    /// Maximum reference candidates retained across the map.
     pub max_references: usize,
+    /// Maximum heuristic edges retained across the map.
     pub max_edges: usize,
 }
 
@@ -359,6 +447,7 @@ pub fn build_repo_map_lite(
     Ok(map)
 }
 
+/// Builder that converts code-intelligence rows into trust-labeled context items.
 #[derive(Debug, Clone)]
 pub struct CodeContextBuilder {
     trust_level: ContextTrustLevel,
@@ -534,35 +623,41 @@ impl Default for CodeContextBuilder {
 mod tests;
 
 impl CodeContextBuilder {
+    /// Creates a builder with local-generated trust and normal sensitivity defaults.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the trust label applied to subsequently projected context items.
     #[must_use]
     pub fn trust_level(mut self, trust_level: ContextTrustLevel) -> Self {
         self.trust_level = trust_level;
         self
     }
 
+    /// Sets the sensitivity label applied to subsequently projected context items.
     #[must_use]
     pub fn sensitivity(mut self, sensitivity: ContextSensitivity) -> Self {
         self.sensitivity = sensitivity;
         self
     }
 
+    /// Binds projected context items to an explicit egress decision.
     #[must_use]
     pub fn egress_decision(mut self, egress_decision: impl Into<ContextEgressDecisionId>) -> Self {
         self.egress_decision = Some(egress_decision.into());
         self
     }
 
+    /// Binds projected context items to their durable source event when one exists.
     #[must_use]
     pub fn source_event_id(mut self, source_event_id: impl Into<EventId>) -> Self {
         self.source_event_id = Some(source_event_id.into());
         self
     }
 
+    /// Projects one symbol row into a bounded context hit.
     #[must_use]
     pub fn symbol_hit(&self, symbol: &CodeSymbol) -> CodeContextHit {
         let snippet = format!(
@@ -578,6 +673,7 @@ impl CodeContextBuilder {
         )
     }
 
+    /// Projects one diagnostic row into a bounded context hit.
     #[must_use]
     pub fn diagnostic_hit(&self, diagnostic: &CodeDiagnostic) -> CodeContextHit {
         let snippet = format!(
@@ -596,6 +692,7 @@ impl CodeContextBuilder {
         )
     }
 
+    /// Projects one reference location into a bounded context hit.
     #[must_use]
     pub fn reference_hit(&self, location: &CodeLocation) -> CodeContextHit {
         let preview = location.preview.as_deref().unwrap_or("reference");
@@ -615,6 +712,7 @@ impl CodeContextBuilder {
         )
     }
 
+    /// Projects bounded repository-file text into a context hit.
     #[must_use]
     pub fn repo_file_hit(
         &self,
@@ -632,6 +730,7 @@ impl CodeContextBuilder {
         )
     }
 
+    /// Projects a bounded current-diff fragment into a context hit.
     #[must_use]
     pub fn current_diff_hit(
         &self,

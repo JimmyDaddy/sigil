@@ -128,6 +128,7 @@ where
         self.write_message(&payload).await
     }
 
+    #[cfg(test)]
     pub async fn shutdown(&mut self, timeout: Duration) -> Result<()> {
         let _ = self.request("shutdown", Value::Null, timeout).await;
         let _ = self.notify("exit", Value::Null).await;

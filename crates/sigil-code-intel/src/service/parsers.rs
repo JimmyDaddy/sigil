@@ -2,41 +2,62 @@ use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// A zero-based source range using LSP UTF-16 character offsets.
 pub struct CodeRange {
+    /// Inclusive start line.
     pub start_line: u64,
+    /// Inclusive start character offset.
     pub start_character: u64,
+    /// Exclusive end line.
     pub end_line: u64,
+    /// Exclusive end character offset.
     pub end_character: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// A named symbol returned from a bounded code-intelligence query.
 pub struct CodeSymbol {
+    /// Symbol name reported by the language server.
     pub name: String,
+    /// Provider-neutral symbol kind label.
     pub kind: String,
+    /// Workspace-relative source path.
     pub path: String,
+    /// Source range occupied by the symbol.
     pub range: CodeRange,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional enclosing symbol name.
     pub container_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// A workspace-confined source location.
 pub struct CodeLocation {
+    /// Workspace-relative source path.
     pub path: String,
+    /// Source range at the location.
     pub range: CodeRange,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional bounded source preview.
     pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// A diagnostic associated with a workspace-confined source range.
 pub struct CodeDiagnostic {
+    /// Workspace-relative source path.
     pub path: String,
+    /// Source range associated with the diagnostic.
     pub range: CodeRange,
+    /// Provider-neutral severity label.
     pub severity: String,
+    /// Human-readable diagnostic message.
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional diagnostic producer identifier.
     pub source: Option<String>,
 }
 

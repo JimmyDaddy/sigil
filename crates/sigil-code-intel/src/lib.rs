@@ -1,3 +1,12 @@
+//! Bounded, provider-neutral code intelligence for Sigil runtimes.
+//!
+//! The crate-root façade exposes request-local repository mapping, warm LSP context snapshots,
+//! the shared code-intelligence service, tool registration, and Doctor planning. LSP framing,
+//! process discovery, edit preparation, caches, and workspace path helpers remain private so
+//! callers cannot bypass trust, confinement, or prepared-mutation boundaries.
+
+#![deny(missing_docs)]
+
 mod cache;
 mod context;
 mod discovery;
@@ -16,10 +25,7 @@ pub use context::{
     RepoMapEdgeKind, RepoMapLite, RepoMapLiteOptions, RepoReferenceRef, RepoSourceFileRef,
     RepoSymbolKind, RepoSymbolRef, build_repo_map_lite,
 };
-pub use service::{
-    CodeActionSummary, CodeDiagnostic, CodeEditPlan, CodeIntelResponse, CodeIntelServerStatus,
-    CodeIntelStatus, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol, QueryMetadata,
-};
+pub use service::{CodeDiagnostic, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol};
 pub use tools::{
     register_code_intelligence_tools, register_code_intelligence_tools_with_workspace_trust,
 };

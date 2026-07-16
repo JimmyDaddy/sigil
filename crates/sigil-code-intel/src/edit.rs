@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use similar::TextDiff;
@@ -8,7 +8,6 @@ use similar::TextDiff;
 use crate::{
     lsp::lsp_uri_to_workspace_path,
     service::{CodeRange, parse_range},
-    workspace::resolve_workspace_file,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,40 +32,9 @@ pub struct CodeTextEdit {
     pub new_text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodeEditPreviewFile {
-    pub path: String,
-    pub diff: String,
-}
-
 impl CodeWorkspaceEdit {
-    pub fn changed_files(&self) -> Vec<String> {
-        self.files.iter().map(|file| file.path.clone()).collect()
-    }
-
     pub fn total_edits(&self) -> usize {
         self.files.iter().map(|file| file.edits.len()).sum()
-    }
-
-    pub fn previews(&self, workspace_root: &Path) -> Result<Vec<CodeEditPreviewFile>> {
-        let mut previews = Vec::new();
-        for file in &self.files {
-            let resolved = resolve_workspace_file(workspace_root, &file.path)?;
-            let current = fs::read_to_string(&resolved)
-                .with_context(|| format!("failed to read {}", resolved.display()))?;
-            let proposed = apply_text_edits(&current, &file.edits)
-                .with_context(|| format!("failed to preview edits for {}", file.path))?;
-            previews.push(CodeEditPreviewFile {
-                path: file.path.clone(),
-                diff: render_unified_diff(
-                    &current,
-                    &proposed,
-                    &format!("current/{}", file.path),
-                    &format!("proposed/{}", file.path),
-                ),
-            });
-        }
-        Ok(previews)
     }
 }
 

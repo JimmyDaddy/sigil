@@ -23,6 +23,7 @@ pub enum CodeIntelStatus {
 }
 
 impl CodeIntelStatus {
+    #[cfg(test)]
     pub fn line(&self) -> String {
         match self {
             Self::Off => "off".to_owned(),

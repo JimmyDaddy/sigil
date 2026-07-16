@@ -145,13 +145,13 @@ fn workspace_edit_preview_matches_materialized_text_edits() {
         unsupported_changes_filtered: 0,
     };
 
-    let preview = edit.previews(temp.path()).expect("preview should build");
     let current = fs::read_to_string(&path).expect("source should read");
     let proposed =
         apply_text_edits(&current, &edit.files[0].edits).expect("text edits should materialize");
     let noop = apply_text_edits(&current, &[]).expect("noop edits should materialize");
+    let preview = render_unified_diff(&current, &proposed, "current/lib.rs", "proposed/lib.rs");
 
-    assert!(preview[0].diff.contains("+fn greet()"));
+    assert!(preview.contains("+fn greet()"));
     assert_eq!(proposed, "fn greet() {}\n");
     assert_eq!(noop, current);
 }

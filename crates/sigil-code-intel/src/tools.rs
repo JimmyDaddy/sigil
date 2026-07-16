@@ -17,6 +17,10 @@ use crate::{
     workspace::{canonical_workspace_root, workspace_relative_path},
 };
 
+/// Registers code-intelligence tools with unknown workspace trust.
+///
+/// The returned service is the same shared instance used by the registered tools. Unknown trust
+/// fails closed for language-server processes that require a trusted workspace.
 pub fn register_code_intelligence_tools(
     registry: &mut ToolRegistry,
     config: &CodeIntelligenceConfig,
@@ -30,6 +34,9 @@ pub fn register_code_intelligence_tools(
     )
 }
 
+/// Registers code-intelligence tools using the runtime's durable workspace-trust projection.
+///
+/// Returns `None` when code intelligence is disabled or configured with startup mode `off`.
 pub fn register_code_intelligence_tools_with_workspace_trust(
     registry: &mut ToolRegistry,
     config: &CodeIntelligenceConfig,
