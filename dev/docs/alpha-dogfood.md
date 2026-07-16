@@ -62,6 +62,12 @@ Passing evidence requires the final reply to appear exactly once on both reconst
 
 The safe `manifest.json` contains only public binary/tokenizer identity, counters, booleans, duration, and relative evidence paths/checksums. Byte-exact source/fork JSONL plus raw PTY logs remain in ignored local output for independent recounting and are never uploaded. Repository-local output is rejected unless Git ignores it; an explicitly selected path outside the repository is recorded as local-only. CI runs parser, admission, process-cleanup, durable-structure, and manifest-privacy contract tests; the real release-binary campaign remains an explicit local release check because it requires the installed tokenizer artifact.
 
+## Real-provider campaign
+
+After the offline and stateful tiers pass, run `scripts/real-provider-dogfood-campaign.py` with an explicit native binary, config, case list, repetition count, cost budget, and deadline. The stable R34.4 matrix contains `small-code-edit`, `stale-after-write`, `workspace-trust`, `sandbox-denial`, and `plan-only`; the exact command and evidence contract are documented in [Model-backed evaluation](model-evaluation.md#run-the-rfc-0034-dogfood-matrix).
+
+This tier is allowed to contact the configured provider and spend tokens. Its aggregate manifest contains case terminals and public binary identity only; raw model, PTY, and session evidence remains local. The budget is a pre-dispatch admission/accounting boundary, not a provider-side cap for an already dispatched request.
+
 ## Evidence
 
 The default output is `.repo-local-dev/dogfood/offline-<timestamp>`. The aggregate `manifest.json`, `manifest.sha256`, and `summary.md` contain only timestamps, build identity, binary digest, case status, duration, and relative evidence paths. Raw case artifacts stay in the ignored local output directory for debugging and are never uploaded automatically. A custom output outside the repository is recorded as explicitly selected local output; a custom output inside the repository is rejected unless Git ignores it.

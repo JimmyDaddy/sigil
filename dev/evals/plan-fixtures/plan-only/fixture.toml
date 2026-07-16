@@ -1,0 +1,12 @@
+schema_version = 1
+id = "plan-only"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:b704b7997b5f829f7b900e637ca823c20cf79b239b67246ec3b98c775c2e79d9"
+expected_target_path = "README.md"
+
+allowed_tools = ["glob", "grep", "ls", "read_file"]
+
+[[files]]
+path = "README.md"
+source = "files/README.md"
+sha256 = "sha256:a6a3d5829ee968d4dc80c42cc0bdbd3fc0c743696cf9c914d65d02b0d33ca3ae"

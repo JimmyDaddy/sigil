@@ -1,6 +1,6 @@
 # RFC-0034 Alpha Dogfood Stabilization V1
 
-状态：accepted / R34.0-R34.3 complete / R34.4-R34.5 planned
+状态：accepted / R34.0-R34.3 complete / R34.4 in progress / R34.5 planned
 
 创建日期：2026-07-16
 

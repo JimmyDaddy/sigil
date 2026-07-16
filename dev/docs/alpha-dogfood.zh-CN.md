@@ -62,6 +62,12 @@ campaign 会把两个输入冻结到 case-owned storage，并围绕同一组 dur
 
 安全的 `manifest.json` 只包含公开 binary/tokenizer identity、计数、布尔结果、耗时，以及相对 evidence path/checksum。字节完全一致的 source/fork JSONL 与原始 PTY log 只保留在被忽略的本地输出中，可用于独立复算，且不会上传。仓库内输出若未被 Git ignore 会在执行前被拒绝；显式选择的仓库外路径会标记为 local-only。CI 只运行 parser、admission、process cleanup、durable structure 和 manifest privacy contract test；真实 release-binary campaign 因依赖已安装 tokenizer artifact，继续作为显式本地发布检查。
 
+## 真实 provider campaign
+
+离线与 stateful 两层通过后，使用显式 native binary、config、case list、repetition 数量、成本预算和 deadline 运行 `scripts/real-provider-dogfood-campaign.py`。R34.4 的稳定矩阵包含 `small-code-edit`、`stale-after-write`、`workspace-trust`、`sandbox-denial` 和 `plan-only`；精确命令与 evidence contract 见[真实模型评测](model-evaluation.zh-CN.md#执行-rfc-0034-dogfood-矩阵)。
+
+这一层允许访问配置的 provider 并消耗 token。Aggregate manifest 只包含 case terminal 和公开 binary identity；原始 model、PTY 与 session evidence 仍只保存在本地。预算是请求发出前的准入与记账边界，不能充当已发出请求的 provider-side cap。
+
 ## Evidence
 
 默认输出目录是 `.repo-local-dev/dogfood/offline-<timestamp>`。聚合的 `manifest.json`、`manifest.sha256` 和 `summary.md` 只包含时间戳、build identity、binary digest、case 状态、耗时和相对 evidence path。原始 case artifact 只保留在被忽略的本地输出目录中用于排障，不会自动上传。仓库外的自定义目录会记录为显式选择的本地输出；仓库内的自定义目录若未被 Git ignore，Runner 会拒绝执行。

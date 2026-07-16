@@ -1,0 +1,1 @@
+Inspect README.md and propose a concrete one-step implementation plan that changes the token PLAN_DOGFOOD_TYPOO to PLAN_DOGFOOD_TYPO. Do not modify files or execute the plan. Include README.md in target_paths and include one verification check.

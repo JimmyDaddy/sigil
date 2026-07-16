@@ -6,7 +6,7 @@ Sigil's model-backed evaluation is a developer-only, explicit acceptance workflo
 
 ```bash
 scripts/run-evals.sh --model \
-  --config ~/.config/sigil/config.toml \
+  --config ~/.sigil/sigil.toml \
   --case small-code-edit \
   --repetitions 1 \
   --max-cost-usd 0.50 \
@@ -26,6 +26,28 @@ The active provider credential must be supplied through its normal environment o
 - `sandbox-denial`: an outside-workspace write is rejected, the external path stays absent, and committed fixture source stays unchanged.
 
 Each manifest contains machine-evaluated assertions. Assistant final text is never accepted as proof.
+
+## Run the RFC-0034 dogfood matrix
+
+Before an alpha readiness decision, run the committed edit, verification, trust, sandbox, and Plan-only cases together through one exact prebuilt binary:
+
+```bash
+python3 scripts/real-provider-dogfood-campaign.py \
+  --binary target/release/sigil \
+  --config ~/.sigil/sigil.toml \
+  --case small-code-edit \
+  --case stale-after-write \
+  --case workspace-trust \
+  --case sandbox-denial \
+  --case plan-only \
+  --repetitions 1 \
+  --max-cost-usd 0.50 \
+  --timeout-secs 600
+```
+
+The runner admits and freezes the binary before dispatch, partitions one local cost budget across all planned repetitions, and keeps aggregate evidence free of prompt, provider, config, and session content. `plan-only` drives the production TUI `/plan` path in a PTY with a generated secret-free config, a four-turn fuse, read-only permissions, and Web/MCP/skills/memory/task disabled. It requires one durable structured Plan draft, a visible Plan review surface, persisted usage, no plan-to-task handoff, and an unchanged workspace.
+
+The source config is read only to select the active provider/model and secret-free provider options. The active credential must be present in that provider's documented environment variable; inline keys are never copied into the generated Plan config. Raw PTY/session/model artifacts stay under the selected ignored local output. The aggregate budget remains an admission/accounting limit, not a provider-side billing cap for a request already in flight.
 
 ## Artifacts
 
@@ -47,4 +69,3 @@ scripts/run-evals.sh --deterministic
 ```
 
 Deterministic results prove local contracts; they must not be reported as real-model success rates.
-
