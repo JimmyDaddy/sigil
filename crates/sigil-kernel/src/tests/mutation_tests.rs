@@ -1701,8 +1701,9 @@ fn controlled_mutation_rejects_escape_paths_and_mismatched_hashes() -> Result<()
     let recorder = MutationEventRecorder::new(store);
     let coordinator = recorder.coordinator(&workspace, "tool-call-escape", None)?;
 
+    let absolute_path = temp.path().join("escape.txt");
     let absolute_error = coordinator
-        .prepare_file("/tmp/escape.txt", &target, Some(bytes_hash(b"new")))
+        .prepare_file(&absolute_path, &target, Some(bytes_hash(b"new")))
         .expect_err("absolute relative path should be rejected");
     assert!(absolute_error.to_string().contains("workspace-relative"));
 

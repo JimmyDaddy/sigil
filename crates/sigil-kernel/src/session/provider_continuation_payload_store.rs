@@ -755,11 +755,19 @@ fn sync_parent(path: &Path) -> Result<()> {
     sync_directory(parent)
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("failed to open {}", path.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    // Payload files are individually synced before publication or deletion. Directory fsync is
+    // not available through Rust's portable Windows filesystem API.
+    Ok(())
 }
 
 #[cfg(unix)]

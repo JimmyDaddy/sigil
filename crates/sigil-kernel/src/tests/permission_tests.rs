@@ -1430,9 +1430,7 @@ fn permission_helper_matchers_cover_any_missing_subject_and_invalid_external_rul
 
 #[test]
 fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .expect("HOME should be available in tests");
+    let home = super::home_dir()?;
     assert_eq!(
         super::expand_external_rule_path("~")?,
         home.display().to_string()

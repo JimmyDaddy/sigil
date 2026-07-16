@@ -53,7 +53,7 @@ use output::{CollectedPipe, OutputAlert, OutputCollectionLimits, collect_async_p
 
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
 const PROCESS_TERM_GRACE: Duration = Duration::from_millis(500);
-const PROCESS_KILL_VERIFY_GRACE: Duration = Duration::from_secs(1);
+const PROCESS_KILL_VERIFY_GRACE: Duration = Duration::from_secs(3);
 const PROCESS_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(test)]

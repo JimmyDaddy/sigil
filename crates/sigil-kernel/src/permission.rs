@@ -2082,6 +2082,13 @@ fn expand_external_rule_path(path_glob: &str) -> Result<String> {
 
 fn home_dir() -> Result<PathBuf> {
     std::env::var_os("HOME")
+        .or_else(|| {
+            if cfg!(windows) {
+                std::env::var_os("USERPROFILE")
+            } else {
+                None
+            }
+        })
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("HOME is not set for external directory path expansion"))
 }

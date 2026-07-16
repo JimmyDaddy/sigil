@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::fs;
 
 use anyhow::Result;
 
@@ -129,8 +129,10 @@ fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()
 
 #[test]
 fn memory_loader_reports_missing_workspace_root() {
-    let missing_root =
-        Path::new("/tmp").join(format!("sigil-memory-missing-{}", uuid::Uuid::new_v4()));
+    let parent = tempfile::tempdir().expect("temporary parent should be available");
+    let missing_root = parent
+        .path()
+        .join(format!("sigil-memory-missing-{}", uuid::Uuid::new_v4()));
 
     let error = inspect_memory_documents(&missing_root, &MemoryConfig { enabled: true })
         .expect_err("missing root should fail");
@@ -157,7 +159,11 @@ fn memory_loader_skips_duplicate_imports() -> Result<()> {
 #[test]
 fn memory_loader_rejects_absolute_imports() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    fs::write(temp.path().join("AGENTS.md"), "@/tmp/outside.md\n")?;
+    let outside = temp.path().join("outside.md");
+    fs::write(
+        temp.path().join("AGENTS.md"),
+        format!("@{}\n", outside.display()),
+    )?;
 
     let error = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: true })
         .expect_err("absolute imports should fail");
@@ -190,15 +196,17 @@ fn memory_parser_keeps_empty_import_markers_as_content() {
 }
 
 #[test]
-fn memory_import_path_resolution_accepts_relative_and_rejects_absolute() {
-    let base = Path::new("/workspace/docs");
+fn memory_import_path_resolution_accepts_relative_and_rejects_absolute() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().join("workspace").join("docs");
 
-    let relative = resolve_import_path(base, "../AGENTS.md").expect("relative import should work");
-    assert_eq!(relative, Path::new("/workspace/docs/../AGENTS.md"));
+    let relative = resolve_import_path(&base, "../AGENTS.md").expect("relative import should work");
+    assert_eq!(relative, base.join("../AGENTS.md"));
 
-    let error =
-        resolve_import_path(base, "/tmp/outside.md").expect_err("absolute import should fail");
+    let error = resolve_import_path(&base, &temp.path().join("outside.md").to_string_lossy())
+        .expect_err("absolute import should fail");
     assert!(error.to_string().contains("memory import must be relative"));
+    Ok(())
 }
 
 #[test]

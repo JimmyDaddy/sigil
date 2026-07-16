@@ -100,9 +100,7 @@ pub(super) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to sync {}", temp_path.display()))?;
     }
     fs::rename(&temp_path, path).with_context(|| atomic_replace_error_message(path, &temp_path))?;
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync {}", path.display()))?;
+    sync_published_file(path)?;
     sync_parent(path)
 }
 
@@ -124,6 +122,21 @@ pub(super) fn atomic_replace_error_message(path: &Path, temp_path: &Path) -> Str
     )
 }
 
+#[cfg(unix)]
+fn sync_published_file(path: &Path) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_published_file(_path: &Path) -> Result<()> {
+    // The temporary file is synced before publication. Rust cannot portably reopen a published
+    // read-only file with the write access Windows requires for FlushFileBuffers.
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(super) fn sync_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -133,6 +146,13 @@ pub(super) fn sync_parent(path: &Path) -> Result<()> {
     parent_file
         .sync_all()
         .with_context(|| format!("failed to sync {}", parent.display()))
+}
+
+#[cfg(not(unix))]
+pub(super) fn sync_parent(_path: &Path) -> Result<()> {
+    // Rust's standard library cannot portably open and flush directory handles on Windows. File
+    // contents are synced before this boundary; directory-entry flushing is a platform limit.
+    Ok(())
 }
 
 pub(super) fn temp_path_for(path: &Path) -> PathBuf {
@@ -179,9 +199,6 @@ pub(super) fn artifact_blob_matches(path: &Path, expected_hash: &str) -> Result<
 }
 
 pub(super) fn atomic_write_artifact(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("artifact path has no parent: {}", path.display()))?;
     let temp_path = temp_path_for(path);
     {
         let mut temp_file = File::create(&temp_path)
@@ -200,14 +217,8 @@ pub(super) fn atomic_write_artifact(path: &Path, bytes: &[u8]) -> Result<()> {
             temp_path.display()
         )
     })?;
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync {}", path.display()))?;
-    let parent_file =
-        File::open(parent).with_context(|| format!("failed to open {}", parent.display()))?;
-    parent_file
-        .sync_all()
-        .with_context(|| format!("failed to sync {}", parent.display()))
+    sync_published_file(path)?;
+    sync_parent(path)
 }
 
 pub(super) fn remove_file_if_exists(path: &Path) -> Result<()> {
@@ -218,6 +229,7 @@ pub(super) fn remove_file_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn sync_existing_dir(path: &Path) -> Result<()> {
     match File::open(path) {
         Ok(file) => file
@@ -226,6 +238,11 @@ pub(super) fn sync_existing_dir(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("failed to open {}", path.display())),
     }
+}
+
+#[cfg(not(unix))]
+pub(super) fn sync_existing_dir(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

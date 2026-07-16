@@ -874,7 +874,7 @@ pub(super) fn lock_exclusive_with_retry(file: &File, path: &Path) -> Result<()> 
     for attempt in 0..=SESSION_LOG_SHARED_LOCK_RETRIES {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if lock_is_contended(&error) => {
                 last_error = Some(error);
                 if attempt < SESSION_LOG_SHARED_LOCK_RETRIES {
                     thread::sleep(SESSION_LOG_SHARED_LOCK_RETRY_DELAY);
@@ -892,4 +892,9 @@ pub(super) fn lock_exclusive_with_retry(file: &File, path: &Path) -> Result<()> 
     } else {
         bail!("failed to lock {}", path.display())
     }
+}
+
+fn lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }

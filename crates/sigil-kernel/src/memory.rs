@@ -173,8 +173,10 @@ fn load_memory_file(
     let relative_path = canonical_path
         .strip_prefix(canonical_root)
         .map_err(|error| anyhow!("failed to relativize {}: {error}", canonical_path.display()))?
-        .to_string_lossy()
-        .to_string();
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
     documents.push(MemoryDocument {
         relative_path,
         content,
@@ -214,7 +216,7 @@ fn parse_memory_file(raw: &str) -> (String, Vec<String>) {
 
 fn resolve_import_path(base_dir: &Path, import: &str) -> Result<PathBuf> {
     let import_path = Path::new(import);
-    if import_path.is_absolute() {
+    if import_path.is_absolute() || import_path.has_root() {
         bail!("memory import must be relative: {import}");
     }
     Ok(base_dir.join(import_path))

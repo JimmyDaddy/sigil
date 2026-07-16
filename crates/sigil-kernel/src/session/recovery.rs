@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,10 +286,11 @@ pub(super) fn quarantine_tail_copy(
         .and_then(|name| name.to_str())
         .unwrap_or("session.jsonl");
     let quarantine_path = dir.join(format!("{file_name}.corrupt.{short_hash}"));
-    fs::write(&quarantine_path, content)
+    let mut quarantine_file = File::create(&quarantine_path)
+        .with_context(|| format!("failed to create {}", quarantine_path.display()))?;
+    quarantine_file
+        .write_all(content.as_bytes())
         .with_context(|| format!("failed to write {}", quarantine_path.display()))?;
-    let quarantine_file = File::open(&quarantine_path)
-        .with_context(|| format!("failed to open {}", quarantine_path.display()))?;
     quarantine_file
         .sync_all()
         .with_context(|| format!("failed to sync {}", quarantine_path.display()))?;
@@ -318,10 +321,10 @@ pub(super) fn read_tail_recovery_intent(path: &Path) -> Result<Option<TailRecove
 pub(super) fn write_tail_recovery_intent(path: &Path, intent: &TailRecoveryIntent) -> Result<()> {
     let intent_path = tail_recovery_intent_path(path);
     let content = serde_json::to_vec(intent).context("failed to serialize tail recovery intent")?;
-    fs::write(&intent_path, content)
+    let mut file = File::create(&intent_path)
+        .with_context(|| format!("failed to create {}", intent_path.display()))?;
+    file.write_all(&content)
         .with_context(|| format!("failed to write {}", intent_path.display()))?;
-    let file = File::open(&intent_path)
-        .with_context(|| format!("failed to open {}", intent_path.display()))?;
     file.sync_all()
         .with_context(|| format!("failed to sync {}", intent_path.display()))?;
     sync_parent_dir(&intent_path)

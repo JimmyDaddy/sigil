@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     MutationArtifactId, OperationId, SnapshotCoverage, artifact_blob_matches,
     atomic_write_artifact, bytes_hash, file_modified_ms, harden_artifact_dir, harden_artifact_file,
-    short_hash, sync_parent, unix_time_ms,
+    short_hash, sync_existing_dir, sync_parent, unix_time_ms,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,10 +196,7 @@ fn store_mutation_artifact(
         .sync_all()
         .with_context(|| format!("failed to sync {}", metadata_path.display()))?;
     harden_artifact_file(&metadata_path)?;
-    let dir_file = File::open(&dir).with_context(|| format!("failed to open {}", dir.display()))?;
-    dir_file
-        .sync_all()
-        .with_context(|| format!("failed to sync {}", dir.display()))?;
+    sync_existing_dir(&dir)?;
     sync_parent(&dir)?;
     Ok(artifact_id)
 }

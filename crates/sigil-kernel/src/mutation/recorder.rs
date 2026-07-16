@@ -246,7 +246,7 @@ impl MutationEventRecorder {
         for attempt in 0..=WORKSPACE_MUTATION_LEASE_ATTEMPTS {
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(WorkspaceMutationLease { file }),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if lock_is_contended(&error) => {
                     if attempt < WORKSPACE_MUTATION_LEASE_ATTEMPTS {
                         thread::sleep(WORKSPACE_MUTATION_LEASE_RETRY_DELAY);
                     }
@@ -483,6 +483,11 @@ impl MutationEventRecorder {
                 .context("failed to encode extension process lifecycle payload")?,
         )
     }
+}
+
+fn lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
 fn workspace_lease_root_for_artifacts(artifact_root: &Path) -> PathBuf {
