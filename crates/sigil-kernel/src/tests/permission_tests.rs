@@ -1455,7 +1455,7 @@ fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Resul
 
     let absolute_rule = format!("{}/**/*.txt", home.display());
     let pattern = super::canonical_external_rule_pattern(&absolute_rule)?;
-    assert!(pattern.starts_with(&home.display().to_string()));
+    assert!(pattern.starts_with(&std::fs::canonicalize(&home)?.display().to_string()));
 
     let relative = super::canonical_external_rule_pattern("notes/**")
         .expect_err("relative patterns should be rejected");

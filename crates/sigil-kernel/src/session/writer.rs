@@ -980,7 +980,8 @@ impl LinearSessionWriter {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
-            .append(true)
+            .write(true)
+            .truncate(false)
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
         lock_exclusive_with_retry(&file, &self.path)?;

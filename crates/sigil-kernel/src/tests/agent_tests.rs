@@ -3525,7 +3525,8 @@ async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Resu
 async fn agent_reconciles_terminal_start_mutation_when_terminal_cancel_finishes_task() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let state = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(state.path().join("session.jsonl"))?;
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(TerminalStartAuditTool));
     registry.register(Arc::new(TerminalCancelAuditTool));
