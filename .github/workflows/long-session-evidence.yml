@@ -1,0 +1,50 @@
+name: Long-session evidence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 7 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: long-session-evidence-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN_VERSION: 1.94.1
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify evidence collector contract
+        run: python3 scripts/test-long-session-evidence.py
+
+      - name: Collect release-profile evidence
+        run: |
+          python3 scripts/long-session-evidence.py \
+            --output target/long-session-evidence.json
+
+      - name: Upload machine-readable evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: long-session-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/long-session-evidence.json
+          if-no-files-found: error
+          retention-days: 30

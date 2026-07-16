@@ -16,6 +16,8 @@ on:
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
       - "scripts/test-check-test-layout.py"
+      - "scripts/long-session-evidence.py"
+      - "scripts/test-long-session-evidence.py"
       - "scripts/tui-stateful-pty-acceptance.py"
       - "scripts/test-tui-stateful-pty-acceptance.py"
       - "scripts/context-v1-binary-acceptance.py"
@@ -36,6 +38,8 @@ on:
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
       - "scripts/test-check-test-layout.py"
+      - "scripts/long-session-evidence.py"
+      - "scripts/test-long-session-evidence.py"
       - "scripts/tui-stateful-pty-acceptance.py"
       - "scripts/test-tui-stateful-pty-acceptance.py"
       - "scripts/context-v1-binary-acceptance.py"
@@ -75,6 +79,9 @@ jobs:
         run: |
           python3 scripts/test-check-test-layout.py
           python3 scripts/check-test-layout.py
+
+      - name: Verify long-session evidence contract
+        run: python3 scripts/test-long-session-evidence.py
 
   fmt:
     runs-on: ubuntu-latest
