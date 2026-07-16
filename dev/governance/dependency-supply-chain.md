@@ -79,3 +79,25 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 复扫结果为 `cargo audit` 零已知漏洞；`cargo deny check` 的 advisories、bans、licenses、sources 四项均通过。当前显式 advisory 例外有两项：`RUSTSEC-2025-0141`（`syntect` 只用 `bincode 1.3.3` 反序列化版本固定、编译进二进制的 syntax/theme dump）以及上文 K25.10/K25.13 记录的 `RUSTSEC-2024-0436`（tokenizers 的构建期 `paste` 路径）。两项都必须随上游迁移复核并删除，不得把例外误写成漏洞已经消失。
 
 上述证据覆盖 E21.17 public WebFetch、stable websearch 与 user-root Streamable HTTP MCP cutover；最终发布结论仍以同一工作区的完整测试、Clippy、格式、文档和站点 gate 全绿为前提。
+
+## 常规自动化门禁（RFC-0037）
+
+`.github/workflows/dependency-supply-chain.yml` 将上述发布前扫描提升为常规仓库门禁：
+
+- Cargo manifest、lockfile、`deny.toml` 或 workflow 变化时运行，此外每周执行一次；
+- `cargo-deny 0.20.x` 的官方 action 按已提交的 `deny.toml` 检查 advisories、bans、licenses 和 sources；
+- `cargo-audit 0.22.2` 独立复扫 `Cargo.lock`，只携带本台账已说明的
+  `RUSTSEC-2025-0141` 与 `RUSTSEC-2024-0436` 两个精确例外；
+- 两个 job 都是阻塞门禁，不使用 `continue-on-error`，且 workflow 权限仅为
+  `contents: read`。
+
+新增、删除或修改 advisory 例外时，必须原子更新 `deny.toml`、本台账和 workflow 的
+`cargo audit --ignore` 参数，并在本地重新执行：
+
+```bash
+cargo deny check
+cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2024-0436
+```
+
+workflow 定时运行只能证明默认分支的最新依赖状态；发布仍需按对应 release RFC 执行完整
+workspace、文档、站点和分发 gate。

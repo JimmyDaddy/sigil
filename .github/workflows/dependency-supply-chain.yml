@@ -1,0 +1,79 @@
+name: Dependency Supply Chain
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/dependency-supply-chain.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**/Cargo.toml"
+      - "deny.toml"
+  pull_request:
+    paths:
+      - ".github/workflows/dependency-supply-chain.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**/Cargo.toml"
+      - "deny.toml"
+  schedule:
+    - cron: "17 18 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_AUDIT_VERSION: 0.22.2
+  RUST_TOOLCHAIN_VERSION: 1.94.1
+
+jobs:
+  cargo-deny:
+    name: Licenses, sources, bans, and advisories
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Enforce committed cargo-deny policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          command: check
+          arguments: --all-features
+
+  cargo-audit:
+    name: Independent RustSec lockfile audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo-audit binary
+        id: cargo-audit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+
+      - name: Audit lockfile with reviewed exceptions
+        run: >-
+          cargo audit
+          --ignore RUSTSEC-2025-0141
+          --ignore RUSTSEC-2024-0436

@@ -127,3 +127,8 @@ pushed and GitHub Actions runs it.
   rather than mere file existence. Five focused Bash and three terminal cancellation repetitions,
   the complete workspace/all-target check, and the full macOS package set pass (144 code-intel,
   1,090 kernel, 570 runtime and 184 tools tests; one Docker conformance test remains opt-in).
+- R37.2 complete. A dedicated least-privilege workflow now runs official cargo-deny policy and
+  an independently version-pinned cargo-audit job on dependency changes, manual dispatch and a
+  weekly schedule. The dependency ledger documents the routine gate and exact reviewed advisory
+  exceptions. Local `cargo deny check` and the matching cargo-audit command pass; static validation
+  also proves the policy, workflow and ledger carry the same two exact advisory identifiers.
