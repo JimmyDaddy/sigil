@@ -185,6 +185,7 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
   ],
   "target_paths": ["README.md"]
 }
+
 ```
 
 是否需要我执行这个修改？
@@ -202,6 +203,42 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
     assert!(task_input.contains("Approved structured plan:"));
     assert!(task_input.contains("This docs has typoo"));
     assert_eq!(draft.target_paths, vec!["README.md"]);
+    Ok(())
+}
+
+#[test]
+fn sigil_plan_v1_accepts_single_string_notes_and_acceptance() -> Result<()> {
+    let draft = plan_draft_created_entry(
+        r#"```sigil-plan-v1
+{
+  "summary": "Fix README typo",
+  "steps": [
+    {
+      "id": "fix-readme-typo",
+      "title": "Fix README marker",
+      "target_paths": ["README.md"],
+      "notes": "One token replacement.",
+      "acceptance": "README.md contains the corrected marker."
+    }
+  ],
+  "target_paths": ["README.md"],
+  "notes": "Plan mode only; no files were modified."
+}
+```"#,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?
+    .expect("single-string notes and acceptance should remain durable");
+
+    assert_eq!(draft.notes, vec!["Plan mode only; no files were modified."]);
+    assert_eq!(
+        draft.steps[0].notes,
+        vec![
+            "One token replacement.",
+            "acceptance: README.md contains the corrected marker.",
+        ]
+    );
     Ok(())
 }
 

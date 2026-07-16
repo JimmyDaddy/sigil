@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -678,7 +678,7 @@ struct RawStructuredPlanDraft {
     suggested_checks: Vec<RawPlanSuggestedCheck>,
     #[serde(default)]
     risk: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
     notes: Vec<String>,
 }
 
@@ -698,10 +698,27 @@ struct RawPlanDraftStep {
     suggested_checks: Vec<RawPlanSuggestedCheck>,
     #[serde(default)]
     risk: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
     notes: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_list")]
     acceptance: Vec<String>,
+}
+
+fn deserialize_string_or_list<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrList {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(match StringOrList::deserialize(deserializer)? {
+        StringOrList::One(value) => vec![value],
+        StringOrList::Many(values) => values,
+    })
 }
 
 #[derive(Debug, Deserialize)]
