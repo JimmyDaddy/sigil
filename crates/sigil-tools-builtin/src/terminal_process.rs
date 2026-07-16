@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     io::{Read, Write},
     panic::{AssertUnwindSafe, catch_unwind},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex as StdMutex,
@@ -40,6 +40,9 @@ use crate::execution_backends::{
     ensure_linux_bubblewrap_available, ensure_macos_seatbelt_available, find_executable_on_path,
     linux_bubblewrap_args, macos_seatbelt_workspace_write_profile,
 };
+use crate::path::{
+    absolute_path_from, canonical_workspace_root, lexically_normalize_path, resolve_existing_prefix,
+};
 
 mod config; // public DTOs and terminal execution policy.
 mod cwd; // workspace-confined terminal cwd resolution.
@@ -54,10 +57,7 @@ use config::{
     TERMINAL_TASK_STDERR_FILE, TERMINAL_TASK_STDOUT_FILE, TerminalArtifactLimits,
     TerminalPtyCommandSpec, TerminalPtyExecution,
 };
-use cwd::{
-    ResolvedTerminalCwd, absolute_path_from, canonical_workspace_root, lexically_normalize_path,
-    resolve_existing_prefix, resolve_terminal_cwd,
-};
+use cwd::{ResolvedTerminalCwd, resolve_terminal_cwd};
 use io::{
     CombinedOutputWriter, TerminalCaptureFailure, TerminalCaptureLedger, TerminalOutputStream,
     configure_process_group, create_empty_log_files, join_pty_read_thread, open_append_file,

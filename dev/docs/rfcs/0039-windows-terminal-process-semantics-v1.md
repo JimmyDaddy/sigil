@@ -1,6 +1,6 @@
 # RFC-0039 Windows Terminal and Process Semantics V1
 
-状态：active / R39.0 complete
+状态：active / R39.0-R39.1 complete
 
 创建日期：2026-07-17
 
@@ -180,3 +180,7 @@ Windows-only conformance 必须由 pushed hosted job 执行；非 Windows 本地
   已完成 inventory。本地分解审计补齐了 frozen-per-registry resolver、PowerShell UTF-8 与 native
   exit-code propagation 三个原始方案缺口；路径、dialect、process owner、UX、hosted proof 和非目标
   已有独立验收项。
+- R39.1 complete. Terminal cwd 删除了拒绝 `Component::Prefix` 的重复 lexical/prefix 实现，改为
+  复用 file/change-set 已验证的 portable path helpers；Windows-only regression 同时覆盖 prefixed
+  workspace cwd 与 prefixed external cwd rejection。macOS 上 tools 186/1 ignored、strict Clippy、fmt
+  与 diff gate 通过；真实 Windows 运行留在 R39.5 hosted conformance。

@@ -61,6 +61,26 @@ fn terminal_process_manager_permission_context_reports_missing_task() -> Result<
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+fn terminal_cwd_accepts_prefixed_workspace_paths_and_keeps_confinement() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let canonical_workspace = workspace.path().canonicalize()?;
+    let nested = canonical_workspace.join("nested");
+    std::fs::create_dir(&nested)?;
+
+    let resolved = super::resolve_terminal_cwd(&canonical_workspace, Some(&nested))?;
+    assert_eq!(resolved.relative, PathBuf::from("nested"));
+    assert_eq!(resolved.absolute, nested.canonicalize()?);
+
+    let outside = tempfile::tempdir()?;
+    let error =
+        super::resolve_terminal_cwd(&canonical_workspace, Some(&outside.path().canonicalize()?))
+            .expect_err("prefixed cwd outside the workspace must remain rejected");
+    assert!(error.to_string().contains("outside workspace"));
+    Ok(())
+}
+
 #[test]
 fn terminal_process_artifact_path_guards_cover_labels_and_relative_roots() -> Result<()> {
     let temp = tempfile::tempdir()?;
