@@ -101,3 +101,7 @@ cargo audit --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2024-0436
 
 workflow 定时运行只能证明默认分支的最新依赖状态；发布仍需按对应 release RFC 执行完整
 workspace、文档、站点和分发 gate。
+
+`.github/dependabot.yml` 每周检查 Cargo 与 GitHub Actions 版本。Cargo minor/patch 合并为
+一个更新组，major 保持独立 PR；Actions 更新合并为一个组。两个 ecosystem 的开放 PR
+上限分别为 3 和 2，不自动合并，仍必须通过普通 CI 与上述供应链门禁。

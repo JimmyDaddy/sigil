@@ -132,3 +132,7 @@ pushed and GitHub Actions runs it.
   weekly schedule. The dependency ledger documents the routine gate and exact reviewed advisory
   exceptions. Local `cargo deny check` and the matching cargo-audit command pass; static validation
   also proves the policy, workflow and ledger carry the same two exact advisory identifiers.
+- R37.3 complete. Dependabot now checks Cargo and GitHub Actions weekly with bounded open-PR
+  counts. Cargo minor/patch proposals and Actions proposals are grouped, while Cargo major updates
+  stay isolated for explicit review. YAML parsing and contract assertions prove both ecosystem
+  roots, weekly schedules, update groups and PR limits.
