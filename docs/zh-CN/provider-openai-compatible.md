@@ -56,6 +56,8 @@ Sigil 按这个顺序解析 OpenAI-compatible 认证：
 
 该 provider 会把 Sigil 的 provider-neutral messages、tool specs、streamed tool calls、usage 和可选 `system_fingerprint` 映射到 Chat Completions-compatible API。
 
+V1 不在通用 OpenAI-compatible route 上开启图片附件。文本/tool wire 形状兼容不能证明 endpoint 接受相同的 multimodal contract，因此带图请求会在 provider transport 前失败。请使用[图片附件](user-guide.md#图片附件)中明确支持的原生 provider。
+
 它不提供 DeepSeek-only prefix/FIM、reasoning replay、strict tools mode 或 beta endpoint 设置。如果需要这些能力，请使用 [DeepSeek provider](provider-deepseek.md)。
 
 ## 验证

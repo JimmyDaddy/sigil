@@ -75,6 +75,7 @@ sigil doctor
 - 按显式 trust、approval 和 secret-egress policy 接入本地 stdio 与用户根 Streamable HTTP MCP server。
 - 提供 capability-backed `webfetch` 与 stable `websearch` route，并执行独立 network policy、durable egress disclosure 和 external-source provenance。
 - 每次请求可附带少量相关的 Rust、Python、JavaScript/TypeScript 或 Go 仓库片段，并继续遵守 ignore、secret、文件大小和 context budget 限制。
+- TUI 可向明确识别为支持图片的 OpenAI Responses、Anthropic 和 Gemini model 发送有边界的 PNG、JPEG 与 WebP 附件。
 - 可选开启 code intelligence，支持符号、引用、诊断、code action 和 rename preview。
 - 为脚本提供稳定 JSON/JSONL 输出，并为受信任本机 client 提供高级、带认证且仅允许 loopback 的 `sigil serve` 接口。
 - 通过显式 export、conversation fork、pin、精确 delete review 和 retention maintenance 管理已保存 session。
@@ -87,6 +88,7 @@ sigil doctor
 | --- | --- |
 | 普通提问或编辑 | 直接在 composer 输入 |
 | 粘贴多行文本或代码 | 粘贴到 composer；大段粘贴会折叠展示，但会完整提交 |
+| 附加图片 | 粘贴本地 PNG、JPEG 或 WebP 路径，或按 `Ctrl-V` 读取图片剪贴板；发送前可检查或删除 metadata chip |
 | 编辑较长 composer 草稿 | `Ctrl-A/E`、`Alt-B/F`、`Ctrl-K/Y`、`Ctrl-Z` |
 | 规划后执行 | `/plan` 后输入 prompt，或 `/plan <prompt>`；接受 plan card 后创建并运行 durable task |
 | 执行 durable 多步骤任务 | `/task <任务>`；未完成任务用 `/task continue` |

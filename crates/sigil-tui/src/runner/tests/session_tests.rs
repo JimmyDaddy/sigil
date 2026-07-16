@@ -1,10 +1,13 @@
-use std::{fs, thread, time::Duration};
+use std::{fs, pin::Pin, sync::mpsc, thread, time::Duration};
 
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
+use futures::{Stream, stream};
 use sigil_kernel::{
-    Agent, AssistantMessageKind, ControlEntry, ControlledCheckpointProjection,
-    ControlledCheckpointRestoreRequest, DurableEventType, EventClass, JsonlSessionStore,
-    ModelMessage, MutationEventRecorder, ReasoningEffort, SessionLogEntry, SessionStreamRecord,
+    Agent, AssistantMessageKind, CompletionRequest, ControlEntry, ControlledCheckpointProjection,
+    ControlledCheckpointRestoreRequest, DurableEventType, EventClass, ImageInputCapability,
+    JsonlSessionStore, ModelMessage, MutationEventRecorder, Provider, ProviderCapabilities,
+    ProviderChunk, ReasoningEffort, SessionLogEntry, SessionStreamRecord, StorageRoot,
     ToolRegistry, WorkspaceTrust, WorkspaceTrustDecisionEntry, stable_workspace_id,
     write_file_with_mutation,
 };
@@ -16,6 +19,127 @@ use super::{
         PlannedProvider, StreamPlan, spawn_test_worker, test_root_config, wait_for_session_entry,
     },
 };
+
+struct ImageCapturingProvider {
+    request_tx: mpsc::Sender<CompletionRequest>,
+}
+
+#[async_trait]
+impl Provider for ImageCapturingProvider {
+    fn name(&self) -> &str {
+        "image-capturing"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        PlannedProvider::new(Vec::new()).capabilities()
+    }
+
+    fn image_input_capability(&self, _model_name: &str) -> ImageInputCapability {
+        ImageInputCapability::Supported
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.request_tx
+            .send(request)
+            .map_err(|_| anyhow!("image request receiver closed"))?;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+fn prepare_resumable_image_session(
+    temp: &tempfile::TempDir,
+) -> Result<(
+    sigil_kernel::RootConfig,
+    std::path::PathBuf,
+    std::path::PathBuf,
+)> {
+    let workspace_root = temp.path().join("workspace");
+    fs::create_dir(&workspace_root)?;
+    let mut root_config = test_root_config(&workspace_root, "image-capturing", "vision-model");
+    root_config.storage.state_root =
+        StorageRoot::Path(temp.path().join("state").display().to_string());
+    root_config.storage.cache_root =
+        StorageRoot::Path(temp.path().join("cache").display().to_string());
+    let paths = sigil_runtime::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
+        &workspace_root,
+    );
+    let cache = sigil_runtime::ControlledImageAttachmentCache::new(paths.attachments_root);
+    let encoded_png = crate::clipboard_image::encode_clipboard_rgba(1, 1, &[255, 0, 0, 255])?;
+    let attachment = cache.ingest_encoded_bytes("image_1", encoded_png)?;
+    let cached_path = cache.root().join(&attachment.artifact_ref);
+    let session_log_path = temp.path().join("sessions/session-image.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "image-capturing".to_owned(),
+        model_name: "vision-model".to_owned(),
+    }))?;
+    let mut user = ModelMessage::user("inspect this image");
+    user.image_attachments.push(attachment);
+    store.append(&SessionLogEntry::User(user))?;
+    Ok((root_config, session_log_path, cached_path))
+}
+
+#[test]
+fn worker_resume_rehydrates_durable_image_metadata_from_controlled_cache() -> Result<()> {
+    let temp = tempdir()?;
+    let (root_config, session_log_path, _) = prepare_resumable_image_session(&temp)?;
+    let workspace_root = temp.path().join("workspace");
+    let (request_tx, request_rx) = mpsc::channel();
+    let agent = Agent::new(ImageCapturingProvider { request_tx }, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "continue".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+    let request = request_rx.recv_timeout(Duration::from_secs(1))?;
+    let attachment = request
+        .messages
+        .iter()
+        .flat_map(|message| &message.image_attachments)
+        .next()
+        .expect("resumed request should include the durable image");
+    assert!(attachment.has_resolved_bytes());
+    assert!(!attachment.resolved_bytes()?.is_empty());
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn worker_resume_fails_before_transport_when_image_cache_blob_is_missing() -> Result<()> {
+    let temp = tempdir()?;
+    let (root_config, session_log_path, cached_path) = prepare_resumable_image_session(&temp)?;
+    fs::remove_file(cached_path)?;
+    let workspace_root = temp.path().join("workspace");
+    let (request_tx, request_rx) = mpsc::channel();
+    let agent = Agent::new(ImageCapturingProvider { request_tx }, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "continue".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error)
+            if error.contains("failed to resolve cached image")
+    ));
+    assert!(request_rx.try_recv().is_err());
+
+    worker.shutdown()?;
+    Ok(())
+}
 
 #[test]
 fn worker_previews_and_executes_exact_checkpoint_restore() -> Result<()> {

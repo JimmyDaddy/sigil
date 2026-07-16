@@ -17,6 +17,7 @@
 | 反馈支持 | `sigil doctor --output json` 生成带版本的脱敏报告；`/feedback` 会先预览隐私边界，再由用户显式导出到本机。 |
 | 自动化输出 | `sigil run --output json` 输出一条带版本的结果；`--output jsonl` 输出有序的带版本事件，并以唯一 terminal result 或 error 结束。 |
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
+| 图片输入 | 空闲 Build composer 可接收有边界的 PNG、JPEG、WebP 路径或图片剪贴板输入，显示可删除的 metadata chip，并且只向明确识别为支持图片的 OpenAI Responses、Anthropic 或 Gemini model id 发送。 |
 | Tool approvals | 文件变更、shell execution、外部路径和外部工具可在执行前 review。 |
 | Session recovery | Session 和 control records 是 append-only；当前 V2 session log 可在重启后恢复可见状态。旧 raw session log 会明确提示为不受支持并保持原样。 |
 | Checkpoint recovery | `Ctrl-R` 预览绑定证据的 checkpoint，并提供受控文件 restore，或保持文件不变的 conversation fork。 |

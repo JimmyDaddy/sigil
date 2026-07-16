@@ -57,6 +57,8 @@ Prefer environment variables for local and CI use. Do not commit configs that co
 
 Sigil handles Anthropic's request format, streaming replies, tool results, usage, and incremental tool input for you. Anthropic-specific options remain on this page, while the normal tool-approval, privacy, and session workflow stays the same.
 
+Image attachments are available only for explicitly recognized Claude model IDs and their accepted dated variants. Unknown names and unrecognized aliases fail before provider transport. See [Image Attachments](user-guide.md#image-attachments) for input methods, local limits, cache behavior, and resume guidance.
+
 Use `beta_headers` only when you know the Anthropic feature or endpoint requires them.
 
 ## Verify

@@ -52,6 +52,8 @@ Sigil 按这个顺序解析 Gemini 认证：
 
 Sigil 会为你处理 Gemini 的请求格式、function calling、response、usage 与安全阻断。Gemini 专属选项留在本文；正常的 tool approval、隐私与 session 工作流保持一致。
 
+只有明确识别的 Gemini model id 才能使用图片附件。浮动 `latest` 名称、未知 id 和未识别 alias 会在 provider transport 前失败。输入方式、本地上限、cache 行为与 resume 建议见[图片附件](user-guide.md#图片附件)。
+
 Gemini model 名称和 endpoint 可用性可能随账号和区域变化。自动化使用时，请显式配置 `[agent].model`。
 
 ## 验证

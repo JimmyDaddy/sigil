@@ -264,6 +264,7 @@ where
         };
 
     let url_capability_registrar = run_session.user_url_capability_registrar();
+    let image_attachment_resolver = run_session.image_attachment_resolver();
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -311,6 +312,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         url_capability_registrar,
+        image_attachment_resolver,
     })
 }
 
@@ -411,6 +413,7 @@ where
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
     let url_capability_registrar = run_session.user_url_capability_registrar();
+    let image_attachment_resolver = run_session.image_attachment_resolver();
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -459,6 +462,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         url_capability_registrar,
+        image_attachment_resolver,
     })
 }
 
@@ -515,6 +519,7 @@ where
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
     let url_capability_registrar = run_session.user_url_capability_registrar();
+    let image_attachment_resolver = run_session.image_attachment_resolver();
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -563,6 +568,7 @@ where
         cancellation_owner,
         cancellation_recorder,
         url_capability_registrar,
+        image_attachment_resolver,
     })
 }
 
@@ -700,7 +706,7 @@ pub(in crate::runner) fn close_agent_thread(
     thread_id: AgentThreadId,
     reason: Option<String>,
 ) -> std::result::Result<(AgentThreadId, Vec<SessionLogEntry>), String> {
-    let mut session = load_session_with_url_capability_attachment(
+    let mut session = load_session_with_runtime_attachments(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,

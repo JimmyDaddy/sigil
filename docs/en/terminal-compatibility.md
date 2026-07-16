@@ -67,6 +67,18 @@ Expected result: clicks and wheel events affect only the focused TUI surface. Ke
 
 Expected result: Sigil shows `copied ...` when OSC52 is enabled and the terminal accepts the sequence. If OSC52 is disabled in config, Sigil shows `clipboard unavailable: OSC52 disabled`.
 
+## Image Paste Smoke
+
+Image input is separate from OSC52 text-selection copy. Configure an explicitly supported OpenAI Responses, Anthropic, or Gemini model, then run these checks from an idle Build composer:
+
+1. Put a PNG image in the system clipboard and press `Ctrl-V`.
+2. Confirm that a metadata chip appears above the composer without a local path.
+3. Select the chip with `Up`, move with `Left/Right` when several chips exist, and remove it with `Backspace` or `Delete`.
+4. Paste a local PNG, JPEG, or WebP path and confirm that it becomes a chip instead of prompt text.
+5. Submit an image-only turn or add text and submit; unsupported model IDs must keep the draft and fail before provider transport.
+
+tmux, screen, SSH, WSL, and remote terminal applications may not expose the host system's image clipboard to Sigil. In those environments, paste an admitted local file path instead. OSC52 is only Sigil's outbound text-selection copy mechanism; enabling it does not make clipboard image input available.
+
 ## tmux, screen, SSH, And WSL
 
 These layers commonly require explicit clipboard or mouse pass-through:
@@ -97,5 +109,6 @@ Doctor terminal status:
 Mouse smoke:
 Text selection:
 OSC52 copy:
+Image paste:
 Notes:
 ```

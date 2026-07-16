@@ -1,6 +1,6 @@
 # RFC-0033 Image & Attachment Input V1
 
-状态：accepted / R33.0 complete
+状态：accepted / R33.0-R33.5 complete
 
 创建日期：2026-07-16
 
@@ -143,3 +143,4 @@ git diff --check
 - R33.2 complete：runtime 已实现 workspace-scoped content-addressed cache、PNG/JPEG/WebP bounded decode、同目录原子 no-clobber 写入、path/file URL admission、no-follow regular-file 读取及 hash/format/dimension 重新校验；依赖台账、audit/deny 与 adversarial tests 通过。
 - R33.3 complete：OpenAI Responses、Anthropic 与 Gemini 已实现 exact-model capability 和官方 inline image wire，provider request DTO 的 Debug 已 redacted；OpenAI/Anthropic native compaction 移除 image block，DeepSeek/generic compatible 在 mapper/transport 前 fail closed，五个 provider crate 全量测试与 strict Clippy 通过。
 - R33.4 complete：TUI 已支持空闲 Build composer 的单图片路径/file URL 粘贴与 `Ctrl-V` clipboard image，附件以 bounded metadata chip 展示并可用方向键选择、Backspace/Delete 删除；图片-only normal chat 可提交，queue/Plan/slash/agent 路径保留草稿并 fail closed，worker 在 active run 期间拒绝图片排队，TUI 全量测试与 strict Clippy 通过。
+- R33.5 complete：普通 resume、session scope 切换与 active-run cancel reload 均恢复 workspace-scoped resolver；durable metadata 可从受控 cache 重新 materialize，而 missing blob 会在 provider transport 前失败。Kernel durable/compaction canary、runtime safe export、TUI 1366/1370 tests（4 ignored）、strict Clippy、EN/ZH docs/site 与 diff gates 通过。

@@ -75,6 +75,7 @@ sigil doctor
 - Connects local stdio and user-root Streamable HTTP MCP servers under explicit trust, approval, and secret-egress policy.
 - Provides capability-backed `webfetch` and stable `websearch` routes with independent network policy, durable egress disclosure, and external-source provenance.
 - Adds a small, request-local set of relevant Rust, Python, JavaScript/TypeScript, or Go repository snippets while respecting ignore, secret, size, and context-budget limits.
+- Accepts bounded PNG, JPEG, and WebP attachments in the TUI for explicitly recognized image-capable OpenAI Responses, Anthropic, and Gemini models.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 - Provides stable JSON/JSONL output for scripts and an advanced authenticated, loopback-only `sigil serve` interface for trusted local clients.
 - Manages saved sessions through explicit export, conversation fork, pin, exact delete review, and retention maintenance actions.
@@ -87,6 +88,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | --- | --- |
 | Ask or edit normally | Type in the composer |
 | Paste multiline text or code | Paste into the composer; large pastes fold visually and submit in full |
+| Attach an image | Paste a local PNG, JPEG, or WebP path, or press `Ctrl-V` for an image clipboard; review or remove the metadata chip before sending |
 | Edit long composer drafts | `Ctrl-A/E`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
 | Plan before editing | `/plan` then type a prompt, or `/plan <prompt>`; accept a structured Plan ready card to create and run a durable task |
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |

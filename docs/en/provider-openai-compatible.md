@@ -56,6 +56,8 @@ These overrides are useful for CI and local experiments where you do not want to
 
 This provider uses a Chat Completions-compatible API and supports Sigil conversations, tool calls, streaming replies, and usage reporting. Optional provider diagnostics may be shown when the service supplies them.
 
+Image attachments are not enabled on the generic OpenAI-compatible route in V1. A compatible text/tool wire shape is not sufficient evidence that an endpoint accepts the same multimodal contract, so an attached-image request fails before provider transport. Use an explicitly supported native provider from [Image Attachments](user-guide.md#image-attachments).
+
 It does not expose DeepSeek-only prefix/FIM, reasoning replay, strict tools mode, or beta endpoint settings. If you need those, use [DeepSeek provider](provider-deepseek.md).
 
 ## Verify

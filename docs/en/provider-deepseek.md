@@ -73,6 +73,8 @@ The TUI `/config` surface focuses on high-frequency fields such as `model`, `api
 
 The authentication variable `SIGIL_API_KEY` is documented in [Authentication](#authentication) above.
 
+Image attachments are not enabled for the DeepSeek provider in V1 because its current Sigil chat contract is text/tool based. Attached-image requests fail before provider transport. Use an explicitly supported provider from [Image Attachments](user-guide.md#image-attachments).
+
 ## Verify
 
 Run:

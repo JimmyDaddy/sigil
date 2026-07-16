@@ -57,6 +57,8 @@ Sigil 按这个顺序解析 Anthropic 认证：
 
 Sigil 会为你处理 Anthropic 的请求格式、流式回复、tool result、usage 和增量工具输入。Anthropic 专属选项留在本文；正常的 tool approval、隐私与 session 工作流保持一致。
 
+只有明确识别的 Claude model id 及其已接受的日期变体才能使用图片附件。未知名称和未识别 alias 会在 provider transport 前失败。输入方式、本地上限、cache 行为与 resume 建议见[图片附件](user-guide.md#图片附件)。
+
 只有在你明确知道 Anthropic feature 或 endpoint 需要时，才使用 `beta_headers`。
 
 ## 验证

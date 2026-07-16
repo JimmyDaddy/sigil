@@ -25,13 +25,29 @@ pub(in crate::runner) fn run_worker_loop<P>(
     } = mcp_handlers;
     let mut current_session_log_path = session_log_path;
     let mut exact_conversation_prompts = ExactConversationPromptStore::new();
-    let mut current_session = match load_session_with_url_capability_attachment(
+    let attachment_paths = sigil_runtime::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
+        &workspace_root,
+    );
+    let default_image_attachment_resolver: Arc<dyn ImageAttachmentResolver> = Arc::new(
+        sigil_runtime::ControlledImageAttachmentCache::new(attachment_paths.attachments_root),
+    );
+    let mut current_session = match load_session_with_runtime_attachments(
         &root_config.agent.provider,
         &root_config.agent.model,
         &current_session_log_path,
         None,
     ) {
         Ok(mut session) => {
+            if let Err(error) = session.try_attach_image_attachment_resolver(Arc::clone(
+                &default_image_attachment_resolver,
+            )) {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                    "failed to attach image cache resolver: {error:#}"
+                )));
+                return;
+            }
             mark_stale_dispatching_conversation_queue_items(
                 &mut session,
                 &exact_conversation_prompts,
@@ -340,7 +356,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         ));
                         continue;
                     };
-                    match load_session_with_url_capability_attachment(
+                    match load_session_with_runtime_attachments(
                         session.provider_name(),
                         session.model_name(),
                         &current_session_log_path,
@@ -404,7 +420,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             elicitation_handler.set_audit_buffer(None);
             active_run = None;
-            current_session = match load_session_with_url_capability_attachment(
+            current_session = match load_session_with_runtime_attachments(
                 task_result.session.provider_name(),
                 task_result.session.model_name(),
                 &current_session_log_path,
@@ -1000,7 +1016,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let folded_event_count = pending.folded_event_count();
                     match pending.apply_compaction(session, &current_session_log_path) {
                         Ok((candidate, outcome)) => {
-                            match load_session_with_url_capability_attachment(
+                            match load_session_with_runtime_attachments(
                                 session.provider_name(),
                                 session.model_name(),
                                 &current_session_log_path,
@@ -1056,7 +1072,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             .map(|session| session.model_name().to_owned());
                         match (provider_name, model_name) {
                             (Some(provider_name), Some(model_name)) => {
-                                match load_session_with_url_capability_attachment(
+                                match load_session_with_runtime_attachments(
                                     &provider_name,
                                     &model_name,
                                     &current_session_log_path,
@@ -1368,6 +1384,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     .expect("new root cancellation owner must admit its first task");
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -1438,6 +1455,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     cancellation_owner,
                     cancellation_recorder,
                     url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
             Ok(WorkerCommand::InvokeAgentProfile {
@@ -1512,6 +1530,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 );
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let profile_id_for_summary = profile_id.clone();
@@ -1574,6 +1593,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     cancellation_owner,
                     cancellation_recorder,
                     url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
             Ok(WorkerCommand::InvokeInlineSkill {
@@ -1651,6 +1671,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     .expect("new root cancellation owner must admit its first task");
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -1703,6 +1724,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     cancellation_owner,
                     cancellation_recorder,
                     url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
             Ok(WorkerCommand::InvokeChildSessionSkill {
@@ -1791,6 +1813,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
                 let handle = spawn_skill_child_run(
                     &runtime,
                     SkillChildRunSpawn {
@@ -1825,6 +1848,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     cancellation_owner,
                     cancellation_recorder,
                     url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
             Ok(WorkerCommand::SubmitTask { prompt }) => {
@@ -1893,6 +1917,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
                 let handle = spawn_task_run(
                     &runtime,
                     TaskRunSpawn {
@@ -1924,6 +1949,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     cancellation_owner,
                     cancellation_recorder,
                     url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
             Ok(WorkerCommand::ContinueTask { task_id, guidance }) => {
@@ -1991,6 +2017,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
                 let handle = spawn_task_continue(
                     &runtime,
                     TaskContinueSpawn {
@@ -2023,6 +2050,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     cancellation_owner,
                     cancellation_recorder,
                     url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
             Ok(WorkerCommand::ApprovalDecision { call_id, approved }) => {
@@ -2264,6 +2292,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 };
                 let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
                 let handle = spawn_task_run(
                     &runtime,
                     TaskRunSpawn {
@@ -2294,6 +2323,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     cancellation_owner,
                     cancellation_recorder,
                     url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
             Ok(WorkerCommand::RejectPlan {
@@ -2578,7 +2608,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let applied = pending.apply(session, &current_session_log_path);
                 match applied {
                     Ok(outcome) => {
-                        let reloaded = load_session_with_url_capability_attachment(
+                        let reloaded = load_session_with_runtime_attachments(
                             &provider_name,
                             &model_name,
                             &current_session_log_path,
@@ -2730,7 +2760,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         continue;
                     }
                 };
-                match load_session_with_url_capability_attachment(
+                match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &current_session_log_path,
@@ -2779,7 +2809,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         continue;
                     }
                 };
-                match load_session_with_url_capability_attachment(
+                match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &output.destination_path,
@@ -2872,7 +2902,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         continue;
                     }
                 };
-                match load_session_with_url_capability_attachment(
+                match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &output.destination_path,
@@ -3392,7 +3422,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 pending_queued_pre_turn_preparation = None;
                 compaction_preparation_tasks.abort_all();
 
-                match load_session_with_url_capability_attachment(
+                match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &session_log_path,
@@ -3455,7 +3485,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 pending_queued_pre_turn_preparation = None;
                 compaction_preparation_tasks.abort_all();
 
-                match load_session_with_url_capability_attachment(
+                match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &session_log_path,
@@ -3551,7 +3581,7 @@ fn finish_idle_auto_compaction(
             let idle_auto_scope_fingerprint =
                 pending.idle_auto_scope_fingerprint().map(str::to_owned);
             match (*pending).apply(session, current_session_log_path) {
-                Ok(outcome) => match load_session_with_url_capability_attachment(
+                Ok(outcome) => match load_session_with_runtime_attachments(
                     &provider_name,
                     &model_name,
                     current_session_log_path,
@@ -3575,7 +3605,7 @@ fn finish_idle_auto_compaction(
                     }
                 },
                 Err(error) => {
-                    match load_session_with_url_capability_attachment(
+                    match load_session_with_runtime_attachments(
                         &provider_name,
                         &model_name,
                         current_session_log_path,

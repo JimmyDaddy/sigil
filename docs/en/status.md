@@ -17,6 +17,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Feedback support | `sigil doctor --output json` produces a versioned redacted report; `/feedback` previews its privacy boundary before an explicit local-only export. |
 | Automation output | `sigil run --output json` emits one versioned result, while `--output jsonl` emits ordered versioned events followed by one terminal result or error. |
 | Chat workflow | Users can work through the composer with visible tool activity. |
+| Image input | An idle Build composer accepts bounded PNG, JPEG, and WebP paths or image-clipboard input, shows removable metadata chips, and sends only to explicitly recognized image-capable OpenAI Responses, Anthropic, or Gemini model IDs. |
 | Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |
 | Session recovery | Session and control records are append-only and restore visible state after restart for current V2 session logs. Older raw session logs are reported as unsupported and left unchanged. |
 | Checkpoint recovery | `Ctrl-R` previews an evidence-bound checkpoint and offers controlled file restore or a conversation fork that leaves files unchanged. |

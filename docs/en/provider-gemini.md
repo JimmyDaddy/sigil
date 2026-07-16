@@ -52,6 +52,8 @@ Prefer `SIGIL_GEMINI_API_KEY` when you want Sigil-specific credentials without a
 
 Sigil handles Gemini's request format, function calling, responses, usage, and safety blocks for you. Gemini-specific options remain on this page, while the normal tool-approval, privacy, and session workflow stays the same.
 
+Image attachments are available only for explicitly recognized Gemini model IDs. Floating `latest` names, unknown IDs, and unrecognized aliases fail before provider transport. See [Image Attachments](user-guide.md#image-attachments) for input methods, local limits, cache behavior, and resume guidance.
+
 Gemini model names and endpoint availability can vary by account and region. Keep `[agent].model` explicit when using this provider in automation.
 
 ## Verify

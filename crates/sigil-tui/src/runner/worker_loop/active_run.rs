@@ -8,6 +8,7 @@ pub(in crate::runner) struct ActiveRun {
     pub(in crate::runner) cancellation_owner: RunCancellationOwner,
     pub(in crate::runner) cancellation_recorder: RunCancellationRecorder,
     pub(in crate::runner) url_capability_registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
+    pub(in crate::runner) image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
 }
 
 const RUN_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +49,7 @@ pub(in crate::runner) fn cancel_active_run(
     reason: &str,
 ) {
     let url_capability_registrar = active_run.url_capability_registrar.clone();
+    let image_attachment_resolver = active_run.image_attachment_resolver.clone();
     elicitation_handler.set_audit_buffer(None);
     if !active_run.cancellation_owner.reserve_cancel() {
         let _ = message_tx.send(WorkerMessage::Notice(
@@ -144,6 +146,7 @@ pub(in crate::runner) fn cancel_active_run(
             &root_config.agent.model,
             current_session_log_path,
             url_capability_registrar.clone(),
+            image_attachment_resolver.clone(),
         ) {
             *current_session = Some(session);
         }
@@ -176,6 +179,7 @@ pub(in crate::runner) fn cancel_active_run(
         &root_config.agent.model,
         current_session_log_path,
         url_capability_registrar,
+        image_attachment_resolver,
     ) {
         Ok(session) => {
             let mut session = session;
@@ -254,6 +258,7 @@ fn load_active_run_session(
     model_name: &str,
     session_log_path: &Path,
     registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
+    image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
 ) -> std::result::Result<Session, String> {
     let mut session = load_session(provider_name, model_name, session_log_path)
         .map_err(|error| format!("failed to reload active-run session: {error:#}"))?;
@@ -263,6 +268,11 @@ fn load_active_run_session(
     session
         .try_attach_user_url_capability_registrar(registrar)
         .map_err(|error| format!("failed to restore active-run URL capabilities: {error:#}"))?;
+    let image_attachment_resolver = image_attachment_resolver
+        .ok_or_else(|| "active run lost its image attachment resolver".to_owned())?;
+    session
+        .try_attach_image_attachment_resolver(image_attachment_resolver)
+        .map_err(|error| format!("failed to restore active-run image cache: {error:#}"))?;
     Ok(session)
 }
 

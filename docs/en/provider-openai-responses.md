@@ -56,6 +56,8 @@ The provider streams text, supported reasoning deltas, tool calls, and usage fro
 
 Normal requests use the full local session context and do not use remote response-handle continuation. Background requests and provider-hosted tools are not enabled on this provider. The native compact endpoint is not a user action.
 
+Image attachments are available only for model IDs that Sigil explicitly recognizes as image-capable, including supported dated snapshots. Unknown IDs and malformed or unrecognized aliases fail before provider transport; Sigil does not infer image support from the endpoint alone. See [Image Attachments](user-guide.md#image-attachments) for input methods, local limits, cache behavior, and resume guidance.
+
 Guarded overflow recovery is enabled only for the official `https://api.openai.com/v1` endpoint and exact `gpt-4.1-2025-04-14` snapshot after a provider-confirmed context-window rejection before output or side effects. Its request/session-owned preparation records separate non-generating measurements for the rejected request and compacted target, then requires exact before/after savings and target-fit proof before one frozen retry. Aliases, compatible endpoints, ordinary errors, count failures, stale frontiers, restored sessions, and recursive recovery remain excluded.
 
 ## Verify

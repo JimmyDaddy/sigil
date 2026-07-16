@@ -1168,7 +1168,7 @@ pub(in crate::runner) fn approve_plan(
     if plan_text.is_empty() {
         return Err("plan approval failed: plan text is empty".to_owned());
     }
-    let mut session = load_session_with_url_capability_attachment(
+    let mut session = load_session_with_runtime_attachments(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
@@ -1311,7 +1311,7 @@ pub(in crate::runner) fn create_task_from_plan(
 ) -> std::result::Result<CreatedTaskFromPlan, String> {
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for task creation: {error:#}"))?;
-    let mut session = load_session_with_url_capability_attachment(
+    let mut session = load_session_with_runtime_attachments(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,
@@ -1431,7 +1431,7 @@ pub(in crate::runner) fn reject_plan(
 ) -> std::result::Result<(PlanDecisionRecordedEntry, Vec<SessionLogEntry>), String> {
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for rejection: {error:#}"))?;
-    let mut session = load_session_with_url_capability_attachment(
+    let mut session = load_session_with_runtime_attachments(
         &root_config.agent.provider,
         &root_config.agent.model,
         current_session_log_path,

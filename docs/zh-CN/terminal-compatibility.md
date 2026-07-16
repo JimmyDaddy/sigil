@@ -67,6 +67,18 @@ scripts/tui-attention-signals-pty-acceptance.py
 
 预期结果：OSC52 开启且终端接受序列时，Sigil 显示 `copied ...`。如果配置里关闭 OSC52，Sigil 显示 `clipboard unavailable: OSC52 disabled`。
 
+## 图片粘贴 Smoke
+
+图片输入与 OSC52 文本选择复制相互独立。先配置一个明确支持的 OpenAI Responses、Anthropic 或 Gemini model，再从空闲 Build composer 执行：
+
+1. 将 PNG 图片放入系统剪贴板，按 `Ctrl-V`。
+2. 确认 composer 上方出现 metadata chip，且不显示本地路径。
+3. 用 `Up` 选中 chip；多张图时用 `Left/Right` 移动；用 `Backspace` 或 `Delete` 删除。
+4. 粘贴本地 PNG、JPEG 或 WebP 路径，确认它变成 chip，而不是 prompt 文本。
+5. 提交只含图片的 turn，或加入文本后提交；不支持的 model id 必须保留草稿，并在 provider transport 前失败。
+
+tmux、screen、SSH、WSL 与远程终端应用可能无法向 Sigil 暴露 host 系统图片剪贴板；这类环境请改为粘贴已准入的本地文件路径。OSC52 只是 Sigil 用于向外复制文本选区的机制；开启它不代表系统图片剪贴板可用。
+
 ## tmux、screen、SSH 和 WSL
 
 这些层通常需要显式配置剪贴板或鼠标 pass-through：
@@ -97,5 +109,6 @@ Doctor terminal status:
 Mouse smoke:
 Text selection:
 OSC52 copy:
+图片粘贴:
 Notes:
 ```

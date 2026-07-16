@@ -8,6 +8,9 @@
 
 ### 新增
 
+- 增加默认关闭且有隐私边界的 terminal attention notification，用于长任务完成、等待审批、执行失败和需要用户输入，并可自动选择 OSC 9、OSC 777 或 BEL。
+- 增加适用于 Rust、Python、JavaScript/TypeScript 与 Go 的有边界 request-local 仓库上下文：优先复用相关的 warm LSP snapshot，否则回退到内置 Tree-sitter adapter。
+- 增加 TUI 图片附件：可通过本地路径或系统图片剪贴板输入有边界的 PNG、JPEG 与 WebP，提供可删除的 metadata chip、受控 cache、安全 session projection 和精确 provider/model 准入。
 - 增加 `sigil doctor --output json`，为支持请求提供带版本且脱敏的本地诊断格式。
 - 增加 `/feedback`：先预览包含和排除的数据，再显式导出仅保存在本机的 JSON；报告绝不会自动上传。
 - 增加 bug、feature request 和 documentation issue 的结构化 GitHub 表单。

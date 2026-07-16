@@ -71,6 +71,21 @@ Use the `Terminal` section in `/config` to enable attention notifications, choos
 
 For terminal-specific smoke checks and tmux/SSH guidance, see [Terminal Compatibility Checklist](terminal-compatibility.md).
 
+## Image Attachments
+
+From an idle Build composer, paste one local PNG, JPEG, or WebP path (including a `file://` URL), or press `Ctrl-V` when the system clipboard contains an image. Sigil shows each admitted image as a metadata chip above the text input. It does not put the original path in the conversation.
+
+Press `Up` from the first input row to select the last chip, use `Left/Right` to move between chips, `Down` or `Esc` to return to the text input, and `Backspace/Delete` to remove the selected image. `Enter` can send text plus images or an image-only turn.
+
+Image input is deliberately limited in V1:
+
+- At most 4 images per turn, 8 MiB per image, and 24 MiB total.
+- At most 8192 pixels on either side and 16 million pixels per image; the combined visual-token estimate must also fit the local limit.
+- Images can only be sent as a direct idle Build turn. They are not queued and cannot accompany Plan, slash-command, skill, task, or agent input. Sigil keeps the draft when it blocks one of those routes.
+- Only explicitly recognized image-capable model IDs on OpenAI Responses, Anthropic, and Gemini are admitted. DeepSeek, OpenAI-compatible endpoints, unknown model IDs, and unrecognized aliases fail before provider transport.
+
+Sessions retain bounded image metadata while encoded bytes remain in the workspace-local attachment cache. Resume rechecks the cached content before the next provider request. If a required cache entry is missing or damaged, Sigil does not silently send only the text placeholder: paste the exact original image again to restore the content-addressed entry, or start/fork from a conversation that does not include that image turn. Safe session exports include metadata, not image bytes.
+
 ## Slash Commands
 
 | Command | Purpose |

@@ -6,13 +6,13 @@ Sigil separates provider choice from the rest of the user workflow. This guide a
 
 ## Choose A Provider
 
-| Provider | Best fit | Config value | Guide |
-| --- | --- | --- | --- |
-| DeepSeek | Default Quick Setup path, DeepSeek chat, FIM, and DeepSeek-specific endpoint options. | `deepseek` | [DeepSeek provider](provider-deepseek.md) |
-| OpenAI-compatible | OpenAI or a compatible Chat Completions `/v1` gateway. | `openai_compat` | [OpenAI-compatible provider](provider-openai-compatible.md) |
-| OpenAI Responses | OpenAI Responses `/v1/responses` models and event stream. | `openai_responses` | [OpenAI Responses provider](provider-openai-responses.md) |
-| Anthropic | Claude models through Anthropic Messages streaming. | `anthropic` | [Anthropic provider](provider-anthropic.md) |
-| Gemini | Gemini models through `streamGenerateContent` and function calling. | `gemini` | [Gemini provider](provider-gemini.md) |
+| Provider | Best fit | Image input V1 | Config value | Guide |
+| --- | --- | --- | --- | --- |
+| DeepSeek | Default Quick Setup path, DeepSeek chat, FIM, and DeepSeek-specific endpoint options. | Not supported | `deepseek` | [DeepSeek provider](provider-deepseek.md) |
+| OpenAI-compatible | OpenAI or a compatible Chat Completions `/v1` gateway. | Not supported | `openai_compat` | [OpenAI-compatible provider](provider-openai-compatible.md) |
+| OpenAI Responses | OpenAI Responses `/v1/responses` models and event stream. | Explicit recognized model IDs | `openai_responses` | [OpenAI Responses provider](provider-openai-responses.md) |
+| Anthropic | Claude models through Anthropic Messages streaming. | Explicit recognized Claude IDs | `anthropic` | [Anthropic provider](provider-anthropic.md) |
+| Gemini | Gemini models through `streamGenerateContent` and function calling. | Explicit recognized Gemini IDs | `gemini` | [Gemini provider](provider-gemini.md) |
 
 For first use, run `sigil` and complete Quick Setup. Use manual config when you need repeatable local defaults, CI automation, or a provider not exposed by your current Quick Setup path.
 

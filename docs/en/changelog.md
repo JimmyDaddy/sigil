@@ -8,6 +8,9 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ### Added
 
+- Added default-off, privacy-bounded terminal attention notifications for completed long work, approvals, failures, and user-input requests, with automatic OSC 9/OSC 777/BEL selection.
+- Added bounded request-local repository context for Rust, Python, JavaScript/TypeScript, and Go, preferring relevant warm LSP snapshots and falling back to bundled Tree-sitter adapters.
+- Added TUI image attachments for bounded PNG, JPEG, and WebP input through local paths or the system image clipboard, with removable metadata chips, controlled cache storage, safe session projections, and exact provider/model admission.
 - Added `sigil doctor --output json`, a versioned and redacted local diagnostics format for support requests.
 - Added `/feedback`, which previews included and excluded data before an explicit local-only JSON export; reports are never uploaded automatically.
 - Added structured GitHub forms for bugs, feature requests, and documentation issues.

@@ -17,8 +17,9 @@ use sigil_kernel::{
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
     ConversationInputTarget, ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DiscoveredCheck, EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore,
-    MemoryConfig, ModelMessage, MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
+    DiscoveredCheck, EventHandler, EvidenceScope, ExecutionMutationProfile,
+    ImageAttachmentResolver, JsonlSessionStore, MemoryConfig, ModelMessage,
+    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
     PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
@@ -56,7 +57,7 @@ use super::{
         McpActivationStatus, QueueMoveDirection, V2CompactionApplySource, WorkerApprovalCommand,
         WorkerCommand, WorkerMessage,
     },
-    session_flow::{load_session, load_session_with_url_capability_attachment},
+    session_flow::{load_session, load_session_with_runtime_attachments},
 };
 
 mod active_run;

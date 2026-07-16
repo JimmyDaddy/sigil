@@ -12,7 +12,7 @@ pub(super) fn load_session(
     Session::load_from_store(provider_name.to_owned(), model_name.to_owned(), store)
 }
 
-pub(super) fn load_session_with_url_capability_attachment(
+pub(super) fn load_session_with_runtime_attachments(
     provider_name: &str,
     model_name: &str,
     session_log_path: &Path,
@@ -27,5 +27,12 @@ pub(super) fn load_session_with_url_capability_attachment(
     } else {
         sigil_runtime::attach_session_url_capability_store(&mut session)?;
     }
+    if let Some(resolver) = previous_session.and_then(Session::image_attachment_resolver) {
+        session.try_attach_image_attachment_resolver(resolver)?;
+    }
     Ok(session)
 }
+
+#[cfg(test)]
+#[path = "tests/session_flow_runtime_attachment_tests.rs"]
+mod tests;
