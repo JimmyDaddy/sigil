@@ -23,8 +23,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         role_provider_builder,
         context_resolver,
     } = mcp_handlers;
-    let mut current_session_log_path = session_log_path;
-    let mut exact_conversation_prompts = ExactConversationPromptStore::new();
+    let initial_exact_conversation_prompts = ExactConversationPromptStore::new();
     let attachment_paths = sigil_runtime::resolve_sigil_paths(
         &root_config.storage,
         &root_config.session,
@@ -33,10 +32,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let default_image_attachment_resolver: Arc<dyn ImageAttachmentResolver> = Arc::new(
         sigil_runtime::ControlledImageAttachmentCache::new(attachment_paths.attachments_root),
     );
-    let mut current_session = match load_session_with_runtime_attachments(
+    let initial_session = match load_session_with_runtime_attachments(
         &root_config.agent.provider,
         &root_config.agent.model,
-        &current_session_log_path,
+        &session_log_path,
         None,
     ) {
         Ok(mut session) => {
@@ -50,7 +49,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             mark_stale_dispatching_conversation_queue_items(
                 &mut session,
-                &exact_conversation_prompts,
+                &initial_exact_conversation_prompts,
                 &message_tx,
             );
             Some(session)
@@ -61,27 +60,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }
     };
 
-    let (task_result_tx, task_result_rx) = mpsc::channel::<RunTaskResult>();
-    let (provider_status_tx, provider_status_rx) = mpsc::channel::<ProviderStatusTaskResult>();
-    let (compaction_preparation_tx, compaction_preparation_rx) =
-        mpsc::channel::<CompactionPreparationTaskResult>();
-    let mut active_run: Option<ActiveRun> = None;
-    let mut processed_worker_command_ids = BTreeSet::<String>::new();
-    let mut provider_status_tasks = ProviderStatusTaskManager::new();
-    let mut compaction_preparation_tasks = CompactionPreparationTaskManager::new();
-    let mut next_run_id = 1_u64;
-    let mut next_v2_compaction_request_id = 1_u64;
-    let mut pending_v2_compaction: Option<PendingV2Compaction> = None;
-    let mut idle_auto_compaction = IdleAutoCompactionState::default();
-    let mut discarded_run_ids = BTreeSet::new();
-    let mut pending_mcp_refreshes = BTreeSet::new();
-    let mut next_mcp_refresh_retry_at = Instant::now();
-    let mut pending_agent_result_continuations =
-        pending_agent_result_continuations_from_session(current_session.as_ref());
-    let mut last_queued_pre_turn_block: Option<(ConversationInputQueueId, String)> = None;
-    let mut pending_queued_pre_turn_preparation: Option<PreTurnV2CompactionPreparation> = None;
-    let mut next_terminal_task_refresh_at = Instant::now();
-    let session_entries = current_session
+    let session_entries = initial_session
         .as_ref()
         .map(Session::entries)
         .unwrap_or(&[]);
@@ -105,6 +84,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
         sigil_runtime::AgentToolBackgroundRuns::with_event_sink(Arc::new(WorkerAgentEventSink {
             sender: message_tx.clone(),
         }));
+    let mut state = WorkerLoopState::new(
+        session_log_path,
+        initial_session,
+        agent_supervisor,
+        background_agent_runs,
+    );
     let _ = message_tx.send(WorkerMessage::WorkerReady);
 
     loop {
@@ -114,15 +99,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let _ = message_tx.send(WorkerMessage::McpProgress { notification });
                 }
                 McpRuntimeEvent::ListChanged(notification) => {
-                    pending_mcp_refreshes.insert(notification.server_name.clone());
+                    state
+                        .refresh
+                        .pending_mcp_servers
+                        .insert(notification.server_name.clone());
                     let _ = message_tx.send(WorkerMessage::McpListChanged { notification });
                 }
             }
         }
 
-        if active_run.is_none()
-            && !pending_mcp_refreshes.is_empty()
-            && Instant::now() >= next_mcp_refresh_retry_at
+        if state.run.active.is_none()
+            && !state.refresh.pending_mcp_servers.is_empty()
+            && Instant::now() >= state.refresh.next_mcp_retry_at
         {
             let shared_registry_blocked = refresh_pending_mcp_servers(
                 &runtime,
@@ -133,34 +121,45 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 &message_tx,
                 Arc::clone(&elicitation_handler),
                 Arc::clone(&mcp_event_handler),
-                current_session
+                state
+                    .session
+                    .current
                     .as_ref()
                     .and_then(Session::mutation_event_recorder),
-                &mut pending_mcp_refreshes,
+                &mut state.refresh.pending_mcp_servers,
             );
-            next_mcp_refresh_retry_at = if shared_registry_blocked {
+            state.refresh.next_mcp_retry_at = if shared_registry_blocked {
                 Instant::now() + MCP_REFRESH_RETRY_INTERVAL
             } else {
                 Instant::now()
             };
         }
 
-        drain_provider_status_results(&provider_status_rx, &mut provider_status_tasks, &message_tx);
+        drain_provider_status_results(
+            &state.refresh.provider_status_rx,
+            &mut state.refresh.provider_status_tasks,
+            &message_tx,
+        );
 
-        while let Ok(preparation_result) = compaction_preparation_rx.try_recv() {
+        while let Ok(preparation_result) = state.compaction.preparation_rx.try_recv() {
             match preparation_result {
                 CompactionPreparationTaskResult::Manual {
                     request_id,
                     session_scope_id,
                     result,
                 } => {
-                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                    if !state
+                        .compaction
+                        .preparation_tasks
+                        .accept_result(request_id, &session_scope_id)
+                    {
                         continue;
                     }
-                    let Some(session) = current_session.as_ref() else {
+                    let Some(session) = state.session.current.as_ref() else {
                         continue;
                     };
-                    if active_run.is_some() || session.session_scope_id() != session_scope_id {
+                    if state.run.active.is_some() || session.session_scope_id() != session_scope_id
+                    {
                         let _ = message_tx.send(WorkerMessage::Notice(
                             "discarded stale V2 compaction preparation".to_owned(),
                         ));
@@ -184,7 +183,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                 ));
                                 continue;
                             }
-                            pending_v2_compaction = prepared.pending;
+                            state.compaction.pending = prepared.pending;
                             let _ = message_tx.send(WorkerMessage::V2CompactionPreviewed {
                                 state: V2CompactionPreviewState::Review(Box::new(prepared.review)),
                             });
@@ -201,20 +200,24 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     session_scope_id,
                     result,
                 } => {
-                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                    if !state
+                        .compaction
+                        .preparation_tasks
+                        .accept_result(request_id, &session_scope_id)
+                    {
                         continue;
                     }
                     let idle_frontier_is_current =
-                        current_session.as_ref().is_some_and(|session| {
+                        state.session.current.as_ref().is_some_and(|session| {
                             session.session_scope_id() == session_scope_id
                                 && session
                                     .conversation_queue_projection()
                                     .items
                                     .iter()
                                     .all(|item| item.status.is_terminal())
-                        }) && active_run.is_none()
-                            && pending_agent_result_continuations.is_empty()
-                            && pending_v2_compaction.is_none();
+                        }) && state.run.active.is_none()
+                            && state.session.pending_agent_result_continuations.is_empty()
+                            && state.compaction.pending.is_none();
                     if !idle_frontier_is_current {
                         let _ = message_tx.send(WorkerMessage::Notice(
                             "discarded stale automatic compaction preparation".to_owned(),
@@ -223,11 +226,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                     match result {
                         Ok(prepared) => {
-                            idle_auto_compaction = prepared.state;
+                            state.compaction.idle_auto = prepared.state;
                             finish_idle_auto_compaction(
                                 prepared.preparation,
-                                &mut current_session,
-                                &current_session_log_path,
+                                &mut state.session.current,
+                                &state.session.log_path,
                                 &message_tx,
                             );
                         }
@@ -243,13 +246,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     session_scope_id,
                     result,
                 } => {
-                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                    if !state
+                        .compaction
+                        .preparation_tasks
+                        .accept_result(request_id, &session_scope_id)
+                    {
                         continue;
                     }
-                    let Some(session) = current_session.as_ref() else {
+                    let Some(session) = state.session.current.as_ref() else {
                         continue;
                     };
-                    if active_run.is_some() || session.session_scope_id() != session_scope_id {
+                    if state.run.active.is_some() || session.session_scope_id() != session_scope_id
+                    {
                         let _ = message_tx.send(WorkerMessage::Notice(
                             "discarded stale queued pre-turn preparation".to_owned(),
                         ));
@@ -263,7 +271,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                 .as_ref()
                                 == Some(&prepared.queue_id) =>
                         {
-                            pending_queued_pre_turn_preparation = Some(*prepared);
+                            state.session.pending_queued_pre_turn_preparation = Some(*prepared);
                         }
                         Ok(_) => {
                             let _ = message_tx.send(WorkerMessage::Notice(
@@ -283,7 +291,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     session_scope_id,
                     result,
                 } => {
-                    if !compaction_preparation_tasks.accept_result(request_id, &session_scope_id) {
+                    if !state
+                        .compaction
+                        .preparation_tasks
+                        .accept_result(request_id, &session_scope_id)
+                    {
                         continue;
                     }
                     let prepared = match result {
@@ -295,10 +307,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             continue;
                         }
                     };
-                    let source_is_current = current_session
+                    let source_is_current = state
+                        .session
+                        .current
                         .as_ref()
                         .filter(|session| {
-                            active_run.is_none() && session.session_scope_id() == session_scope_id
+                            state.run.active.is_none()
+                                && session.session_scope_id() == session_scope_id
                         })
                         .and_then(|session| {
                             exact_context_window_rejection_source(
@@ -331,9 +346,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let compaction_request_id = pending.request_id();
                     let folded_event_count = pending.folded_event_count();
                     let frozen_request = pending.frozen_target_request();
-                    let applied = current_session
+                    let applied = state
+                        .session
+                        .current
                         .as_ref()
-                        .map(|session| pending.apply(session, &current_session_log_path));
+                        .map(|session| pending.apply(session, &state.session.log_path));
                     let outcome = match applied {
                         Some(Ok(outcome)) => outcome,
                         Some(Err(apply_error)) => {
@@ -350,7 +367,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             continue;
                         }
                     };
-                    let Some(session) = current_session.as_ref() else {
+                    let Some(session) = state.session.current.as_ref() else {
                         let _ = message_tx.send(WorkerMessage::RunFailed(
                             "overflow recovery applied without a loaded session".to_owned(),
                         ));
@@ -359,12 +376,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     match load_session_with_runtime_attachments(
                         session.provider_name(),
                         session.model_name(),
-                        &current_session_log_path,
+                        &state.session.log_path,
                         Some(session),
                     ) {
                         Ok(reloaded) => {
                             let entries = reloaded.entries().to_vec();
-                            current_session = Some(reloaded);
+                            state.session.current = Some(reloaded);
                             let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
                                 request_id: compaction_request_id,
                                 source: V2CompactionApplySource::OverflowRecovery,
@@ -375,23 +392,23 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             match start_portable_overflow_recovery_run(
                                 &runtime,
                                 Arc::clone(&agent),
-                                &agent_supervisor,
+                                &state.agent.supervisor,
                                 &root_config,
                                 agent.tool_registry(),
                                 &options,
-                                &background_agent_runs,
-                                &mut current_session,
-                                &task_result_tx,
+                                &state.agent.background_runs,
+                                &mut state.session.current,
+                                &state.run.result_tx,
                                 &message_tx,
                                 Arc::clone(&elicitation_handler),
-                                &mut next_run_id,
+                                &mut state.run.next_id,
                                 frozen_request,
                                 format!(
                                     "overflow-recovery-{}",
                                     prepared.source_physical_attempt_id
                                 ),
                             ) {
-                                Ok(recovery_run) => active_run = Some(recovery_run),
+                                Ok(recovery_run) => state.run.active = Some(recovery_run),
                                 Err(start_error) => {
                                     let _ = message_tx.send(WorkerMessage::Notice(format!(
                                         "overflow recovery was applied but its one-shot retry could not start: {start_error:#}"
@@ -414,16 +431,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
         }
 
-        while let Ok(task_result) = task_result_rx.try_recv() {
-            if discarded_run_ids.remove(&task_result.run_id) {
+        while let Ok(task_result) = state.run.result_rx.try_recv() {
+            if state.run.discarded_ids.remove(&task_result.run_id) {
                 continue;
             }
             elicitation_handler.set_audit_buffer(None);
-            active_run = None;
-            current_session = match load_session_with_runtime_attachments(
+            state.run.active = None;
+            state.session.current = match load_session_with_runtime_attachments(
                 task_result.session.provider_name(),
                 task_result.session.model_name(),
-                &current_session_log_path,
+                &state.session.log_path,
                 Some(&task_result.session),
             ) {
                 Ok(session) => Some(session),
@@ -444,7 +461,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 } => {
                     if let Some(queue_id) = queue_id.as_ref() {
                         append_queue_status_and_notify(
-                            &mut current_session,
+                            &mut state.session.current,
                             &message_tx,
                             queue_id.clone(),
                             ConversationInputStatus::Delivered,
@@ -453,7 +470,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                     if !agent_result_continuation_thread_ids.is_empty() {
                         append_agent_result_continuation_status_and_notify(
-                            &mut current_session,
+                            &mut state.session.current,
                             &message_tx,
                             &agent_result_continuation_thread_ids,
                             AgentResultContinuationStatus::Completed,
@@ -464,8 +481,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         && let Err(error) = append_plan_draft(
                             &root_config,
                             &workspace_root,
-                            &current_session_log_path,
-                            &mut current_session,
+                            &state.session.log_path,
+                            &mut state.session.current,
                             &run_result.final_text,
                             run_result.final_message_id.clone(),
                             task_result.run_id,
@@ -473,7 +490,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     {
                         let _ = message_tx.send(WorkerMessage::Notice(error));
                     }
-                    let entries = current_session
+                    let entries = state
+                        .session
+                        .current
                         .as_ref()
                         .map(|session| session.entries().to_vec())
                         .unwrap_or_default();
@@ -489,13 +508,18 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         }
                     };
                     let _ = message_tx.send(message);
-                    idle_auto_compaction.request_after_successful_chat_run();
+                    state
+                        .compaction
+                        .idle_auto
+                        .request_after_successful_chat_run();
                 }
                 RunTaskPayload::Agent {
                     profile_id,
                     result: Ok(run_result),
                 } => {
-                    let entries = current_session
+                    let entries = state
+                        .session
+                        .current
                         .as_ref()
                         .map(|session| session.entries().to_vec())
                         .unwrap_or_default();
@@ -513,7 +537,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     agent_result_continuation_thread_ids,
                 } => {
                     if let Some(queue_id) = queue_id.as_ref() {
-                        let classification = current_session
+                        let classification = state.session.current
                             .as_ref()
                             .ok_or_else(|| {
                                 "conversation queue recovery requires a loaded session".to_owned()
@@ -531,7 +555,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         match classification {
                             Ok(QueuedConversationTerminalClassification::Delivered { reason }) => {
                                 append_queue_status_and_notify(
-                                    &mut current_session,
+                                    &mut state.session.current,
                                     &message_tx,
                                     queue_id.clone(),
                                     ConversationInputStatus::Delivered,
@@ -545,8 +569,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             }
                             Ok(QueuedConversationTerminalClassification::Rejected { reason }) => {
                                 append_queue_failure_and_pause_and_notify(
-                                    &current_session_log_path,
-                                    &mut current_session,
+                                    &state.session.log_path,
+                                    &mut state.session.current,
                                     &message_tx,
                                     queue_id.clone(),
                                     format!("{reason}: {error}"),
@@ -555,7 +579,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             Ok(QueuedConversationTerminalClassification::Stale { reason })
                             | Err(reason) => {
                                 append_queue_status_and_notify(
-                                    &mut current_session,
+                                    &mut state.session.current,
                                     &message_tx,
                                     queue_id.clone(),
                                     ConversationInputStatus::Stale,
@@ -566,7 +590,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                     if !agent_result_continuation_thread_ids.is_empty() {
                         append_agent_result_continuation_status_and_notify(
-                            &mut current_session,
+                            &mut state.session.current,
                             &message_tx,
                             &agent_result_continuation_thread_ids,
                             AgentResultContinuationStatus::Failed,
@@ -580,7 +604,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         && agent_result_continuation_thread_ids.is_empty()
                         && let Some(logical_run_id) = provider_logical_run_id.as_deref()
                     {
-                        let source_physical_attempt_id = match current_session.as_ref() {
+                        let source_physical_attempt_id = match state.session.current.as_ref() {
                             Some(session) => {
                                 match exact_context_window_rejection_source(session, logical_run_id)
                                 {
@@ -596,22 +620,22 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             None => None,
                         };
                         if let Some(source_physical_attempt_id) = source_physical_attempt_id {
-                            let Some(session) = current_session.as_ref() else {
+                            let Some(session) = state.session.current.as_ref() else {
                                 let _ = message_tx.send(WorkerMessage::Notice(
                                     "overflow recovery requires a loaded session".to_owned(),
                                 ));
                                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
                                 continue;
                             };
-                            let request_id = next_v2_compaction_request_id;
-                            next_v2_compaction_request_id =
-                                next_v2_compaction_request_id.saturating_add(1);
+                            let request_id = state.compaction.next_request_id;
+                            state.compaction.next_request_id =
+                                state.compaction.next_request_id.saturating_add(1);
                             let expected_session_scope_id = session.session_scope_id().to_owned();
                             let provider_name = session.provider_name().to_owned();
                             let model_name = session.model_name().to_owned();
                             let root_config = root_config.clone();
                             let workspace_root = workspace_root.clone();
-                            let session_log_path = current_session_log_path.clone();
+                            let session_log_path = state.session.log_path.clone();
                             let options = options.clone();
                             let tools = agent.tool_registry().specs();
                             let runtime_handle = runtime.handle().clone();
@@ -621,11 +645,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             let preparation_agent = Arc::clone(&agent);
                             let source_logical_run_id = logical_run_id.to_owned();
                             let original_run_error = error.clone();
-                            compaction_preparation_tasks.start_overflow(
+                            state.compaction.preparation_tasks.start_overflow(
                                 &runtime,
                                 request_id,
                                 expected_session_scope_id.clone(),
-                                compaction_preparation_tx.clone(),
+                                state.compaction.preparation_tx.clone(),
                                 move || {
                                     let preparation = (|| {
                                         let session =
@@ -685,7 +709,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     task_id,
                     result: Ok(status),
                 } => {
-                    let entries = current_session
+                    let entries = state
+                        .session
+                        .current
                         .as_ref()
                         .map(|session| session.entries().to_vec())
                         .unwrap_or_default();
@@ -704,42 +730,42 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
         }
 
-        let conversation_queue_is_idle = current_session.as_ref().is_some_and(|session| {
+        let conversation_queue_is_idle = state.session.current.as_ref().is_some_and(|session| {
             session
                 .conversation_queue_projection()
                 .items
                 .iter()
                 .all(|item| item.status.is_terminal())
         });
-        if active_run.is_none()
+        if state.run.active.is_none()
             && conversation_queue_is_idle
-            && pending_agent_result_continuations.is_empty()
-            && pending_v2_compaction.is_none()
-            && !compaction_preparation_tasks.has_active()
-            && idle_auto_compaction.is_requested()
-            && let Some(session) = current_session.as_ref()
+            && state.session.pending_agent_result_continuations.is_empty()
+            && state.compaction.pending.is_none()
+            && !state.compaction.preparation_tasks.has_active()
+            && state.compaction.idle_auto.is_requested()
+            && let Some(session) = state.session.current.as_ref()
         {
-            let request_id = next_v2_compaction_request_id;
-            next_v2_compaction_request_id = next_v2_compaction_request_id.saturating_add(1);
+            let request_id = state.compaction.next_request_id;
+            state.compaction.next_request_id = state.compaction.next_request_id.saturating_add(1);
             let expected_session_scope_id = session.session_scope_id().to_owned();
             let provider_name = session.provider_name().to_owned();
             let model_name = session.model_name().to_owned();
             let root_config = root_config.clone();
             let workspace_root = workspace_root.clone();
-            let session_log_path = current_session_log_path.clone();
+            let session_log_path = state.session.log_path.clone();
             let options = options.clone();
             let tools = agent.tool_registry().specs();
             let runtime_handle = runtime.handle().clone();
             let idle_context_resolver = context_resolver.clone();
             let runtime_attachments =
                 CapturedSessionRuntimeAttachments::from_session(Some(session));
-            let mut state = idle_auto_compaction.clone();
-            idle_auto_compaction.cancel_requested_run();
-            compaction_preparation_tasks.start_idle(
+            let mut idle_auto_state = state.compaction.idle_auto.clone();
+            state.compaction.idle_auto.cancel_requested_run();
+            state.compaction.preparation_tasks.start_idle(
                 &runtime,
                 request_id,
                 expected_session_scope_id.clone(),
-                compaction_preparation_tx.clone(),
+                state.compaction.preparation_tx.clone(),
                 move || {
                     let session = load_session_with_captured_runtime_attachments(
                         &provider_name,
@@ -755,7 +781,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         );
                     }
                     let preparation = prepare_idle_auto_compaction(
-                        &mut state,
+                        &mut idle_auto_state,
                         &root_config,
                         &workspace_root,
                         &session_log_path,
@@ -766,20 +792,24 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         &runtime_handle,
                     )
                     .map_err(|error| format!("{error:#}"))?;
-                    Ok(IdleV2CompactionPreparation { state, preparation })
+                    Ok(IdleV2CompactionPreparation {
+                        state: idle_auto_state,
+                        preparation,
+                    })
                 },
             );
         }
 
-        if active_run.is_none() {
-            if Instant::now() >= next_terminal_task_refresh_at {
-                next_terminal_task_refresh_at = Instant::now() + TERMINAL_TASK_REFRESH_INTERVAL;
+        if state.run.active.is_none() {
+            if Instant::now() >= state.refresh.next_terminal_task_refresh_at {
+                state.refresh.next_terminal_task_refresh_at =
+                    Instant::now() + TERMINAL_TASK_REFRESH_INTERVAL;
                 match refresh_terminal_task_statuses(
                     &runtime,
                     agent.tool_registry(),
                     &options,
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                 ) {
                     Ok(updates) => {
                         for (entry, entries) in updates {
@@ -795,22 +825,22 @@ pub(in crate::runner) fn run_worker_loop<P>(
 
             let completed_agent_threads = collect_finished_background_agent_runs(
                 &runtime,
-                &background_agent_runs,
-                &agent_supervisor,
+                &state.agent.background_runs,
+                &state.agent.supervisor,
                 &root_config,
                 agent.tool_registry(),
-                &mut current_session,
+                &mut state.session.current,
                 &message_tx,
             );
             if !completed_agent_threads.is_empty() {
                 let new_continuation_threads = agent_result_continuation_new_thread_ids(
-                    current_session.as_ref(),
+                    state.session.current.as_ref(),
                     &completed_agent_threads,
                 );
                 if !new_continuation_threads.is_empty()
                     && let Err(error) = append_agent_result_continuation_status_entries(
-                        &current_session_log_path,
-                        &mut current_session,
+                        &state.session.log_path,
+                        &mut state.session.current,
                         &new_continuation_threads,
                         AgentResultContinuationStatus::Pending,
                         Some("child agent result ready"),
@@ -820,104 +850,113 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
                 let (blocking, non_blocking) = partition_agent_result_continuations(
-                    current_session.as_ref(),
+                    state.session.current.as_ref(),
                     completed_agent_threads,
                 );
                 extend_agent_thread_ids_unique(
-                    &mut pending_agent_result_continuations,
+                    &mut state.session.pending_agent_result_continuations,
                     non_blocking,
                 );
-                let queued_input_ready = current_session
+                let queued_input_ready = state
+                    .session
+                    .current
                     .as_ref()
                     .and_then(|session| session.conversation_queue_projection().next_dispatchable)
                     .is_some();
                 let mut continuation_threads = blocking;
                 if !queued_input_ready {
-                    continuation_threads.append(&mut pending_agent_result_continuations);
+                    continuation_threads
+                        .append(&mut state.session.pending_agent_result_continuations);
                 }
                 if continuation_threads.is_empty() {
                     continue;
                 }
-                active_run = start_agent_result_continuation_run(
+                state.run.active = start_agent_result_continuation_run(
                     &runtime,
                     Arc::clone(&agent),
-                    &agent_supervisor,
+                    &state.agent.supervisor,
                     &root_config,
-                    &current_session_log_path,
+                    &state.session.log_path,
                     agent.tool_registry(),
                     &options,
-                    &background_agent_runs,
-                    &mut current_session,
-                    &task_result_tx,
+                    &state.agent.background_runs,
+                    &mut state.session.current,
+                    &state.run.result_tx,
                     &message_tx,
                     Arc::clone(&elicitation_handler),
-                    &mut next_run_id,
+                    &mut state.run.next_id,
                     continuation_threads,
                 );
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     continue;
                 }
             }
         }
 
-        if active_run.is_none() {
-            let queued_input_ready = current_session
+        if state.run.active.is_none() {
+            let queued_input_ready = state
+                .session
+                .current
                 .as_ref()
                 .and_then(|session| session.conversation_queue_projection().next_dispatchable)
                 .is_some();
-            if !queued_input_ready && !pending_agent_result_continuations.is_empty() {
-                let continuation_threads = std::mem::take(&mut pending_agent_result_continuations);
-                active_run = start_agent_result_continuation_run(
+            if !queued_input_ready && !state.session.pending_agent_result_continuations.is_empty() {
+                let continuation_threads =
+                    std::mem::take(&mut state.session.pending_agent_result_continuations);
+                state.run.active = start_agent_result_continuation_run(
                     &runtime,
                     Arc::clone(&agent),
-                    &agent_supervisor,
+                    &state.agent.supervisor,
                     &root_config,
-                    &current_session_log_path,
+                    &state.session.log_path,
                     agent.tool_registry(),
                     &options,
-                    &background_agent_runs,
-                    &mut current_session,
-                    &task_result_tx,
+                    &state.agent.background_runs,
+                    &mut state.session.current,
+                    &state.run.result_tx,
                     &message_tx,
                     Arc::clone(&elicitation_handler),
-                    &mut next_run_id,
+                    &mut state.run.next_id,
                     continuation_threads,
                 );
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     continue;
                 }
             }
         }
 
-        if active_run.is_none() {
-            let next_queue_id = current_session
+        if state.run.active.is_none() {
+            let next_queue_id = state
+                .session
+                .current
                 .as_ref()
                 .and_then(|session| session.conversation_queue_projection().next_dispatchable);
-            if pending_queued_pre_turn_preparation.is_none()
-                && !compaction_preparation_tasks.has_active()
+            if state.session.pending_queued_pre_turn_preparation.is_none()
+                && !state.compaction.preparation_tasks.has_active()
                 && let Some(queue_id) = next_queue_id.clone()
-                && let Some(session) = current_session.as_ref()
+                && let Some(session) = state.session.current.as_ref()
             {
-                let request_id = next_v2_compaction_request_id;
-                next_v2_compaction_request_id = next_v2_compaction_request_id.saturating_add(1);
+                let request_id = state.compaction.next_request_id;
+                state.compaction.next_request_id =
+                    state.compaction.next_request_id.saturating_add(1);
                 let expected_session_scope_id = session.session_scope_id().to_owned();
                 let provider_name = session.provider_name().to_owned();
                 let model_name = session.model_name().to_owned();
                 let root_config = root_config.clone();
                 let workspace_root = workspace_root.clone();
-                let session_log_path = current_session_log_path.clone();
-                let exact_prompts = exact_conversation_prompts.clone();
+                let session_log_path = state.session.log_path.clone();
+                let exact_prompts = state.session.exact_prompts.clone();
                 let options = options.clone();
                 let tools = agent.tool_registry().specs();
                 let runtime_handle = runtime.handle().clone();
                 let queue_context_resolver = context_resolver.clone();
                 let runtime_attachments =
                     CapturedSessionRuntimeAttachments::from_session(Some(session));
-                compaction_preparation_tasks.start_pre_turn(
+                state.compaction.preparation_tasks.start_pre_turn(
                     &runtime,
                     request_id,
                     expected_session_scope_id.clone(),
-                    compaction_preparation_tx.clone(),
+                    state.compaction.preparation_tx.clone(),
                     move || {
                         let session = load_session_with_captured_runtime_attachments(
                             &provider_name,
@@ -965,10 +1004,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 );
             }
 
-            let candidate = match pending_queued_pre_turn_preparation.take() {
+            let candidate = match state.session.pending_queued_pre_turn_preparation.take() {
                 None => {
                     if next_queue_id.is_none() {
-                        last_queued_pre_turn_block = None;
+                        state.session.last_queued_pre_turn_block = None;
                     }
                     None
                 }
@@ -976,7 +1015,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     admission: QueuedConversationPreTurnAdmission::NoQueuedInput,
                     ..
                 }) => {
-                    last_queued_pre_turn_block = None;
+                    state.session.last_queued_pre_turn_block = None;
                     None
                 }
                 Some(PreTurnV2CompactionPreparation {
@@ -993,21 +1032,21 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             "queued pre-turn compaction is unavailable ({reason}); dispatching the unchanged frozen request"
                         );
                         let block = (queue_id, notice.clone());
-                        if last_queued_pre_turn_block.as_ref() != Some(&block) {
+                        if state.session.last_queued_pre_turn_block.as_ref() != Some(&block) {
                             let _ = message_tx.send(WorkerMessage::Notice(notice));
                         }
-                        last_queued_pre_turn_block = Some(block);
+                        state.session.last_queued_pre_turn_block = Some(block);
                         Some(*candidate)
                     }
                     None => {
                         let block = (queue_id, reason);
-                        if last_queued_pre_turn_block.as_ref() != Some(&block) {
+                        if state.session.last_queued_pre_turn_block.as_ref() != Some(&block) {
                             let _ = message_tx.send(WorkerMessage::Notice(format!(
                                 "queued follow-up is waiting for a local pre-turn admission: {}",
                                 block.1
                             )));
                         }
-                        last_queued_pre_turn_block = Some(block);
+                        state.session.last_queued_pre_turn_block = Some(block);
                         None
                     }
                 },
@@ -1015,29 +1054,29 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     admission: QueuedConversationPreTurnAdmission::ExactFit(admitted),
                     ..
                 }) => {
-                    last_queued_pre_turn_block = None;
+                    state.session.last_queued_pre_turn_block = None;
                     Some(admitted.candidate)
                 }
                 Some(PreTurnV2CompactionPreparation {
                     admission: QueuedConversationPreTurnAdmission::PortablePreflightReady(pending),
                     ..
                 }) => {
-                    let Some(session) = current_session.as_ref() else {
+                    let Some(session) = state.session.current.as_ref() else {
                         continue;
                     };
                     let folded_event_count = pending.folded_event_count();
-                    match pending.apply_compaction(session, &current_session_log_path) {
+                    match pending.apply_compaction(session, &state.session.log_path) {
                         Ok((candidate, outcome)) => {
                             match load_session_with_runtime_attachments(
                                 session.provider_name(),
                                 session.model_name(),
-                                &current_session_log_path,
-                                current_session.as_ref(),
+                                &state.session.log_path,
+                                state.session.current.as_ref(),
                             ) {
                                 Ok(reloaded) => {
                                     let entries = reloaded.entries().to_vec();
-                                    current_session = Some(reloaded);
-                                    last_queued_pre_turn_block = None;
+                                    state.session.current = Some(reloaded);
+                                    state.session.last_queued_pre_turn_block = None;
                                     let _ = message_tx.send(WorkerMessage::V2CompactionApplied {
                                         request_id: 0,
                                         source: V2CompactionApplySource::PreTurnPressure,
@@ -1066,9 +1105,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
             };
             if let Some(candidate) = candidate {
                 let queue_id = candidate.promotion.queue_id.clone();
-                let committed = match current_session.as_mut() {
+                let committed = match state.session.current.as_mut() {
                     Some(session) => commit_prepared_queued_conversation_candidate(
-                        &current_session_log_path,
+                        &state.session.log_path,
                         session,
                         candidate,
                     ),
@@ -1076,10 +1115,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
                 match committed {
                     Ok(candidate) => {
-                        let provider_name = current_session
+                        let provider_name = state
+                            .session
+                            .current
                             .as_ref()
                             .map(|session| session.provider_name().to_owned());
-                        let model_name = current_session
+                        let model_name = state
+                            .session
+                            .current
                             .as_ref()
                             .map(|session| session.model_name().to_owned());
                         match (provider_name, model_name) {
@@ -1087,31 +1130,31 @@ pub(in crate::runner) fn run_worker_loop<P>(
                                 match load_session_with_runtime_attachments(
                                     &provider_name,
                                     &model_name,
-                                    &current_session_log_path,
-                                    current_session.as_ref(),
+                                    &state.session.log_path,
+                                    state.session.current.as_ref(),
                                 ) {
                                     Ok(reloaded) => {
-                                        current_session = Some(reloaded);
-                                        exact_conversation_prompts.remove(&queue_id);
-                                        if let Some(session) = current_session.as_ref() {
+                                        state.session.current = Some(reloaded);
+                                        state.session.exact_prompts.remove(&queue_id);
+                                        if let Some(session) = state.session.current.as_ref() {
                                             send_conversation_queue_update(
                                                 &message_tx,
                                                 session.entries(),
                                             );
                                         }
-                                        active_run = start_queued_conversation_run(
+                                        state.run.active = start_queued_conversation_run(
                                             &runtime,
                                             Arc::clone(&agent),
-                                            &agent_supervisor,
+                                            &state.agent.supervisor,
                                             &root_config,
                                             agent.tool_registry(),
                                             &options,
-                                            &background_agent_runs,
-                                            &mut current_session,
-                                            &task_result_tx,
+                                            &state.agent.background_runs,
+                                            &mut state.session.current,
+                                            &state.run.result_tx,
                                             &message_tx,
                                             Arc::clone(&elicitation_handler),
-                                            &mut next_run_id,
+                                            &mut state.run.next_id,
                                             candidate,
                                         );
                                     }
@@ -1137,7 +1180,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     }
                 }
             }
-            if active_run.is_some() {
+            if state.run.active.is_some() {
                 continue;
             }
         }
@@ -1149,12 +1192,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 target,
                 reasoning_effort,
             }) => {
-                compaction_preparation_tasks.abort_all();
-                pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                state.session.pending_queued_pre_turn_preparation = None;
                 match queue_conversation_input(
-                    &current_session_log_path,
-                    &mut current_session,
-                    &mut exact_conversation_prompts,
+                    &state.session.log_path,
+                    &mut state.session.current,
+                    &mut state.session.exact_prompts,
                     prompt,
                     kind,
                     target,
@@ -1169,12 +1212,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CancelQueuedConversationInput { queue_id }) => {
-                compaction_preparation_tasks.abort_all();
-                pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                state.session.pending_queued_pre_turn_preparation = None;
                 match cancel_queued_conversation_input(
-                    &current_session_log_path,
-                    &mut current_session,
-                    &mut exact_conversation_prompts,
+                    &state.session.log_path,
+                    &mut state.session.current,
+                    &mut state.session.exact_prompts,
                     queue_id,
                 ) {
                     Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
@@ -1188,12 +1231,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 prompt,
                 reasoning_effort,
             }) => {
-                compaction_preparation_tasks.abort_all();
-                pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                state.session.pending_queued_pre_turn_preparation = None;
                 match edit_queued_conversation_input(
-                    &current_session_log_path,
-                    &mut current_session,
-                    &mut exact_conversation_prompts,
+                    &state.session.log_path,
+                    &mut state.session.current,
+                    &mut state.session.exact_prompts,
                     queue_id,
                     prompt,
                     reasoning_effort,
@@ -1208,11 +1251,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 queue_id,
                 direction,
             }) => {
-                compaction_preparation_tasks.abort_all();
-                pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                state.session.pending_queued_pre_turn_preparation = None;
                 match move_queued_conversation_input(
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     queue_id,
                     direction,
                 ) {
@@ -1223,11 +1266,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::PromoteQueuedConversationInput { queue_id }) => {
-                compaction_preparation_tasks.abort_all();
-                pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                state.session.pending_queued_pre_turn_preparation = None;
                 match promote_queued_conversation_input(
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     queue_id,
                 ) {
                     Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
@@ -1237,26 +1280,26 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::SendQueuedConversationInputNow { queue_id }) => {
-                compaction_preparation_tasks.abort_all();
-                pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                state.session.pending_queued_pre_turn_preparation = None;
                 match promote_queued_conversation_input(
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     queue_id,
                 ) {
                     Ok(entries) => {
                         send_conversation_queue_update(&message_tx, &entries);
-                        if let Some(run) = active_run.take() {
+                        if let Some(run) = state.run.active.take() {
                             cancel_active_run(
                                 run,
                                 &runtime,
                                 &root_config,
-                                &current_session_log_path,
-                                &mut current_session,
+                                &state.session.log_path,
+                                &mut state.session.current,
                                 &message_tx,
                                 &elicitation_handler,
-                                &agent_supervisor,
-                                &mut discarded_run_ids,
+                                &state.agent.supervisor,
+                                &mut state.run.discarded_ids,
                                 "run interrupted for follow-up",
                             );
                         }
@@ -1268,8 +1311,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
             Ok(WorkerCommand::SetConversationQueuePaused { paused }) => {
                 match set_conversation_queue_paused(
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     paused,
                 ) {
                     Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
@@ -1299,7 +1342,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     } => (prompt, Vec::new(), reasoning_effort, true),
                     _ => unreachable!("matched submit prompt commands above"),
                 };
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     if !attachments.is_empty() {
                         let _ = message_tx.send(WorkerMessage::RunFailed(
                             "image attachments cannot be queued; wait for the active run"
@@ -1313,9 +1356,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         ConversationInputKind::Chat
                     };
                     match queue_conversation_input(
-                        &current_session_log_path,
-                        &mut current_session,
-                        &mut exact_conversation_prompts,
+                        &state.session.log_path,
+                        &mut state.session.current,
+                        &mut state.session.exact_prompts,
                         prompt,
                         kind,
                         ConversationInputTarget::MainThread,
@@ -1329,7 +1372,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
-                let Some(run_session) = current_session.take() else {
+                let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -1362,11 +1405,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
-                    agent_supervisor.clone(),
+                    state.agent.supervisor.clone(),
                     root_config.clone(),
                     agent.tool_registry().clone(),
                 )
-                .with_background_runs(background_agent_runs.clone());
+                .with_background_runs(state.agent.background_runs.clone());
                 let plan_tools = plan_mode.then(|| {
                     sigil_runtime::build_plan_prompt_tool_registry(
                         agent.tool_registry(),
@@ -1374,15 +1417,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     )
                     .into_registry()
                 });
-                let task_result_tx = task_result_tx.clone();
-                let run_id = next_run_id;
-                next_run_id += 1;
+                let task_result_tx = state.run.result_tx.clone();
+                let run_id = state.run.next_id;
+                state.run.next_id += 1;
                 let provider_logical_run_id = format!("foreground-run-{run_id}");
                 let context_resolver = context_resolver.clone();
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                             "failed to create cancellation recorder: {error}"
                         )));
@@ -1459,7 +1502,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     });
                 });
 
-                active_run = Some(ActiveRun {
+                state.run.active = Some(ActiveRun {
                     run_id,
                     handle,
                     approval_tx,
@@ -1475,14 +1518,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 prompt,
                 parent_prompt,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
                     ));
                     continue;
                 }
 
-                let Some(run_session) = current_session.take() else {
+                let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -1496,7 +1539,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                         "failed to persist agent invocation prompt: {error:#}"
                     )));
-                    current_session = Some(run_session);
+                    state.session.current = Some(run_session);
                     continue;
                 }
 
@@ -1512,19 +1555,19 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
-                    agent_supervisor.clone(),
+                    state.agent.supervisor.clone(),
                     root_config.clone(),
                     agent.tool_registry().clone(),
                 )
-                .with_background_runs(background_agent_runs.clone());
+                .with_background_runs(state.agent.background_runs.clone());
                 let options = options.clone();
-                let task_result_tx = task_result_tx.clone();
-                let run_id = next_run_id;
-                next_run_id += 1;
+                let task_result_tx = state.run.result_tx.clone();
+                let run_id = state.run.next_id;
+                state.run.next_id += 1;
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                             "failed to create cancellation recorder: {error}"
                         )));
@@ -1597,7 +1640,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     });
                 });
 
-                active_run = Some(ActiveRun {
+                state.run.active = Some(ActiveRun {
                     run_id,
                     handle,
                     approval_tx,
@@ -1613,14 +1656,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 arguments,
                 reasoning_effort,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
                     ));
                     continue;
                 }
 
-                let run_id = next_run_id;
+                let run_id = state.run.next_id;
                 let loaded =
                     match load_worker_skill(&root_config, &options, &skill_id, Some(run_id)) {
                         Ok(loaded) => loaded,
@@ -1636,7 +1679,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     )));
                     continue;
                 }
-                let Some(run_session) = current_session.take() else {
+                let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -1663,13 +1706,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let agent = Arc::clone(&agent);
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
-                let task_result_tx = task_result_tx.clone();
-                let run_id = next_run_id;
-                next_run_id += 1;
+                let task_result_tx = state.run.result_tx.clone();
+                let run_id = state.run.next_id;
+                state.run.next_id += 1;
                 let cancellation_recorder = match run_session.run_cancellation_recorder() {
                     Ok(recorder) => recorder,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                             "failed to create cancellation recorder: {error}"
                         )));
@@ -1728,7 +1771,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     });
                 });
 
-                active_run = Some(ActiveRun {
+                state.run.active = Some(ActiveRun {
                     run_id,
                     handle,
                     approval_tx,
@@ -1743,7 +1786,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 skill_id,
                 arguments,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
                     ));
@@ -1756,7 +1799,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
-                let run_id = next_run_id;
+                let run_id = state.run.next_id;
                 let loaded =
                     match load_worker_skill(&root_config, &options, &skill_id, Some(run_id)) {
                         Ok(loaded) => loaded,
@@ -1772,7 +1815,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     )));
                     continue;
                 }
-                let Some(run_session) = current_session.take() else {
+                let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -1782,16 +1825,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let task_id = match next_task_id(&run_session) {
                     Ok(task_id) => task_id,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
                 };
                 let task_id_value = task_id.as_str().to_owned();
-                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -1808,8 +1851,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let run_id = next_run_id;
-                next_run_id += 1;
+                let run_id = state.run.next_id;
+                state.run.next_id += 1;
                 let (
                     cancellation_owner,
                     cancellation_recorder,
@@ -1818,7 +1861,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 ) = match prepare_run_cancellation(&run_session) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -1841,9 +1884,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         root_config: root_config.clone(),
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: agent_supervisor.clone(),
+                        agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(&role_provider_builder),
-                        task_result_tx: task_result_tx.clone(),
+                        task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
@@ -1852,7 +1895,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     },
                 );
 
-                active_run = Some(ActiveRun {
+                state.run.active = Some(ActiveRun {
                     run_id,
                     handle,
                     approval_tx,
@@ -1864,7 +1907,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 });
             }
             Ok(WorkerCommand::SubmitTask { prompt }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
                     ));
@@ -1877,7 +1920,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
-                let Some(run_session) = current_session.take() else {
+                let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -1887,16 +1930,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let task_id = match next_task_id(&run_session) {
                     Ok(task_id) => task_id,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
                 };
                 let task_id_value = task_id.as_str().to_owned();
-                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -1912,8 +1955,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let run_id = next_run_id;
-                next_run_id += 1;
+                let run_id = state.run.next_id;
+                state.run.next_id += 1;
                 let (
                     cancellation_owner,
                     cancellation_recorder,
@@ -1922,7 +1965,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 ) = match prepare_run_cancellation(&run_session) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -1942,9 +1985,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         root_config: root_config.clone(),
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: agent_supervisor.clone(),
+                        agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(&role_provider_builder),
-                        task_result_tx: task_result_tx.clone(),
+                        task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
@@ -1953,7 +1996,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     },
                 );
 
-                active_run = Some(ActiveRun {
+                state.run.active = Some(ActiveRun {
                     run_id,
                     handle,
                     approval_tx,
@@ -1965,7 +2008,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 });
             }
             Ok(WorkerCommand::ContinueTask { task_id, guidance }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
                     ));
@@ -1978,7 +2021,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
-                let Some(run_session) = current_session.take() else {
+                let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -1988,15 +2031,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     match resolve_continue_task(&run_session, task_id) {
                         Ok(resolved) => resolved,
                         Err(error) => {
-                            current_session = Some(run_session);
+                            state.session.current = Some(run_session);
                             let _ = message_tx.send(WorkerMessage::RunFailed(error));
                             continue;
                         }
                     };
-                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -2012,8 +2055,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let run_id = next_run_id;
-                next_run_id += 1;
+                let run_id = state.run.next_id;
+                state.run.next_id += 1;
                 let (
                     cancellation_owner,
                     cancellation_recorder,
@@ -2022,7 +2065,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 ) = match prepare_run_cancellation(&run_session) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -2043,9 +2086,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         root_config: root_config.clone(),
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: agent_supervisor.clone(),
+                        agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(&role_provider_builder),
-                        task_result_tx: task_result_tx.clone(),
+                        task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
@@ -2054,7 +2097,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     },
                 );
 
-                active_run = Some(ActiveRun {
+                state.run.active = Some(ActiveRun {
                     run_id,
                     handle,
                     approval_tx,
@@ -2066,7 +2109,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 });
             }
             Ok(WorkerCommand::ApprovalDecision { call_id, approved }) => {
-                if let Some(active_run) = &active_run {
+                if let Some(active_run) = &state.run.active {
                     let approval = if approved {
                         ToolApproval::Approve
                     } else {
@@ -2084,7 +2127,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json }) => {
-                if let Some(active_run) = &active_run {
+                if let Some(active_run) = &state.run.active {
                     let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
                         call_id,
                         approval: ToolApproval::ApproveWithArgs { args_json },
@@ -2096,7 +2139,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::ApprovalSessionDecision { call_id }) => {
-                if let Some(active_run) = &active_run {
+                if let Some(active_run) = &state.run.active {
                     let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
                         call_id,
                         approval: ToolApproval::ApproveForSession,
@@ -2108,7 +2151,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::ApprovalCommand(command)) => {
-                if processed_worker_command_ids.contains(&command.command_id) {
+                if state
+                    .processed_worker_command_ids
+                    .contains(&command.command_id)
+                {
                     let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "duplicate command {} ignored",
                         command.command_id
@@ -2139,9 +2185,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         }
                     }
                 };
-                if let Some(active_run) = &active_run {
+                if let Some(active_run) = &state.run.active {
                     if active_run.approval_tx.send(signal).is_ok() {
-                        processed_worker_command_ids.insert(command.command_id);
+                        state
+                            .processed_worker_command_ids
+                            .insert(command.command_id);
                     } else {
                         let _ = message_tx.send(WorkerMessage::RunFailed(
                             "approval channel closed".to_owned(),
@@ -2154,13 +2202,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::BackgroundActiveAgent) => {
-                if active_run.is_none() {
+                if state.run.active.is_none() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "no active agent run to background".to_owned(),
                     ));
                     continue;
                 }
-                match agent_supervisor.request_foreground_background() {
+                match state.agent.supervisor.request_foreground_background() {
                     Ok(thread_id) => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
                             "agent {} background requested",
@@ -2175,17 +2223,17 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CancelRun) => {
-                if let Some(active_run) = active_run.take() {
+                if let Some(active_run) = state.run.active.take() {
                     cancel_active_run(
                         active_run,
                         &runtime,
                         &root_config,
-                        &current_session_log_path,
-                        &mut current_session,
+                        &state.session.log_path,
+                        &mut state.session.current,
                         &message_tx,
                         &elicitation_handler,
-                        &agent_supervisor,
-                        &mut discarded_run_ids,
+                        &state.agent.supervisor,
+                        &mut state.run.discarded_ids,
                         "run cancelled from TUI",
                     );
                 } else {
@@ -2195,7 +2243,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CancelTerminalTask { task_id }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before cancelling terminal task".to_owned(),
                     ));
@@ -2206,8 +2254,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     agent.tool_registry().clone(),
                     &root_config,
                     &options,
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     task_id,
                 ) {
                     Ok((entry, entries)) => {
@@ -2225,7 +2273,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 start_mode,
                 permission_grant,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before creating a task from a plan".to_owned(),
                     ));
@@ -2240,8 +2288,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let created = match create_task_from_plan(
                     &root_config,
                     &workspace_root,
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     CreateTaskFromPlanRequest {
                         plan_id,
                         expected_plan_hash,
@@ -2264,16 +2312,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
 
-                let Some(run_session) = current_session.take() else {
+                let Some(run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
                     continue;
                 };
-                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -2288,8 +2336,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let run_id = next_run_id;
-                next_run_id += 1;
+                let run_id = state.run.next_id;
+                state.run.next_id += 1;
                 let (
                     cancellation_owner,
                     cancellation_recorder,
@@ -2298,7 +2346,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 ) = match prepare_run_cancellation(&run_session) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
-                        current_session = Some(run_session);
+                        state.session.current = Some(run_session);
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                         continue;
                     }
@@ -2317,9 +2365,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         root_config: root_config.clone(),
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: agent_supervisor.clone(),
+                        agent_supervisor: state.agent.supervisor.clone(),
                         role_provider_builder: Arc::clone(&role_provider_builder),
-                        task_result_tx: task_result_tx.clone(),
+                        task_result_tx: state.run.result_tx.clone(),
                         approval_rx,
                         handler,
                         elicitation_audit_buffer: run_elicitation_audit_buffer,
@@ -2327,7 +2375,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         cancellation_task_guard,
                     },
                 );
-                active_run = Some(ActiveRun {
+                state.run.active = Some(ActiveRun {
                     run_id,
                     handle,
                     approval_tx,
@@ -2342,7 +2390,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 plan_id,
                 expected_plan_hash,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before rejecting a plan".to_owned(),
                     ));
@@ -2350,8 +2398,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 match reject_plan(
                     &root_config,
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     RejectPlanRequest {
                         plan_id,
                         expected_plan_hash,
@@ -2371,7 +2419,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 scope_summary,
                 clear_planning_context,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before approving a plan".to_owned(),
                     ));
@@ -2379,8 +2427,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 match approve_plan(
                     &root_config,
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     PlanApprovalRequest {
                         plan_text,
                         permission,
@@ -2397,7 +2445,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CloseAgent { thread_id, reason }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before closing agent".to_owned(),
                     ));
@@ -2405,8 +2453,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 match close_agent_thread(
                     &root_config,
-                    &current_session_log_path,
-                    &mut current_session,
+                    &state.session.log_path,
+                    &mut state.session.current,
                     thread_id,
                     reason,
                 ) {
@@ -2420,7 +2468,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CancelAgent { thread_id, reason }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before cancelling agent".to_owned(),
                     ));
@@ -2428,12 +2476,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 match cancel_agent_thread(
                     &runtime,
-                    &background_agent_runs,
-                    &agent_supervisor,
+                    &state.agent.background_runs,
+                    &state.agent.supervisor,
                     &root_config,
                     agent.tool_registry(),
                     &options,
-                    &mut current_session,
+                    &mut state.session.current,
                     thread_id,
                     reason,
                 ) {
@@ -2447,7 +2495,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::MessageAgent { thread_id, prompt }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before messaging agent".to_owned(),
                     ));
@@ -2455,12 +2503,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 match message_agent_thread(
                     &runtime,
-                    &background_agent_runs,
-                    &agent_supervisor,
+                    &state.agent.background_runs,
+                    &state.agent.supervisor,
                     &root_config,
                     agent.tool_registry(),
                     &options,
-                    &mut current_session,
+                    &mut state.session.current,
                     thread_id,
                     prompt,
                 ) {
@@ -2479,16 +2527,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::PreviewV2Compaction) => {
-                pending_v2_compaction = None;
-                pending_queued_pre_turn_preparation = None;
-                compaction_preparation_tasks.abort_all();
-                if active_run.is_some() {
+                state.compaction.pending = None;
+                state.session.pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot preview compaction while the agent is running".to_owned(),
                     ));
                     continue;
                 }
-                let Some(session) = current_session.as_ref() else {
+                let Some(session) = state.session.current.as_ref() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -2507,26 +2555,26 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 match session.v2_compaction_preview(effective_config.tail_messages) {
                     Ok(Some(preview)) => {
-                        let request_id = next_v2_compaction_request_id;
-                        next_v2_compaction_request_id =
-                            next_v2_compaction_request_id.saturating_add(1);
+                        let request_id = state.compaction.next_request_id;
+                        state.compaction.next_request_id =
+                            state.compaction.next_request_id.saturating_add(1);
                         let expected_session_scope_id = session.session_scope_id().to_owned();
                         let provider_name = session.provider_name().to_owned();
                         let model_name = session.model_name().to_owned();
                         let root_config = root_config.clone();
                         let workspace_root = workspace_root.clone();
-                        let session_log_path = current_session_log_path.clone();
+                        let session_log_path = state.session.log_path.clone();
                         let options = options.clone();
                         let tools = agent.tool_registry().specs();
                         let runtime_handle = runtime.handle().clone();
                         let manual_context_resolver = context_resolver.clone();
                         let runtime_attachments =
                             CapturedSessionRuntimeAttachments::from_session(Some(session));
-                        compaction_preparation_tasks.start_manual(
+                        state.compaction.preparation_tasks.start_manual(
                             &runtime,
                             request_id,
                             expected_session_scope_id.clone(),
-                            compaction_preparation_tx.clone(),
+                            state.compaction.preparation_tx.clone(),
                             move || {
                                 let session = load_session_with_captured_runtime_attachments(
                                     &provider_name,
@@ -2586,14 +2634,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::ApplyV2Compaction { request_id }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                         request_id,
                         error: "cannot apply compaction while the agent is running".to_owned(),
                     });
                     continue;
                 }
-                let Some(pending) = pending_v2_compaction.take() else {
+                let Some(pending) = state.compaction.pending.take() else {
                     let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                         request_id,
                         error: "no admitted V2 compaction review is pending".to_owned(),
@@ -2602,7 +2650,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 };
                 if pending.request_id() != request_id {
                     let reviewed_request_id = pending.request_id();
-                    pending_v2_compaction = Some(pending);
+                    state.compaction.pending = Some(pending);
                     let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                         request_id,
                         error: format!(
@@ -2611,7 +2659,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     });
                     continue;
                 }
-                let Some(session) = current_session.as_ref() else {
+                let Some(session) = state.session.current.as_ref() else {
                     let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                         request_id,
                         error: "session state is unavailable".to_owned(),
@@ -2621,26 +2669,28 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 let provider_name = session.provider_name().to_owned();
                 let model_name = session.model_name().to_owned();
                 let folded_event_count = pending.folded_event_count();
-                let applied = pending.apply(session, &current_session_log_path);
+                let applied = pending.apply(session, &state.session.log_path);
                 match applied {
                     Ok(outcome) => {
                         let reloaded = load_session_with_runtime_attachments(
                             &provider_name,
                             &model_name,
-                            &current_session_log_path,
-                            current_session.as_ref(),
+                            &state.session.log_path,
+                            state.session.current.as_ref(),
                         );
                         let entries = match reloaded {
                             Ok(session) => {
                                 let entries = session.entries().to_vec();
-                                current_session = Some(session);
+                                state.session.current = Some(session);
                                 entries
                             }
                             Err(error) => {
                                 let _ = message_tx.send(WorkerMessage::Notice(format!(
                                     "compaction applied, but session reload was deferred: {error:#}"
                                 )));
-                                current_session
+                                state
+                                    .session
+                                    .current
                                     .as_ref()
                                     .map(|current| current.entries().to_vec())
                                     .unwrap_or_default()
@@ -2663,12 +2713,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CancelV2CompactionReview { request_id }) => {
-                let preparation_cancelled = compaction_preparation_tasks.cancel(request_id);
-                if pending_v2_compaction
+                let preparation_cancelled = state.compaction.preparation_tasks.cancel(request_id);
+                if state
+                    .compaction
+                    .pending
                     .as_ref()
                     .is_some_and(|pending| pending.request_id() == request_id)
                 {
-                    pending_v2_compaction = None;
+                    state.compaction.pending = None;
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "discarded pending V2 compaction review".to_owned(),
                     ));
@@ -2679,7 +2731,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CheckChangedFilesDiagnostics) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot check changes while the agent is running".to_owned(),
                     ));
@@ -2698,7 +2750,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     ));
                     continue;
                 }
-                let Some(session) = current_session.as_mut() else {
+                let Some(session) = state.session.current.as_mut() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),
                     ));
@@ -2726,7 +2778,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 request,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
                         request_id,
                         error: "cannot preview checkpoint restore while the agent is running"
@@ -2735,8 +2787,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
                 match preview_current_checkpoint_restore(
-                    &current_session_log_path,
-                    current_session.as_ref(),
+                    &state.session.log_path,
+                    state.session.current.as_ref(),
                     &workspace_root,
                     &request,
                 ) {
@@ -2756,7 +2808,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 request,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
                         request_id,
                         error: "cannot restore checkpoint while the agent is running".to_owned(),
@@ -2764,8 +2816,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
                 let output = match execute_current_checkpoint_restore(
-                    &current_session_log_path,
-                    current_session.as_ref(),
+                    &state.session.log_path,
+                    state.session.current.as_ref(),
                     &workspace_root,
                     &request,
                 ) {
@@ -2779,12 +2831,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
-                    &current_session_log_path,
-                    current_session.as_ref(),
+                    &state.session.log_path,
+                    state.session.current.as_ref(),
                 ) {
                     Ok(session) => {
                         let entries = session.entries().to_vec();
-                        current_session = Some(session);
+                        state.session.current = Some(session);
                         let _ = message_tx.send(WorkerMessage::CheckpointRestoreCompleted {
                             request_id,
                             preview: output.preview,
@@ -2806,7 +2858,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 request,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
                         request_id,
                         error: "cannot fork conversation while the agent is running".to_owned(),
@@ -2814,8 +2866,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     continue;
                 }
                 let output = match fork_current_conversation(
-                    &current_session_log_path,
-                    current_session.as_ref(),
+                    &state.session.log_path,
+                    state.session.current.as_ref(),
                     &request,
                 ) {
                     Ok(output) => output,
@@ -2829,10 +2881,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &output.destination_path,
-                    current_session.as_ref(),
+                    state.session.current.as_ref(),
                 ) {
                     Ok(mut session) => {
-                        if current_session.as_ref().is_some_and(|session| {
+                        if state.session.current.as_ref().is_some_and(|session| {
                             session_workspace_is_trusted(session, &workspace_root)
                         }) && let Err(error) = ensure_session_workspace_trust(
                             &mut session,
@@ -2845,12 +2897,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             });
                             continue;
                         }
-                        exact_conversation_prompts.clear();
+                        state.session.exact_prompts.clear();
                         let entries = session.entries().to_vec();
                         let provider_name = session.provider_name().to_owned();
                         let model_name = session.model_name().to_owned();
-                        current_session_log_path = output.destination_path.clone();
-                        current_session = Some(session);
+                        state.session.log_path = output.destination_path.clone();
+                        state.session.current = Some(session);
                         let _ = message_tx.send(WorkerMessage::ConversationForked {
                             request_id,
                             session_log_path: output.destination_path,
@@ -2874,7 +2926,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 source_path,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot inspect session actions while the agent is running"
@@ -2900,7 +2952,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 source_path,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot fork a local session while the agent is running".to_owned(),
@@ -2922,10 +2974,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &output.destination_path,
-                    current_session.as_ref(),
+                    state.session.current.as_ref(),
                 ) {
                     Ok(mut session) => {
-                        if current_session.as_ref().is_some_and(|session| {
+                        if state.session.current.as_ref().is_some_and(|session| {
                             session_workspace_is_trusted(session, &workspace_root)
                         }) && let Err(error) = ensure_session_workspace_trust(
                             &mut session,
@@ -2938,15 +2990,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             });
                             continue;
                         }
-                        pending_v2_compaction = None;
-                        pending_queued_pre_turn_preparation = None;
-                        compaction_preparation_tasks.abort_all();
-                        exact_conversation_prompts.clear();
+                        state.compaction.pending = None;
+                        state.session.pending_queued_pre_turn_preparation = None;
+                        state.compaction.preparation_tasks.abort_all();
+                        state.session.exact_prompts.clear();
                         let entries = session.entries().to_vec();
                         let provider_name = session.provider_name().to_owned();
                         let model_name = session.model_name().to_owned();
-                        current_session_log_path = output.destination_path.clone();
-                        current_session = Some(session);
+                        state.session.log_path = output.destination_path.clone();
+                        state.session.current = Some(session);
                         let _ = message_tx.send(WorkerMessage::LocalSessionForked {
                             request_id,
                             session_log_path: output.destination_path,
@@ -2970,7 +3022,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 source_path,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot export a local session while the agent is running"
@@ -2997,7 +3049,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 source_path,
                 pinned,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot change a session pin while the agent is running".to_owned(),
@@ -3022,7 +3074,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 source_path,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot preview session deletion while the agent is running"
@@ -3034,7 +3086,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match preview_local_session_delete(
                     &service,
                     &source_path,
-                    std::slice::from_ref(&current_session_log_path),
+                    std::slice::from_ref(&state.session.log_path),
                 ) {
                     Ok(preview) => {
                         let _ = message_tx.send(WorkerMessage::LocalSessionDeletePreviewed {
@@ -3054,7 +3106,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 preview,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot delete a local session while the agent is running"
@@ -3066,7 +3118,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match apply_local_session_delete(
                     &service,
                     &preview,
-                    std::slice::from_ref(&current_session_log_path),
+                    std::slice::from_ref(&state.session.log_path),
                 ) {
                     Ok(output) => {
                         let _ = message_tx
@@ -3081,7 +3133,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::PreviewSessionRetention { request_id, policy }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot preview session retention while the agent is running"
@@ -3093,7 +3145,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match preview_session_retention(
                     &service,
                     policy,
-                    std::slice::from_ref(&current_session_log_path),
+                    std::slice::from_ref(&state.session.log_path),
                 ) {
                     Ok(preview) => {
                         let _ = message_tx.send(WorkerMessage::SessionRetentionPreviewed {
@@ -3113,7 +3165,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 preview,
             }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
                         error: "cannot apply session retention while the agent is running"
@@ -3125,7 +3177,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match apply_session_retention(
                     &service,
                     &preview,
-                    std::slice::from_ref(&current_session_log_path),
+                    std::slice::from_ref(&state.session.log_path),
                 ) {
                     Ok(output) => {
                         let _ = message_tx
@@ -3140,7 +3192,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::CleanMutationArtifacts { target }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before cleaning mutation artifacts".to_owned(),
                     ));
@@ -3148,8 +3200,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
                 match clean_mutation_artifacts(
                     &root_config,
-                    &current_session_log_path,
-                    &current_session,
+                    &state.session.log_path,
+                    &state.session.current,
                     &target,
                 ) {
                     Ok(report) => {
@@ -3163,15 +3215,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::DeleteMutationArtifact { artifact_id }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before deleting mutation artifacts".to_owned(),
                     ));
                     continue;
                 }
                 match delete_mutation_artifact(
-                    &current_session_log_path,
-                    &current_session,
+                    &state.session.log_path,
+                    &state.session.current,
                     &artifact_id,
                 ) {
                     Ok(payload) => {
@@ -3185,7 +3237,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::ApproveVerificationCheck { check_spec_id }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before approving verification checks".to_owned(),
                     ));
@@ -3194,7 +3246,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match promote_workspace_verification_check(
                     &options.workspace_root,
                     &root_config,
-                    &mut current_session,
+                    &mut state.session.current,
                     &check_spec_id,
                     VerificationCheckPromotionKind::Approve,
                 ) {
@@ -3218,7 +3270,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::SandboxVerificationCheck { check_spec_id }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before sandboxing verification checks".to_owned(),
                     ));
@@ -3227,7 +3279,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 match promote_workspace_verification_check(
                     &options.workspace_root,
                     &root_config,
-                    &mut current_session,
+                    &mut state.session.current,
                     &check_spec_id,
                     VerificationCheckPromotionKind::Sandbox,
                 ) {
@@ -3251,13 +3303,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::RerunTaskVerification { request }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before running verification".to_owned(),
                     ));
                     continue;
                 }
-                let Some(session) = current_session.as_mut() else {
+                let Some(session) = state.session.current.as_mut() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "verification rerun requires an active session".to_owned(),
                     ));
@@ -3309,29 +3361,32 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 request_id,
                 provider_config,
             }) => {
-                provider_status_tasks.refresh_balance(
+                state.refresh.provider_status_tasks.refresh_balance(
                     &runtime,
                     request_id,
                     provider_config,
-                    provider_status_tx.clone(),
+                    state.refresh.provider_status_tx.clone(),
                 );
             }
             Ok(WorkerCommand::RefreshProviderModels {
                 request_id,
                 provider_config,
             }) => {
-                provider_status_tasks.refresh_models(
+                state.refresh.provider_status_tasks.refresh_models(
                     &runtime,
                     request_id,
                     provider_config,
-                    provider_status_tx.clone(),
+                    state.refresh.provider_status_tx.clone(),
                 );
             }
             Ok(WorkerCommand::CancelProviderModelsRefresh { request_id }) => {
-                provider_status_tasks.cancel_models_refresh(request_id);
+                state
+                    .refresh
+                    .provider_status_tasks
+                    .cancel_models_refresh(request_id);
             }
             Ok(WorkerCommand::ActivateLazyMcp { server_name }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot activate MCP while the agent is running".to_owned(),
                     ));
@@ -3347,7 +3402,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     server_name: server_name.clone(),
                     status: McpActivationStatus::Activating,
                 });
-                let mutation_recorder = current_session
+                let mutation_recorder = state
+                    .session
+                    .current
                     .as_ref()
                     .and_then(Session::mutation_event_recorder);
                 match runtime.block_on(
@@ -3417,47 +3474,47 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::RefreshMcpServer { server_name }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot refresh MCP while the agent is running".to_owned(),
                     ));
                     continue;
                 }
-                pending_mcp_refreshes.insert(server_name);
-                next_mcp_refresh_retry_at = Instant::now();
+                state.refresh.pending_mcp_servers.insert(server_name);
+                state.refresh.next_mcp_retry_at = Instant::now();
             }
             Ok(WorkerCommand::SwitchSession { session_log_path }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot switch sessions while the agent is running".to_owned(),
                     ));
                     continue;
                 }
 
-                pending_v2_compaction = None;
-                pending_queued_pre_turn_preparation = None;
-                compaction_preparation_tasks.abort_all();
+                state.compaction.pending = None;
+                state.session.pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
 
                 match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &session_log_path,
-                    current_session.as_ref(),
+                    state.session.current.as_ref(),
                 ) {
                     Ok(mut session) => {
                         let same_logical_session =
-                            current_session.as_ref().is_some_and(|current| {
+                            state.session.current.as_ref().is_some_and(|current| {
                                 current.session_scope_id() == session.session_scope_id()
                             });
                         if !same_logical_session {
-                            exact_conversation_prompts.clear();
+                            state.session.exact_prompts.clear();
                         }
                         mark_stale_dispatching_conversation_queue_items(
                             &mut session,
-                            &exact_conversation_prompts,
+                            &state.session.exact_prompts,
                             &message_tx,
                         );
-                        if current_session.as_ref().is_some_and(|session| {
+                        if state.session.current.as_ref().is_some_and(|session| {
                             session_workspace_is_trusted(session, &workspace_root)
                         }) {
                             match ensure_session_workspace_trust(
@@ -3473,10 +3530,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             }
                         }
                         let entries = session.entries().to_vec();
-                        current_session_log_path = session_log_path.clone();
+                        state.session.log_path = session_log_path.clone();
                         let provider_name = session.provider_name().to_owned();
                         let model_name = session.model_name().to_owned();
-                        current_session = Some(session);
+                        state.session.current = Some(session);
                         let _ = message_tx.send(WorkerMessage::SessionSwitched {
                             session_log_path,
                             provider_name,
@@ -3490,37 +3547,37 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::StartNewSession { session_log_path }) => {
-                if active_run.is_some() {
+                if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot start a new session while the agent is running".to_owned(),
                     ));
                     continue;
                 }
 
-                pending_v2_compaction = None;
-                pending_queued_pre_turn_preparation = None;
-                compaction_preparation_tasks.abort_all();
+                state.compaction.pending = None;
+                state.session.pending_queued_pre_turn_preparation = None;
+                state.compaction.preparation_tasks.abort_all();
 
                 match load_session_with_runtime_attachments(
                     &root_config.agent.provider,
                     &root_config.agent.model,
                     &session_log_path,
-                    current_session.as_ref(),
+                    state.session.current.as_ref(),
                 ) {
                     Ok(mut session) => {
                         let same_logical_session =
-                            current_session.as_ref().is_some_and(|current| {
+                            state.session.current.as_ref().is_some_and(|current| {
                                 current.session_scope_id() == session.session_scope_id()
                             });
                         if !same_logical_session {
-                            exact_conversation_prompts.clear();
+                            state.session.exact_prompts.clear();
                         }
                         mark_stale_dispatching_conversation_queue_items(
                             &mut session,
-                            &exact_conversation_prompts,
+                            &state.session.exact_prompts,
                             &message_tx,
                         );
-                        if current_session.as_ref().is_some_and(|session| {
+                        if state.session.current.as_ref().is_some_and(|session| {
                             session_workspace_is_trusted(session, &workspace_root)
                         }) {
                             match ensure_session_workspace_trust(
@@ -3536,10 +3593,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
                             }
                         }
                         let entries = session.entries().to_vec();
-                        current_session_log_path = session_log_path.clone();
+                        state.session.log_path = session_log_path.clone();
                         let provider_name = session.provider_name().to_owned();
                         let model_name = session.model_name().to_owned();
-                        current_session = Some(session);
+                        state.session.current = Some(session);
                         let _ = message_tx.send(WorkerMessage::NewSessionStarted {
                             session_log_path,
                             provider_name,
@@ -3553,22 +3610,22 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 }
             }
             Ok(WorkerCommand::Shutdown) => {
-                if let Some(active_run) = active_run.take() {
+                if let Some(active_run) = state.run.active.take() {
                     cancel_active_run(
                         active_run,
                         &runtime,
                         &root_config,
-                        &current_session_log_path,
-                        &mut current_session,
+                        &state.session.log_path,
+                        &mut state.session.current,
                         &message_tx,
                         &elicitation_handler,
-                        &agent_supervisor,
-                        &mut discarded_run_ids,
+                        &state.agent.supervisor,
+                        &mut state.run.discarded_ids,
                         "run interrupted by TUI shutdown",
                     );
                 }
-                provider_status_tasks.abort_all();
-                compaction_preparation_tasks.abort_all();
+                state.refresh.provider_status_tasks.abort_all();
+                state.compaction.preparation_tasks.abort_all();
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -3576,8 +3633,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }
     }
 
-    provider_status_tasks.abort_all();
-    compaction_preparation_tasks.abort_all();
+    state.refresh.provider_status_tasks.abort_all();
+    state.compaction.preparation_tasks.abort_all();
 }
 
 fn finish_idle_auto_compaction(

@@ -11,4 +11,5 @@ mod session_lifecycle_runtime_tests;
 mod session_tests;
 mod spawn_tests;
 mod verification_e2e_tests;
+mod worker_loop_state_tests;
 mod worker_loop_tests;

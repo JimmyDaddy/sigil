@@ -1,6 +1,6 @@
 # RFC-0035 TUI Orchestration Boundary Hardening V1
 
-状态：accepted / R35.0 complete; R35.1 in progress
+状态：accepted / R35.0-R35.1 complete; R35.2 in progress
 
 创建日期：2026-07-16
 
@@ -167,4 +167,8 @@ The stateful campaign uses only its loopback fixtures. No paid provider or publi
 ## 12. Progress
 
 - R35.0 complete. Baseline runner and session-lifecycle tests pass. Independent decomposition review found no P0/P1 and identified five P2 contract gaps plus one P3 compatibility risk; the accepted design now freezes background-agent transition safety, complete session-scoped reset, best-effort queue recovery semantics, tick advancement extraction, fresh-binary admission and public `AppState` field compatibility before implementation begins.
-- R35.1 in progress.
+- R35.1 complete. The scheduler now owns its mutable session, run, compaction,
+  refresh, continuation and background-agent state through one private
+  `WorkerLoopState`; the change preserves command/event order and is covered by
+  focused construction plus full runner regression tests.
+- R35.2 in progress.
