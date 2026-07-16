@@ -13,6 +13,7 @@ use crate::{
         DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, WriteFileTool,
     },
     shell::BashTool,
+    shell_runtime::ResolvedShell,
     terminal_process::{self, TerminalExecutionConfig},
     terminal_tools::{
         TerminalCancelTool, TerminalInputTool, TerminalProcessManagers, TerminalReadTool,
@@ -99,6 +100,9 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
     execution_backend: Arc<dyn ExecutionBackend>,
     terminal_execution_config: TerminalExecutionConfig,
 ) {
+    let default_shell = ResolvedShell::detect_default();
+    let terminal_execution_config =
+        terminal_execution_config.with_default_shell(default_shell.clone());
     let terminal_managers = Arc::new(TerminalProcessManagers::new(terminal_execution_config));
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
@@ -117,6 +121,7 @@ fn register_builtin_tools_with_paths_execution_backend_and_terminal_config(
         scratch_root: paths.scratch_root.clone(),
         scratch_label: paths.scratch_label.clone(),
         backend: Arc::clone(&execution_backend),
+        shell: default_shell,
     }));
     registry.register(Arc::new(TerminalStartTool {
         managers: Arc::clone(&terminal_managers),

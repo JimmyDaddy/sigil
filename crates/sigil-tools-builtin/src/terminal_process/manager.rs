@@ -109,8 +109,7 @@ impl TerminalProcessManager {
 
         let mut command_process = Command::new(&plan.shell);
         command_process
-            .arg("-lc")
-            .arg(&plan.command)
+            .args(&plan.shell_args)
             .current_dir(&plan.resolved_cwd.absolute)
             .envs(&plan.env)
             .stdout(Stdio::piped())
@@ -522,7 +521,11 @@ impl TerminalProcessManager {
         };
         let artifacts = self.artifacts_for(&task_id)?;
         let resolved_cwd = resolve_terminal_cwd(&self.workspace_root, request.cwd.as_deref())?;
-        let shell = request.shell.unwrap_or_else(|| "sh".to_owned());
+        let shell = self
+            .terminal_execution
+            .resolve_shell(request.shell.as_deref())?;
+        let shell_program = shell.program_string();
+        let shell_args = shell.terminal_args(&command);
         let env = request.env;
         let execution = match mode {
             TerminalStartMode::LocalProcess => local_process_execution(),
@@ -548,7 +551,7 @@ impl TerminalProcessManager {
             task_id: task_id.clone(),
             command: command.clone(),
             cwd: resolved_cwd.relative.clone(),
-            shell: shell.clone(),
+            shell: shell_program.clone(),
             log_path: artifacts.relative_output.clone(),
             created_at_ms,
             execution_backend: Some(execution.execution_backend),
@@ -574,7 +577,8 @@ impl TerminalProcessManager {
         Ok(TerminalTaskStartPlan {
             task_id,
             command,
-            shell,
+            shell: shell_program,
+            shell_args,
             env,
             artifacts,
             resolved_cwd,
@@ -655,6 +659,7 @@ pub(super) struct TerminalTaskStartPlan {
     pub(super) task_id: TerminalTaskId,
     pub(super) command: String,
     pub(super) shell: String,
+    pub(super) shell_args: Vec<String>,
     pub(super) env: BTreeMap<String, String>,
     pub(super) artifacts: TerminalTaskArtifacts,
     pub(super) resolved_cwd: ResolvedTerminalCwd,

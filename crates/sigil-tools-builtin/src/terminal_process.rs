@@ -43,6 +43,7 @@ use crate::execution_backends::{
 use crate::path::{
     absolute_path_from, canonical_workspace_root, lexically_normalize_path, resolve_existing_prefix,
 };
+use crate::shell_runtime::ResolvedShell;
 
 mod config; // public DTOs and terminal execution policy.
 mod cwd; // workspace-confined terminal cwd resolution.

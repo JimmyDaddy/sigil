@@ -1085,7 +1085,7 @@ async fn terminal_process_manager_reports_unknown_tasks_and_spawn_errors() -> Re
             task_id: Some(TerminalTaskId::new("terminal-spawn-error")?),
             command: "echo never".to_owned(),
             cwd: None,
-            shell: Some("/missing/shell".to_owned()),
+            shell: Some("/missing/sh".to_owned()),
             env: Default::default(),
         })
         .await
@@ -1707,7 +1707,7 @@ impl portable_pty::ChildKiller for FailingKiller {
 
 #[cfg(unix)]
 fn test_shell(dir: &Path) -> Result<String> {
-    let shell = dir.join("test-shell");
+    let shell = dir.join("sh");
     std::fs::write(
         &shell,
         "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then shift; fi\nexec /bin/sh -c \"$1\"\n",

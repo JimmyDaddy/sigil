@@ -20,6 +20,7 @@ use crate::{
     path::{
         ResolvedToolPath, absolute_path_from, canonical_workspace_root, resolve_tool_path_from_base,
     },
+    shell_runtime::{ResolvedShell, ShellDialect},
     support::{
         TextLimitResult, ceil_char_boundary, floor_char_boundary, limit_text_head_tail,
         required_string,
@@ -30,6 +31,7 @@ pub(crate) struct BashTool {
     pub(crate) scratch_root: PathBuf,
     pub(crate) scratch_label: String,
     pub(crate) backend: Arc<dyn ExecutionBackend>,
+    pub(crate) shell: ResolvedShell,
 }
 
 #[async_trait]
@@ -38,7 +40,8 @@ impl Tool for BashTool {
         ToolSpec {
             name: "bash".to_owned(),
             description: format!(
-                "Run a shell command from the workspace root. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                "Run a shell command from the workspace root using {} syntax (the tool name remains `bash`). Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                shell_syntax_guidance(&self.shell),
                 self.scratch_label
             ),
             input_schema: json!({
@@ -58,17 +61,17 @@ impl Tool for BashTool {
 
     fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let command = required_string(args, "command")?;
-        Ok(analyze_shell_command(&ctx.workspace_root, command)?.subjects)
+        Ok(analyze_shell_command_with_shell(&ctx.workspace_root, command, &self.shell)?.subjects)
     }
 
     fn permission_access(&self, ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
         let command = required_string(args, "command")?;
-        Ok(analyze_shell_command(&ctx.workspace_root, command)?.access)
+        Ok(analyze_shell_command_with_shell(&ctx.workspace_root, command, &self.shell)?.access)
     }
 
     fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
         let command = required_string(args, "command")?;
-        Ok(analyze_shell_command(&ctx.workspace_root, command)?.operation)
+        Ok(analyze_shell_command_with_shell(&ctx.workspace_root, command, &self.shell)?.operation)
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -82,9 +85,14 @@ impl Tool for BashTool {
         tokio::fs::create_dir_all(&scratch_root)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
-        let analysis = analyze_shell_command(&ctx.workspace_root, command)?;
-        let request =
-            bash_execution_request(command, &ctx.workspace_root, &scratch_root, timeout_secs);
+        let analysis = analyze_shell_command_with_shell(&ctx.workspace_root, command, &self.shell)?;
+        let request = bash_execution_request_with_shell(
+            command,
+            &ctx.workspace_root,
+            &scratch_root,
+            timeout_secs,
+            &self.shell,
+        );
         let receipt = self
             .backend
             .execute_with_cancellation(request, ctx.cancellation_handle())
@@ -117,6 +125,8 @@ pub(crate) struct ShellCommandAnalysis {
     pub(crate) subjects: Vec<ToolSubject>,
     pub(crate) grant_scope: Option<CommandGrantScope>,
     pub(crate) explanation: ShellApprovalReason,
+    pub(crate) shell_program: String,
+    pub(crate) shell_dialect: ShellDialect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,10 +239,39 @@ impl ShellApprovalReason {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn analyze_shell_command(
     workspace_root: &Path,
     command: &str,
 ) -> Result<ShellCommandAnalysis> {
+    let shell = ResolvedShell::resolve_explicit("sh")?;
+    analyze_shell_command_with_shell(workspace_root, command, &shell)
+}
+
+pub(crate) fn analyze_shell_command_with_shell(
+    workspace_root: &Path,
+    command: &str,
+    shell: &ResolvedShell,
+) -> Result<ShellCommandAnalysis> {
+    if shell.dialect() != ShellDialect::Posix {
+        let normalized_command = normalize_shell_command_for_permission(command);
+        return Ok(ShellCommandAnalysis {
+            command: command.to_owned(),
+            normalized_command: normalized_command.clone(),
+            command_family: CommandFamily::Unknown,
+            classification_source: ShellClassificationSource::Unknown,
+            access: ToolAccess::Execute,
+            operation: ToolOperation::ExecuteUnknownCommand,
+            subjects: vec![ToolSubject::command(
+                normalized_command,
+                command_permission_subject(command),
+            )],
+            grant_scope: None,
+            explanation: ShellApprovalReason::UnknownCommand,
+            shell_program: shell.program_string(),
+            shell_dialect: shell.dialect(),
+        });
+    }
     let family = classify_shell_command_family(workspace_root, command)?;
     let normalized_command = normalize_shell_command_for_permission(command);
     let destructive = shell_command_is_destructive(command);
@@ -321,7 +360,20 @@ pub(crate) fn analyze_shell_command(
         subjects,
         grant_scope,
         explanation,
+        shell_program: shell.program_string(),
+        shell_dialect: shell.dialect(),
     })
+}
+
+fn shell_syntax_guidance(shell: &ResolvedShell) -> String {
+    match shell.dialect() {
+        ShellDialect::Posix => format!("POSIX shell ({})", shell.program().display()),
+        ShellDialect::PowerShell => format!(
+            "PowerShell ({}) with PowerShell syntax such as `$env:NAME` and `$null`",
+            shell.program().display()
+        ),
+        ShellDialect::Cmd => format!("cmd.exe ({}) syntax", shell.program().display()),
+    }
 }
 
 fn workspace_check_grant_scope(family: &CommandFamily) -> Option<CommandGrantScope> {
@@ -334,15 +386,27 @@ fn workspace_check_grant_scope(family: &CommandFamily) -> Option<CommandGrantSco
     }
 }
 
+#[cfg(test)]
 pub(crate) fn bash_execution_request(
     command: &str,
     workspace_root: &Path,
     scratch_root: &Path,
     timeout_secs: u64,
 ) -> ExecutionRequest {
+    let shell = ResolvedShell::resolve_explicit("sh").expect("sh is a supported shell");
+    bash_execution_request_with_shell(command, workspace_root, scratch_root, timeout_secs, &shell)
+}
+
+pub(crate) fn bash_execution_request_with_shell(
+    command: &str,
+    workspace_root: &Path,
+    scratch_root: &Path,
+    timeout_secs: u64,
+    shell: &ResolvedShell,
+) -> ExecutionRequest {
     ExecutionRequest {
-        program: "sh".to_owned(),
-        args: vec!["-c".to_owned(), command.to_owned()],
+        program: shell.program_string(),
+        args: shell.one_shot_args(command),
         cwd: workspace_root.to_path_buf(),
         env: BTreeMap::from([(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),
@@ -571,6 +635,8 @@ pub(crate) fn execution_receipt_details(
     }
     if let Some(analysis) = analysis {
         details["shell"] = json!({
+            "program": analysis.shell_program.as_str(),
+            "dialect": analysis.shell_dialect.as_str(),
             "command": analysis.command.as_str(),
             "normalized_command": analysis.normalized_command.as_str(),
             "command_family": analysis.command_family.as_str(),
@@ -867,25 +933,13 @@ pub(crate) fn shell_command_permission_operation(command: &str) -> ToolOperation
     }
 }
 
+#[cfg(test)]
 pub(crate) fn terminal_input_permission_operation(input: &str) -> ToolOperation {
     if shell_command_is_destructive(input) {
         ToolOperation::ExecuteDestructiveCommand
     } else {
         ToolOperation::SendTerminalInput
     }
-}
-
-pub(crate) fn terminal_input_permission_operation_from_analysis(
-    workspace_root: &Path,
-    input: &str,
-) -> Result<ToolOperation> {
-    let analysis = analyze_shell_command(workspace_root, input)?;
-    Ok(match analysis.operation {
-        ToolOperation::ExecuteDestructiveCommand => ToolOperation::ExecuteDestructiveCommand,
-        ToolOperation::ExecuteReadOnlyCommand => ToolOperation::ExecuteReadOnlyCommand,
-        ToolOperation::ExecuteWorkspaceCheckCommand => ToolOperation::ExecuteWorkspaceCheckCommand,
-        _ => terminal_input_permission_operation(input),
-    })
 }
 
 pub(crate) fn shell_command_is_destructive(command: &str) -> bool {

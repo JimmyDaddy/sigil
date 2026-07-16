@@ -39,6 +39,7 @@ fn bash_tool(test_root: &Path) -> BashTool {
         scratch_root: test_root.join("scratch-cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
         backend: Arc::new(LocalExecutionBackend),
+        shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
 }
 
@@ -2151,6 +2152,7 @@ fn temporary_file_guidance_is_model_visible() {
             scratch_root: scratch_root.clone(),
             scratch_label: "cache/tmp".to_owned(),
             backend: Arc::new(LocalExecutionBackend),
+            shell: crate::shell_runtime::ResolvedShell::detect_default(),
         }
         .spec(),
         super::TerminalStartTool {
@@ -3758,6 +3760,7 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
         scratch_root: temp.path().join("cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
         backend: Arc::new(LocalExecutionBackend),
+        shell: crate::shell_runtime::ResolvedShell::detect_default(),
     };
     let ctx = ToolContext::new(workspace, 5);
 
@@ -3797,6 +3800,7 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
         scratch_root: scratch_file.clone(),
         scratch_label: "scratch-file".to_owned(),
         backend: Arc::new(LocalExecutionBackend),
+        shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
     .execute(ctx.clone(), "bash".to_owned(), json!({ "command": "true" }))
     .await
@@ -5988,7 +5992,7 @@ async fn wait_for_terminal_read_contains(
 
 #[cfg(unix)]
 fn test_shell(dir: &Path) -> Result<String> {
-    let shell = dir.join("test-shell");
+    let shell = dir.join("sh");
     fs::write(
         &shell,
         "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then shift; fi\nexec /bin/sh -c \"$1\"\n",
@@ -6002,4 +6006,69 @@ fn test_shell(dir: &Path) -> Result<String> {
 #[cfg(not(unix))]
 fn test_shell(_dir: &Path) -> Result<String> {
     Ok("sh".to_owned())
+}
+
+#[test]
+fn explicit_shells_resolve_to_their_native_dialects() -> Result<()> {
+    use crate::shell_runtime::{ResolvedShell, ShellDialect};
+
+    assert_eq!(
+        ResolvedShell::resolve_explicit("/bin/bash")?.dialect(),
+        ShellDialect::Posix
+    );
+    assert_eq!(
+        ResolvedShell::resolve_explicit("C:/Program Files/PowerShell/7/pwsh.exe")?.dialect(),
+        ShellDialect::PowerShell
+    );
+    assert_eq!(
+        ResolvedShell::resolve_explicit("cmd.exe")?.dialect(),
+        ShellDialect::Cmd
+    );
+    Ok(())
+}
+
+#[test]
+fn unknown_shell_is_rejected_before_spawn() {
+    let error = crate::shell_runtime::ResolvedShell::resolve_explicit("nu.exe")
+        .expect_err("nu is not supported");
+    assert!(error.to_string().contains("unsupported terminal shell"));
+}
+
+#[test]
+fn powershell_arguments_freeze_noninteractive_utf8_and_exit_propagation() -> Result<()> {
+    let shell = crate::shell_runtime::ResolvedShell::resolve_explicit("pwsh.exe")?;
+    let args = shell.one_shot_args("git status");
+    assert_eq!(
+        &args[..4],
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
+    );
+    assert!(args[4].contains("System.Text.UTF8Encoding"));
+    assert!(args[4].contains("LASTEXITCODE"));
+    assert!(args[4].contains("exit 1"));
+    Ok(())
+}
+
+#[test]
+fn cmd_arguments_disable_autorun_and_select_utf8() -> Result<()> {
+    let shell = crate::shell_runtime::ResolvedShell::resolve_explicit("cmd.exe")?;
+    assert_eq!(
+        shell.one_shot_args("git status"),
+        ["/d", "/s", "/c", "chcp 65001>nul & git status"]
+    );
+    Ok(())
+}
+
+#[test]
+fn non_posix_commands_do_not_reuse_posix_readonly_downgrades() -> Result<()> {
+    let shell = crate::shell_runtime::ResolvedShell::resolve_explicit("pwsh.exe")?;
+    let analysis =
+        crate::shell::analyze_shell_command_with_shell(Path::new("."), "git status", &shell)?;
+    assert_eq!(analysis.access, ToolAccess::Execute);
+    assert_eq!(analysis.operation, ToolOperation::ExecuteUnknownCommand);
+    assert_eq!(analysis.grant_scope, None);
+    assert_eq!(
+        analysis.shell_dialect,
+        crate::shell_runtime::ShellDialect::PowerShell
+    );
+    Ok(())
 }

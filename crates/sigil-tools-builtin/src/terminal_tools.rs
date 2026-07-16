@@ -25,10 +25,10 @@ use crate::{
         tool_path_subject,
     },
     shell::{
-        ShellCommandAnalysis, analyze_shell_command, bash_path_subjects_from_cwd,
+        ShellCommandAnalysis, analyze_shell_command_with_shell, bash_path_subjects_from_cwd,
         command_permission_subject, shell_grant_scope_detail,
-        terminal_input_permission_operation_from_analysis,
     },
+    shell_runtime::{ResolvedShell, ShellDialect},
     support::{optional_string, optional_usize, required_string},
     terminal_process::{
         MAX_TERMINAL_INPUT_BYTES, TerminalExecutionConfig, TerminalInputResult,
@@ -82,6 +82,10 @@ impl TerminalProcessManagers {
             terminal_execution_config,
             managers: StdMutex::new(BTreeMap::new()),
         }
+    }
+
+    fn resolve_shell(&self, explicit: Option<&str>) -> Result<ResolvedShell> {
+        self.terminal_execution_config.resolve_shell(explicit)
     }
 
     pub(crate) fn manager_for(
@@ -159,7 +163,10 @@ impl Tool for TerminalStartTool {
         let command = required_string(args, "command")?;
         let cwd = optional_string(args, "cwd");
         let shell = optional_string(args, "shell");
-        let mut subjects = analyze_shell_command(&ctx.workspace_root, command)?.subjects;
+        let resolved_shell = self.managers.resolve_shell(shell)?;
+        let mut subjects =
+            analyze_shell_command_with_shell(&ctx.workspace_root, command, &resolved_shell)?
+                .subjects;
         if let Some(shell) = shell {
             subjects.push(ToolSubject::command(
                 shell.to_owned(),
@@ -167,22 +174,30 @@ impl Tool for TerminalStartTool {
             ));
         }
         subjects.push(tool_path_subject(&ctx.workspace_root, cwd.unwrap_or("."))?);
-        subjects.extend(terminal_command_path_subjects(
-            &ctx.workspace_root,
-            cwd,
-            command,
-        )?);
+        if resolved_shell.dialect() == ShellDialect::Posix {
+            subjects.extend(terminal_command_path_subjects(
+                &ctx.workspace_root,
+                cwd,
+                command,
+            )?);
+        }
         Ok(subjects)
     }
 
     fn permission_access(&self, ctx: &ToolContext, args: &Value) -> Result<ToolAccess> {
         let command = required_string(args, "command")?;
-        Ok(analyze_shell_command(&ctx.workspace_root, command)?.access)
+        let shell = self
+            .managers
+            .resolve_shell(optional_string(args, "shell"))?;
+        Ok(analyze_shell_command_with_shell(&ctx.workspace_root, command, &shell)?.access)
     }
 
     fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
         let command = required_string(args, "command")?;
-        Ok(analyze_shell_command(&ctx.workspace_root, command)?.operation)
+        let shell = self
+            .managers
+            .resolve_shell(optional_string(args, "shell"))?;
+        Ok(analyze_shell_command_with_shell(&ctx.workspace_root, command, &shell)?.operation)
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -197,7 +212,9 @@ impl Tool for TerminalStartTool {
         tokio::fs::create_dir_all(&scratch_root)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
-        let analysis = analyze_shell_command(&ctx.workspace_root, &args.command)?;
+        let shell = self.managers.resolve_shell(args.shell.as_deref())?;
+        let analysis =
+            analyze_shell_command_with_shell(&ctx.workspace_root, &args.command, &shell)?;
         let execution_mode = resolve_terminal_start_execution_mode(args.mode, args.pty, &analysis)?;
         let mut env = BTreeMap::new();
         env.insert(
@@ -339,7 +356,8 @@ impl Tool for TerminalInputTool {
         validate_terminal_input_len(input)?;
         let context = self.terminal_input_permission_context(ctx, &task_id)?;
         let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
-        let analysis = analyze_shell_command(&workspace_root, input)?;
+        let shell = ResolvedShell::resolve_explicit(&context.shell)?;
+        let analysis = analyze_shell_command_with_shell(&workspace_root, input, &shell)?;
         let mut subjects = vec![
             terminal_task_subject(&task_id),
             terminal_input_subject(input.len()),
@@ -350,11 +368,13 @@ impl Tool for TerminalInputTool {
                 .into_iter()
                 .filter(|subject| subject.kind == ToolSubjectKind::Command),
         );
-        subjects.extend(bash_path_subjects_from_cwd(
-            &workspace_root,
-            &context.cwd,
-            input,
-        )?);
+        if shell.dialect() == ShellDialect::Posix {
+            subjects.extend(bash_path_subjects_from_cwd(
+                &workspace_root,
+                &context.cwd,
+                input,
+            )?);
+        }
         Ok(subjects)
     }
 
@@ -362,8 +382,18 @@ impl Tool for TerminalInputTool {
         let task_id = required_terminal_task_id(args)?;
         let input = required_string(args, "input")?;
         validate_terminal_input_len(input)?;
-        let _context = self.terminal_input_permission_context(ctx, &task_id)?;
-        terminal_input_permission_operation_from_analysis(&ctx.workspace_root, input)
+        let context = self.terminal_input_permission_context(ctx, &task_id)?;
+        let shell = ResolvedShell::resolve_explicit(&context.shell)?;
+        let operation =
+            analyze_shell_command_with_shell(&ctx.workspace_root, input, &shell)?.operation;
+        Ok(match operation {
+            ToolOperation::ExecuteDestructiveCommand => ToolOperation::ExecuteDestructiveCommand,
+            ToolOperation::ExecuteReadOnlyCommand => ToolOperation::ExecuteReadOnlyCommand,
+            ToolOperation::ExecuteWorkspaceCheckCommand => {
+                ToolOperation::ExecuteWorkspaceCheckCommand
+            }
+            _ => ToolOperation::SendTerminalInput,
+        })
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -1267,8 +1297,12 @@ pub(crate) fn terminal_entry_details(
         details_object.insert(
             "shell_analysis".to_owned(),
             json!({
+                "program": analysis.shell_program.as_str(),
+                "dialect": analysis.shell_dialect.as_str(),
                 "command": analysis.command.as_str(),
+                "normalized_command": analysis.normalized_command.as_str(),
                 "command_family": analysis.command_family.as_str(),
+                "classification_source": analysis.classification_source.as_str(),
                 "grant_scope": analysis.grant_scope.as_ref().map(|scope| scope.as_str()),
                 "grant_scope_detail": shell_grant_scope_detail(analysis.grant_scope.as_ref()),
                 "approval_reason": analysis.explanation.as_str(),

@@ -95,6 +95,7 @@ pub struct TerminalExecutionConfig {
     fallback: ExecutionSandboxFallback,
     requires_sandbox: bool,
     network_allowed: bool,
+    default_shell: ResolvedShell,
 }
 
 impl TerminalExecutionConfig {
@@ -106,13 +107,26 @@ impl TerminalExecutionConfig {
             fallback: config.fallback(),
             requires_sandbox: config.requires_sandbox(),
             network_allowed: config.profile_spec().network_allowed,
+            default_shell: ResolvedShell::detect_default(),
         }
+    }
+
+    pub(crate) fn with_default_shell(mut self, default_shell: ResolvedShell) -> Self {
+        self.default_shell = default_shell;
+        self
+    }
+
+    pub(crate) fn resolve_shell(&self, explicit: Option<&str>) -> Result<ResolvedShell> {
+        explicit
+            .map(ResolvedShell::resolve_explicit)
+            .transpose()
+            .map(|shell| shell.unwrap_or_else(|| self.default_shell.clone()))
     }
 
     pub(super) fn resolve_pty_execution(
         &self,
         resolved_cwd: &Path,
-        shell: &str,
+        shell: &ResolvedShell,
         command: &str,
         env: &BTreeMap<String, String>,
     ) -> Result<TerminalPtyExecution> {
@@ -140,7 +154,7 @@ impl TerminalExecutionConfig {
     fn resolve_macos_seatbelt_pty_execution(
         &self,
         resolved_cwd: &Path,
-        shell: &str,
+        shell: &ResolvedShell,
         command: &str,
         env: &BTreeMap<String, String>,
     ) -> Result<TerminalPtyExecution> {
@@ -152,18 +166,19 @@ impl TerminalExecutionConfig {
         }
 
         let profile = macos_seatbelt_workspace_write_profile(resolved_cwd);
-        let command_spec = TerminalPtyCommandSpec {
+        let mut command_spec = TerminalPtyCommandSpec {
             program: PathBuf::from("/usr/bin/sandbox-exec"),
             args: vec![
                 OsString::from("-p"),
                 OsString::from(profile),
-                OsString::from(shell),
-                OsString::from("-lc"),
-                OsString::from(command),
+                shell.program().as_os_str().to_owned(),
             ],
             cwd: resolved_cwd.to_path_buf(),
             env: env.clone(),
         };
+        command_spec
+            .args
+            .extend(shell.terminal_args(command).into_iter().map(OsString::from));
         Ok(TerminalPtyExecution::sandboxed(
             ExecutionBackendKind::MacosSeatbelt,
             capabilities,
@@ -175,7 +190,7 @@ impl TerminalExecutionConfig {
     fn resolve_linux_bubblewrap_pty_execution(
         &self,
         resolved_cwd: &Path,
-        shell: &str,
+        shell: &ResolvedShell,
         command: &str,
         env: &BTreeMap<String, String>,
     ) -> Result<TerminalPtyExecution> {
@@ -191,8 +206,8 @@ impl TerminalExecutionConfig {
         }
 
         let request = ExecutionRequest {
-            program: shell.to_owned(),
-            args: vec!["-lc".to_owned(), command.to_owned()],
+            program: shell.program_string(),
+            args: shell.terminal_args(command),
             cwd: resolved_cwd.to_path_buf(),
             env: env.clone(),
             environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
@@ -203,9 +218,8 @@ impl TerminalExecutionConfig {
             process_count_limit: None,
         };
         let mut args = linux_bubblewrap_args(resolved_cwd, &request, self.network_allowed);
-        args.push(OsString::from(shell));
-        args.push(OsString::from("-lc"));
-        args.push(OsString::from(command));
+        args.push(shell.program().as_os_str().to_owned());
+        args.extend(shell.terminal_args(command).into_iter().map(OsString::from));
         let command_spec = TerminalPtyCommandSpec {
             program: bwrap,
             args,
@@ -272,6 +286,7 @@ impl Default for TerminalExecutionConfig {
             fallback: ExecutionSandboxFallback::Deny,
             requires_sandbox: false,
             network_allowed: true,
+            default_shell: ResolvedShell::detect_default(),
         }
     }
 }
@@ -314,7 +329,7 @@ pub(super) struct TerminalPtyCommandSpec {
 
 fn local_pty_execution(
     resolved_cwd: &Path,
-    shell: &str,
+    shell: &ResolvedShell,
     command: &str,
     env: &BTreeMap<String, String>,
 ) -> TerminalPtyExecution {
@@ -325,8 +340,12 @@ fn local_pty_execution(
         enforcement_backend_capabilities: ExecutionBackendCapabilities::default(),
         sandbox_profile: ExecutionSandboxProfile::Unconfined,
         command: TerminalPtyCommandSpec {
-            program: PathBuf::from(shell),
-            args: vec![OsString::from("-lc"), OsString::from(command)],
+            program: shell.program().to_path_buf(),
+            args: shell
+                .terminal_args(command)
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
             cwd: resolved_cwd.to_path_buf(),
             env: env.clone(),
         },

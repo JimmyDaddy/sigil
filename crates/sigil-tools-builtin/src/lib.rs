@@ -7,6 +7,7 @@ mod path;
 mod process_group;
 mod registry;
 mod shell;
+mod shell_runtime;
 mod support;
 mod terminal_process;
 mod terminal_tools;

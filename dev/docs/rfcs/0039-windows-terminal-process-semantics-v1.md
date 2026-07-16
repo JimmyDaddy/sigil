@@ -184,3 +184,10 @@ Windows-only conformance 必须由 pushed hosted job 执行；非 Windows 本地
   复用 file/change-set 已验证的 portable path helpers；Windows-only regression 同时覆盖 prefixed
   workspace cwd 与 prefixed external cwd rejection。macOS 上 tools 186/1 ignored、strict Clippy、fmt
   与 diff gate 通过；真实 Windows 运行留在 R39.5 hosted conformance。
+- R39.2 complete. Registry 构造时冻结 native default shell：Windows 优先 `pwsh.exe`、回退
+  `powershell.exe`，其他平台保持 `sh`；explicit shell 仅接受已建模的 POSIX、PowerShell 与 cmd
+  dialect，未知值在 spawn 前失败。one-shot、terminal permission 与 execute 共用同一 resolver；
+  PowerShell 使用 non-interactive/no-profile/UTF-8 wrapper 并传播 native/cmdlet failure，cmd 使用
+  `/d /s /c`。非 POSIX 命令不再复用 Bash AST、readonly downgrade 或 family grant；tool/terminal
+  metadata 同时报告实际 program 与 dialect。tools 191/1 ignored、focused permission regression、
+  strict Clippy、fmt 与 diff gate 通过；Windows 实际 argv/exit/UTF-8 仍由 R39.5 hosted 证明。
