@@ -148,6 +148,8 @@ class AlphaDogfoodCampaignTests(unittest.TestCase):
                         str(binary),
                         "--expected-sha256",
                         "b" * 64,
+                        "--case",
+                        "context",
                         "--output-dir",
                         str(output),
                     ]
@@ -167,7 +169,14 @@ class AlphaDogfoodCampaignTests(unittest.TestCase):
                 launcher.chmod(0o700)
                 output = temporary_root / f"{name}-output"
                 return_code = campaign.main(
-                    ["--binary", str(launcher), "--output-dir", str(output)]
+                    [
+                        "--binary",
+                        str(launcher),
+                        "--case",
+                        "context",
+                        "--output-dir",
+                        str(output),
+                    ]
                 )
                 self.assertEqual(return_code, 2)
                 self.assertFalse(output.exists())
