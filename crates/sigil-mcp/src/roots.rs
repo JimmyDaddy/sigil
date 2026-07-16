@@ -31,7 +31,8 @@ pub(super) fn file_uri(path: &std::path::Path) -> String {
 pub(super) fn percent_encode_uri_path(path: &str) -> String {
     let mut output = String::new();
     for byte in path.bytes() {
-        let keep = byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~');
+        let keep =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'.' | b'_' | b'~');
         if keep {
             output.push(char::from(byte));
         } else {

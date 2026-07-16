@@ -2932,7 +2932,7 @@ fn mcp_launch_static_fingerprint_preserves_empty_grant_compatibility_and_binds_n
     let granted = sigil_mcp_launch_fingerprint(mcp_server_config! {
         command: "python3".to_owned(),
         args,
-        inherit_env: vec!["HOME".to_owned()],
+        inherit_env: vec!["PATH".to_owned()],
         ..McpServerConfig::default()
     })?;
 
@@ -4608,10 +4608,10 @@ fn mcp_name_and_uri_helpers_sanitize_and_encode() {
         super::root_name(std::path::Path::new("/tmp/test-root")),
         "test-root"
     );
-    assert_eq!(
-        super::file_uri(std::path::Path::new("/tmp/space name.txt")),
-        "file:///tmp/space%20name.txt"
-    );
+    let file_uri = super::file_uri(std::path::Path::new("/tmp/space name.txt"));
+    assert!(file_uri.starts_with("file:///"));
+    assert!(file_uri.ends_with("/tmp/space%20name.txt"));
+    assert!(!file_uri.contains("%3A"));
 }
 
 #[test]
