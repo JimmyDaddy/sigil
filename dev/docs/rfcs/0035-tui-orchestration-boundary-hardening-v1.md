@@ -1,6 +1,6 @@
 # RFC-0035 TUI Orchestration Boundary Hardening V1
 
-状态：accepted / R35.0-R35.1 complete; R35.2 in progress
+状态：accepted / R35.0-R35.2 complete; R35.3 in progress
 
 创建日期：2026-07-16
 
@@ -171,4 +171,9 @@ The stateful campaign uses only its loopback fixtures. No paid provider or publi
   refresh, continuation and background-agent state through one private
   `WorkerLoopState`; the change preserves command/event order and is covered by
   focused construction plus full runner regression tests.
-- R35.2 in progress.
+- R35.2 complete. The 3,687-line scheduler hotspot is now a 251-line loop
+  coordinator. Seven focused advancement functions own refresh, compaction,
+  run-result, idle-compaction, background-agent, continuation and queue
+  progress; an exhaustive classifier routes all 56 commands into seven domain
+  handlers with no classifier wildcard.
+- R35.3 in progress.

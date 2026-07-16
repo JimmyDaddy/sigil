@@ -64,8 +64,10 @@ use super::{
 };
 
 mod active_run;
+mod advancement;
 mod agent_runtime;
 mod checkpoint_runtime;
+mod command_dispatch;
 mod compaction_runtime;
 mod compaction_tasks;
 mod mcp_refresh;
@@ -80,6 +82,9 @@ mod terminal_refresh;
 pub(in crate::runner) use active_run::{
     ActiveRun, RunTaskPayload, RunTaskResult, cancel_active_run, prepare_run_cancellation,
 };
+pub(in crate::runner) use advancement::{
+    WorkerAdvancementContext, WorkerAdvancementControl, advance_worker_loop,
+};
 pub(in crate::runner) use agent_runtime::{
     WorkerAgentEventSink, agent_result_continuation_new_thread_ids, cancel_agent_thread,
     close_agent_thread, collect_finished_background_agent_runs, extend_agent_thread_ids_unique,
@@ -91,6 +96,11 @@ pub(in crate::runner) use checkpoint_runtime::{
     execute_current_checkpoint_restore, fork_current_conversation,
     preview_current_checkpoint_restore,
 };
+pub(in crate::runner) use command_dispatch::{
+    WorkerCommandContext, WorkerCommandDispatchControl, dispatch_worker_command,
+};
+#[cfg(test)]
+pub(in crate::runner) use command_dispatch::{WorkerCommandDomain, classify_worker_command};
 pub(in crate::runner) use compaction_runtime::{
     IdleAutoCompactionPreparation, IdleAutoCompactionState, PendingV2Compaction,
     QueuedConversationPreTurnAdmission, exact_context_window_rejection_source,
@@ -124,7 +134,7 @@ pub(in crate::runner) use queue_driver::{
     QueuedConversationCandidatePreparation, prepare_next_queued_conversation_candidate,
     prepare_next_queued_conversation_pressure_admission,
 };
-pub(in crate::runner) use scheduler::run_worker_loop;
+pub(in crate::runner) use scheduler::{finish_idle_auto_compaction, run_worker_loop};
 pub(in crate::runner) use session_lifecycle_runtime::{
     apply_local_session_delete, apply_session_retention, export_local_session, fork_local_session,
     inspect_local_session, local_session_lifecycle_service, preview_local_session_delete,

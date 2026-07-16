@@ -1,7 +1,13 @@
 use anyhow::Result;
 use sigil_kernel::{ProviderCapabilities, ReasoningStreamSupport, Session};
 
-use super::{super::worker_loop::WorkerLoopState, common::test_root_config};
+use super::{
+    super::{
+        WorkerCommand,
+        worker_loop::{WorkerCommandDomain, WorkerLoopState, classify_worker_command},
+    },
+    common::test_root_config,
+};
 
 fn provider_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
@@ -64,4 +70,38 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
     assert!(state.refresh.pending_mcp_servers.is_empty());
     assert!(state.processed_worker_command_ids.is_empty());
     Ok(())
+}
+
+#[test]
+fn worker_commands_are_routed_to_explicit_domains() {
+    let cases = [
+        (WorkerCommand::CancelRun, WorkerCommandDomain::RunPlan),
+        (
+            WorkerCommand::StartNewSession {
+                session_log_path: "new-session.jsonl".into(),
+            },
+            WorkerCommandDomain::Session,
+        ),
+        (
+            WorkerCommand::PreviewV2Compaction,
+            WorkerCommandDomain::QueueCompaction,
+        ),
+        (
+            WorkerCommand::BackgroundActiveAgent,
+            WorkerCommandDomain::AgentTask,
+        ),
+        (
+            WorkerCommand::CheckChangedFilesDiagnostics,
+            WorkerCommandDomain::VerificationCheckpoint,
+        ),
+        (
+            WorkerCommand::CancelProviderModelsRefresh { request_id: 7 },
+            WorkerCommandDomain::ProviderMcp,
+        ),
+        (WorkerCommand::Shutdown, WorkerCommandDomain::Maintenance),
+    ];
+
+    for (command, expected) in cases {
+        assert_eq!(classify_worker_command(&command), expected);
+    }
 }
