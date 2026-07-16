@@ -81,7 +81,7 @@ use background::{
 };
 use chat::close_agent_from_args;
 #[cfg(test)]
-use chat::wait_throttle_remaining_since;
+use chat::wait_throttle_remaining_for_elapsed;
 use handlers::{
     BackgroundApprovalHandler, ChatAgentApprovalRouteHandler, ChatChildEventHandler,
     ChatChildThreadGuard,

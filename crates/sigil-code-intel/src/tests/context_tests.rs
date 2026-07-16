@@ -119,6 +119,18 @@ fn context_repo_file_and_diff_hits_apply_secret_egress_filtering() {
 }
 
 #[test]
+fn repository_context_ids_use_portable_path_separators() {
+    let hit = CodeContextBuilder::new().repo_file_hit(
+        std::path::Path::new("crates")
+            .join("sigil-runtime")
+            .join("src/lib.rs"),
+        "runtime context",
+    );
+
+    assert_eq!(hit.item.id, "repo-file:crates/sigil-runtime/src/lib.rs");
+}
+
+#[test]
 fn context_repo_map_lite_builds_rust_source_files_symbols_and_edges() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_dir = temp.path().join("crates/sigil-runtime/src");

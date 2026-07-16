@@ -722,7 +722,7 @@ impl CodeContextBuilder {
         let path = path.into();
         let snippet = body.into();
         self.hit(
-            format!("repo-file:{}", path.display()),
+            format!("repo-file:{}", portable_context_path(&path)),
             ContextSource::RepositoryFile,
             path,
             None,
@@ -740,7 +740,7 @@ impl CodeContextBuilder {
         let path = path.into();
         let snippet = diff.into();
         self.hit(
-            format!("current-diff:{}", path.display()),
+            format!("current-diff:{}", portable_context_path(&path)),
             ContextSource::CurrentDiff,
             path,
             None,
@@ -782,5 +782,14 @@ impl CodeContextBuilder {
             range,
             snippet,
         }
+    }
+}
+
+fn portable_context_path(path: &Path) -> String {
+    let display = path.to_string_lossy();
+    if cfg!(windows) {
+        display.replace('\\', "/")
+    } else {
+        display.into_owned()
     }
 }

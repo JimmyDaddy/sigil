@@ -3333,10 +3333,9 @@ async fn wait_agent_marks_running_thread_without_live_handle_unavailable() -> Re
 
 #[test]
 fn wait_agent_throttle_expiry_does_not_panic_after_interval() {
-    let expired_wait =
-        Instant::now() - super::WAIT_AGENT_MIN_REPOLL_INTERVAL - Duration::from_millis(1);
+    let elapsed = super::WAIT_AGENT_MIN_REPOLL_INTERVAL + Duration::from_millis(1);
 
-    assert_eq!(super::wait_throttle_remaining_since(expired_wait), None);
+    assert_eq!(super::wait_throttle_remaining_for_elapsed(elapsed), None);
 }
 
 #[tokio::test]

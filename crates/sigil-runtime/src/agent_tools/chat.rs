@@ -792,8 +792,12 @@ fn full_agent_result_delivery(
 }
 
 pub(super) fn wait_throttle_remaining_since(last_wait: Instant) -> Option<Duration> {
+    wait_throttle_remaining_for_elapsed(saturating_elapsed(last_wait))
+}
+
+pub(super) fn wait_throttle_remaining_for_elapsed(elapsed: Duration) -> Option<Duration> {
     WAIT_AGENT_MIN_REPOLL_INTERVAL
-        .checked_sub(saturating_elapsed(last_wait))
+        .checked_sub(elapsed)
         .filter(|remaining| !remaining.is_zero())
 }
 
