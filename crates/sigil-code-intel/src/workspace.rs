@@ -50,13 +50,6 @@ pub fn effective_server_plan(
     }
 }
 
-pub fn effective_servers(
-    config: &CodeIntelligenceConfig,
-    workspace_root: &Path,
-) -> Vec<LanguageServerConfig> {
-    effective_server_plan(config, workspace_root).servers
-}
-
 pub fn default_rust_analyzer_server() -> LanguageServerConfig {
     built_in_profiles()
         .into_iter()
@@ -198,10 +191,6 @@ pub(crate) fn effective_server_plan_from_discovered(
             ServerAvailability::Missing => {
                 plan.statuses
                     .push(planned_status(&server.config, "missing"));
-            }
-            ServerAvailability::Disabled => {
-                plan.statuses
-                    .push(planned_status(&server.config, "disabled"));
             }
         }
     }

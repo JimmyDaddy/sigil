@@ -25,14 +25,12 @@ const SKIPPED_DIRS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoverySource {
     BuiltIn,
-    UserOverride,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerAvailability {
     Installed,
     Missing,
-    Disabled,
 }
 
 #[derive(Debug, Clone, PartialEq)]

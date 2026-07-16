@@ -14,7 +14,7 @@ fn effective_servers_defaults_to_rust_analyzer_when_discovery_is_disabled() {
         report_missing: true,
         ..CodeIntelligenceConfig::default()
     };
-    let servers = effective_servers(&config, temp.path());
+    let servers = effective_server_plan(&config, temp.path()).servers;
 
     assert_eq!(servers[0].name, "rust-analyzer");
     assert!(servers[0].file_extensions.contains(&"rs".to_owned()));
@@ -139,7 +139,7 @@ fn configured_servers_override_discovered_profile_by_name() {
 }
 
 #[test]
-fn effective_server_plan_tracks_disabled_and_extra_configured_servers() {
+fn effective_server_plan_tracks_missing_and_extra_configured_servers() {
     let configured_override = LanguageServerConfig {
         command: "custom-ts-lsp".to_owned(),
         ..test_server("typescript-language-server", &["typescript"], &["ts"])
@@ -156,7 +156,7 @@ fn effective_server_plan_tracks_disabled_and_extra_configured_servers() {
         ),
         discovered_server(
             test_server("go-lsp", &["go"], &["go"]),
-            ServerAvailability::Disabled,
+            ServerAvailability::Missing,
         ),
     ];
 
@@ -176,7 +176,7 @@ fn effective_server_plan_tracks_disabled_and_extra_configured_servers() {
             .iter()
             .find(|status| status.server == "go-lsp")
             .map(|status| status.status.as_str()),
-        Some("disabled")
+        Some("missing")
     );
     assert_eq!(
         plan.statuses

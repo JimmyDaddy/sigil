@@ -46,10 +46,6 @@ impl<V: Clone> TimedCache<V> {
             .collect()
     }
 
-    pub fn remove(&mut self, key: &str) {
-        self.values.remove(key);
-    }
-
     pub fn remove_expired(&mut self) {
         let ttl = self.ttl;
         self.values

@@ -8,12 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
-use sigil_code_intel::context::{
-    CodeContextBuilder, CodeContextHit, LspContextSnapshot, LspContextSnapshotStatus, RepoMapLite,
+use sigil_code_intel::{
+    CodeContextBuilder, CodeContextHit, CodeDiagnostic, CodeIntelligenceService, CodeLocation,
+    CodeRange, CodeSymbol, LspContextSnapshot, LspContextSnapshotStatus, RepoMapLite,
     RepoMapLiteOptions, RepoSourceFileRef,
-};
-use sigil_code_intel::service::{
-    CodeDiagnostic, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol,
 };
 use sigil_kernel::{
     ContextBodyRef, ContextInclusionReason, ContextItem, ContextScoreComponent,

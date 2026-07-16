@@ -109,3 +109,9 @@ git diff --check
   behavior or durable-contract dependency: the façade can preserve the service/context/Doctor
   types while making low-level modules private. No sub-agent review was run because current agent
   policy only permits sub-agents when the user explicitly requests them.
+- R36.1 complete. All implementation modules are private; context, service, tool-registration and
+  Doctor-planning contracts are re-exported from the crate root; and `sigil-runtime` no longer
+  imports code-intel module paths. The narrower reachability exposed five dead internal items:
+  unused cache removal and discovery states were removed, the test-only LSP encoder is now
+  test-only, and the redundant server-list helper test now exercises the supported plan result.
+  Code-intel 144 tests and runtime context/code-intel focused suites pass.

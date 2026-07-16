@@ -319,6 +319,7 @@ where
     Ok(Some(value))
 }
 
+#[cfg(test)]
 pub fn encode_lsp_message(value: &Value) -> Result<Vec<u8>> {
     let body = serde_json::to_vec(value)?;
     let mut encoded = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();

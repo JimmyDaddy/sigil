@@ -16,15 +16,13 @@ pub(super) fn check_code_intelligence(
     root_config: &RootConfig,
     workspace_root: &Path,
 ) {
-    if !sigil_code_intel::workspace::config_enabled(&root_config.code_intelligence) {
+    if !sigil_code_intel::config_enabled(&root_config.code_intelligence) {
         report.push(DoctorStatus::Ok, "code_intelligence", "disabled");
         return;
     }
 
-    let plan = sigil_code_intel::workspace::effective_server_plan(
-        &root_config.code_intelligence,
-        workspace_root,
-    );
+    let plan =
+        sigil_code_intel::effective_server_plan(&root_config.code_intelligence, workspace_root);
     if plan.statuses.is_empty() {
         report.push_with_remediation(
             DoctorStatus::Warn,

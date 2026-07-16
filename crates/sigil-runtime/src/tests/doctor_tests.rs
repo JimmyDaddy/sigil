@@ -1398,6 +1398,7 @@ root_markers = ["Cargo.toml"]
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].name, "lsp:missing-lsp");
     assert_eq!(checks[0].status, DoctorStatus::Warn);
+    assert!(checks[0].message.contains("languages=rust"));
     assert!(checks[0].message.contains("command=missing"));
     assert!(
         checks[0]
