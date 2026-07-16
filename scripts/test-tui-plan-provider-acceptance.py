@@ -88,6 +88,25 @@ def write_audit(path: Path, *, tool_name: str = "read_file", target: str = "READ
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_long_plan_prompt_drains_pty_redraws_while_typing(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+                self.reads: list[float] = []
+
+            def send(self, value: str) -> None:
+                self.sent.append(value)
+
+            def read_available(self, timeout: float) -> None:
+                self.reads.append(timeout)
+
+        runner = FakeRunner()
+        prompt = "/plan " + ("inspect README.md " * 32)
+        MODULE.type_text_while_draining(runner, prompt)
+        self.assertEqual("".join(runner.sent), prompt)
+        self.assertEqual(len(runner.reads), len(prompt))
+        self.assertTrue(all(timeout == 0.002 for timeout in runner.reads))
+
     def test_committed_fixture_is_checksum_pinned(self) -> None:
         fixture = MODULE.load_fixture(MODULE.repo_root() / MODULE.DEFAULT_FIXTURE)
         self.assertEqual(fixture.fixture_id, "plan-only")

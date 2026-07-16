@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from typing import Sequence
+from typing import Callable, Sequence
 from urllib.parse import urlsplit
 
 
@@ -470,10 +470,24 @@ def read_plan_audit(path: Path) -> PlanAudit:
     )
 
 
-def wait_for_plan_audit(state_root: Path, timeout: float) -> PlanAudit:
+def type_text_while_draining(runner: object, value: str) -> None:
+    """Keep the PTY writable while a long prompt triggers repeated TUI redraws."""
+    for character in value:
+        runner.send(character)
+        runner.read_available(0.002)
+
+
+def wait_for_plan_audit(
+    state_root: Path,
+    timeout: float,
+    *,
+    tick: Callable[[], None] | None = None,
+) -> PlanAudit:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
+        if tick is not None:
+            tick()
         files = session_files(state_root)
         if len(files) > 1:
             raise PlanAcceptanceError("Plan case created more than one session stream")
@@ -656,9 +670,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         runner.start()
         SUPPORT.wait_for_main_tui(runner, deadline.remaining())
-        runner.type_text(f"/plan {fixture.prompt}")
+        type_text_while_draining(runner, f"/plan {fixture.prompt}")
         runner.send("\r")
-        audit = wait_for_plan_audit(fixture_root / "state", deadline.remaining())
+        audit = wait_for_plan_audit(
+            fixture_root / "state",
+            deadline.remaining(),
+            tick=lambda: runner.read_available(0.01),
+        )
         plan_screen = runner.wait_until(
             lambda text: "plan ready" in text.lower() and "create and run task" in text.lower(),
             deadline.remaining(),
