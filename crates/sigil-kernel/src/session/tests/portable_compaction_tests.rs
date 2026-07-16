@@ -1,3 +1,5 @@
+use std::{fs, time::Instant};
+
 use anyhow::Result;
 
 use super::*;
@@ -24,6 +26,52 @@ fn setup_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
     ))?;
     session.append_user_message(ModelMessage::user("继续实现 portable checkpoint。"))?;
     Ok((temp, store, session))
+}
+
+#[test]
+#[ignore = "release-profile long-session performance evidence"]
+fn portable_compaction_long_session_evidence() -> Result<()> {
+    const TURN_COUNT: usize = 1_000;
+
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    for index in 0..TURN_COUNT {
+        session.append_user_message(ModelMessage::user(format!("user turn {index}")))?;
+        session.append_assistant_message(ModelMessage::assistant(
+            Some(format!("assistant turn {index}")),
+            Vec::new(),
+        ))?;
+    }
+
+    let records = store.read_event_records_writer()?;
+    let file_bytes_before = fs::metadata(store.path())?.len();
+    let planning_started = Instant::now();
+    let plan = CompactionFoldPlan::from_records_after(&records, 1, None)?;
+    let elapsed_ms = planning_started.elapsed().as_millis();
+    let file_bytes_after = fs::metadata(store.path())?.len();
+
+    assert!(!plan.folded_event_ids.is_empty());
+    assert!(plan.folded_event_ids.len() < records.len());
+    assert!(plan.folded_through.is_some());
+    assert_eq!(file_bytes_after, file_bytes_before);
+
+    println!(
+        "SIGIL_LONG_SESSION_EVIDENCE {}",
+        serde_json::json!({
+            "schema_version": 1,
+            "scenario": "portable_compaction_1k_turns",
+            "scale": TURN_COUNT,
+            "elapsed_ms": elapsed_ms,
+            "facts": {
+                "source_record_count": records.len(),
+                "folded_event_count": plan.folded_event_ids.len(),
+                "raw_file_bytes_before": file_bytes_before,
+                "raw_file_bytes_after": file_bytes_after,
+            }
+        })
+    );
+    Ok(())
 }
 
 fn request(

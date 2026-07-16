@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, time::Instant};
 
 use ratatui::text::Line;
 
@@ -304,4 +304,77 @@ fn timeline_render_store_entry_at_line_matches_ranges() {
             assert_eq!(snapshot.entry_at_line(line_index), Some(entry_index));
         }
     }
+}
+
+#[test]
+#[ignore = "release-profile long-session performance evidence"]
+fn timeline_render_store_long_session_evidence() {
+    const ENTRY_COUNT: usize = 5_000;
+    const TAIL_RERENDER_COUNT: usize = 250;
+
+    let options = render_options();
+    let source = (0..ENTRY_COUNT)
+        .map(|index| {
+            let role = match index % 3 {
+                0 => TimelineRole::User,
+                1 => TimelineRole::Assistant,
+                _ => TimelineRole::Notice,
+            };
+            entry(role, &format!("long timeline entry {index}"))
+        })
+        .collect::<Vec<_>>();
+
+    let rebuild_started = Instant::now();
+    let mut rebuilt = TimelineRenderStore::default();
+    rebuilt.rebuild(&source, &options);
+    let full_rebuild_ms = rebuild_started.elapsed().as_millis();
+
+    let append_started = Instant::now();
+    let mut timeline = Vec::with_capacity(ENTRY_COUNT);
+    let mut incremental = TimelineRenderStore::default();
+    incremental.rebuild(&timeline, &options);
+    for item in &source {
+        timeline.push(item.clone());
+        assert_eq!(
+            incremental.append_entry(&timeline, timeline.len() - 1, &options),
+            AppendOutcome::Appended
+        );
+    }
+    let sequential_append_ms = append_started.elapsed().as_millis();
+    assert_matches_full_rebuild(&incremental, &timeline, &options);
+
+    let rerender_started = Instant::now();
+    for revision in 0..TAIL_RERENDER_COUNT {
+        timeline
+            .last_mut()
+            .expect("long timeline has a tail entry")
+            .text = format!("streaming tail revision {revision}");
+        assert_eq!(
+            incremental.rerender_entry(&timeline, timeline.len() - 1, &options),
+            RerenderOutcome::Rerendered
+        );
+    }
+    let tail_rerender_ms = rerender_started.elapsed().as_millis();
+    assert_matches_full_rebuild(&incremental, &timeline, &options);
+    let snapshot = incremental.snapshot();
+
+    println!(
+        "SIGIL_LONG_SESSION_EVIDENCE {}",
+        serde_json::json!({
+            "schema_version": 1,
+            "scenario": "timeline_render_5k",
+            "scale": ENTRY_COUNT,
+            "elapsed_ms": full_rebuild_ms
+                .saturating_add(sequential_append_ms)
+                .saturating_add(tail_rerender_ms),
+            "facts": {
+                "full_rebuild_ms": full_rebuild_ms,
+                "sequential_append_ms": sequential_append_ms,
+                "tail_rerender_count": TAIL_RERENDER_COUNT,
+                "tail_rerender_ms": tail_rerender_ms,
+                "total_lines": snapshot.total_lines(),
+                "prefix_hash_count": snapshot.prefix_hashes().len(),
+            }
+        })
+    );
 }

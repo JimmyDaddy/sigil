@@ -5,6 +5,7 @@ use std::{
     process::Command,
     sync::{Arc, Barrier},
     thread,
+    time::Instant,
 };
 
 use anyhow::Result;
@@ -12,7 +13,8 @@ use fs2::FileExt;
 
 use super::*;
 use crate::{
-    MutationEventRecorder, MutationPrepared, MutationSubject, MutationSyncClass, SnapshotCoverage,
+    ModelMessage, MutationEventRecorder, MutationPrepared, MutationSubject, MutationSyncClass,
+    Session, SnapshotCoverage,
 };
 
 fn audit_record(
@@ -132,6 +134,53 @@ fn session_writer_hot_append_scans_existing_stream_once() -> Result<()> {
     assert_eq!(
         JsonlSessionStore::read_event_records(store.path())?.len(),
         64
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "release-profile long-session performance evidence"]
+fn session_writer_long_session_evidence() -> Result<()> {
+    const EVENT_COUNT: usize = 10_000;
+
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+
+    let append_started = Instant::now();
+    for index in 0..EVENT_COUNT {
+        session.append_user_message(ModelMessage::user(format!("long-session-{index}")))?;
+    }
+    let append_elapsed_ms = append_started.elapsed().as_millis();
+
+    assert_eq!(store.writer_full_scan_count()?, 1);
+    let replay_started = Instant::now();
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let replay_elapsed_ms = replay_started.elapsed().as_millis();
+    assert_eq!(records.len(), EVENT_COUNT);
+    assert_eq!(
+        records
+            .iter()
+            .map(SessionStreamRecord::stream_sequence)
+            .collect::<Vec<_>>(),
+        (1..=EVENT_COUNT as u64).collect::<Vec<_>>()
+    );
+
+    println!(
+        "SIGIL_LONG_SESSION_EVIDENCE {}",
+        serde_json::json!({
+            "schema_version": 1,
+            "scenario": "session_writer_10k",
+            "scale": EVENT_COUNT,
+            "elapsed_ms": append_elapsed_ms.saturating_add(replay_elapsed_ms),
+            "facts": {
+                "append_elapsed_ms": append_elapsed_ms,
+                "replay_elapsed_ms": replay_elapsed_ms,
+                "full_scan_count": store.writer_full_scan_count()?,
+                "record_count": records.len(),
+                "file_bytes": fs::metadata(store.path())?.len(),
+            }
+        })
     );
     Ok(())
 }
