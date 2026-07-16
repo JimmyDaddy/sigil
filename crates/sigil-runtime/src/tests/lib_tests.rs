@@ -855,6 +855,17 @@ fn build_run_options_omits_default_reasoning_for_unsupported_providers() {
 }
 
 #[test]
+fn build_run_options_uses_supported_openai_responses_reasoning_default() {
+    let options = build_run_options(
+        &test_root_config("openai_responses"),
+        Path::new("/tmp/sigil-runtime-test").to_path_buf(),
+        InteractionMode::Headless,
+    );
+
+    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
+}
+
+#[test]
 fn build_run_options_keeps_uncanonical_workspace_root_observable_but_tolerant() {
     let workspace_root = Path::new("/tmp/sigil-runtime-test-missing").to_path_buf();
     let options = build_run_options(

@@ -52,14 +52,14 @@ use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, AgentThreadStateProjection, CompactionConfig, CompactionThresholdStatus,
     ControlledCheckpointRestorePreview, ControlledCheckpointRestoreRequest, ConversationInputKind,
-    ConversationInputQueueId, ConversationInputTarget, ImageAttachment, MemoryConfig,
-    MutationArtifactCleanupTarget, MutationArtifactInventoryItem, MutationArtifactRetentionReport,
-    PermissionMode, PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig,
-    SecretRedactor, SessionConfig, SessionStats, StorageConfig, TaskStateProjection,
-    ToolPreviewSnapshot, resolve_workspace_root,
+    ConversationInputQueueId, ConversationInputTarget, ImageAttachment, InteractionMode,
+    MemoryConfig, MutationArtifactCleanupTarget, MutationArtifactInventoryItem,
+    MutationArtifactRetentionReport, PermissionMode, PlanApprovalPermission, PlanTaskStartMode,
+    ReasoningEffort, RootConfig, SecretRedactor, SessionConfig, SessionStats, StorageConfig,
+    TaskStateProjection, ToolPreviewSnapshot, resolve_workspace_root,
 };
 use sigil_runtime::{
-    BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths,
+    BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths, build_run_options,
     effective_compaction_config, resolve_sigil_paths, support::SupportBuildInfo,
 };
 use uuid::Uuid;
@@ -555,6 +555,13 @@ impl AppState {
         .to_owned();
         let initial_code_intelligence_status =
             code_intelligence_config_status(&root_config.code_intelligence);
+        let initial_reasoning_effort = build_run_options(
+            root_config,
+            workspace_root.clone(),
+            InteractionMode::Interactive,
+        )
+        .reasoning_effort
+        .unwrap_or(ReasoningEffort::Max);
 
         let mut app = Self {
             config_path: config_path.to_path_buf(),
@@ -583,7 +590,7 @@ impl AppState {
                 session_delta_stats: SessionStats::default(),
                 is_busy: false,
                 mcp_progress: None,
-                reasoning_effort: ReasoningEffort::Max,
+                reasoning_effort: initial_reasoning_effort,
                 run_phase: RunPhase::Idle,
                 last_phase_marker: None,
                 balance_snapshot: BalanceSnapshot {

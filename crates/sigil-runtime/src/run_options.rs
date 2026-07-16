@@ -186,6 +186,7 @@ fn provider_configured_default_reasoning_effort(
         crate::DEEPSEEK_PROVIDER_KEY => load_deepseek_config(root_config)
             .ok()
             .map(|config| config.profile().default_reasoning_effort),
+        crate::OPENAI_RESPONSES_PROVIDER_KEY => Some(ReasoningEffort::High),
         _ => None,
     }
 }

@@ -2,6 +2,17 @@ use super::super::ComposerMode;
 use super::*;
 
 #[test]
+fn app_uses_provider_supported_default_reasoning_effort() {
+    let mut config = test_config();
+    config.agent.provider = "openai_responses".to_owned();
+    config.agent.model = "gpt-4.1".to_owned();
+
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert_eq!(app.runtime.reasoning_effort, ReasoningEffort::High);
+}
+
+#[test]
 fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     assert_eq!(ComposerMode::Build.notice(), "thinking");
     assert_eq!(ComposerMode::Plan.notice(), "planning");
