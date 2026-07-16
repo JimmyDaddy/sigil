@@ -21,7 +21,7 @@ use crate::{
     },
     path::{
         canonical_workspace_root, lexically_normalize_path, relativize, resolve_delete_file_target,
-        resolve_tool_path_from_base, resolve_workspace_path, tool_path_subject,
+        resolve_tool_path, resolve_tool_path_from_base, resolve_workspace_path, tool_path_subject,
         validate_delete_file_target,
     },
     support::{
@@ -209,12 +209,17 @@ impl Tool for WriteFileTool {
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let path = required_string(&args, "path")?.to_owned();
         let content = required_string(&args, "content")?.to_owned();
-        let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
-        let result_path = resolved.display().to_string();
+        let resolved = resolve_tool_path(&ctx.workspace_root, &path)?;
+        let result_path = if resolved.scope == ToolSubjectScope::Workspace {
+            resolved.normalized
+        } else {
+            path.clone()
+        };
+        let resolved_path = resolved.canonical;
         let bytes = content.len() as u64;
         let workspace_root = ctx.workspace_root.clone();
         let mutation_recorder = ctx.mutation_recorder.clone();
-        let path_for_write = path.clone();
+        let path_for_write = result_path.clone();
         let call_id_for_write = call_id.clone();
         run_blocking_io("write_file", move || {
             write_file_with_mutation(
@@ -222,7 +227,7 @@ impl Tool for WriteFileTool {
                 &workspace_root,
                 &call_id_for_write,
                 path_for_write,
-                resolved,
+                resolved_path,
                 content.as_bytes(),
             )?;
             Ok(())
@@ -233,7 +238,7 @@ impl Tool for WriteFileTool {
             self.spec().name,
             format!("wrote {result_path}"),
             ToolResultMeta {
-                changed_files: vec![path.to_owned()],
+                changed_files: vec![result_path],
                 bytes: Some(bytes),
                 ..ToolResultMeta::default()
             },
@@ -307,16 +312,21 @@ impl Tool for EditFileTool {
         let path = required_string(&args, "path")?.to_owned();
         let old_text = required_string(&args, "old_text")?.to_owned();
         let new_text = required_string(&args, "new_text")?.to_owned();
-        let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
-        let result_path = resolved.display().to_string();
+        let resolved = resolve_tool_path(&ctx.workspace_root, &path)?;
+        let result_path = if resolved.scope == ToolSubjectScope::Workspace {
+            resolved.normalized
+        } else {
+            path.clone()
+        };
+        let resolved_path = resolved.canonical;
         let error_path = path.clone();
         let workspace_root = ctx.workspace_root.clone();
         let mutation_recorder = ctx.mutation_recorder.clone();
-        let path_for_write = path.clone();
+        let path_for_write = result_path.clone();
         let call_id_for_write = call_id.clone();
         run_blocking_io("edit_file", move || {
-            let original = fs::read_to_string(&resolved)
-                .with_context(|| format!("failed to read {}", resolved.display()))?;
+            let original = fs::read_to_string(&resolved_path)
+                .with_context(|| format!("failed to read {}", resolved_path.display()))?;
             let occurrences = original.matches(&old_text).count();
             if occurrences == 0 {
                 bail!("old_text not found in {}", error_path);
@@ -330,7 +340,7 @@ impl Tool for EditFileTool {
                 &workspace_root,
                 &call_id_for_write,
                 path_for_write,
-                resolved,
+                resolved_path,
                 updated.as_bytes(),
             )?;
             Ok(())
@@ -341,7 +351,7 @@ impl Tool for EditFileTool {
             self.spec().name,
             format!("edited {result_path}"),
             ToolResultMeta {
-                changed_files: vec![path.to_owned()],
+                changed_files: vec![result_path],
                 ..ToolResultMeta::default()
             },
         ))
@@ -415,11 +425,11 @@ impl Tool for DeleteFileTool {
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let path = required_string(&args, "path")?.to_owned();
+        let result_path = resolve_tool_path(&ctx.workspace_root, &path)?.normalized;
         let target = resolve_delete_file_target(&ctx.workspace_root, &path)?;
-        let result_path = target.path.display().to_string();
         let workspace_root = ctx.workspace_root.clone();
         let mutation_recorder = ctx.mutation_recorder.clone();
-        let path_for_delete = path.clone();
+        let path_for_delete = result_path.clone();
         let call_id_for_delete = call_id.clone();
         let bytes = run_blocking_io("delete_file", move || {
             let metadata = validate_delete_file_target(&target.path, &target.display_path)?;
@@ -438,7 +448,7 @@ impl Tool for DeleteFileTool {
             self.spec().name,
             format!("deleted {result_path}"),
             ToolResultMeta {
-                changed_files: vec![path],
+                changed_files: vec![result_path],
                 bytes: Some(bytes),
                 details: json!({
                     "action": "delete"

@@ -2254,6 +2254,51 @@ async fn read_and_edit_file_tool_work() -> Result<()> {
 }
 
 #[tokio::test]
+async fn file_write_results_use_workspace_relative_paths() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let write_path = temp.path().join("written.txt");
+    let edit_path = temp.path().join("edited.txt");
+    let delete_path = temp.path().join("deleted.txt");
+    fs::write(&edit_path, "old")?;
+    fs::write(&delete_path, "delete me")?;
+    let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
+
+    let write = WriteFileTool
+        .execute(
+            ctx.clone(),
+            "write".to_owned(),
+            json!({ "path": write_path, "content": "new" }),
+        )
+        .await?;
+    let edit = EditFileTool
+        .execute(
+            ctx.clone(),
+            "edit".to_owned(),
+            json!({ "path": edit_path, "old_text": "old", "new_text": "new" }),
+        )
+        .await?;
+    let delete = DeleteFileTool
+        .execute(ctx, "delete".to_owned(), json!({ "path": delete_path }))
+        .await?;
+
+    for (result, expected) in [
+        (write, "written.txt"),
+        (edit, "edited.txt"),
+        (delete, "deleted.txt"),
+    ] {
+        assert!(result.content.contains(expected));
+        assert_eq!(result.metadata.changed_files, vec![expected]);
+        assert!(result.to_model_content().contains(expected));
+        assert!(
+            !result
+                .to_model_content()
+                .contains(&temp.path().to_string_lossy().to_string())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn write_file_records_controlled_mutation_events_when_session_store_is_available()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
