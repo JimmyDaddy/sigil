@@ -181,6 +181,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-mcp --lib
 
+      - name: Test Windows builtin tool paths
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p sigil-tools-builtin --lib
+
       - name: Test Windows runtime integration
         if: runner.os == 'Windows'
         run: cargo test --locked -p sigil-runtime --lib

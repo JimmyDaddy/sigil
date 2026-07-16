@@ -5598,6 +5598,29 @@ fn builtin_text_limit_and_path_helpers_cover_multibyte_edges() -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_prefixed_workspace_paths_resolve_existing_and_missing_targets() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let existing = workspace.path().join("existing.txt");
+    fs::write(&existing, "existing")?;
+    let canonical_workspace = workspace.path().canonicalize()?;
+
+    assert_eq!(
+        super::lexically_normalize_path(&canonical_workspace.join("nested/../existing.txt"))?,
+        existing.canonicalize()?
+    );
+    assert_eq!(
+        super::resolve_existing_prefix(&canonical_workspace.join("missing/child.txt"))?,
+        canonical_workspace.join("missing/child.txt")
+    );
+
+    let subject = super::tool_path_subject(&canonical_workspace, "existing.txt")?;
+    assert_eq!(subject.scope, ToolSubjectScope::Workspace);
+    assert_eq!(subject.normalized, "existing.txt");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn delete_file_and_path_resolution_helpers_cover_external_and_symlink_paths() -> Result<()> {

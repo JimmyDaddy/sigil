@@ -137,7 +137,12 @@ pub(crate) fn lexically_normalize_path(path: &Path) -> Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Prefix(_) => bail!("platform path prefixes are not supported"),
+            Component::Prefix(prefix) => {
+                if !normalized.as_os_str().is_empty() {
+                    bail!("platform path prefix must be the first component");
+                }
+                normalized.push(prefix.as_os_str());
+            }
             Component::RootDir => normalized.push(component.as_os_str()),
             Component::CurDir => {}
             Component::Normal(part) => normalized.push(part),
@@ -156,28 +161,26 @@ pub(crate) fn lexically_normalize_path(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn resolve_existing_prefix(absolute_path: &Path) -> Result<PathBuf> {
-    let components = absolute_path
-        .components()
-        .map(|component| component.as_os_str().to_os_string())
-        .collect::<Vec<OsString>>();
-    let mut resolved = PathBuf::new();
-    for (index, component) in components.iter().enumerate() {
-        let candidate = if resolved.as_os_str().is_empty() {
-            PathBuf::from(component)
-        } else {
-            resolved.join(component)
-        };
+    let mut candidate = absolute_path.to_path_buf();
+    let mut missing_suffix = Vec::<OsString>::new();
+    loop {
         match fs::symlink_metadata(&candidate) {
             Ok(_) => {
-                resolved = fs::canonicalize(&candidate)
+                let mut resolved = fs::canonicalize(&candidate)
                     .with_context(|| format!("failed to resolve {}", candidate.display()))?;
+                for component in missing_suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return lexically_normalize_path(&resolved);
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                let mut missing_path = candidate;
-                for remaining in components.iter().skip(index + 1) {
-                    missing_path.push(remaining);
+                let Some(file_name) = candidate.file_name().map(ToOwned::to_owned) else {
+                    return lexically_normalize_path(absolute_path);
+                };
+                missing_suffix.push(file_name);
+                if !candidate.pop() {
+                    return lexically_normalize_path(absolute_path);
                 }
-                return lexically_normalize_path(&missing_path);
             }
             Err(error) => {
                 return Err(error)
@@ -185,7 +188,6 @@ pub(crate) fn resolve_existing_prefix(absolute_path: &Path) -> Result<PathBuf> {
             }
         }
     }
-    Ok(resolved)
 }
 
 pub(crate) fn relativize(workspace_root: &Path, path: &Path) -> Result<String> {
