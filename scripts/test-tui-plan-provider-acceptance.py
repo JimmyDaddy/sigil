@@ -165,6 +165,7 @@ allowed_tools = ["read_file"]
 
     def test_cost_is_positive_and_locally_bounded(self) -> None:
         self.assertEqual(MODULE.parse_cost_microusd("0.05"), 50_000)
+        self.assertGreaterEqual(MODULE.PLAN_RUN_WAIT_CAP_SECS, 90.0)
         for value in ("0", "-1", "nan", "inf", "1.01", "not-a-number"):
             with self.subTest(value=value):
                 with self.assertRaises(MODULE.PlanAcceptanceError):

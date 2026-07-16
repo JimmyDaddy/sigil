@@ -30,6 +30,7 @@ SUPPORT_SPEC.loader.exec_module(SUPPORT)
 
 SCHEMA_VERSION = 1
 DEFAULT_FIXTURE = Path("dev/evals/plan-fixtures/plan-only")
+PLAN_RUN_WAIT_CAP_SECS = 120.0
 COMMON_PROVIDER_ENV_NAMES = {
     "ALL_PROXY",
     "HTTPS_PROXY",
@@ -678,7 +679,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         runner.send("\r")
         audit = wait_for_plan_audit(
             fixture_root / "state",
-            deadline.remaining(),
+            deadline.remaining(PLAN_RUN_WAIT_CAP_SECS),
             tick=lambda: runner.read_available(0.01),
         )
         plan_screen = runner.wait_until(
@@ -710,6 +711,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if runner is not None:
             runner.stop()
+        if audit is None and fixture_root is not None:
+            incomplete_sessions = session_files(fixture_root / "state")
+            if len(incomplete_sessions) == 1:
+                try:
+                    audit = read_plan_audit(incomplete_sessions[0])
+                except (OSError, json.JSONDecodeError, PlanAcceptanceError):
+                    pass
         if workspace is not None and before_digest is not None and workspace.exists():
             try:
                 workspace_unchanged = before_digest == workspace_digest(workspace)
