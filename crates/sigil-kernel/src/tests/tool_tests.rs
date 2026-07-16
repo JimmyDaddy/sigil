@@ -16,6 +16,16 @@ use crate::{
 };
 
 #[test]
+fn weak_tool_registry_tracks_external_ownership_without_retaining_it() {
+    let registry = ToolRegistry::new();
+    let weak_registry = registry.downgrade();
+
+    assert!(weak_registry.upgrade().is_some());
+    drop(registry);
+    assert!(weak_registry.upgrade().is_none());
+}
+
+#[test]
 fn tool_diff_stats_ignore_file_headers() {
     let stats = ToolDiffStats::from_unified_diff(
         "--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,3 @@\n old\n-removed\n+added\n+another",

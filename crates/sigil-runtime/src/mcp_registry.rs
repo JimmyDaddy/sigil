@@ -1338,7 +1338,7 @@ pub(super) fn register_lazy_mcp_activation_tool(
         return;
     }
     registry.register(Arc::new(McpActivateServerTool {
-        registry: registry.clone(),
+        registry: registry.downgrade(),
         root_config: root_config.clone(),
         provider_capabilities: provider_capabilities.clone(),
         workspace_root,
@@ -1380,7 +1380,7 @@ pub fn attach_remote_mcp_activation_presenter(
         return;
     }
     registry.register(Arc::new(McpActivateServerTool {
-        registry: registry.clone(),
+        registry: registry.downgrade(),
         root_config: root_config.clone(),
         provider_capabilities: provider_capabilities.clone(),
         workspace_root,
@@ -1392,7 +1392,7 @@ pub fn attach_remote_mcp_activation_presenter(
 
 #[derive(Clone)]
 struct McpActivateServerTool {
-    registry: ToolRegistry,
+    registry: sigil_kernel::WeakToolRegistry,
     root_config: RootConfig,
     provider_capabilities: ProviderCapabilities,
     workspace_root: PathBuf,
@@ -1565,7 +1565,10 @@ impl Tool for McpActivateServerTool {
             ));
         }
 
-        let mut registry = self.registry.clone();
+        let mut registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| anyhow!("MCP tool registry is no longer available"))?;
         if let Some(server) = self.lazy_server(server_name)
             && server.streamable_http().is_some()
         {
@@ -1633,8 +1636,13 @@ impl McpActivateServerTool {
 
     fn registered_tool_count(&self, server_name: &str) -> usize {
         self.registry
-            .lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name)
-            .len()
+            .upgrade()
+            .map(|registry| {
+                registry
+                    .lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name)
+                    .len()
+            })
+            .unwrap_or_default()
     }
 }
 

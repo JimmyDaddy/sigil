@@ -147,6 +147,22 @@ fn test_root_config(provider: &str) -> RootConfig {
     }
 }
 
+fn command_exists_on_path(command: &str) -> bool {
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    if cfg!(windows) {
+        let path_extensions =
+            env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+        return env::split_paths(&path).any(|directory| {
+            path_extensions.split(';').any(|extension| {
+                !extension.is_empty() && directory.join(format!("{command}{extension}")).is_file()
+            })
+        });
+    }
+    env::split_paths(&path).any(|directory| directory.join(command).is_file())
+}
+
 #[test]
 fn append_session_control_entries_updates_in_memory_session() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -1757,7 +1773,7 @@ async fn explicit_workspace_trust_reaches_code_intelligence_services() -> Result
 
 #[tokio::test]
 async fn mcp_activate_server_tool_registers_lazy_tools_for_model_turns() -> Result<()> {
-    if Command::new("python3").arg("--version").output().is_err() {
+    if !command_exists_on_path("python3") {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -1850,6 +1866,12 @@ while True:
 
     assert!(!activation.is_error());
     assert!(registry.spec_for("mcp__lazy__echo").is_some());
+    let weak_registry = registry.downgrade();
+    drop(registry);
+    assert!(
+        weak_registry.upgrade().is_none(),
+        "the activation tool must not retain its containing registry"
+    );
     Ok(())
 }
 
@@ -1883,7 +1905,7 @@ async fn explicit_optional_lazy_activation_fails_instead_of_reporting_empty_read
 
 #[tokio::test]
 async fn refresh_mcp_server_tools_replaces_existing_server_tool_surface() -> Result<()> {
-    if Command::new("python3").arg("--version").output().is_err() {
+    if !command_exists_on_path("python3") {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -1953,7 +1975,7 @@ while True:
 
 #[tokio::test]
 async fn refresh_mcp_server_tools_uses_exact_server_scope_and_stable_hashed_names() -> Result<()> {
-    if Command::new("python3").arg("--version").output().is_err() {
+    if !command_exists_on_path("python3") {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -2095,7 +2117,7 @@ async fn mcp_tool_contents(
 #[tokio::test]
 async fn refresh_mcp_server_tools_replaces_poisoned_generation_before_first_new_call() -> Result<()>
 {
-    if Command::new("python3").arg("--version").output().is_err() {
+    if !command_exists_on_path("python3") {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -2195,7 +2217,7 @@ while True:
 #[cfg(unix)]
 #[tokio::test]
 async fn refresh_mcp_server_tools_reaps_healthy_retired_generation_process_group() -> Result<()> {
-    if Command::new("python3").arg("--version").output().is_err() {
+    if !command_exists_on_path("python3") {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -2295,7 +2317,7 @@ while True:
 #[tokio::test]
 async fn refresh_mcp_server_tools_rolls_back_new_generation_when_old_shutdown_fails() -> Result<()>
 {
-    if Command::new("python3").arg("--version").output().is_err() {
+    if !command_exists_on_path("python3") {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -2434,7 +2456,7 @@ async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -
 
 #[tokio::test]
 async fn refresh_optional_mcp_server_failure_preserves_healthy_old_generation() -> Result<()> {
-    if Command::new("python3").arg("--version").output().is_err() {
+    if !command_exists_on_path("python3") {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;

@@ -3,7 +3,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, Weak},
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -2049,6 +2049,18 @@ pub struct ToolRegistry {
     deny_scope: Option<Arc<ToolRegistryScope>>,
 }
 
+/// Non-owning handle used by tools that need to mutate their containing registry.
+///
+/// Keeping this handle inside a registered tool does not create a registry-to-tool ownership
+/// cycle. It upgrades only while some external [`ToolRegistry`] owner remains alive.
+#[derive(Clone)]
+pub struct WeakToolRegistry {
+    tools: Weak<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
+    run_input_preparer: Weak<RwLock<Option<Arc<dyn crate::AgentRunInputPreparer>>>>,
+    scope: Option<Arc<ToolRegistryScope>>,
+    deny_scope: Option<Arc<ToolRegistryScope>>,
+}
+
 /// Strong role-specific view over a shared tool registry.
 #[derive(Clone)]
 pub struct ScopedToolRegistry {
@@ -2070,6 +2082,16 @@ impl ToolRegistry {
     /// Creates an empty tool registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a non-owning handle that can recover this registry while an external owner lives.
+    pub fn downgrade(&self) -> WeakToolRegistry {
+        WeakToolRegistry {
+            tools: Arc::downgrade(&self.tools),
+            run_input_preparer: Arc::downgrade(&self.run_input_preparer),
+            scope: self.scope.clone(),
+            deny_scope: self.deny_scope.clone(),
+        }
     }
 
     /// Registers one tool by its stable spec name, replacing any prior entry with the same name.
@@ -2602,6 +2624,18 @@ impl ToolRegistry {
             .get(name)
             .cloned()
             .ok_or_else(|| anyhow!("unknown tool {name}"))
+    }
+}
+
+impl WeakToolRegistry {
+    /// Recovers an owning registry handle, or returns `None` after the registry has been released.
+    pub fn upgrade(&self) -> Option<ToolRegistry> {
+        Some(ToolRegistry {
+            tools: self.tools.upgrade()?,
+            run_input_preparer: self.run_input_preparer.upgrade()?,
+            scope: self.scope.clone(),
+            deny_scope: self.deny_scope.clone(),
+        })
     }
 }
 

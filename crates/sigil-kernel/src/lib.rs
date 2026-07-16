@@ -463,7 +463,7 @@ pub use tool::{
     ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink, ToolReceiptMetadata,
     ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind,
-    ToolSubjectScope,
+    ToolSubjectScope, WeakToolRegistry,
 };
 pub use verification::{
     ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,
