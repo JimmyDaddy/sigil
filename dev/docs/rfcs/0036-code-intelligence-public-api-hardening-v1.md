@@ -1,6 +1,6 @@
 # RFC-0036 Code Intelligence Public API Hardening V1
 
-状态：in progress / R36.0-R36.4
+状态：complete / R36.0-R36.4
 
 创建日期：2026-07-16
 
@@ -125,3 +125,9 @@ git diff --check
 - R36.3 complete. The main CI workflow now runs the same locked strict-rustdoc command after the
   workspace check, so crate, runtime, manifest and workflow changes cannot silently expand the
   undocumented code-intelligence surface.
+- R36.4 complete. The affected-scope standard gate passed with 144 code-intel and 570 runtime
+  tests plus strict Clippy. Documentation checks, workflow parsing, strict rustdoc and diff checks
+  also pass. The final code-quality audit found no remaining public module-path escape, missing-doc
+  suppression or dead production API; the completeness audit found every acceptance criterion
+  implemented. Hosted CI execution remains delivery evidence after a future push, not a release
+  action in this RFC.
