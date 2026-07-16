@@ -1,6 +1,6 @@
 # RFC-0037 Cross-platform CI Reliability V1
 
-状态：in progress / R37.0-R37.4
+状态：complete / R37.0-R37.4
 
 创建日期：2026-07-17
 
@@ -136,3 +136,11 @@ pushed and GitHub Actions runs it.
   counts. Cargo minor/patch proposals and Actions proposals are grouped, while Cargo major updates
   stay isolated for explicit review. YAML parsing and contract assertions prove both ecosystem
   roots, weekly schedules, update groups and PR limits.
+- R37.4 complete. The final code-quality audit removed executable caching from the security
+  scanner, pinned the cargo-deny action release, expanded triggers to every policy surface, and
+  added a tested consistency gate for `deny.toml`, cargo-audit and the dependency ledger. The
+  affected standard gate passes with 184 tool tests and strict Clippy; actionlint, all YAML parsing,
+  policy tests, cargo-deny, cargo-audit, docs and diff checks pass. The completeness audit found all
+  RFC acceptance criteria implemented with no remaining local finding. macOS has direct local
+  execution evidence; Windows hosted execution remains pending a future push and is not claimed as
+  complete external evidence here.

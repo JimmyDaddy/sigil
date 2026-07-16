@@ -85,11 +85,14 @@ P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为
 `.github/workflows/dependency-supply-chain.yml` 将上述发布前扫描提升为常规仓库门禁：
 
 - Cargo manifest、lockfile、`deny.toml` 或 workflow 变化时运行，此外每周执行一次；
-- `cargo-deny 0.20.x` 的官方 action 按已提交的 `deny.toml` 检查 advisories、bans、licenses 和 sources；
+- `cargo-deny 0.20.2` 的官方 action release 按已提交的 `deny.toml` 检查 advisories、bans、licenses 和 sources；
 - `cargo-audit 0.22.2` 独立复扫 `Cargo.lock`，只携带本台账已说明的
   `RUSTSEC-2025-0141` 与 `RUSTSEC-2024-0436` 两个精确例外；
 - 两个 job 都是阻塞门禁，不使用 `continue-on-error`，且 workflow 权限仅为
   `contents: read`。
+- 扫描前先运行 `scripts/check-supply-chain-policy.py` 及其单测，确保 `deny.toml`、workflow
+  和本台账中的 advisory 例外一致；安全扫描器从 crates.io 按锁定版本安装，不信任跨 run
+  缓存的可执行文件。
 
 新增、删除或修改 advisory 例外时，必须原子更新 `deny.toml`、本台账和 workflow 的
 `cargo audit --ignore` 参数，并在本地重新执行：
