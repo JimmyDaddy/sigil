@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::{fs, io::ErrorKind, path::Path};
 
@@ -53,8 +55,15 @@ pub(crate) async fn process_group_has_live_members(process_id: u32) -> Result<bo
             .context("Linux process-group inspection task failed")
     }
 
-    #[cfg(not(target_os = "linux"))]
-    Ok(true)
+    #[cfg(target_os = "macos")]
+    {
+        macos_process_group_has_live_members(process_id).await
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +210,50 @@ fn parse_linux_proc_stat(contents: &str) -> Result<LinuxProcStat> {
 #[cfg(target_os = "linux")]
 fn linux_state_is_live(state: char) -> bool {
     !matches!(state, 'Z' | 'X' | 'x')
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_process_group_has_live_members(process_group_id: u32) -> Result<bool> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::process::Command::new("/bin/ps")
+            .args(["-axo", "pgid=,state="])
+            .output(),
+    )
+    .await
+    .context("macOS process-group inspection timed out")?
+    .context("failed to run macOS process-group inspection")?;
+    if !output.status.success() {
+        bail!(
+            "macOS process-group inspection exited with {}",
+            output.status
+        );
+    }
+    let stdout = std::str::from_utf8(&output.stdout)
+        .context("macOS process-group inspection output is not UTF-8")?;
+    macos_ps_has_live_group_members(stdout, process_group_id)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ps_has_live_group_members(stdout: &str, process_group_id: u32) -> Result<bool> {
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let observed_group = fields
+            .next()
+            .context("macOS process-group inspection row is missing pgid")?
+            .parse::<u32>()
+            .context("macOS process-group inspection row has invalid pgid")?;
+        let state = fields
+            .next()
+            .context("macOS process-group inspection row is missing state")?;
+        if fields.next().is_some() {
+            bail!("macOS process-group inspection row has unexpected fields");
+        }
+        if observed_group == process_group_id && !state.starts_with('Z') {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

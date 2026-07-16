@@ -928,7 +928,9 @@ async fn docker_cleanup_output_limit_force_removes_and_verifies_daemon_container
     assert!(output.stdout.total_bytes > 8 * 1024 * 1024);
     assert_eq!(
         receipt.resources.cleanup.status,
-        ExecutionCleanupStatus::Completed
+        ExecutionCleanupStatus::Completed,
+        "unexpected cleanup evidence: {:?}",
+        receipt.resources.cleanup
     );
     assert!(!fixture.state_path.exists());
     assert_detached_writer_stopped(&fixture).await?;

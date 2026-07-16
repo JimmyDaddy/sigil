@@ -73,6 +73,26 @@ fn linux_process_group_scan_is_conservative_when_proc_is_unavailable() -> Result
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_ps_parser_ignores_zombies_and_detects_live_group_members() -> Result<()> {
+    let zombie_only = "  91 Z\n  91 Z+\n  92 R\n";
+    assert!(!macos_ps_has_live_group_members(zombie_only, 91)?);
+
+    let live_member = "  91 Z\n  91 S+\n";
+    assert!(macos_ps_has_live_group_members(live_member, 91)?);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_ps_parser_rejects_incomplete_rows() {
+    let error =
+        macos_ps_has_live_group_members("91\n", 91).expect_err("missing state must fail closed");
+
+    assert!(error.to_string().contains("missing state"));
+}
+
 #[cfg(unix)]
 #[test]
 fn process_probe_reports_current_test_process_as_live() -> Result<()> {
