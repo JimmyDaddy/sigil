@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import pty
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -100,6 +102,50 @@ def strip_control(data: bytes) -> str:
         byte for byte in without_ansi if byte in (9, 10, 13) or byte >= 32
     )
     return without_controls.decode("utf-8", errors="replace")
+
+
+def feedback_export_result_visible(rendered: str) -> bool:
+    """Match stable export-result controls despite absolute-cursor repaint gaps."""
+    return (
+        "Saved locally." in rendered
+        and "Enter review JSON" in rendered
+        and "B open bug form" in rendered
+    )
+
+
+class ProviderFixture(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), ProviderFixtureHandler)
+        self.requests: list[tuple[str, str]] = []
+
+
+class ProviderFixtureHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def record_and_respond(self) -> None:
+        fixture = self.server
+        assert isinstance(fixture, ProviderFixture)
+        fixture.requests.append((self.command, self.path))
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length:
+            self.rfile.read(content_length)
+        body = b'{"is_available":true,"balance_infos":[]}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract.
+        self.record_and_respond()
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract.
+        self.record_and_respond()
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
 
 
 class PtyRunner:
@@ -221,7 +267,13 @@ class PtyRunner:
         self.raw_log.write_bytes(bytes(self.output))
 
 
-def write_config(path: Path, workspace: Path, state_dir: Path, cache_dir: Path) -> None:
+def write_config(
+    path: Path,
+    workspace: Path,
+    state_dir: Path,
+    cache_dir: Path,
+    provider_origin: str,
+) -> None:
     path.write_text(
         f'''[workspace]
 root = "{workspace}"
@@ -244,9 +296,9 @@ mouse_capture = false
 osc52_clipboard = false
 
 [providers.deepseek]
-base_url = "https://{CANARIES[4]}/v1"
-beta_base_url = "https://{CANARIES[4]}/beta"
-anthropic_base_url = "https://{CANARIES[4]}/anthropic"
+base_url = "{provider_origin}/{CANARIES[4]}/v1"
+beta_base_url = "{provider_origin}/{CANARIES[4]}/beta"
+anthropic_base_url = "{provider_origin}/{CANARIES[4]}/anthropic"
 api_key = "{CANARIES[1]}"
 strict_tools_mode = "auto"
 ''',
@@ -322,12 +374,14 @@ def write_report(
     bundle: dict | None,
     error: str | None,
     checks: dict[str, bool],
+    provider_request_count: int,
 ) -> None:
     doctor = bundle.get("doctor", {}) if isinstance(bundle, dict) else {}
     report = {
         "status": status,
         "schema_version": bundle.get("schema_version") if bundle else None,
         "doctor_check_count": len(doctor.get("checks", [])),
+        "provider_request_count": provider_request_count,
         **checks,
         "error": error,
     }
@@ -354,7 +408,12 @@ def main() -> int:
         directory.mkdir(parents=True, exist_ok=True)
     (workspace / "private.txt").write_text(CANARIES[2], encoding="utf-8")
     config_path = home_dir / "sigil.toml"
-    write_config(config_path, workspace, state_dir, cache_dir)
+    provider_server = ProviderFixture()
+    provider_thread = threading.Thread(target=provider_server.serve_forever, daemon=True)
+    provider_thread.start()
+    provider_host, provider_port = provider_server.server_address
+    provider_origin = f"http://{provider_host}:{provider_port}"
+    write_config(config_path, workspace, state_dir, cache_dir, provider_origin)
 
     binary = (
         args.binary.resolve()
@@ -386,6 +445,8 @@ def main() -> int:
         "state_tree_unchanged_after_export": False,
         "modal_input_exclusive": False,
         "privacy_canaries_absent": False,
+        "provider_fixture_loopback_only": False,
+        "provider_generation_request_absent": False,
     }
     try:
         runner.start()
@@ -429,11 +490,7 @@ def main() -> int:
 
         runner.send("\r")
         runner.wait_until(
-            lambda text: (
-                "Saved locally. Nothing was uploaded" in text
-                and "Enter review JSON" in text
-                and "B open bug form" in text
-            ),
+            feedback_export_result_visible,
             args.timeout,
             "feedback export result",
         )
@@ -471,6 +528,14 @@ def main() -> int:
         if runner.wait_for_exit(args.timeout) != 0:
             raise RuntimeError("TUI exited unsuccessfully after feedback acceptance")
         checks["modal_input_exclusive"] = True
+        generation_paths = ("/chat/completions", "/messages", "/responses")
+        if any(
+            path.endswith(generation_paths)
+            for _, path in provider_server.requests
+        ):
+            raise RuntimeError("feedback flow made an unexpected provider generation request")
+        checks["provider_fixture_loopback_only"] = True
+        checks["provider_generation_request_absent"] = True
         status = "passed"
         return_code = 0
     except Exception as error:  # noqa: BLE001 - acceptance reports bounded failures.
@@ -478,7 +543,17 @@ def main() -> int:
         return_code = 1
     finally:
         runner.close()
-        write_report(report_path, status, bundle, error_text, checks)
+        provider_server.shutdown()
+        provider_server.server_close()
+        provider_thread.join(timeout=5)
+        write_report(
+            report_path,
+            status,
+            bundle,
+            error_text,
+            checks,
+            len(provider_server.requests),
+        )
         print(f"feedback PTY acceptance: {status}")
         print(f"report: {report_path}")
         print(f"raw log: {raw_log}")

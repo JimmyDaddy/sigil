@@ -12,6 +12,12 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "scripts/coverage.sh"
+      - "scripts/alpha-dogfood-campaign.py"
+      - "scripts/test-alpha-dogfood-campaign.py"
+      - "scripts/context-v1-binary-acceptance.py"
+      - "scripts/image-attachment-v1-acceptance.py"
+      - "scripts/tui-attention-signals-pty-acceptance.py"
+      - "scripts/tui-feedback-pty-acceptance.py"
       - "scripts/tui-web-pty-acceptance.py"
   pull_request:
     paths:
@@ -22,6 +28,12 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "scripts/coverage.sh"
+      - "scripts/alpha-dogfood-campaign.py"
+      - "scripts/test-alpha-dogfood-campaign.py"
+      - "scripts/context-v1-binary-acceptance.py"
+      - "scripts/image-attachment-v1-acceptance.py"
+      - "scripts/tui-attention-signals-pty-acceptance.py"
+      - "scripts/tui-feedback-pty-acceptance.py"
       - "scripts/tui-web-pty-acceptance.py"
 
 permissions:
@@ -39,6 +51,16 @@ env:
   RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
+  dogfood-contracts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Verify alpha dogfood runner contracts
+        run: python3 scripts/test-alpha-dogfood-campaign.py
+
   fmt:
     runs-on: ubuntu-latest
 
@@ -56,7 +78,9 @@ jobs:
         run: cargo fmt --all --check
 
   check:
-    needs: fmt
+    needs:
+      - dogfood-contracts
+      - fmt
     runs-on: ubuntu-latest
 
     steps:

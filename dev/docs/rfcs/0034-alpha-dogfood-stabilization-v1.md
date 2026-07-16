@@ -1,6 +1,6 @@
 # RFC-0034 Alpha Dogfood Stabilization V1
 
-状态：accepted / R34.0-R34.1 complete / R34.2-R34.5 planned
+状态：accepted / R34.0-R34.2 complete / R34.3-R34.5 planned
 
 创建日期：2026-07-16
 
@@ -53,13 +53,14 @@ Lower tiers cannot be presented as stronger evidence. A passing loopback case pr
 
 The offline campaign runner must:
 
-1. accept an explicit executable path;
+1. accept an explicit standalone Mach-O, ELF or PE executable path and reject dependency-bearing launchers;
 2. run `sigil --version` before any case;
 3. parse version, commit, target and profile from that output;
 4. compute the executable SHA-256 before any case;
-5. optionally require exact expected version, build-reported commit prefix and executable SHA-256;
-6. reject a missing, non-executable or mismatched binary before creating case state;
-7. record only a safe binary label, SHA-256 and parsed build identity, not its absolute local path.
+5. freeze the executable in a private temporary directory and execute only that copy for the entire campaign;
+6. optionally require exact expected version, build-reported commit prefix and executable SHA-256;
+7. reject a missing, non-executable or mismatched frozen copy before creating case state;
+8. record only a safe binary label, SHA-256 and parsed build identity, not its absolute local path.
 
 The runner never builds implicitly. Building a candidate and selecting the binary remain separate, visible operations so a stale debug or release binary cannot silently satisfy the campaign.
 
@@ -73,15 +74,18 @@ R34.2 aggregates these existing production paths:
 - terminal attention default-off/explicit-BEL behavior through a real TUI PTY;
 - image path/clipboard/provider-wire/session/compaction flow through a real TUI PTY and loopback providers.
 
-Every case receives its own output directory. The aggregate runner continues after a failed case, writes a terminal manifest and exits non-zero when any selected case fails. Clipboard cases may only be skipped through an explicit flag; the manifest must record the skip reason.
+Every case receives its own output directory. The aggregate runner continues after a failed case, writes a terminal manifest and exits non-zero when any selected case fails. Clipboard cases may only be skipped through an explicit flag; the manifest must record the skip reason. An outer timeout first interrupts the harness to permit its cleanup handlers, then reaps remaining detached descendants.
 
-The runner starts every case with a minimal environment allowlist. It replaces `HOME`, XDG roots and temporary storage with case-owned directories; does not inherit provider credentials, Sigil config overrides or ambient HTTP proxy state; and configures non-loopback HTTP/HTTPS attempts to fail against a closed local endpoint while preserving loopback fixture access. Existing case scripts still own their finer workspace/state/cache setup, but they cannot accidentally fall back to the user's provider or config environment.
+The runner starts every case with a minimal environment allowlist. It replaces `HOME`, XDG roots and temporary storage with case-owned directories; does not inherit provider credentials, Sigil config overrides or ambient HTTP proxy state; and points ambient proxy routes at a closed loopback endpoint. Existing case scripts own their finer workspace/state/cache setup and configure/assert case-owned loopback services, so they cannot accidentally fall back to the user's provider or config environment.
+
+This is defense in depth, not an OS network sandbox. RFC-0034 only calls the reviewed cases offline; it does not claim to deny every direct socket that arbitrary future code could open.
 
 ## 7. Evidence and privacy
 
 The aggregate `manifest.json` and `summary.md` may contain:
 
 - schema version and campaign terminal status;
+- campaign start and finish timestamps;
 - selected case ids and their passed/failed/skipped status;
 - duration and relative report/log directories;
 - parsed Sigil version, commit, target and profile;
@@ -95,7 +99,7 @@ They must not contain:
 - prompt text, tool arguments, file content or diff;
 - environment names or values, credentials, private endpoints or session log content.
 
-Raw case artifacts remain under ignored `.repo-local-dev` output by default. They are local debugging evidence and are never committed or uploaded automatically.
+Raw case artifacts remain under ignored `.repo-local-dev` output by default. A repository-local custom output is rejected unless Git ignores it; an external custom output is labeled as explicitly selected local output. These artifacts are local debugging evidence and are never uploaded automatically.
 
 ## 8. Failure classification
 
@@ -123,7 +127,7 @@ Only evidence-bound failures unlock fixes. A harness defect must be repaired in 
 
 - Published Distribution Smoke passes npm on Linux/Windows/macOS ARM/macOS Intel, Homebrew on both macOS architectures, and Release checksum/attestation checks.
 - Offline runner refuses an incorrect binary identity before executing cases.
-- Offline cases cannot inherit user provider credentials/config or reach a public provider through ambient proxy state.
+- Offline cases cannot inherit user provider credentials/config or use ambient proxy state; their reviewed configs and request assertions remain loopback-only.
 - Selected cases execute through the existing real binary and real PTY entrypoints, not a test-only agent loop.
 - Every case is isolated and the aggregate manifest is written on both success and failure.
 - Aggregate evidence contains no absolute private paths, prompts, raw provider material, credentials or session content.
@@ -149,4 +153,5 @@ R34.3-R34.5 add their own targeted PTY, provider, docs and full-workspace gates 
 ## 12. Progress
 
 - R34.0 complete：RFC、execution slices、privacy/evidence contract、exact-binary admission and dependency order accepted on 2026-07-16.
-- R34.1 complete：GitHub Actions run `29475042404` passed the exact `alpha.4` public distribution matrix: four npm platforms, two Homebrew architectures, GitHub archive checksums, artifact attestations and doctor build/privacy metadata.
+- R34.1 complete：[GitHub Actions run 29475042404](https://github.com/JimmyDaddy/sigil/actions/runs/29475042404) passed the exact `alpha.4` public distribution matrix: four npm platforms, two Homebrew architectures, GitHub archive checksums, artifact attestations and doctor build/privacy metadata.
+- R34.2 complete：the released `alpha.4` macOS ARM binary (`e4bfd6c96c099df2bda8abb3db07ad39b3cd05ca72702a01d3d9c407b2ae26c0`) passed Context, Web, Feedback, Attention and Image through the aggregate runner. The terminal manifest digest is `e8131b4cf7511af0f0f51e879717e6934d3d95936bb0df62630ff58c65d27905`. The first run exposed two `harness_defect` findings—an aggregate state/cache override and a cursor-repaint-sensitive feedback marker—which were fixed and covered before the successful rerun. Post-implementation review additionally tightened native-only frozen-binary execution, detached-descendant cleanup, loopback Feedback evidence, output ignore policy and terminal-failure contracts; no product regression was observed.

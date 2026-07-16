@@ -42,6 +42,10 @@ below explain how Sigil is engineered and why its internal boundaries exist.
 
 ## Release and Distribution
 
+- [Alpha dogfood campaigns](alpha-dogfood.md): public distribution smoke,
+  isolated production-binary acceptance, privacy boundaries, and local evidence.
+- [Alpha dogfood campaign（中文）](alpha-dogfood.zh-CN.md)：公开分发 smoke、
+  隔离的 production-binary 验收、隐私边界与本地证据。
 - [Model-backed evaluation](model-evaluation.md): explicit provider-backed
   acceptance, bounded cost admission, evidence, and report artifacts.
 - [真实模型评测](model-evaluation.zh-CN.md)：显式真实模型验收、成本准入、证据与报告产物。
