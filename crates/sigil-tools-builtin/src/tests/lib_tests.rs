@@ -839,8 +839,10 @@ async fn docker_cleanup_timeout_force_removes_and_verifies_daemon_container() ->
     let backend =
         DockerExecutionBackend::new(fixture.docker.clone(), "fixture:latest".to_owned(), false);
 
+    // Keep the deadline comfortably above process-start latency under a fully parallel workspace
+    // test run; the fixture still proves the timeout cleanup path by never exiting on its own.
     let receipt = backend
-        .execute(docker_cleanup_request(temp.path(), 2_000))
+        .execute(docker_cleanup_request(temp.path(), 5_000))
         .await?;
 
     assert_eq!(
