@@ -62,6 +62,25 @@ class AdmissionTests(unittest.TestCase):
             )
         )
 
+    def test_unknown_plan_cost_consumes_remaining_local_admission(self) -> None:
+        charged, confidence = MODULE.account_plan_result(
+            accounting_charged_microusd=100_000,
+            max_cost_microusd=500_000,
+            reservation_microusd=100_000,
+            result={"charged_microusd": 100_000, "checks": {}},
+        )
+        self.assertEqual(charged, 500_000)
+        self.assertEqual(confidence, "unknown")
+        self.assertEqual(
+            MODULE.admission_failure(
+                accounting_charged_microusd=charged,
+                next_reservation_microusd=400_000,
+                max_cost_microusd=500_000,
+                remaining_seconds=500,
+            ),
+            "budget_exhausted_before_admission",
+        )
+
     def test_environment_keeps_provider_inputs_but_drops_ambient_sigil_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with mock.patch.dict(
@@ -193,13 +212,83 @@ class EvidenceTests(unittest.TestCase):
             timeout_secs=600,
             max_cost_microusd=500_000,
             accounting_charged_microusd=100_000,
+            accounting_confidence="reported_or_reserved",
+            campaign_failure_class=None,
             results=results,
             artifact_policy="local_only_under_git_ignored_output",
         )
         serialized = json.dumps(manifest)
         self.assertNotIn("/Users/", serialized)
         self.assertFalse(manifest["budget"]["provider_side_cap"])
+        self.assertEqual(manifest["budget"]["accounting_confidence"], "reported_or_reserved")
+        self.assertIsNone(manifest["failure_class"])
         self.assertEqual(manifest["results"][0]["evidence_dir"], "plan-only/repetition-1")
+
+    def test_terminal_campaign_error_fails_even_when_all_case_results_passed(self) -> None:
+        results = [{"case_id": "plan-only", "repetition": 1, "status": "passed"}]
+        self.assertEqual(MODULE.terminal_status(results, 1, None), "passed")
+        self.assertEqual(
+            MODULE.terminal_status(results, 1, "campaign_internal_error"),
+            "failed",
+        )
+
+    def test_orchestration_error_after_admission_writes_terminal_manifest(self) -> None:
+        identity = MODULE.SUPPORT.BinaryIdentity(
+            "sigil",
+            "a" * 64,
+            "0.0.1-alpha.4",
+            "b" * 12,
+            "aarch64-apple-darwin",
+            "release",
+        )
+        source_config = mock.Mock(path=Path("/tmp/config.toml"), provider="deepseek")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "campaign"
+            with (
+                mock.patch.object(MODULE.PLAN, "validate_source_config", return_value=source_config),
+                mock.patch.object(MODULE.PLAN, "load_fixture", return_value={}),
+                mock.patch.object(
+                    MODULE.SUPPORT,
+                    "inspect_binary",
+                    return_value=(Path("/tmp/sigil"), identity),
+                ),
+                mock.patch.object(MODULE.SUPPORT, "assert_expected_identity"),
+                mock.patch.object(
+                    MODULE.SUPPORT,
+                    "raw_artifact_policy",
+                    return_value="local_only_under_git_ignored_output",
+                ),
+                mock.patch.object(
+                    MODULE.SUPPORT,
+                    "freeze_binary",
+                    side_effect=OSError("private path must not enter the manifest"),
+                ),
+            ):
+                exit_code = MODULE.main(
+                    [
+                        "--binary",
+                        "/tmp/sigil",
+                        "--config",
+                        "/tmp/config.toml",
+                        "--case",
+                        "plan-only",
+                        "--repetitions",
+                        "1",
+                        "--max-cost-usd",
+                        "0.100000",
+                        "--timeout-secs",
+                        "60",
+                        "--output-dir",
+                        str(output),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(manifest["budget"]["accounting_confidence"], "unknown")
+            self.assertEqual(manifest["results"][0]["failure_class"], "campaign_internal_error")
+            self.assertNotIn("private path", json.dumps(manifest))
 
 
 if __name__ == "__main__":

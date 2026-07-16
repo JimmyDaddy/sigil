@@ -232,6 +232,7 @@ fn sigil_plan_v1_accepts_single_string_notes_and_acceptance() -> Result<()> {
     .expect("single-string notes and acceptance should remain durable");
 
     assert_eq!(draft.notes, vec!["Plan mode only; no files were modified."]);
+    assert_eq!(draft.steps[0].step_id, "fix-readme-typo");
     assert_eq!(
         draft.steps[0].notes,
         vec![

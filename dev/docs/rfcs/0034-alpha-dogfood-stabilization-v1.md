@@ -1,6 +1,6 @@
 # RFC-0034 Alpha Dogfood Stabilization V1
 
-状态：accepted / R34.0-R34.3 complete / R34.4 in progress / R34.5 planned
+状态：accepted / R34.0-R34.5 complete
 
 创建日期：2026-07-16
 
@@ -157,3 +157,43 @@ R34.3-R34.5 add their own targeted PTY, provider, docs and full-workspace gates 
 - R34.1 complete：[GitHub Actions run 29475042404](https://github.com/JimmyDaddy/sigil/actions/runs/29475042404) passed the exact `alpha.4` public distribution matrix: four npm platforms, two Homebrew architectures, GitHub archive checksums, artifact attestations and doctor build/privacy metadata.
 - R34.2 complete：the released `alpha.4` macOS ARM binary (`e4bfd6c96c099df2bda8abb3db07ad39b3cd05ca72702a01d3d9c407b2ae26c0`) passed Context, Web, Feedback, Attention and Image through the aggregate runner. The terminal manifest digest is `e8131b4cf7511af0f0f51e879717e6934d3d95936bb0df62630ff58c65d27905`. The first run exposed two `harness_defect` findings—an aggregate state/cache override and a cursor-repaint-sensitive feedback marker—which were fixed and covered before the successful rerun. Post-implementation review additionally tightened native-only frozen-binary execution, detached-descendant cleanup, loopback Feedback evidence, output ignore policy and terminal-failure contracts; no product regression was observed.
 - R34.3 complete：the same released `alpha.4` binary plus the checksum-pinned DeepSeek V4 Flash tokenizer passed the standalone stateful real-PTY campaign. The final safe manifest digest is `0380c21401b5106b1128857390424f1506cd2d9f14c54387bd81cdda6f48e0d7`. Three real TUI processes proved four finalized turns, facts-before-final reply deduplication, one locally admitted compaction, one controlled checkpoint restore, modal-owned `F` conversation fork, and explicit source-to-fork `/resume`; the resumed screen additionally proved the active session identity was the fork. After all processes exited, source/fork durable final answers were re-audited exactly once and byte-exact JSONL evidence was preserved with independent checksums; both reconstructed VT screens also contained the canary exactly once. Iteration found and fixed harness defects around viewport markers, durable timing/schema, the sixth facts-continuation request, custom-route compaction admission, transient notices, fork identity, terminal re-audit, ignored-output admission and detached-process cleanup. Real dogfood also exposed unnecessary absolute workspace paths in file-tool results; the product now emits workspace-relative user/model-visible paths. The final harness preserves rather than weakens each product boundary.
+- R34.4 complete：an explicit one-repetition DeepSeek matrix ran with a frozen release-profile `alpha.4` binary, a ten-minute campaign deadline and an initial `$0.50` local admission budget. `small-code-edit`, `stale-after-write`, `workspace-trust` and `sandbox-denial` passed in the original aggregate; its model-eval manifest and result digests are `a76580303067dad2e43d2f312127f6491fa7053c3d1c97e4e055f69c236d2884` and `5dd65bab58d6f6bc872e02c5906f224a4c77c00c91839d1fabccf781b69eb9e4`. Three isolated Plan repair reruns each used a separate `$0.10` admission, so cumulative local admission/accounting across the initial matrix and diagnostic reruns was `$0.80`; this is not a provider-side billing cap or a statement of actual spend. The production-TUI `plan-only` case then passed on the repaired binary at commit `2133498f8f3b`; its safe manifest digest is `3f24e03f4e839e198d1214970c28d9f3084e55f8fad347714754fb660cdc70b9`, with exactly one durable Plan draft, one finalized run, three usage snapshots, only `grep`/`read_file`, no task handoff and an unchanged workspace. Successful-case evidence reports `$0.001792` for the four model cases and `$0.000756527` for Plan (`$0.002548527` total); failed-attempt provider cost is unknown because those attempts predated complete failure-session preservation. Dogfood classified and fixed three harness defects—PTY output backpressure, over-broad JSONL discovery, and a Plan wait shorter than the configured provider deadline—and one product regression: valid single-string `notes`/`acceptance` fields rendered as a plan card but were silently rejected by the durable Plan parser. Kernel now accepts one-or-many strings while the Plan prompt explicitly requests arrays; `id` is also accepted as the documented alias of durable `step_id`. Final review made the aggregate fail closed when cost evidence is unknown and guarantees a failed terminal manifest for orchestration errors, including errors after all case results exist.
+
+## 13. R34.5 completion audit
+
+### 13.1 Evidence reconciliation
+
+| Tier | Terminal evidence |
+| --- | --- |
+| Public distribution | [GitHub Actions run 29475042404](https://github.com/JimmyDaddy/sigil/actions/runs/29475042404) passed npm on four platforms, Homebrew on two architectures, Release checksums, attestations and doctor metadata for `v0.0.1-alpha.4`. |
+| Offline production binary | Context, Web, Feedback, Attention and Image all passed; safe aggregate manifest SHA-256 `e8131b4cf7511af0f0f51e879717e6934d3d95936bb0df62630ff58c65d27905`. |
+| Stateful PTY | Compact, checkpoint restore, modal fork, explicit resume and reply deduplication passed; safe manifest SHA-256 `0380c21401b5106b1128857390424f1506cd2d9f14c54387bd81cdda6f48e0d7`. |
+| Real provider | Four edit/verification cases passed with child manifest/results SHA-256 `a76580303067dad2e43d2f312127f6491fa7053c3d1c97e4e055f69c236d2884` / `5dd65bab58d6f6bc872e02c5906f224a4c77c00c91839d1fabccf781b69eb9e4`; repaired production-TUI Plan passed with safe manifest SHA-256 `3f24e03f4e839e198d1214970c28d9f3084e55f8fad347714754fb660cdc70b9`. |
+| User feedback | The public repository had zero open issues at reconciliation time. No local `/feedback` report was selected by the user for review or upload, so no private support bundle was read. |
+
+The real-provider result is intentionally composed from the original frozen-binary aggregate and the final Plan-only repair rerun. The product change is confined to structured Plan parsing and the later harness changes do not affect the four headless model-eval cases; repeating those paid cases would add cost without testing the changed path. The first aggregate's failed Plan terminal remains preserved rather than rewritten as a pass.
+
+### 13.2 Evidence-backed fixes
+
+| Classification | Finding | Resolution |
+| --- | --- | --- |
+| `harness_defect` | Long Plan input could fill the PTY output buffer while the harness was not draining redraws. | Drain output while typing and while polling durable state; regression-covered by the Plan harness tests. |
+| `harness_defect` | Recursive `*.jsonl` discovery counted input history as a second session. | Admit only `sessions/session-*.jsonl`; retain a mixed-state discovery fixture. |
+| `harness_defect` | A provider request allowed 90 seconds while Plan evidence inherited a 30-second step cap. | Use a 120-second Plan cap bounded by the explicit campaign deadline and preserve incomplete session evidence on failure. |
+| `product_regression` | Valid scalar `notes` and `acceptance` rendered visibly but prevented durable Plan creation. | The provider-neutral kernel accepts a string or string array and normalizes both to the existing durable vector contract; the Plan prompt now asks for arrays explicitly. |
+| `contract_alignment` | The Plan prompt documented `id`, while the durable parser only consumed `step_id`. | Treat `id` as a serialization alias and prove that it remains the durable step identifier. |
+| `harness_defect` | Missing or invalid Plan cost evidence could leave later paid cases eligible for admission. | Unknown cost confidence consumes the remaining local accounting budget and blocks later provider admission; invalid model evidence is reported with unknown accounting confidence too. |
+| `harness_defect` | An orchestration or terminal-cleanup exception could omit a terminal manifest or, after all case results existed, still appear passed. | Complete missing case records, retain a fixed privacy-safe campaign failure class, and require the campaign itself to be error-free before terminal status can pass. |
+
+### 13.3 Accepted limitations
+
+- Cost values are local admission and provider-reported evidence, not a provider-side hard billing cap. The initial matrix admitted `$0.50` and three Plan repair reruns admitted `$0.10` each (`$0.80` cumulative local admission/accounting); successful cases reported `$0.002548527`, while diagnostic failed runs before complete session preservation do not provide an exact provider-cost total.
+- One repetition per real-provider case is smoke evidence only and is not trend-eligible.
+- The paid campaign ran on macOS ARM with DeepSeek; it does not claim cross-provider or cross-platform remote-model conformance.
+- Remote MCP OAuth, persistent semantic graph, SQLite projection, physical worktree and Windows restricted backend remain behind their original evidence/product gates.
+- Checkpoint restore and session fork cover controlled file mutation and conversation state only; they do not undo shell, external process or remote side effects.
+- Raw PTY, provider and session evidence remains local under ignored output; only privacy-safe digests and counters are recorded here.
+
+### 13.4 Next-alpha readiness
+
+R34.5 is complete and the repository is ready for the next alpha release decision. The RFC-0034 full-scope gate passed formatting, `cargo check`, the complete workspace test suite and all-target Clippy with warnings denied; documentation and Pages-site gates also passed. Two independent final reviews found no unresolved P0/P1/P2 release blocker after the fail-closed accounting, terminal-manifest and Plan identifier fixes. This is a readiness conclusion rather than a release tag, and every limitation in section 13.3 remains explicit.

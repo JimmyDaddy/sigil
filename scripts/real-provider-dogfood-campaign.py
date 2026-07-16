@@ -116,6 +116,72 @@ def admission_failure(
     return None
 
 
+def account_plan_result(
+    *,
+    accounting_charged_microusd: int,
+    max_cost_microusd: int,
+    reservation_microusd: int,
+    result: dict[str, object],
+) -> tuple[int, str]:
+    checks = result.get("checks")
+    charged = result.get("charged_microusd")
+    if (
+        not isinstance(checks, dict)
+        or checks.get("cost_confidence") != "reported"
+        or not isinstance(charged, int)
+        or charged < reservation_microusd
+    ):
+        return max(accounting_charged_microusd, max_cost_microusd), "unknown"
+    return accounting_charged_microusd + charged, "reported"
+
+
+def append_missing_terminal_results(
+    results: list[dict[str, object]],
+    selected: Sequence[str],
+    repetitions: int,
+    failure_class: str,
+) -> None:
+    observed = {
+        (result.get("case_id"), result.get("repetition"))
+        for result in results
+    }
+    for case in CASE_ORDER:
+        if case not in selected:
+            continue
+        for repetition in range(1, repetitions + 1):
+            if (case, repetition) in observed:
+                continue
+            results.append(
+                {
+                    "case_id": case,
+                    "repetition": repetition,
+                    "status": "failed",
+                    "execution_status": "not_admitted",
+                    "failure_class": failure_class,
+                    "charged_microusd": 0,
+                    "evidence_dir": (
+                        f"plan-only/repetition-{repetition}"
+                        if case == PLAN_CASE
+                        else "model-eval"
+                    ),
+                }
+            )
+
+
+def terminal_status(
+    results: Sequence[dict[str, object]],
+    expected_results: int,
+    campaign_failure_class: str | None,
+) -> str:
+    return (
+        "passed"
+        if campaign_failure_class is None
+        and len(results) == expected_results
+        and all(result.get("status") == "passed" for result in results)
+        else "failed"
+    )
+
+
 def child_environment(case_root: Path, provider: str) -> dict[str, str]:
     environment = SUPPORT.identity_environment(os.environ)
     allowed_names = PLAN.COMMON_PROVIDER_ENV_NAMES | PLAN.PROVIDER_ENV_BY_NAME.get(provider, set())
@@ -351,6 +417,8 @@ def safe_manifest(
     timeout_secs: int,
     max_cost_microusd: int,
     accounting_charged_microusd: int,
+    accounting_confidence: str,
+    campaign_failure_class: str | None,
     results: Sequence[dict[str, object]],
     artifact_policy: str,
 ) -> dict[str, object]:
@@ -358,6 +426,7 @@ def safe_manifest(
         "schema_version": SCHEMA_VERSION,
         "campaign": "sigil-real-provider-dogfood-v1",
         "status": status,
+        "failure_class": campaign_failure_class,
         "started_at": started_at,
         "finished_at": finished_at,
         "duration_ms": duration_ms,
@@ -367,6 +436,7 @@ def safe_manifest(
         "budget": {
             "local_admission_max_microusd": max_cost_microusd,
             "accounting_charged_microusd": accounting_charged_microusd,
+            "accounting_confidence": accounting_confidence,
             "provider_side_cap": False,
         },
         "results": list(results),
@@ -393,6 +463,7 @@ def render_summary(manifest: dict[str, object]) -> str:
         f"Status: `{manifest['status']}`",
         f"Deadline: `{manifest['deadline_secs']}s`",
         f"Local admission budget: `${budget['local_admission_max_microusd'] / 1_000_000:.6f}`",
+        f"Accounting confidence: `{budget['accounting_confidence']}`",
         "Provider-side billing cap: `false`",
         "",
         "| Case | Repetition | Status |",
@@ -453,146 +524,167 @@ def main(argv: Sequence[str] | None = None) -> int:
     deadline = time.monotonic() + args.timeout_secs
     results: list[dict[str, object]] = []
     accounting_charged = 0
-    with tempfile.TemporaryDirectory(prefix="sigil-real-provider-campaign-") as temporary:
-        temporary_root = Path(temporary)
-        frozen_binary = SUPPORT.freeze_binary(binary_source, temporary_root, identity)
-        plan_budgets = iter(allocations["plan_run_budgets_microusd"])
-        if PLAN_CASE in selected:
-            for repetition in range(1, args.repetitions + 1):
-                budget = next(plan_budgets)
+    accounting_confidence = "reported_or_reserved"
+    campaign_failure_class: str | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="sigil-real-provider-campaign-") as temporary:
+            temporary_root = Path(temporary)
+            frozen_binary = SUPPORT.freeze_binary(binary_source, temporary_root, identity)
+            plan_budgets = iter(allocations["plan_run_budgets_microusd"])
+            if PLAN_CASE in selected:
+                for repetition in range(1, args.repetitions + 1):
+                    budget = next(plan_budgets)
+                    remaining = deadline - time.monotonic()
+                    case_output = output_dir / "plan-only" / f"repetition-{repetition}"
+                    failure_class = admission_failure(
+                        accounting_charged_microusd=accounting_charged,
+                        next_reservation_microusd=budget,
+                        max_cost_microusd=max_cost_microusd,
+                        remaining_seconds=remaining,
+                    )
+                    if failure_class is not None:
+                        results.append(
+                            {
+                                "case_id": PLAN_CASE,
+                                "repetition": repetition,
+                                "status": "failed",
+                                "failure_class": failure_class,
+                                "charged_microusd": 0,
+                                "evidence_dir": case_output.relative_to(output_dir).as_posix(),
+                            }
+                        )
+                        continue
+                    command = [
+                        sys.executable,
+                        str(PLAN_SCRIPT),
+                        "--binary",
+                        str(frozen_binary),
+                        "--config",
+                        str(config_path),
+                        "--max-cost-usd",
+                        format_microusd(budget),
+                        "--timeout-secs",
+                        str(min(180, int(remaining))),
+                        "--output-dir",
+                        str(case_output),
+                        "--expected-version",
+                        identity.version,
+                        "--expected-commit",
+                        identity.commit,
+                        "--expected-binary-sha256",
+                        identity.sha256,
+                    ]
+                    environment = child_environment(
+                        temporary_root / f"plan-child-{repetition}",
+                        source_config.provider,
+                    )
+                    child = run_child(
+                        command,
+                        cwd=root,
+                        environment=environment,
+                        log_path=output_dir / "plan-only" / f"repetition-{repetition}.log",
+                        timeout=min(190.0, remaining),
+                    )
+                    result = parse_plan_result(case_output, child, repetition, budget)
+                    result["evidence_dir"] = case_output.relative_to(output_dir).as_posix()
+                    results.append(result)
+                    accounting_charged, plan_confidence = account_plan_result(
+                        accounting_charged_microusd=accounting_charged,
+                        max_cost_microusd=max_cost_microusd,
+                        reservation_microusd=budget,
+                        result=result,
+                    )
+                    if plan_confidence == "unknown":
+                        accounting_confidence = "unknown"
+
+            selected_model_cases = [case for case in selected if case in MODEL_CASES]
+            if selected_model_cases:
+                model_budget = allocations["model_budget_microusd"]
+                assert isinstance(model_budget, int)
                 remaining = deadline - time.monotonic()
-                case_output = output_dir / "plan-only" / f"repetition-{repetition}"
+                model_output = output_dir / "model-eval"
                 failure_class = admission_failure(
                     accounting_charged_microusd=accounting_charged,
-                    next_reservation_microusd=budget,
+                    next_reservation_microusd=model_budget,
                     max_cost_microusd=max_cost_microusd,
                     remaining_seconds=remaining,
                 )
                 if failure_class is not None:
-                    results.append(
+                    model_records = [
                         {
-                            "case_id": PLAN_CASE,
+                            "case_id": case,
                             "repetition": repetition,
                             "status": "failed",
+                            "execution_status": "not_admitted",
                             "failure_class": failure_class,
-                            "charged_microusd": 0,
-                            "evidence_dir": case_output.relative_to(output_dir).as_posix(),
+                            "evidence_dir": "model-eval",
                         }
+                        for case in selected_model_cases
+                        for repetition in range(1, args.repetitions + 1)
+                    ]
+                    results.extend(model_records)
+                else:
+                    command = [
+                        str(frozen_binary),
+                        "--config",
+                        str(config_path),
+                        "model-eval",
+                        "--repetitions",
+                        str(args.repetitions),
+                        "--max-cost-usd",
+                        format_microusd(model_budget),
+                        "--timeout-secs",
+                        str(max(30, int(remaining))),
+                        "--output-dir",
+                        str(model_output),
+                    ]
+                    for case in selected_model_cases:
+                        command.extend(("--case", case))
+                    environment = child_environment(
+                        temporary_root / "model-child",
+                        source_config.provider,
                     )
-                    continue
-                command = [
-                    sys.executable,
-                    str(PLAN_SCRIPT),
-                    "--binary",
-                    str(frozen_binary),
-                    "--config",
-                    str(config_path),
-                    "--max-cost-usd",
-                    format_microusd(budget),
-                    "--timeout-secs",
-                    str(min(180, int(remaining))),
-                    "--output-dir",
-                    str(case_output),
-                    "--expected-version",
-                    identity.version,
-                    "--expected-commit",
-                    identity.commit,
-                    "--expected-binary-sha256",
-                    identity.sha256,
-                ]
-                environment = child_environment(
-                    temporary_root / f"plan-child-{repetition}",
-                    source_config.provider,
-                )
-                child = run_child(
-                    command,
-                    cwd=root,
-                    environment=environment,
-                    log_path=output_dir / "plan-only" / f"repetition-{repetition}.log",
-                    timeout=min(190.0, remaining),
-                )
-                result = parse_plan_result(case_output, child, repetition, budget)
-                result["evidence_dir"] = case_output.relative_to(output_dir).as_posix()
-                results.append(result)
-                raw_charged = result.get("charged_microusd")
-                accounting_charged += raw_charged if isinstance(raw_charged, int) else budget
-
-        selected_model_cases = [case for case in selected if case in MODEL_CASES]
-        if selected_model_cases:
-            model_budget = allocations["model_budget_microusd"]
-            assert isinstance(model_budget, int)
-            remaining = deadline - time.monotonic()
-            model_output = output_dir / "model-eval"
-            failure_class = admission_failure(
-                accounting_charged_microusd=accounting_charged,
-                next_reservation_microusd=model_budget,
-                max_cost_microusd=max_cost_microusd,
-                remaining_seconds=remaining,
-            )
-            if failure_class is not None:
-                model_records = [
-                    {
-                        "case_id": case,
-                        "repetition": repetition,
-                        "status": "failed",
-                        "execution_status": "not_admitted",
-                        "failure_class": failure_class,
-                        "evidence_dir": "model-eval",
-                    }
-                    for case in selected_model_cases
-                    for repetition in range(1, args.repetitions + 1)
-                ]
-                model_charged = 0
-                results.extend(model_records)
-                accounting_charged += model_charged
-            else:
-                command = [
-                    str(frozen_binary),
-                    "--config",
-                    str(config_path),
-                    "model-eval",
-                    "--repetitions",
-                    str(args.repetitions),
-                    "--max-cost-usd",
-                    format_microusd(model_budget),
-                    "--timeout-secs",
-                    str(max(30, int(remaining))),
-                    "--output-dir",
-                    str(model_output),
-                ]
-                for case in selected_model_cases:
-                    command.extend(("--case", case))
-                environment = child_environment(
-                    temporary_root / "model-child",
-                    source_config.provider,
-                )
-                model_child = run_child(
-                    command,
-                    cwd=root,
-                    environment=environment,
-                    log_path=output_dir / "model-eval.log",
-                    timeout=remaining,
-                )
-                model_records, model_charged = parse_model_results(
-                    model_output,
-                    selected_model_cases,
-                    args.repetitions,
-                )
-                if model_child.status != "passed":
-                    for record in model_records:
-                        record["status"] = "failed"
-                        record["failure_class"] = model_child.failure_class
-                results.extend(model_records)
-                accounting_charged += model_charged
+                    model_child = run_child(
+                        command,
+                        cwd=root,
+                        environment=environment,
+                        log_path=output_dir / "model-eval.log",
+                        timeout=remaining,
+                    )
+                    model_records, model_charged = parse_model_results(
+                        model_output,
+                        selected_model_cases,
+                        args.repetitions,
+                    )
+                    if model_child.status != "passed":
+                        for record in model_records:
+                            record["status"] = "failed"
+                            record["failure_class"] = model_child.failure_class
+                    results.extend(model_records)
+                    if model_charged == 0 and any(
+                        record.get("failure_class")
+                        in {"missing_model_evidence", "invalid_model_evidence"}
+                        for record in model_records
+                    ):
+                        accounting_charged = max(accounting_charged, max_cost_microusd)
+                        accounting_confidence = "unknown"
+                    else:
+                        accounting_charged += model_charged
+    except Exception:  # noqa: BLE001 - established output must receive a terminal safe manifest.
+        accounting_charged = max(accounting_charged, max_cost_microusd)
+        accounting_confidence = "unknown"
+        campaign_failure_class = "campaign_internal_error"
+        append_missing_terminal_results(
+            results,
+            selected,
+            args.repetitions,
+            campaign_failure_class,
+        )
 
     result_order = {case: index for index, case in enumerate(CASE_ORDER)}
     results.sort(key=lambda result: (result_order[str(result["case_id"])], int(result["repetition"])))
     expected_results = len(selected) * args.repetitions
-    status = (
-        "passed"
-        if len(results) == expected_results and all(result.get("status") == "passed" for result in results)
-        else "failed"
-    )
+    status = terminal_status(results, expected_results, campaign_failure_class)
     manifest = safe_manifest(
         status=status,
         started_at=started_at,
@@ -604,6 +696,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         timeout_secs=args.timeout_secs,
         max_cost_microusd=max_cost_microusd,
         accounting_charged_microusd=accounting_charged,
+        accounting_confidence=accounting_confidence,
+        campaign_failure_class=campaign_failure_class,
         results=results,
         artifact_policy=artifact_policy,
     )

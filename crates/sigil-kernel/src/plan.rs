@@ -685,7 +685,7 @@ struct RawStructuredPlanDraft {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct RawPlanDraftStep {
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     step_id: Option<String>,
     title: String,
     #[serde(default)]
