@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn dispatch_agent_task_command<P>(
     context: WorkerCommandContext<'_, P>,
-    command: WorkerCommand,
+    command: AgentTaskCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -21,16 +21,15 @@ where
         context_resolver: _,
         state,
     } = context;
-    let mut command_result: Option<Result<WorkerCommand, mpsc::RecvTimeoutError>> =
-        Some(Ok(command));
+    let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
-            Ok(WorkerCommand::InvokeAgentProfile {
+            AgentTaskCommand::InvokeAgentProfile {
                 profile_id,
                 prompt,
                 parent_prompt,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -164,10 +163,10 @@ where
                     image_attachment_resolver,
                 });
             }
-            Ok(WorkerCommand::InvokeChildSessionSkill {
+            AgentTaskCommand::InvokeChildSessionSkill {
                 skill_id,
                 arguments,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -288,7 +287,7 @@ where
                     image_attachment_resolver,
                 });
             }
-            Ok(WorkerCommand::SubmitTask { prompt }) => {
+            AgentTaskCommand::SubmitTask { prompt } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -389,7 +388,7 @@ where
                     image_attachment_resolver,
                 });
             }
-            Ok(WorkerCommand::ContinueTask { task_id, guidance }) => {
+            AgentTaskCommand::ContinueTask { task_id, guidance } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -490,7 +489,7 @@ where
                     image_attachment_resolver,
                 });
             }
-            Ok(WorkerCommand::BackgroundActiveAgent) => {
+            AgentTaskCommand::BackgroundActiveAgent => {
                 if state.run.active.is_none() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "no active agent run to background".to_owned(),
@@ -511,7 +510,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::CancelTerminalTask { task_id }) => {
+            AgentTaskCommand::CancelTerminalTask { task_id } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before cancelling terminal task".to_owned(),
@@ -536,12 +535,12 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::CreateTaskFromPlan {
+            AgentTaskCommand::CreateTaskFromPlan {
                 plan_id,
                 expected_plan_hash,
                 start_mode,
                 permission_grant,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before creating a task from a plan".to_owned(),
@@ -655,7 +654,7 @@ where
                     image_attachment_resolver,
                 });
             }
-            Ok(WorkerCommand::CloseAgent { thread_id, reason }) => {
+            AgentTaskCommand::CloseAgent { thread_id, reason } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before closing agent".to_owned(),
@@ -678,7 +677,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::CancelAgent { thread_id, reason }) => {
+            AgentTaskCommand::CancelAgent { thread_id, reason } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before cancelling agent".to_owned(),
@@ -705,7 +704,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::MessageAgent { thread_id, prompt }) => {
+            AgentTaskCommand::MessageAgent { thread_id, prompt } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before messaging agent".to_owned(),
@@ -737,10 +736,6 @@ where
                     }
                 }
             }
-            Ok(command) => unreachable!(
-                "exhaustive classifier routed an unexpected command to agent_task: {command:?}"
-            ),
-            Err(error) => unreachable!("owned command dispatch received channel error: {error}"),
         }
     }
     control

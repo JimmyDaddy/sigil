@@ -2,16 +2,16 @@ use super::*;
 
 pub(super) fn dispatch_session_command<P>(
     context: WorkerCommandContext<'_, P>,
-    command: WorkerCommand,
+    command: SessionCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
     let WorkerCommandContext {
         runtime: _,
-        agent: _,
+        agent,
         root_config,
-        provider_capabilities: _,
+        provider_capabilities,
         workspace_root,
         options: _,
         message_tx,
@@ -21,15 +21,14 @@ where
         context_resolver: _,
         state,
     } = context;
-    let mut command_result: Option<Result<WorkerCommand, mpsc::RecvTimeoutError>> =
-        Some(Ok(command));
+    let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
-            Ok(WorkerCommand::InspectLocalSession {
+            SessionCommand::InspectLocalSession {
                 request_id,
                 source_path,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
@@ -52,15 +51,15 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ForkLocalSession {
+            SessionCommand::ForkLocalSession {
                 request_id,
                 source_path,
-            }) => {
-                if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
-                        request_id,
-                        error: "cannot fork a local session while the agent is running".to_owned(),
-                    });
+            } => {
+                if let Err(error) =
+                    ensure_session_transition_allowed(SessionTransitionKind::LocalFork, state)
+                {
+                    let _ = message_tx
+                        .send(WorkerMessage::LocalSessionLifecycleFailed { request_id, error });
                     continue;
                 }
                 let service = local_session_lifecycle_service(root_config, workspace_root);
@@ -74,42 +73,24 @@ where
                         continue;
                     }
                 };
-                match load_session_with_runtime_attachments(
-                    &root_config.agent.provider,
-                    &root_config.agent.model,
-                    &output.destination_path,
-                    state.session.current.as_ref(),
+                match transition_session(
+                    SessionTransitionKind::LocalFork,
+                    output.destination_path.clone(),
+                    root_config,
+                    provider_capabilities,
+                    workspace_root,
+                    agent,
+                    state,
+                    message_tx,
                 ) {
-                    Ok(mut session) => {
-                        if state.session.current.as_ref().is_some_and(|session| {
-                            session_workspace_is_trusted(session, workspace_root)
-                        }) && let Err(error) = ensure_session_workspace_trust(
-                            &mut session,
-                            workspace_root,
-                            "trusted workspace carried into local conversation fork",
-                        ) {
-                            let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
-                                request_id,
-                                error,
-                            });
-                            continue;
-                        }
-                        state.compaction.pending = None;
-                        state.session.pending_queued_pre_turn_preparation = None;
-                        state.compaction.preparation_tasks.abort_all();
-                        state.session.exact_prompts.clear();
-                        let entries = session.entries().to_vec();
-                        let provider_name = session.provider_name().to_owned();
-                        let model_name = session.model_name().to_owned();
-                        state.session.log_path = output.destination_path.clone();
-                        state.session.current = Some(session);
+                    Ok(transition) => {
                         let _ = message_tx.send(WorkerMessage::LocalSessionForked {
                             request_id,
-                            session_log_path: output.destination_path,
-                            provider_name,
-                            model_name,
+                            session_log_path: transition.session_log_path,
+                            provider_name: transition.provider_name,
+                            model_name: transition.model_name,
                             copied_message_count: output.copied_message_count,
-                            entries,
+                            entries: transition.entries,
                         });
                     }
                     Err(error) => {
@@ -122,10 +103,10 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ExportLocalSession {
+            SessionCommand::ExportLocalSession {
                 request_id,
                 source_path,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
@@ -148,11 +129,11 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::SetLocalSessionPin {
+            SessionCommand::SetLocalSessionPin {
                 request_id,
                 source_path,
                 pinned,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
@@ -174,10 +155,10 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::PreviewLocalSessionDelete {
+            SessionCommand::PreviewLocalSessionDelete {
                 request_id,
                 source_path,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
@@ -206,10 +187,10 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ApplyLocalSessionDelete {
+            SessionCommand::ApplyLocalSessionDelete {
                 request_id,
                 preview,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
@@ -236,7 +217,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::PreviewSessionRetention { request_id, policy }) => {
+            SessionCommand::PreviewSessionRetention { request_id, policy } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
@@ -265,10 +246,10 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ApplySessionRetention {
+            SessionCommand::ApplySessionRetention {
                 request_id,
                 preview,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::LocalSessionLifecycleFailed {
                         request_id,
@@ -295,44 +276,54 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::SwitchSession { session_log_path }) => {
+            SessionCommand::SwitchSession { session_log_path } => {
                 match transition_session(
                     SessionTransitionKind::Switch,
                     session_log_path,
                     root_config,
+                    provider_capabilities,
                     workspace_root,
+                    agent,
                     state,
                     message_tx,
                 ) {
-                    Ok(message) => {
-                        let _ = message_tx.send(message);
+                    Ok(transition) => {
+                        let _ = message_tx.send(WorkerMessage::SessionSwitched {
+                            session_log_path: transition.session_log_path,
+                            provider_name: transition.provider_name,
+                            model_name: transition.model_name,
+                            entries: transition.entries,
+                        });
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
             }
-            Ok(WorkerCommand::StartNewSession { session_log_path }) => {
+            SessionCommand::StartNewSession { session_log_path } => {
                 match transition_session(
                     SessionTransitionKind::StartNew,
                     session_log_path,
                     root_config,
+                    provider_capabilities,
                     workspace_root,
+                    agent,
                     state,
                     message_tx,
                 ) {
-                    Ok(message) => {
-                        let _ = message_tx.send(message);
+                    Ok(transition) => {
+                        let _ = message_tx.send(WorkerMessage::NewSessionStarted {
+                            session_log_path: transition.session_log_path,
+                            provider_name: transition.provider_name,
+                            model_name: transition.model_name,
+                            entries: transition.entries,
+                        });
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
             }
-            Ok(command) => unreachable!(
-                "exhaustive classifier routed an unexpected command to session: {command:?}"
-            ),
-            Err(error) => unreachable!("owned command dispatch received channel error: {error}"),
         }
     }
     control

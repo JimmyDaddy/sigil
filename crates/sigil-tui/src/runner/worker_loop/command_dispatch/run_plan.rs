@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) fn dispatch_run_plan_command<P>(
     context: WorkerCommandContext<'_, P>,
-    command: WorkerCommand,
+    command: RunPlanCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -22,32 +22,16 @@ where
         context_resolver,
         state,
     } = context;
-    let mut command_result: Option<Result<WorkerCommand, mpsc::RecvTimeoutError>> =
-        Some(Ok(command));
+    let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
-            Ok(
-                command @ (WorkerCommand::SubmitPrompt { .. }
-                | WorkerCommand::SubmitPromptWithAttachments { .. }
-                | WorkerCommand::SubmitPlanPrompt { .. }),
-            ) => {
-                let (prompt, attachments, reasoning_effort, plan_mode) = match command {
-                    WorkerCommand::SubmitPrompt {
-                        prompt,
-                        reasoning_effort,
-                    } => (prompt, Vec::new(), reasoning_effort, false),
-                    WorkerCommand::SubmitPromptWithAttachments {
-                        prompt,
-                        attachments,
-                        reasoning_effort,
-                    } => (prompt, attachments, reasoning_effort, false),
-                    WorkerCommand::SubmitPlanPrompt {
-                        prompt,
-                        reasoning_effort,
-                    } => (prompt, Vec::new(), reasoning_effort, true),
-                    _ => unreachable!("matched submit prompt commands above"),
-                };
+            RunPlanCommand::Submit {
+                prompt,
+                attachments,
+                reasoning_effort,
+                plan_mode,
+            } => {
                 if state.run.active.is_some() {
                     if !attachments.is_empty() {
                         let _ = message_tx.send(WorkerMessage::RunFailed(
@@ -219,11 +203,11 @@ where
                     image_attachment_resolver,
                 });
             }
-            Ok(WorkerCommand::InvokeInlineSkill {
+            RunPlanCommand::InvokeInlineSkill {
                 skill_id,
                 arguments,
                 reasoning_effort,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -350,7 +334,7 @@ where
                     image_attachment_resolver,
                 });
             }
-            Ok(WorkerCommand::ApprovalDecision { call_id, approved }) => {
+            RunPlanCommand::ApprovalDecision { call_id, approved } => {
                 if let Some(active_run) = &state.run.active {
                     let approval = if approved {
                         ToolApproval::Approve
@@ -368,7 +352,7 @@ where
                     ));
                 }
             }
-            Ok(WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json }) => {
+            RunPlanCommand::ApprovalDecisionWithArgs { call_id, args_json } => {
                 if let Some(active_run) = &state.run.active {
                     let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
                         call_id,
@@ -380,7 +364,7 @@ where
                     ));
                 }
             }
-            Ok(WorkerCommand::ApprovalSessionDecision { call_id }) => {
+            RunPlanCommand::ApprovalSessionDecision { call_id } => {
                 if let Some(active_run) = &state.run.active {
                     let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
                         call_id,
@@ -392,7 +376,7 @@ where
                     ));
                 }
             }
-            Ok(WorkerCommand::ApprovalCommand(command)) => {
+            RunPlanCommand::ApprovalCommand(command) => {
                 if state
                     .processed_worker_command_ids
                     .contains(&command.command_id)
@@ -443,7 +427,7 @@ where
                     ));
                 }
             }
-            Ok(WorkerCommand::CancelRun) => {
+            RunPlanCommand::CancelRun => {
                 if let Some(active_run) = state.run.active.take() {
                     cancel_active_run(
                         active_run,
@@ -463,10 +447,10 @@ where
                     ));
                 }
             }
-            Ok(WorkerCommand::RejectPlan {
+            RunPlanCommand::RejectPlan {
                 plan_id,
                 expected_plan_hash,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before rejecting a plan".to_owned(),
@@ -490,12 +474,12 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ApprovePlan {
+            RunPlanCommand::ApprovePlan {
                 plan_text,
                 permission,
                 scope_summary,
                 clear_planning_context,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before approving a plan".to_owned(),
@@ -521,10 +505,6 @@ where
                     }
                 }
             }
-            Ok(command) => unreachable!(
-                "exhaustive classifier routed an unexpected command to run_plan: {command:?}"
-            ),
-            Err(error) => unreachable!("owned command dispatch received channel error: {error}"),
         }
     }
     control

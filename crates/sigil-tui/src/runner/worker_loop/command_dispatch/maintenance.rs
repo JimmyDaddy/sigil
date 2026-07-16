@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn dispatch_maintenance_command<P>(
     context: WorkerCommandContext<'_, P>,
-    command: WorkerCommand,
+    command: MaintenanceCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -22,7 +22,7 @@ where
         state,
     } = context;
     match command {
-        WorkerCommand::Shutdown => {
+        MaintenanceCommand::Shutdown => {
             if let Some(active_run) = state.run.active.take() {
                 cancel_active_run(
                     active_run,
@@ -41,8 +41,5 @@ where
             state.compaction.preparation_tasks.abort_all();
             WorkerCommandDispatchControl::Break
         }
-        command => unreachable!(
-            "exhaustive classifier routed an unexpected command to maintenance: {command:?}"
-        ),
     }
 }

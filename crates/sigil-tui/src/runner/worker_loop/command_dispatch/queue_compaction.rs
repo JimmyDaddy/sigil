@@ -3,7 +3,7 @@ use crate::runner::V2CompactionPreviewState;
 
 pub(super) fn dispatch_queue_compaction_command<P>(
     context: WorkerCommandContext<'_, P>,
-    command: WorkerCommand,
+    command: QueueCompactionCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -22,17 +22,16 @@ where
         context_resolver,
         state,
     } = context;
-    let mut command_result: Option<Result<WorkerCommand, mpsc::RecvTimeoutError>> =
-        Some(Ok(command));
+    let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
-            Ok(WorkerCommand::QueueConversationInput {
+            QueueCompactionCommand::QueueConversationInput {
                 prompt,
                 kind,
                 target,
                 reasoning_effort,
-            }) => {
+            } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
                 match queue_conversation_input(
@@ -52,7 +51,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::CancelQueuedConversationInput { queue_id }) => {
+            QueueCompactionCommand::CancelQueuedConversationInput { queue_id } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
                 match cancel_queued_conversation_input(
@@ -67,11 +66,11 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::EditQueuedConversationInput {
+            QueueCompactionCommand::EditQueuedConversationInput {
                 queue_id,
                 prompt,
                 reasoning_effort,
-            }) => {
+            } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
                 match edit_queued_conversation_input(
@@ -88,10 +87,10 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::MoveQueuedConversationInput {
+            QueueCompactionCommand::MoveQueuedConversationInput {
                 queue_id,
                 direction,
-            }) => {
+            } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
                 match move_queued_conversation_input(
@@ -106,7 +105,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::PromoteQueuedConversationInput { queue_id }) => {
+            QueueCompactionCommand::PromoteQueuedConversationInput { queue_id } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
                 match promote_queued_conversation_input(
@@ -120,7 +119,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::SendQueuedConversationInputNow { queue_id }) => {
+            QueueCompactionCommand::SendQueuedConversationInputNow { queue_id } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
                 match promote_queued_conversation_input(
@@ -150,7 +149,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::SetConversationQueuePaused { paused }) => {
+            QueueCompactionCommand::SetConversationQueuePaused { paused } => {
                 match set_conversation_queue_paused(
                     &state.session.log_path,
                     &mut state.session.current,
@@ -162,7 +161,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::PreviewV2Compaction) => {
+            QueueCompactionCommand::PreviewV2Compaction => {
                 state.compaction.pending = None;
                 state.session.pending_queued_pre_turn_preparation = None;
                 state.compaction.preparation_tasks.abort_all();
@@ -269,7 +268,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ApplyV2Compaction { request_id }) => {
+            QueueCompactionCommand::ApplyV2Compaction { request_id } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::V2CompactionApplyFailed {
                         request_id,
@@ -348,7 +347,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::CancelV2CompactionReview { request_id }) => {
+            QueueCompactionCommand::CancelV2CompactionReview { request_id } => {
                 let preparation_cancelled = state.compaction.preparation_tasks.cancel(request_id);
                 if state
                     .compaction
@@ -366,10 +365,6 @@ where
                     ));
                 }
             }
-            Ok(command) => unreachable!(
-                "exhaustive classifier routed an unexpected command to queue: {command:?}"
-            ),
-            Err(error) => unreachable!("owned command dispatch received channel error: {error}"),
         }
     }
     control

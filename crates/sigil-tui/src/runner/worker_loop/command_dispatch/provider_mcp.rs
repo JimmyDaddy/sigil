@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn dispatch_provider_mcp_command<P>(
     context: WorkerCommandContext<'_, P>,
-    command: WorkerCommand,
+    command: ProviderMcpCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -21,15 +21,14 @@ where
         context_resolver: _,
         state,
     } = context;
-    let mut command_result: Option<Result<WorkerCommand, mpsc::RecvTimeoutError>> =
-        Some(Ok(command));
+    let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
-            Ok(WorkerCommand::RefreshProviderBalance {
+            ProviderMcpCommand::RefreshProviderBalance {
                 request_id,
                 provider_config,
-            }) => {
+            } => {
                 state.refresh.provider_status_tasks.refresh_balance(
                     runtime,
                     request_id,
@@ -37,10 +36,10 @@ where
                     state.refresh.provider_status_tx.clone(),
                 );
             }
-            Ok(WorkerCommand::RefreshProviderModels {
+            ProviderMcpCommand::RefreshProviderModels {
                 request_id,
                 provider_config,
-            }) => {
+            } => {
                 state.refresh.provider_status_tasks.refresh_models(
                     runtime,
                     request_id,
@@ -48,13 +47,13 @@ where
                     state.refresh.provider_status_tx.clone(),
                 );
             }
-            Ok(WorkerCommand::CancelProviderModelsRefresh { request_id }) => {
+            ProviderMcpCommand::CancelProviderModelsRefresh { request_id } => {
                 state
                     .refresh
                     .provider_status_tasks
                     .cancel_models_refresh(request_id);
             }
-            Ok(WorkerCommand::ActivateLazyMcp { server_name }) => {
+            ProviderMcpCommand::ActivateLazyMcp { server_name } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot activate MCP while the agent is running".to_owned(),
@@ -142,7 +141,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::RefreshMcpServer { server_name }) => {
+            ProviderMcpCommand::RefreshMcpServer { server_name } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot refresh MCP while the agent is running".to_owned(),
@@ -152,10 +151,6 @@ where
                 state.refresh.pending_mcp_servers.insert(server_name);
                 state.refresh.next_mcp_retry_at = Instant::now();
             }
-            Ok(command) => unreachable!(
-                "exhaustive classifier routed an unexpected command to provider_mcp: {command:?}"
-            ),
-            Err(error) => unreachable!("owned command dispatch received channel error: {error}"),
         }
     }
     control

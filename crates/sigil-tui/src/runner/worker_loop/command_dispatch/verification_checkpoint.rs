@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn dispatch_verification_checkpoint_command<P>(
     context: WorkerCommandContext<'_, P>,
-    command: WorkerCommand,
+    command: VerificationCheckpointCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
@@ -11,7 +11,7 @@ where
         runtime,
         agent,
         root_config,
-        provider_capabilities: _,
+        provider_capabilities,
         workspace_root,
         options,
         message_tx,
@@ -21,12 +21,11 @@ where
         context_resolver: _,
         state,
     } = context;
-    let mut command_result: Option<Result<WorkerCommand, mpsc::RecvTimeoutError>> =
-        Some(Ok(command));
+    let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
         match command_result {
-            Ok(WorkerCommand::CheckChangedFilesDiagnostics) => {
+            VerificationCheckpointCommand::CheckChangedFilesDiagnostics => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "cannot check changes while the agent is running".to_owned(),
@@ -70,10 +69,10 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::PreviewCheckpointRestore {
+            VerificationCheckpointCommand::PreviewCheckpointRestore {
                 request_id,
                 request,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
                         request_id,
@@ -100,10 +99,10 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ExecuteCheckpointRestore {
+            VerificationCheckpointCommand::ExecuteCheckpointRestore {
                 request_id,
                 request,
-            }) => {
+            } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
                         request_id,
@@ -150,15 +149,15 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ForkConversationAtCheckpoint {
+            VerificationCheckpointCommand::ForkConversationAtCheckpoint {
                 request_id,
                 request,
-            }) => {
-                if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
-                        request_id,
-                        error: "cannot fork conversation while the agent is running".to_owned(),
-                    });
+            } => {
+                if let Err(error) =
+                    ensure_session_transition_allowed(SessionTransitionKind::CheckpointFork, state)
+                {
+                    let _ = message_tx
+                        .send(WorkerMessage::CheckpointOperationFailed { request_id, error });
                     continue;
                 }
                 let output = match fork_current_conversation(
@@ -173,39 +172,24 @@ where
                         continue;
                     }
                 };
-                match load_session_with_runtime_attachments(
-                    &root_config.agent.provider,
-                    &root_config.agent.model,
-                    &output.destination_path,
-                    state.session.current.as_ref(),
+                match transition_session(
+                    SessionTransitionKind::CheckpointFork,
+                    output.destination_path.clone(),
+                    root_config,
+                    provider_capabilities,
+                    workspace_root,
+                    agent,
+                    state,
+                    message_tx,
                 ) {
-                    Ok(mut session) => {
-                        if state.session.current.as_ref().is_some_and(|session| {
-                            session_workspace_is_trusted(session, workspace_root)
-                        }) && let Err(error) = ensure_session_workspace_trust(
-                            &mut session,
-                            workspace_root,
-                            "trusted workspace carried into conversation fork",
-                        ) {
-                            let _ = message_tx.send(WorkerMessage::CheckpointOperationFailed {
-                                request_id,
-                                error,
-                            });
-                            continue;
-                        }
-                        state.session.exact_prompts.clear();
-                        let entries = session.entries().to_vec();
-                        let provider_name = session.provider_name().to_owned();
-                        let model_name = session.model_name().to_owned();
-                        state.session.log_path = output.destination_path.clone();
-                        state.session.current = Some(session);
+                    Ok(transition) => {
                         let _ = message_tx.send(WorkerMessage::ConversationForked {
                             request_id,
-                            session_log_path: output.destination_path,
-                            provider_name,
-                            model_name,
+                            session_log_path: transition.session_log_path,
+                            provider_name: transition.provider_name,
+                            model_name: transition.model_name,
                             copied_message_count: output.copied_message_count,
-                            entries,
+                            entries: transition.entries,
                         });
                     }
                     Err(error) => {
@@ -218,7 +202,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::CleanMutationArtifacts { target }) => {
+            VerificationCheckpointCommand::CleanMutationArtifacts { target } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before cleaning mutation artifacts".to_owned(),
@@ -241,7 +225,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::DeleteMutationArtifact { artifact_id }) => {
+            VerificationCheckpointCommand::DeleteMutationArtifact { artifact_id } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before deleting mutation artifacts".to_owned(),
@@ -263,7 +247,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::ApproveVerificationCheck { check_spec_id }) => {
+            VerificationCheckpointCommand::ApproveVerificationCheck { check_spec_id } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before approving verification checks".to_owned(),
@@ -296,7 +280,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::SandboxVerificationCheck { check_spec_id }) => {
+            VerificationCheckpointCommand::SandboxVerificationCheck { check_spec_id } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before sandboxing verification checks".to_owned(),
@@ -329,7 +313,7 @@ where
                     }
                 }
             }
-            Ok(WorkerCommand::RerunTaskVerification { request }) => {
+            VerificationCheckpointCommand::RerunTaskVerification { request } => {
                 if state.run.active.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before running verification".to_owned(),
@@ -384,10 +368,6 @@ where
                     }
                 }
             }
-            Ok(command) => unreachable!(
-                "exhaustive classifier routed an unexpected command to verification: {command:?}"
-            ),
-            Err(error) => unreachable!("owned command dispatch received channel error: {error}"),
         }
     }
     control
