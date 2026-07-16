@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
@@ -13,6 +13,7 @@ use sigil_kernel::{
     WebBudgetReservationKind, WebBudgetReservationRequest, WebSearchRoute, WebTaskTreeBudget,
     validate_disclosure_receipt,
 };
+use url::Url;
 
 use crate::{
     ActiveHostedEgress, EgressOrderingCoordinator, HostedEvidenceFinalizer, hosted_terminal_status,
@@ -71,12 +72,15 @@ impl AgentRunInputPreparer for HostedWebSearchInputPreparer {
         if self.root_config.web.network_mode == NetworkPolicy::Ask {
             return Ok(input.suppress_tool("websearch"));
         }
+        let safe_provider_destination =
+            provider_hosted_safe_destination(&self.root_config, provider.name())?;
 
         let preparer = Arc::new(RuntimeHostedTurnPreparer {
             root_config: self.root_config.clone(),
             presenter: Arc::clone(&self.presenter),
             recorder: session.egress_audit_recorder()?,
             provider_name: provider.name().to_owned(),
+            safe_provider_destination,
             capability,
             budget,
         });
@@ -91,6 +95,7 @@ struct RuntimeHostedTurnPreparer {
     presenter: Arc<dyn EgressDisclosurePresenter>,
     recorder: EgressAuditRecorder,
     provider_name: String,
+    safe_provider_destination: String,
     capability: HostedWebSearchCapability,
     budget: Arc<WebTaskTreeBudget>,
 }
@@ -120,8 +125,8 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
             format!("{} provider-hosted web search", self.provider_name),
             route_fingerprint.clone(),
             sha256(&format!("hosted-web-profile\0{route_fingerprint}")),
-            format!("provider:{}", self.provider_name),
-            format!("provider:{}", self.provider_name),
+            self.safe_provider_destination.clone(),
+            self.safe_provider_destination.clone(),
             EgressNetworkRoute::Direct,
             vec![
                 EgressDataCategory::SearchQuery,
@@ -162,6 +167,54 @@ impl AgentHostedTurnPreparer for RuntimeHostedTurnPreparer {
             hosted_tools: vec![request],
             evidence_processor: processor,
         })
+    }
+}
+
+fn provider_hosted_safe_destination(root: &RootConfig, provider_name: &str) -> Result<String> {
+    let base_url = match crate::normalize_provider_name(provider_name) {
+        crate::OPENAI_RESPONSES_PROVIDER_KEY => {
+            crate::resolve_openai_responses_config(root)?.base_url
+        }
+        crate::OPENAI_COMPAT_PROVIDER_KEY => crate::resolve_openai_compat_config(root)?.base_url,
+        crate::ANTHROPIC_PROVIDER_KEY => crate::resolve_anthropic_config(root)?.base_url,
+        crate::GEMINI_PROVIDER_KEY => crate::resolve_gemini_config(root)?.base_url,
+        crate::DEEPSEEK_PROVIDER_KEY => crate::resolve_deepseek_config(root)?.base_url,
+        other => bail!("hosted web search has no configured destination for provider {other}"),
+    };
+    safe_provider_origin(&base_url)
+}
+
+fn safe_provider_origin(base_url: &str) -> Result<String> {
+    let parsed = Url::parse(base_url).context("provider base URL must be absolute")?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        bail!("provider base URL must use HTTP(S) without embedded credentials");
+    }
+    let host = parsed
+        .host_str()
+        .context("provider base URL must contain a host")?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let port = parsed
+        .port_or_known_default()
+        .context("provider base URL has no effective port")?;
+    let default_port = match parsed.scheme() {
+        "http" => 80,
+        "https" => 443,
+        _ => unreachable!("provider scheme was validated above"),
+    };
+    if port == default_port {
+        Ok(format!("{}://{host}/", parsed.scheme()))
+    } else {
+        Ok(format!("{}://{host}:{port}/", parsed.scheme()))
     }
 }
 
@@ -236,3 +289,7 @@ impl Drop for AuthorizedHostedFinalizer {
 fn sha256(value: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
 }
+
+#[cfg(test)]
+#[path = "tests/hosted_web_search_tests.rs"]
+mod tests;
