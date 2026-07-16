@@ -76,6 +76,7 @@ sigil doctor
 - 提供 capability-backed `webfetch` 与 stable `websearch` route，并执行独立 network policy、durable egress disclosure 和 external-source provenance。
 - 每次请求可附带少量相关的 Rust、Python、JavaScript/TypeScript 或 Go 仓库片段，并继续遵守 ignore、secret、文件大小和 context budget 限制。
 - TUI 可向明确识别为支持图片的 OpenAI Responses、Anthropic 和 Gemini model 发送有边界的 PNG、JPEG 与 WebP 附件。
+- 可为长任务完成、等待审批、执行失败和 MCP 等待输入发送默认关闭且有隐私边界的终端 attention signal。
 - 可选开启 code intelligence，支持符号、引用、诊断、code action 和 rename preview。
 - 为脚本提供稳定 JSON/JSONL 输出，并为受信任本机 client 提供高级、带认证且仅允许 loopback 的 `sigil serve` 接口。
 - 通过显式 export、conversation fork、pin、精确 delete review 和 retention maintenance 管理已保存 session。
@@ -105,6 +106,7 @@ sigil doctor
 | 新建、切换或维护 session | `/new`、`/resume`，或退出后用 `sigil resume <session-id>`；在 `/resume` 行按 `Ctrl-O` 或右键，可安全导出、fork、pin 或审查精确删除 |
 | 修改常用设置 | `/config` |
 | 诊断 setup/auth/MCP/LSP | `/doctor` |
+| 开启失焦任务提醒 | `/config` → `Terminal`；选择 `auto`、`osc9`、`osc777` 或 `bell`，再用 `Ctrl-S` 保存 |
 | 准备私密支持报告 | `/feedback`；先检查隐私预览，再导出到本机 |
 | 在紧凑和详细信息栏之间切换 | `F2` |
 | 切换默认权限模式 | `Shift-Tab` |

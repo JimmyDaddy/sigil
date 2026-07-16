@@ -6,7 +6,7 @@
     <title>Sigil - TUI-first Rust coding agent</title>
     <meta
       name="description"
-      content="Sigil is a TUI-first Rust coding agent for repository work, durable tasks, child agents, approvals, verification, MCP tools, and session recovery."
+      content="Sigil is a TUI-first Rust coding agent with durable tasks, bounded repository context, image input, approvals, verification, attention signals, and session recovery."
     >
     <link rel="canonical" href="https://jimmydaddy.github.io/sigil/">
     <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/">
@@ -19,7 +19,7 @@
     <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       property="og:description"
-      content="Repository work, durable tasks, child agents, approvals, verification, MCP tools, and session recovery inside one terminal interface."
+      content="Repository work with bounded code context, image input, durable tasks, approvals, verification, and attention signals inside one terminal interface."
     >
     <meta property="og:url" content="https://jimmydaddy.github.io/sigil/">
     <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full-staff-glow.png">
@@ -28,7 +28,7 @@
     <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       name="twitter:description"
-      content="Repository work, durable tasks, child agents, approvals, verification, MCP tools, and session recovery inside one terminal interface."
+      content="Repository work with bounded code context, image input, durable tasks, approvals, verification, and attention signals inside one terminal interface."
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full-staff-glow.png">
     <script>
@@ -94,7 +94,7 @@
           <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first Rust coding agent</p>
           <h1>Repository work,<br><span class="hero-accent">inside one terminal.</span></h1>
           <p class="lede">
-            Sigil brings chat, durable tasks, child agents, approvals, diffs, diagnostics, verification, and session recovery into a terminal product built for real coding sessions.
+            Sigil brings bounded repository context, image input, durable tasks, approvals, diffs, verification, attention signals, and session recovery into a terminal product built for real coding sessions.
           </p>
           <div class="alpha-status" aria-label="Release status">
             <strong>v0.0.1-alpha.3 preview</strong>
@@ -161,6 +161,8 @@
             <span role="listitem">Child agents</span>
             <span role="listitem">MCP tools</span>
             <span role="listitem">Code intelligence</span>
+            <span role="listitem">Image input</span>
+            <span role="listitem">Attention signals</span>
             <span role="listitem">Verification</span>
             <span role="listitem">Recovery</span>
           </div>
@@ -170,6 +172,8 @@
             <span>Child agents</span>
             <span>MCP tools</span>
             <span>Code intelligence</span>
+            <span>Image input</span>
+            <span>Attention signals</span>
             <span>Verification</span>
             <span>Recovery</span>
           </div>
@@ -288,6 +292,10 @@ sigil</code></pre>
           <article>
             <h3>Image-aware composer</h3>
             <p>Paste bounded PNG, JPEG, or WebP input, review metadata chips, and send image-only or text-plus-image turns to explicitly supported OpenAI Responses, Anthropic, and Gemini models.</p>
+          </article>
+          <article>
+            <h3>Attention without prompt leakage</h3>
+            <p>Opt in to terminal signals for completed long work, approvals, failures, or MCP input requests; fixed notification text never includes prompts, paths, tool details, or session identifiers.</p>
           </article>
         </div>
       </section>

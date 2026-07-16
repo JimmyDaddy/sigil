@@ -76,6 +76,7 @@ sigil doctor
 - Provides capability-backed `webfetch` and stable `websearch` routes with independent network policy, durable egress disclosure, and external-source provenance.
 - Adds a small, request-local set of relevant Rust, Python, JavaScript/TypeScript, or Go repository snippets while respecting ignore, secret, size, and context-budget limits.
 - Accepts bounded PNG, JPEG, and WebP attachments in the TUI for explicitly recognized image-capable OpenAI Responses, Anthropic, and Gemini models.
+- Can send default-off, privacy-bounded terminal attention signals for completed long work, approvals, failures, and MCP input requests.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 - Provides stable JSON/JSONL output for scripts and an advanced authenticated, loopback-only `sigil serve` interface for trusted local clients.
 - Manages saved sessions through explicit export, conversation fork, pin, exact delete review, and retention maintenance actions.
@@ -105,6 +106,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Start, switch, or maintain sessions | `/new`, `/resume`, or `sigil resume <session-id>` after exit; use `Ctrl-O` or right-click on a `/resume` row for safe export, fork, pin, or exact delete review |
 | Change common settings | `/config` |
 | Diagnose setup/auth/MCP/LSP | `/doctor` |
+| Enable out-of-focus task alerts | `/config` → `Terminal`; choose `auto`, `osc9`, `osc777`, or `bell` and save with `Ctrl-S` |
 | Prepare a private support report | `/feedback`; review the privacy preview before exporting locally |
 | Toggle the right info rail between compact and detail | `F2` |
 | Cycle default permission mode | `Shift-Tab` |

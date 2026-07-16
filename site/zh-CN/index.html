@@ -6,7 +6,7 @@
     <title>Sigil - TUI-first Rust coding agent</title>
     <meta
       name="description"
-      content="Sigil 是一个 TUI-first Rust coding agent，用于仓库开发、durable task、child agent、审批、verification、MCP 工具和 session 恢复。"
+      content="Sigil 是一个 TUI-first Rust coding agent，提供有边界的仓库上下文、图片输入、durable task、审批、verification、attention signal 和 session 恢复。"
     >
     <link rel="canonical" href="https://jimmydaddy.github.io/sigil/zh-CN/">
     <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/">
@@ -19,7 +19,7 @@
     <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       property="og:description"
-      content="把仓库开发、durable task、child agent、审批、verification、MCP 工具和 session 恢复放进一个终端界面。"
+      content="把有边界的代码上下文、图片输入、durable task、审批、verification、attention signal 和 session 恢复放进一个终端界面。"
     >
     <meta property="og:url" content="https://jimmydaddy.github.io/sigil/zh-CN/">
     <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full-staff-glow.png">
@@ -28,7 +28,7 @@
     <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
     <meta
       name="twitter:description"
-      content="把仓库开发、durable task、child agent、审批、verification、MCP 工具和 session 恢复放进一个终端界面。"
+      content="把有边界的代码上下文、图片输入、durable task、审批、verification、attention signal 和 session 恢复放进一个终端界面。"
     >
     <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full-staff-glow.png">
     <script>
@@ -94,7 +94,7 @@
           <p class="eyebrow hero-eyebrow"><span class="hero-live-dot" aria-hidden="true"></span>TUI-first Rust coding agent</p>
           <h1>在一个终端里<br><span class="hero-accent">完成仓库工作。</span></h1>
           <p class="lede">
-            Sigil 把对话、durable task、child agent、审批、diff、诊断、verification 和 session 恢复放进面向 coding session 的终端产品里。
+            Sigil 把有边界的仓库上下文、图片输入、durable task、审批、diff、verification、attention signal 和 session 恢复放进面向 coding session 的终端产品里。
           </p>
           <div class="alpha-status" aria-label="发布状态">
             <strong>v0.0.1-alpha.3 preview</strong>
@@ -161,6 +161,8 @@
             <span role="listitem">子 Agent</span>
             <span role="listitem">MCP 工具</span>
             <span role="listitem">代码智能</span>
+            <span role="listitem">图片输入</span>
+            <span role="listitem">任务提醒</span>
             <span role="listitem">验证</span>
             <span role="listitem">恢复</span>
           </div>
@@ -170,6 +172,8 @@
             <span>子 Agent</span>
             <span>MCP 工具</span>
             <span>代码智能</span>
+            <span>图片输入</span>
+            <span>任务提醒</span>
             <span>验证</span>
             <span>恢复</span>
           </div>
@@ -284,6 +288,14 @@ sigil</code></pre>
           <article>
             <h3>Session 与相关上下文</h3>
             <p>保持 session lifecycle 显式可控；Rust、Python、JavaScript/TypeScript 和 Go 的有界上下文继续遵守 ignore、secret、大小与 budget 限制。</p>
+          </article>
+          <article>
+            <h3>支持图片的 Composer</h3>
+            <p>粘贴有边界的 PNG、JPEG 或 WebP，检查 metadata chip，并向明确支持图片的 OpenAI Responses、Anthropic 和 Gemini model 发送纯图片或图文 turn。</p>
+          </article>
+          <article>
+            <h3>不泄漏 Prompt 的提醒</h3>
+            <p>可选择为长任务完成、等待审批、执行失败或 MCP 等待输入启用终端 signal；固定通知文案不会包含 prompt、路径、工具详情或 session id。</p>
           </article>
         </div>
       </section>

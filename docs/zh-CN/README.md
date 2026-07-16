@@ -13,7 +13,7 @@ Sigil 是一个 TUI-first coding agent。本页只提供精简的用户文档路
 1. [快速上手](quickstart.md)：使用推荐的 npm alpha 路径，启动 TUI，完成 Quick Setup，并跑完第一次有用的会话。
 2. [安装](installation.md)：选择安装渠道，或查看权威的更新、卸载和 release archive 说明。
 3. [视觉导览](visual-tour.md)：查看主会话、审批、配置、verification、checkpoint recovery 和 compaction preview 界面。
-4. [TUI 使用指南](user-guide.md)：学习界面布局、操作方式、会话、审批、计划任务、verification、recovery、context controls 和 code intelligence。
+4. [TUI 使用指南](user-guide.md)：学习界面布局、操作方式、图片输入、attention notification、会话、审批、计划任务、verification、recovery、context controls 和 code intelligence。
 5. [安全与权限](safety.md)：理解什么能运行、什么需要审批，以及如何检查高风险动作。
 6. [排障](troubleshooting.md)：诊断 setup、认证、终端、MCP、code intelligence 和恢复问题。
 
@@ -33,7 +33,7 @@ Sigil 是一个 TUI-first coding agent。本页只提供精简的用户文档路
 | 理解隐私、provider context、session log 和 secret | [隐私与数据处理](privacy.md) |
 | 通过 MCP 增加外部工具 | [MCP 接入指南](mcp.md) |
 | 查询命令、键位、路径和恢复事实 | [参考](reference.md) |
-| 验证 mouse capture、OSC52、tmux、SSH 或 WSL 行为 | [Terminal 兼容性](terminal-compatibility.md) |
+| 验证 attention notification、图片剪贴板、mouse capture、OSC52、tmux、SSH 或 WSL 行为 | [Terminal 兼容性](terminal-compatibility.md) |
 | 排查问题或报告 bug | [排障](troubleshooting.md) |
 | 查看当前支持承诺 | [当前支持状态与未来工作](status.md) |
 | 阅读用户可见 release notes | [用户 Changelog](changelog.md) |

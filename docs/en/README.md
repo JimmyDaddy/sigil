@@ -13,7 +13,7 @@ If you are new to Sigil, read these guides in order:
 1. [Quickstart](quickstart.md): use the recommended npm alpha path, launch the TUI, complete Quick Setup, and run a first useful session.
 2. [Installation](installation.md): choose an install channel or find the authoritative update, uninstall, and release-archive instructions.
 3. [Visual tour](visual-tour.md): see the main session, approval review, configuration, verification, checkpoint recovery, and compaction preview surfaces.
-4. [TUI user guide](user-guide.md): learn the screen layout, controls, sessions, approvals, planning, verification, recovery, context controls, and code intelligence.
+4. [TUI user guide](user-guide.md): learn the screen layout, controls, image input, attention notifications, sessions, approvals, planning, verification, recovery, context controls, and code intelligence.
 5. [Safety and permissions](safety.md): understand what can run, what needs approval, and how to review risky actions.
 6. [Troubleshooting](troubleshooting.md): diagnose setup, authentication, terminal, MCP, code-intelligence, and recovery problems.
 
@@ -33,7 +33,7 @@ If you are new to Sigil, read these guides in order:
 | Understand privacy, provider context, session logs, and secrets | [Privacy and data handling](privacy.md) |
 | Add external tools through MCP | [MCP guide](mcp.md) |
 | Look up commands, keys, paths, and recovery facts | [Reference](reference.md) |
-| Validate mouse capture, OSC52 copy, tmux, SSH, or WSL behavior | [Terminal compatibility](terminal-compatibility.md) |
+| Validate attention notifications, image clipboard input, mouse capture, OSC52 copy, tmux, SSH, or WSL behavior | [Terminal compatibility](terminal-compatibility.md) |
 | Fix a problem or report a bug | [Troubleshooting](troubleshooting.md) |
 | Check current support commitments | [Supported today and future work](status.md) |
 | Read user-facing release notes | [User changelog](changelog.md) |
