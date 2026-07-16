@@ -1,6 +1,6 @@
 # RFC-0033 Image & Attachment Input V1
 
-状态：accepted / R33.0-R33.5 complete
+状态：implemented / R33.0-R33.6 complete
 
 创建日期：2026-07-16
 
@@ -144,3 +144,4 @@ git diff --check
 - R33.3 complete：OpenAI Responses、Anthropic 与 Gemini 已实现 exact-model capability 和官方 inline image wire，provider request DTO 的 Debug 已 redacted；OpenAI/Anthropic native compaction 移除 image block，DeepSeek/generic compatible 在 mapper/transport 前 fail closed，五个 provider crate 全量测试与 strict Clippy 通过。
 - R33.4 complete：TUI 已支持空闲 Build composer 的单图片路径/file URL 粘贴与 `Ctrl-V` clipboard image，附件以 bounded metadata chip 展示并可用方向键选择、Backspace/Delete 删除；图片-only normal chat 可提交，queue/Plan/slash/agent 路径保留草稿并 fail closed，worker 在 active run 期间拒绝图片排队，TUI 全量测试与 strict Clippy 通过。
 - R33.5 complete：普通 resume、session scope 切换与 active-run cancel reload 均恢复 workspace-scoped resolver；durable metadata 可从受控 cache 重新 materialize，而 missing blob 会在 provider transport 前失败。Kernel durable/compaction canary、runtime safe export、TUI 1366/1370 tests（4 ignored）、strict Clippy、EN/ZH docs/site 与 diff gates 通过。
+- R33.6 complete：production release binary 的真实 PTY/loopback 验收通过 6 个 case、5 次 provider request：OpenAI Responses PNG path/clipboard PNG、Anthropic JPEG、Gemini WebP 正确形成官方 image block，DeepSeek 与 unknown OpenAI-compatible 均在 transport 前零请求失败；同一流程证明 attachment delete/re-add、两轮 PrefixSnapshot、`/compact` preview、safe session export 以及 JSONL/export 中无 path/Base64/data URL/raw bytes。验收发现并修复 background compaction reload 丢失 process-local resolver、hosted provider destination、Gemini hosted/custom-tool composition 与 OpenAI Responses 默认 reasoning 四个真实运行问题；最终 full workspace fmt/check/test/strict Clippy、docs/site、audit/deny、targeted tests 和两轮本地审查通过，未发现剩余 P1/P2 finding。验收脚本只在 clipboard case 内短暂替换剪贴板并无损恢复文字/PNG/TIFF。release binary 为 64,456,256 bytes，相对 RFC-0032 基线 62,540,144 bytes 增加 1,916,112 bytes（3.06%）。
