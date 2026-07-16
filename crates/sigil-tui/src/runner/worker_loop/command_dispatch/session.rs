@@ -296,128 +296,36 @@ where
                 }
             }
             Ok(WorkerCommand::SwitchSession { session_log_path }) => {
-                if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot switch sessions while the agent is running".to_owned(),
-                    ));
-                    continue;
-                }
-
-                state.compaction.pending = None;
-                state.session.pending_queued_pre_turn_preparation = None;
-                state.compaction.preparation_tasks.abort_all();
-
-                match load_session_with_runtime_attachments(
-                    &root_config.agent.provider,
-                    &root_config.agent.model,
-                    &session_log_path,
-                    state.session.current.as_ref(),
+                match transition_session(
+                    SessionTransitionKind::Switch,
+                    session_log_path,
+                    root_config,
+                    workspace_root,
+                    state,
+                    message_tx,
                 ) {
-                    Ok(mut session) => {
-                        let same_logical_session =
-                            state.session.current.as_ref().is_some_and(|current| {
-                                current.session_scope_id() == session.session_scope_id()
-                            });
-                        if !same_logical_session {
-                            state.session.exact_prompts.clear();
-                        }
-                        mark_stale_dispatching_conversation_queue_items(
-                            &mut session,
-                            &state.session.exact_prompts,
-                            message_tx,
-                        );
-                        if state.session.current.as_ref().is_some_and(|session| {
-                            session_workspace_is_trusted(session, workspace_root)
-                        }) {
-                            match ensure_session_workspace_trust(
-                                &mut session,
-                                workspace_root,
-                                "trusted workspace carried into session",
-                            ) {
-                                Ok(()) => {}
-                                Err(error) => {
-                                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                                    continue;
-                                }
-                            }
-                        }
-                        let entries = session.entries().to_vec();
-                        state.session.log_path = session_log_path.clone();
-                        let provider_name = session.provider_name().to_owned();
-                        let model_name = session.model_name().to_owned();
-                        state.session.current = Some(session);
-                        let _ = message_tx.send(WorkerMessage::SessionSwitched {
-                            session_log_path,
-                            provider_name,
-                            model_name,
-                            entries,
-                        });
+                    Ok(message) => {
+                        let _ = message_tx.send(message);
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
             }
             Ok(WorkerCommand::StartNewSession { session_log_path }) => {
-                if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "cannot start a new session while the agent is running".to_owned(),
-                    ));
-                    continue;
-                }
-
-                state.compaction.pending = None;
-                state.session.pending_queued_pre_turn_preparation = None;
-                state.compaction.preparation_tasks.abort_all();
-
-                match load_session_with_runtime_attachments(
-                    &root_config.agent.provider,
-                    &root_config.agent.model,
-                    &session_log_path,
-                    state.session.current.as_ref(),
+                match transition_session(
+                    SessionTransitionKind::StartNew,
+                    session_log_path,
+                    root_config,
+                    workspace_root,
+                    state,
+                    message_tx,
                 ) {
-                    Ok(mut session) => {
-                        let same_logical_session =
-                            state.session.current.as_ref().is_some_and(|current| {
-                                current.session_scope_id() == session.session_scope_id()
-                            });
-                        if !same_logical_session {
-                            state.session.exact_prompts.clear();
-                        }
-                        mark_stale_dispatching_conversation_queue_items(
-                            &mut session,
-                            &state.session.exact_prompts,
-                            message_tx,
-                        );
-                        if state.session.current.as_ref().is_some_and(|session| {
-                            session_workspace_is_trusted(session, workspace_root)
-                        }) {
-                            match ensure_session_workspace_trust(
-                                &mut session,
-                                workspace_root,
-                                "trusted workspace carried into new session",
-                            ) {
-                                Ok(()) => {}
-                                Err(error) => {
-                                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                                    continue;
-                                }
-                            }
-                        }
-                        let entries = session.entries().to_vec();
-                        state.session.log_path = session_log_path.clone();
-                        let provider_name = session.provider_name().to_owned();
-                        let model_name = session.model_name().to_owned();
-                        state.session.current = Some(session);
-                        let _ = message_tx.send(WorkerMessage::NewSessionStarted {
-                            session_log_path,
-                            provider_name,
-                            model_name,
-                            entries,
-                        });
+                    Ok(message) => {
+                        let _ = message_tx.send(message);
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     }
                 }
             }

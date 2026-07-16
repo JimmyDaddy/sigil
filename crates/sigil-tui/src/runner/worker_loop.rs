@@ -75,6 +75,7 @@ mod provider_status;
 mod queue_driver;
 mod scheduler;
 mod session_lifecycle_runtime;
+mod session_transition;
 mod state;
 mod task_runtime;
 mod terminal_refresh;
@@ -140,6 +141,7 @@ pub(in crate::runner) use session_lifecycle_runtime::{
     inspect_local_session, local_session_lifecycle_service, preview_local_session_delete,
     preview_session_retention, set_local_session_pin,
 };
+pub(in crate::runner) use session_transition::{SessionTransitionKind, transition_session};
 pub(in crate::runner) use state::WorkerLoopState;
 pub(in crate::runner) use task_runtime::{
     CreateTaskFromPlanRequest, PlanApprovalRequest, RejectPlanRequest, SkillChildRunSpawn,

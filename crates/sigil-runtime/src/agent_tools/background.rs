@@ -103,6 +103,19 @@ impl AgentToolBackgroundRuns {
             .unwrap_or(false)
     }
 
+    /// Returns whether this owner still holds any detached agent run.
+    ///
+    /// A poisoned lock is treated as occupied so callers that protect session
+    /// boundaries fail closed instead of allowing an unobservable run to cross
+    /// scopes.
+    #[must_use]
+    pub fn has_any(&self) -> bool {
+        self.handles
+            .lock()
+            .map(|handles| !handles.is_empty())
+            .unwrap_or(true)
+    }
+
     pub(super) fn insert(
         &self,
         thread_id: AgentThreadId,

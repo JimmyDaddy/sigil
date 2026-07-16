@@ -2974,6 +2974,7 @@ async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result
     assert_eq!(spawn.metadata.details["status"], "running");
     drop(runtime);
 
+    assert!(background_runs.has_any());
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert!(background_runs.has_finished());
     let mut collector = AgentToolRuntime::with_provider_factory(
@@ -2982,11 +2983,12 @@ async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result
         registry.clone(),
         Arc::new(StaticProviderFactory),
     )
-    .with_background_runs(background_runs);
+    .with_background_runs(background_runs.clone());
     let collected = collector
         .collect_finished_background_runs(&mut session, &mut handler)
         .await?;
     assert_eq!(collected, vec![thread_id.clone()]);
+    assert!(!background_runs.has_any());
 
     let projection = session.agent_thread_state_projection();
     let thread = projection
