@@ -6,7 +6,9 @@
 
 ## Unreleased - main
 
-`v0.0.1-alpha.4` 之后暂时还没有新增用户可见变更。
+### 调整
+
+- Windows shell 与 terminal 工具现在默认使用 native PowerShell，在 Doctor 和 tool card 中显示解析后的 dialect，对非 POSIX 命令保持保守批准分析，并通过 Job Object 持有取消与超时的进程树；本地执行仍明确标记为 unconfined。
 
 ## v0.0.1-alpha.4 - 2026-07-16
 

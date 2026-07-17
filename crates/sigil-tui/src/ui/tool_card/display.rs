@@ -45,6 +45,12 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
     };
     let detail = if tool_name_matches(&summary.tool_name, "bash") {
         let mut details = Vec::new();
+        if let Some(shell) = shell_runtime_label(&summary.metadata) {
+            details.push(shell);
+        }
+        if let Some(backend) = execution_backend_label(&summary.metadata) {
+            details.push(backend);
+        }
         if let Some(code) = summary.metadata.exit_code {
             details.push(format!("exit {code}"));
         }
@@ -57,13 +63,7 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
             .as_deref()
             .filter(|policy| *policy != "unknown")
         {
-            let network_label = summary
-                .metadata
-                .execution_backend
-                .as_deref()
-                .map(|backend| format!("{backend} network {network_policy}"))
-                .unwrap_or_else(|| format!("network {network_policy}"));
-            details.push(network_label);
+            details.push(format!("network {network_policy}"));
         }
         if let Some(timeout_source) = summary
             .metadata
@@ -103,6 +103,33 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
         },
         is_error: summary.is_error,
     }
+}
+
+pub(super) fn shell_runtime_label(metadata: &ToolCardMetadata) -> Option<String> {
+    metadata.shell_dialect.as_deref().map(|dialect| {
+        let dialect = match dialect {
+            "powershell" => "PowerShell",
+            "posix" => "POSIX shell",
+            "cmd" => "cmd.exe",
+            other => other,
+        };
+        metadata
+            .shell_program
+            .as_deref()
+            .filter(|program| !program.is_empty())
+            .map(|program| format!("{dialect} ({program})"))
+            .unwrap_or_else(|| dialect.to_owned())
+    })
+}
+
+pub(super) fn execution_backend_label(metadata: &ToolCardMetadata) -> Option<String> {
+    metadata.execution_backend.as_deref().map(|backend| {
+        if backend == "local" {
+            "local unconfined".to_owned()
+        } else {
+            backend.to_owned()
+        }
+    })
 }
 
 pub(super) fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {

@@ -6073,6 +6073,19 @@ fn non_posix_commands_do_not_reuse_posix_readonly_downgrades() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn terminal_platform_capability_is_offline_and_truthful() -> Result<()> {
+    let capability = crate::inspect_builtin_terminal_platform_capability()?;
+    assert!(!capability.resolved_shell.is_empty());
+    assert!(matches!(capability.shell_dialect, "posix" | "powershell"));
+    assert!(!capability.local_execution_sandboxed);
+    assert!(matches!(
+        capability.process_tree_owner,
+        "unix_process_group" | "windows_job_object" | "direct_child_only"
+    ));
+    Ok(())
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_native_shell_reports_utf8_and_nonzero_exit() -> Result<()> {

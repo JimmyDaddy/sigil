@@ -267,7 +267,16 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|details| details.get("execution"))
             .and_then(|execution| execution.get("backend"))
             .and_then(Value::as_str)
-            .map(str::to_owned),
+            .map(str::to_owned)
+            .or_else(|| {
+                terminal_context
+                    .and_then(|terminal| terminal.get("execution_backend"))
+                    .or_else(|| {
+                        terminal_context.and_then(|terminal| terminal.get("enforcement_backend"))
+                    })
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
         execution_network_policy: details
             .and_then(|details| details.get("execution"))
             .and_then(|execution| execution.get("network"))
@@ -285,6 +294,14 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|execution| execution.get("resources"))
             .and_then(|resources| resources.get("cleanup"))
             .and_then(|cleanup| cleanup.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        shell_program: shell_context
+            .and_then(|shell| shell.get("program"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        shell_dialect: shell_context
+            .and_then(|shell| shell.get("dialect"))
             .and_then(Value::as_str)
             .map(str::to_owned),
         shell_command_family: shell_context
@@ -310,6 +327,10 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .map(str::to_owned),
         terminal_command: terminal_context
             .and_then(|details| details.get("command"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_shell: terminal_context
+            .and_then(|details| details.get("shell"))
             .and_then(Value::as_str)
             .map(str::to_owned),
         terminal_log_path: terminal_context

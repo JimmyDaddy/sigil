@@ -10,7 +10,7 @@
 sigil doctor
 ```
 
-在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会在 mouse、clipboard、scroll、profile、tmux/screen、SSH、WSL 和剪贴板桥接事实之外，显示配置的 notification 开关、method 和 threshold；不会打印 notification payload 或原始环境值。
+在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会在 mouse、clipboard、scroll、profile、tmux/screen、SSH、WSL 和剪贴板桥接事实之外，显示解析后的 command shell、process-tree owner、unconfined local-backend 边界，以及 notification 开关、method 和 threshold；不会打印 notification payload 或原始环境值。
 
 如果要复用一套本地流程来采集 `/doctor`、启动真实 TUI、逐项记录 pass/fail/skip，并生成 Markdown 报告，可以运行：
 
@@ -20,13 +20,15 @@ scripts/tui-mouse-smoke.sh
 
 ## 基线
 
-1. 确认 `/doctor` 输出 `terminal`、`terminal:config`、`terminal:mouse` 和 `terminal:clipboard`。
+1. 确认 `/doctor` 输出 `terminal`、`terminal:shell`、`terminal:process_owner`、`terminal:config`、`terminal:mouse` 和 `terminal:clipboard`。
 2. 打开 `/config`，查看 `Terminal` 区块。
 3. 默认保持 `keyboard_enhancement = "auto"`；只有已确认某个 profile 稳定时才强制 `on`，遇到异常终端层时强制 `off`。
 4. 默认保持 `mouse_capture = true` 以启用鼠标支持；如果终端或 multiplexer 不能稳定处理 mouse mode，再显式设为 `false`。
 5. 除非复制序列被拦截或被可见打印出来，否则保持 `osc52_clipboard = true`。
 6. 除非 transcript 和 approval diff 的滚轮速度过快或过慢，否则保持 `scroll_sensitivity = 3`。
 7. 只有后台或长任务确实需要失焦提示时才开启 attention notification。优先使用 `method = "auto"`；只有在测试已知 terminal profile 时才显式使用 `bell`、`osc9` 或 `osc777`。
+
+Windows 上，`terminal:shell` 应显示 PowerShell，`terminal:process_owner` 应显示 `windows_job_object`。分别运行无害的 `Write-Output '你好'` 与非零退出命令 `exit 7`；tool card 应保留 UTF-8 输出、显示实际 shell 并报告 exit code。Job Object 不是 sandbox，因此看到 `local_backend=unconfined` 是预期行为。
 
 ## Attention Notification Smoke
 

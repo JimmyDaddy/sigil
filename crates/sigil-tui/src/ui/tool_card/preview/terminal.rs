@@ -81,6 +81,14 @@ pub(in crate::ui::tool_card) fn terminal_task_display_status(
         _ => "OK",
     };
     let mut details = Vec::new();
+    if let Some(shell) = shell_runtime_label(&summary.metadata) {
+        details.push(shell);
+    } else if let Some(shell) = summary.metadata.terminal_shell.as_deref() {
+        details.push(shell.to_owned());
+    }
+    if let Some(backend) = execution_backend_label(&summary.metadata) {
+        details.push(backend);
+    }
     match summary.metadata.terminal_status.as_deref() {
         Some("exited") => {
             if let Some(code) = summary.metadata.terminal_exit_code {

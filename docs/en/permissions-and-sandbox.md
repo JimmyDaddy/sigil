@@ -74,6 +74,8 @@ strategy = "local"
 
 `local` preserves normal local shell behavior and does not claim operating-system isolation. On supported systems, advanced users can select a sandbox strategy:
 
+On Windows, local commands are owned by a kill-on-close Job Object so cancellation, timeout, and output failures can reap the registered process tree. This is lifecycle control only: it does not restrict filesystem access, network access, credentials, or tokens, and `local` remains unconfined. PowerShell and `cmd.exe` commands also stay at execute-level approval unless a future dialect-specific analyzer can prove a narrower effect; Sigil never applies Bash read-only classification to them.
+
 ```toml
 [execution]
 strategy = "sandbox"

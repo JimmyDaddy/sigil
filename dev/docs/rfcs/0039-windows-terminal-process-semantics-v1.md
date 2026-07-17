@@ -1,6 +1,6 @@
 # RFC-0039 Windows Terminal and Process Semantics V1
 
-状态：active / R39.0-R39.1 complete
+状态：active / R39.0-R39.4 complete
 
 创建日期：2026-07-17
 
@@ -200,3 +200,11 @@ Windows-only conformance 必须由 pushed hosted job 执行；非 Windows 本地
   one-shot timeout descendant、terminal process/PTY cancel descendant 的 Windows-only regression。
   macOS tools 191/1 ignored 与 strict Clippy 通过；本地 Windows cross-check 因缺少 MinGW C compiler
   无法完成，API 编译及真实 descendant proof 必须在 R39.5 pushed hosted job 收口。
+- R39.4 complete. Doctor 新增纯离线 `terminal:shell` 与 `terminal:process_owner` 检查，明确输出
+  resolved executable/dialect、lifecycle owner 和 `local_backend=unconfined`；检查不会执行用户命令
+  或访问网络。bash/terminal task card 解析 shell program、dialect 与 backend metadata，并把本地
+  backend 显示为 `local unconfined`。EN/ZH configuration、permissions/sandbox、terminal
+  compatibility、changelog 与 site 已同步 Windows 默认 PowerShell、Job Object 仅负责生命周期、
+  非 POSIX 审批更保守的边界。runtime doctor 51 项、TUI tool-card 58 项、focused tools capability、
+  affected strict Clippy、fmt、docs/site 与 diff gate 通过；本机 RVM/dyld 启动异常时使用系统 Ruby
+  执行同一检查入口并恢复全部脚本 shebang，未改变仓库 gate。

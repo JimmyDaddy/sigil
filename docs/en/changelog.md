@@ -6,7 +6,9 @@ This page lists user-facing release notes. For support boundaries and early-prev
 
 ## Unreleased - main
 
-No user-facing changes have been added after `v0.0.1-alpha.4` yet.
+### Changed
+
+- Windows shell and terminal tools now use native PowerShell by default, disclose the resolved dialect in Doctor and tool cards, keep non-POSIX approval analysis conservative, and use Job Object process-tree ownership for cancellation and timeout. Local execution remains explicitly unconfined.
 
 ## v0.0.1-alpha.4 - 2026-07-16
 

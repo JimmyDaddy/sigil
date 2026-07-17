@@ -69,6 +69,12 @@ root = "."
 
 Use the [Permissions and sandbox](permissions-and-sandbox.md) guide before allowing a path outside the workspace or changing local command behavior.
 
+## Local Command Shell
+
+Sigil resolves one native shell when the built-in tools are registered. On Windows it prefers `pwsh.exe` and falls back to Windows PowerShell (`powershell.exe`); on macOS and Linux it uses `sh`. The tool is still named `bash` for provider compatibility, but its description, approval analysis, result metadata, and terminal cards report the actual program and dialect.
+
+PowerShell commands must use PowerShell syntax such as `$env:NAME` and `$null`; Bash syntax is not translated. An explicit `terminal_start.shell` accepts the modeled POSIX shells, PowerShell, or `cmd.exe`; unknown shells fail before spawn. Prefer Sigil's file tools for portable reads and edits. Run `sigil doctor` and inspect `terminal:shell` when command syntax behaves differently from the host you expected.
+
 ## Storage And Session Paths
 
 ```toml

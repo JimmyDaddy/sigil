@@ -3,6 +3,36 @@ use super::*;
 pub(super) fn check_terminal(report: &mut DoctorReport, config: Option<&TerminalConfig>) {
     let environment = TerminalEnvironment::from_env();
     check_terminal_with_env(report, config, &environment);
+    check_terminal_process_capability(report);
+}
+
+fn check_terminal_process_capability(report: &mut DoctorReport) {
+    match sigil_tools_builtin::inspect_builtin_terminal_platform_capability() {
+        Ok(capability) => {
+            report.push(
+                DoctorStatus::Ok,
+                "terminal:shell",
+                format!(
+                    "resolved_shell={} dialect={} local_backend=unconfined",
+                    capability.resolved_shell, capability.shell_dialect
+                ),
+            );
+            report.push(
+                DoctorStatus::Ok,
+                "terminal:process_owner",
+                format!(
+                    "owner={} lifecycle_only=true sandboxed={}",
+                    capability.process_tree_owner, capability.local_execution_sandboxed
+                ),
+            );
+        }
+        Err(error) => report.push_with_remediation(
+            DoctorStatus::Error,
+            "terminal:process_owner",
+            format!("process-tree owner unavailable: {error}"),
+            Some("use a supported local OS/process policy before running shell or terminal tools"),
+        ),
+    }
 }
 
 pub(super) fn check_terminal_with_env(

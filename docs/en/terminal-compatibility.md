@@ -10,7 +10,7 @@ Start with diagnostics:
 sigil doctor
 ```
 
-Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report includes the configured notification switch, method, and threshold alongside mouse, clipboard, scroll, profile, tmux/screen, SSH, WSL, and clipboard bridge facts. It does not print notification payloads or raw environment values.
+Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report includes the resolved command shell, process-tree owner, unconfined local-backend boundary, configured notification switch, method, and threshold alongside mouse, clipboard, scroll, profile, tmux/screen, SSH, WSL, and clipboard bridge facts. It does not print notification payloads or raw environment values.
 
 For a repeatable local run that captures `/doctor`, launches the real TUI, prompts for pass/fail/skip results, and writes a Markdown report, use:
 
@@ -20,13 +20,15 @@ scripts/tui-mouse-smoke.sh
 
 ## Baseline
 
-1. Confirm `/doctor` reports `terminal`, `terminal:config`, `terminal:mouse`, and `terminal:clipboard`.
+1. Confirm `/doctor` reports `terminal`, `terminal:shell`, `terminal:process_owner`, `terminal:config`, `terminal:mouse`, and `terminal:clipboard`.
 2. Open `/config` and review the `Terminal` section.
 3. Keep `keyboard_enhancement = "auto"` unless you need to force `on` for a known-good profile or force `off` for a broken terminal layer.
 4. Keep the default `mouse_capture = true` for mouse support; set it to `false` if the terminal or multiplexer mishandles mouse mode.
 5. Keep `osc52_clipboard = true` unless copy sequences are blocked or printed visibly.
 6. Keep `scroll_sensitivity = 3` unless the mouse wheel feels too fast or too slow in transcript and approval diff views.
 7. Keep attention notifications off unless background or long-running work needs an out-of-focus signal. Prefer `method = "auto"`; use explicit `bell`, `osc9`, or `osc777` only when testing a known terminal profile.
+
+On Windows, `terminal:shell` should report PowerShell and `terminal:process_owner` should report `windows_job_object`. Run a harmless `Write-Output '你好'` command and a non-zero `exit 7` command; the tool card should retain UTF-8 output, show the actual shell, and report the exit code. The Job Object is not a sandbox—`local_backend=unconfined` is expected.
 
 ## Attention Notification Smoke
 

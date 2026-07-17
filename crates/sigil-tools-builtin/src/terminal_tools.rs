@@ -88,6 +88,18 @@ impl TerminalProcessManagers {
         self.terminal_execution_config.resolve_shell(explicit)
     }
 
+    fn default_shell_summary(&self) -> String {
+        self.resolve_shell(None)
+            .map(|shell| {
+                format!(
+                    "{} ({})",
+                    shell.program().display(),
+                    shell.dialect().as_str()
+                )
+            })
+            .unwrap_or_else(|_| "unavailable".to_owned())
+    }
+
     pub(crate) fn manager_for(
         &self,
         workspace_root: &Path,
@@ -124,7 +136,8 @@ impl Tool for TerminalStartTool {
         ToolSpec {
             name: "terminal_start".to_owned(),
             description: format!(
-                "Start a terminal task from the workspace. Use mode=foreground for one-shot checks that should return a single final result, mode=background for long-lived tasks, and pty=true/mode=interactive for tasks that need input. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                "Start a terminal task from the workspace. The default shell is {}; explicit shell accepts modeled POSIX, PowerShell, or cmd executables. Use mode=foreground for one-shot checks that should return a single final result, mode=background for long-lived tasks, and pty=true/mode=interactive for tasks that need input. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                self.managers.default_shell_summary(),
                 self.scratch_label
             ),
             input_schema: json!({

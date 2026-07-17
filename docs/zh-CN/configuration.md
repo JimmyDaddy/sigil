@@ -69,6 +69,12 @@ root = "."
 
 允许 workspace 外路径或修改本地命令行为之前，请先阅读[权限与沙箱](permissions-and-sandbox.md)。
 
+## 本地命令 Shell
+
+注册内置工具时，Sigil 会解析并冻结一个 native shell。Windows 优先使用 `pwsh.exe`，找不到时回退到 Windows PowerShell（`powershell.exe`）；macOS 与 Linux 使用 `sh`。为了 provider 兼容，工具名仍是 `bash`，但工具说明、批准分析、结果 metadata 与 terminal card 都会显示实际 program 和 dialect。
+
+PowerShell 命令必须使用 `$env:NAME`、`$null` 等 PowerShell 语法；Sigil 不会翻译 Bash 语法。显式 `terminal_start.shell` 只接受已建模的 POSIX shell、PowerShell 或 `cmd.exe`，未知 shell 会在 spawn 前失败。跨平台读取和编辑应优先使用 Sigil file tools。如果命令语法与预期 host 不一致，运行 `sigil doctor` 并查看 `terminal:shell`。
+
 ## Storage 与 Session 路径
 
 ```toml

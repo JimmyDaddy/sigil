@@ -1516,6 +1516,21 @@ fn doctor_terminal_check_reports_dumb_and_missing_term() {
         assert!(report.checks.iter().any(|check| check.name == "terminal"
             && check.status == DoctorStatus::Warn
             && check.message.contains("TERM=dumb")));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "terminal:shell"
+                    && check.message.contains("local_backend=unconfined"))
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "terminal:process_owner"
+                    && check.message.contains("lifecycle_only=true")
+                    && check.message.contains("sandboxed=false"))
+        );
     }
 
     {

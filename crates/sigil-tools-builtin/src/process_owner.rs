@@ -144,12 +144,19 @@ mod windows {
             })?;
         job.terminate()
     }
+
+    pub(super) fn validate_process_tree_owner() -> Result<()> {
+        drop(WindowsJob::create()?);
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
 pub(crate) use windows::ProcessTreeOwnerGuard;
 #[cfg(windows)]
 pub(crate) use windows::terminate_owned_process_tree;
+#[cfg(windows)]
+pub(crate) use windows::validate_process_tree_owner;
 
 #[cfg(not(windows))]
 pub(crate) struct ProcessTreeOwnerGuard;
@@ -159,4 +166,9 @@ impl ProcessTreeOwnerGuard {
     pub(crate) fn assign(_process_id: Option<u32>) -> anyhow::Result<Self> {
         Ok(Self)
     }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn validate_process_tree_owner() -> anyhow::Result<()> {
+    Ok(())
 }

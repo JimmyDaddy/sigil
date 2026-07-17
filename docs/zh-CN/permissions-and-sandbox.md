@@ -74,6 +74,8 @@ strategy = "local"
 
 `local` 保留普通本地 shell 行为，不宣称提供操作系统隔离。在受支持系统上，高级用户可以选择 sandbox 策略：
 
+在 Windows 上，本地命令由 kill-on-close Job Object 持有，因此取消、超时或输出失败时可以回收已登记的进程树。这只属于 lifecycle control：它不会限制文件系统、网络、凭据或 token，`local` 仍是 unconfined。PowerShell 与 `cmd.exe` 命令也会保持 execute 级批准，除非未来的 dialect-specific analyzer 能证明更窄的 effect；Sigil 不会把 Bash 的只读分类套用到它们。
+
 ```toml
 [execution]
 strategy = "sandbox"

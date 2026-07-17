@@ -33,6 +33,43 @@ pub use terminal_process::{
     TerminalPtySize, TerminalReadResult, TerminalResizeResult, TerminalStartRequest,
     TerminalTaskArtifacts, TerminalTaskPermissionContext,
 };
+
+/// Offline, secret-free summary of the built-in terminal runtime selected for this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinTerminalPlatformCapability {
+    /// Executable selected once for this process's built-in shell and terminal tools.
+    pub resolved_shell: String,
+    /// Command syntax expected by the resolved executable.
+    pub shell_dialect: &'static str,
+    /// Platform lifecycle primitive used to own descendant processes.
+    pub process_tree_owner: &'static str,
+    /// Whether the local execution backend provides filesystem or network confinement.
+    pub local_execution_sandboxed: bool,
+}
+
+/// Resolves the native shell and validates platform process-tree ownership without running a
+/// command or accessing the network.
+///
+/// # Errors
+///
+/// Returns an error when the platform process-tree owner cannot be initialized.
+pub fn inspect_builtin_terminal_platform_capability()
+-> anyhow::Result<BuiltinTerminalPlatformCapability> {
+    let shell = shell_runtime::ResolvedShell::detect_default();
+    process_owner::validate_process_tree_owner()?;
+    Ok(BuiltinTerminalPlatformCapability {
+        resolved_shell: shell.program_string(),
+        shell_dialect: shell.dialect().as_str(),
+        process_tree_owner: if cfg!(windows) {
+            "windows_job_object"
+        } else if cfg!(unix) {
+            "unix_process_group"
+        } else {
+            "direct_child_only"
+        },
+        local_execution_sandboxed: false,
+    })
+}
 pub use webfetch::{
     WebFetchAuthorizedDialPlan, WebFetchError, WebFetchFetchedResponse, WebFetchFormat,
     WebFetchHopResult, WebFetchLimits, WebFetchNetworkGuard, WebFetchProxyEnvSource, WebFetchRoute,

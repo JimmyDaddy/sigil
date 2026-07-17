@@ -590,14 +590,14 @@ fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
     );
     assert_eq!(
         build_tool_card_display(&no_output).status.detail.as_deref(),
-        Some("exit 0 · docker network denied")
+        Some("docker · exit 0 · network denied")
     );
     assert_eq!(
         build_tool_card_display(&unknown_network)
             .status
             .detail
             .as_deref(),
-        Some("exit 0 · passed")
+        Some("local unconfined · exit 0 · passed")
     );
     let timeout_display = build_tool_card_display(&timed_out);
     assert_eq!(timeout_display.status.label, "TIMEOUT");
@@ -920,7 +920,7 @@ fn tool_card_renders_terminal_task_status_and_preview() {
     assert!(activity.defaults_expanded);
     assert!(text.contains("Terminal terminal-1 cargo test"));
     assert!(text.contains("RUNNING"));
-    assert!(!text.contains("local unconfined"));
+    assert!(text.contains("sh · local unconfined"));
     assert!(text.contains("terminal"));
     assert!(text.contains("log"));
     assert!(text.contains("running tests"));
@@ -1001,7 +1001,7 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
     assert_eq!(exited_display.status.label, "EXITED");
     assert_eq!(
         exited_display.status.detail.as_deref(),
-        Some("exit 7 · cleanup completed")
+        Some("local unconfined · exit 7 · cleanup completed")
     );
     assert_eq!(exited_activity.key, "terminal_task:terminal-exited");
     assert_eq!(exited_activity.title, "Terminal terminal-exited cargo test");
@@ -1457,6 +1457,8 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
                 "cleanup": {"status": "completed"}
             },
             "shell_analysis": {
+                "program": "pwsh.exe",
+                "dialect": "powershell",
                 "command_family": "cargo_check",
                 "verdict": "running"
             }
@@ -1487,6 +1489,8 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
     assert_eq!(metadata.returned_entries, Some(2));
     assert_eq!(metadata.total_entries, Some(4));
     assert_eq!(metadata.execution_backend.as_deref(), Some("docker"));
+    assert_eq!(metadata.shell_program.as_deref(), Some("pwsh.exe"));
+    assert_eq!(metadata.shell_dialect.as_deref(), Some("powershell"));
     assert_eq!(metadata.execution_network_policy.as_deref(), Some("denied"));
     assert_eq!(
         metadata.execution_timeout_source.as_deref(),
