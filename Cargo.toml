@@ -8,6 +8,7 @@ members = [
     "crates/sigil-provider-gemini",
     "crates/sigil-tools-builtin",
     "crates/sigil-code-intel",
+    "crates/sigil-process",
     "crates/sigil-mcp",
     "crates/sigil-runtime",
     "crates/sigil-http",

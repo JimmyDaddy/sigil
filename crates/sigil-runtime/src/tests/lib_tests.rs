@@ -1370,7 +1370,7 @@ async fn refresh_mcp_server_network_admission_rejects_before_spawn() -> Result<(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn planned_mcp_process_network_deny_with_proof_returns_denied_receipt() -> Result<()> {
+async fn planned_mcp_process_returns_owned_child_and_denied_receipt() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let environment = sigil_kernel::resolve_extension_process_environment(&[])?;
     let capabilities = ExecutionBackendCapabilities {
@@ -1421,6 +1421,7 @@ async fn planned_mcp_process_network_deny_with_proof_returns_denied_receipt() ->
         launch.receipt.classification,
         sigil_mcp::McpProcessClass::LocalStdioSandboxed
     );
+    let _process_owner = launch.process_owner;
     assert!(launch.child.wait().await?.success());
     Ok(())
 }

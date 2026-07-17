@@ -171,7 +171,7 @@ jobs:
 
       - name: Test macOS runtime and execution surfaces
         if: runner.os == 'macOS'
-        run: cargo test --locked -p sigil-kernel -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib
+        run: cargo test --locked -p sigil-kernel -p sigil-process -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib
 
       - name: Test Windows kernel durability
         if: runner.os == 'Windows'
@@ -179,7 +179,7 @@ jobs:
 
       - name: Test Windows MCP transport
         if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-mcp --lib
+        run: cargo test --locked -p sigil-process -p sigil-mcp --lib
 
       - name: Test Windows builtin tools and terminal semantics
         if: runner.os == 'Windows'
@@ -201,7 +201,7 @@ jobs:
       matrix:
         include:
           - name: core-runtime-tools
-            packages: "sigil-kernel sigil-tools-builtin sigil-mcp sigil-runtime"
+            packages: "sigil-kernel sigil-process sigil-tools-builtin sigil-mcp sigil-runtime"
           - name: providers
             packages: "sigil-provider-deepseek sigil-provider-openai-compat sigil-provider-openai-responses sigil-provider-anthropic sigil-provider-gemini"
           - name: automation-surfaces

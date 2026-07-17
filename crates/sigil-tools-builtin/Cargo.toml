@@ -27,12 +27,10 @@ tree-sitter-bash.workspace = true
 walkdir.workspace = true
 url.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-process = { path = "../sigil-process" }
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
 serial_test = "3"

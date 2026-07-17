@@ -1182,9 +1182,9 @@ pub(super) fn launch_planned_mcp_process(
     } else {
         request.classification
     };
-    Ok(McpProcessLaunch {
+    McpProcessLaunch::owned(
         child,
-        receipt: McpProcessLaunchReceipt {
+        McpProcessLaunchReceipt {
             server_name: request.server_name,
             classification,
             coverage,
@@ -1200,7 +1200,8 @@ pub(super) fn launch_planned_mcp_process(
             launch_static_fingerprint: request.launch_static_fingerprint,
             declaration: request.declaration,
         },
-    })
+    )
+    .context("failed to establish MCP process-tree ownership")
 }
 
 /// Refreshes provider-visible tools for one configured MCP server.

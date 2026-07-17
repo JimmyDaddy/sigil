@@ -31,6 +31,7 @@
 - `crates/sigil-provider-deepseek`：DeepSeek provider
 - `crates/sigil-provider-openai-compat`：OpenAI-compatible provider
 - `crates/sigil-tools-builtin`：内置工具
+- `crates/sigil-process`：跨 crate 的最小进程树 lifecycle ownership；不承载 shell、sandbox、MCP framing 或 TUI 状态
 - `crates/sigil-mcp`：MCP 接入
 - `crates/sigil-runtime`：跨 TUI / CLI 的 provider、tool registry、run options 装配，并提供 provider-neutral 的配置草稿、状态请求/刷新任务、provider/model metadata、agent-message route 和 session-control append helper；入口层不直接依赖 provider crate
 

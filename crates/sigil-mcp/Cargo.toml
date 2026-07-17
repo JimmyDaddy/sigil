@@ -20,6 +20,7 @@ tracing.workspace = true
 uuid.workspace = true
 url.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
+sigil-process = { path = "../sigil-process" }
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true

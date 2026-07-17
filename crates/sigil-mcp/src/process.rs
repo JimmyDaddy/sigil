@@ -5,8 +5,6 @@ const MCP_STDERR_HEAD_LIMIT_BYTES: usize = 16 * 1024;
 const MCP_STDERR_TAIL_LIMIT_BYTES: usize = 48 * 1024;
 const MCP_STDERR_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const MCP_PROCESS_EXIT_GRACE: Duration = Duration::from_millis(500);
-#[cfg(any(windows, test))]
-const MCP_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -354,7 +352,27 @@ pub(super) fn mcp_backend_capability_labels(
 
 pub struct McpProcessLaunch {
     pub child: Child,
+    pub process_owner: sigil_process::ProcessTreeOwnerGuard,
     pub receipt: McpProcessLaunchReceipt,
+}
+
+impl McpProcessLaunch {
+    /// Binds a freshly spawned child to the platform process-tree owner before returning it to the
+    /// MCP lifecycle. Assignment failure kills and synchronously reaps the direct child within a
+    /// bounded grace so callers cannot accidentally continue with an unowned process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when platform ownership cannot be established. The direct child is then
+    /// terminated and given a bounded synchronous reap grace before the error is returned.
+    pub fn owned(mut child: Child, receipt: McpProcessLaunchReceipt) -> Result<Self> {
+        let process_owner = assign_mcp_process_owner(&mut child)?;
+        Ok(Self {
+            child,
+            process_owner,
+            receipt,
+        })
+    }
 }
 
 pub trait McpProcessLauncher: Send + Sync {
@@ -412,10 +430,40 @@ impl McpProcessLauncher for LocalMcpProcessLauncher {
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn MCP server {}", request.server_name))?;
-        Ok(McpProcessLaunch {
+        McpProcessLaunch::owned(
             child,
-            receipt: McpProcessLaunchReceipt::local_outside_sandbox(&request),
+            McpProcessLaunchReceipt::local_outside_sandbox(&request),
+        )
+        .with_context(|| {
+            format!(
+                "failed to establish process-tree ownership for MCP server {}",
+                request.server_name
+            )
         })
+    }
+}
+
+fn assign_mcp_process_owner(child: &mut Child) -> Result<sigil_process::ProcessTreeOwnerGuard> {
+    let process_id = child.id();
+    match sigil_process::ProcessTreeOwnerGuard::assign(process_id) {
+        Ok(owner) => Ok(owner),
+        Err(error) => {
+            let direct_kill = child.start_kill();
+            let deadline = std::time::Instant::now() + MCP_PROCESS_EXIT_GRACE;
+            let direct_wait = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break format!("reaped with {status}"),
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Ok(None) => break "reap exceeded bounded grace".to_owned(),
+                    Err(wait_error) => break format!("reap failed: {wait_error}"),
+                }
+            };
+            bail!(
+                "process-tree assignment failed: {error}; direct_kill={direct_kill:?}; direct_wait={direct_wait}"
+            );
+        }
     }
 }
 
@@ -640,43 +688,25 @@ pub(super) async fn terminate_mcp_process(child: &mut Child) -> McpProcessCleanu
 
     #[cfg(windows)]
     if let Some(process_id) = process_id {
-        let process_id_text = process_id.to_string();
-        let mut command = Command::new("taskkill");
-        command.args(["/PID", process_id_text.as_str(), "/T", "/F"]);
-        let taskkill = bounded_cleanup_command_status(
-            command,
-            format!("taskkill for MCP process tree {process_id}"),
-        )
-        .await;
-        match taskkill {
-            Ok(status) if status.success() => {
-                return match tokio::time::timeout(MCP_PROCESS_EXIT_GRACE, child.wait()).await {
-                    Ok(Ok(_)) => McpProcessCleanupSummary::completed(format!(
-                        "taskkill terminated the MCP process tree {process_id} and the child was reaped"
-                    )),
-                    Ok(Err(error)) => McpProcessCleanupSummary::failed(format!(
-                        "taskkill terminated MCP process tree {process_id} but the child was not reaped: {error}"
-                    )),
-                    Err(_) => McpProcessCleanupSummary::failed(format!(
-                        "taskkill terminated MCP process tree {process_id} but child reap exceeded the bounded grace"
-                    )),
-                };
-            }
-            Ok(status) => {
-                let fallback = kill_and_reap_child(child).await;
-                return McpProcessCleanupSummary::failed(format!(
-                    "taskkill for MCP process tree {process_id} exited with {status}; direct-child fallback: {}",
-                    fallback.reason
-                ));
-            }
-            Err(error) => {
-                let fallback = kill_and_reap_child(child).await;
-                return McpProcessCleanupSummary::failed(format!(
-                    "failed to invoke taskkill for MCP process tree {process_id}: {error}; direct-child fallback: {}",
-                    fallback.reason
-                ));
-            }
+        let terminate = sigil_process::terminate_owned_process_tree(process_id);
+        if terminate.is_err() {
+            let fallback = kill_and_reap_child(child).await;
+            return McpProcessCleanupSummary::failed(format!(
+                "failed to terminate Windows MCP Job Object {process_id}: {terminate:?}; direct-child fallback: {}",
+                fallback.reason
+            ));
         }
+        return match tokio::time::timeout(MCP_PROCESS_EXIT_GRACE, child.wait()).await {
+            Ok(Ok(_)) => McpProcessCleanupSummary::completed(format!(
+                "Windows Job Object terminated MCP process tree {process_id} and the child was reaped"
+            )),
+            Ok(Err(error)) => McpProcessCleanupSummary::failed(format!(
+                "Windows Job Object terminated MCP process tree {process_id} but the child was not reaped: {error}"
+            )),
+            Err(_) => McpProcessCleanupSummary::failed(format!(
+                "Windows Job Object terminated MCP process tree {process_id} but child reap exceeded the bounded grace"
+            )),
+        };
     }
 
     kill_and_reap_child(child).await
@@ -742,9 +772,14 @@ async fn cleanup_after_mcp_leader_reaped(
     }
     #[cfg(windows)]
     if let Some(process_id) = process_id {
-        return McpProcessCleanupSummary::failed(format!(
-            "{reason}; MCP process-tree cleanup is unconfirmed because leader {process_id} exited before taskkill"
-        ));
+        return match sigil_process::terminate_owned_process_tree(process_id) {
+            Ok(()) => McpProcessCleanupSummary::completed(format!(
+                "{reason}; Windows Job Object terminated remaining MCP descendants"
+            )),
+            Err(error) => McpProcessCleanupSummary::failed(format!(
+                "{reason}; failed to terminate remaining MCP descendants through the Windows Job Object: {error}"
+            )),
+        };
     }
     #[cfg(not(any(unix, windows)))]
     if process_id.is_some() {
@@ -775,23 +810,6 @@ async fn kill_and_reap_child(child: &mut Child) -> McpProcessCleanupSummary {
 fn configure_mcp_process_group(_command: &mut Command) {
     #[cfg(unix)]
     _command.process_group(0);
-}
-
-#[cfg(any(windows, test))]
-async fn bounded_cleanup_command_status(
-    mut command: Command,
-    label: impl AsRef<str>,
-) -> Result<std::process::ExitStatus> {
-    let label = label.as_ref();
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    tokio::time::timeout(MCP_CLEANUP_COMMAND_TIMEOUT, command.status())
-        .await
-        .with_context(|| format!("{label} exceeded the bounded cleanup command timeout"))?
-        .with_context(|| format!("failed to invoke {label}"))
 }
 
 #[cfg(test)]

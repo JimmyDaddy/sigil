@@ -108,6 +108,7 @@ impl std::error::Error for McpPostSpawnStartupError {
 
 pub(super) struct McpClient {
     pub(super) _child: Mutex<Option<Child>>,
+    pub(super) _process_owner: sigil_process::ProcessTreeOwnerGuard,
     pub(super) _process_receipt: McpProcessLaunchReceipt,
     pub(super) _stderr_task: Mutex<Option<JoinHandle<McpStderrSummary>>>,
     pub(super) _stderr_monitor_task: std::sync::Mutex<Option<JoinHandle<()>>>,
@@ -216,7 +217,11 @@ impl McpClient {
         let launch = process_launcher.launch(launch_request)?;
         let startup_receipt = launch.receipt.clone();
         let startup = async move {
-            let mut child = launch.child;
+            let McpProcessLaunch {
+                mut child,
+                process_owner,
+                receipt,
+            } = launch;
 
             let stdin = child.stdin.take();
             let stdout = child.stdout.take();
@@ -244,7 +249,8 @@ impl McpClient {
 
             let client = Arc::new(Self {
                 _child: Mutex::new(Some(child)),
-                _process_receipt: launch.receipt,
+                _process_owner: process_owner,
+                _process_receipt: receipt,
                 _stderr_task: Mutex::new(Some(stderr_task)),
                 _stderr_monitor_task: std::sync::Mutex::new(None),
                 stderr_fault_receiver: Mutex::new(Some(stderr_fault_receiver)),

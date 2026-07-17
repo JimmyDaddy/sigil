@@ -1,6 +1,6 @@
 # RFC-0040 MCP Production Reliability and OAuth V1
 
-状态：active / R40.0-R40.1A complete; R40.1B next
+状态：active / R40.0-R40.1B complete; R40.2 next
 
 创建日期：2026-07-17
 
@@ -310,3 +310,11 @@ CI，但真实第三方 OAuth account 不进入必跑 gate。
   replacement preflight 失败后旧 generation identity 不变。runtime/TUI targeted tests、crate check、
   per-crate `--no-deps` strict Clippy、rustfmt 与 diff 通过。全 dependency Clippy 被同期未提交的
   `sigil-kernel/agent.rs` 三处 `needless_borrow` 阻塞，本切片未修改或吸收该并发工作。
+- R40.1B complete. 新增最小 `sigil-process` crate，把内置工具既有的 Windows kill-on-close Job
+  Object owner 收口为跨 crate lifecycle primitive；tools 通过兼容 façade 复用它，stdio MCP 的 local
+  与 runtime-planned child 都在 spawn 后立即绑定，assignment 失败即 fail closed 并 bounded reap。
+  MCP 清理已移除 `taskkill`，显式终止共享 Job Object 并等待 direct child；zero-surface/drop 路径新增
+  Windows descendant conformance。4-server barrier fixture 在不增加 5 秒产品 deadline 的前提下稳定
+  通过。macOS MCP 168/168、process 1/1、tools 193/193（1 ignored）、targeted strict Clippy、rustdoc、
+  test-layout、fmt/diff 与 `sigil-process` Windows target check 通过；完整 MCP Windows cross-check 受本机
+  缺少 MinGW C compiler 阻塞，真实 Windows 执行证据由 R40.5 hosted gate 收口。

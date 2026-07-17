@@ -591,6 +591,82 @@ while True:
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_mcp_initialization_reaches_controlled_barrier_without_timeout_inflation()
+-> Result<()> {
+    const SERVER_COUNT: usize = 4;
+    let temp = tempfile::tempdir()?;
+    let barrier_dir = temp.path().join("startup-barrier");
+    fs::create_dir(&barrier_dir)?;
+    let script = temp.path().join("barrier-startup.py");
+    write_server(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, pathlib, sys, time
+
+barrier = pathlib.Path(sys.argv[1])
+name = sys.argv[2]
+expected = int(sys.argv[3])
+
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
+
+def write_message(obj):
+    sys.stdout.buffer.write(json.dumps(obj).encode() + b"\n")
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        (barrier / name).write_text("ready")
+        deadline = time.monotonic() + 2.0
+        while len(list(barrier.iterdir())) < expected and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if len(list(barrier.iterdir())) < expected:
+            sys.exit(2)
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"probe","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut tasks = Vec::new();
+    for index in 0..SERVER_COUNT {
+        let name = format!("barrier-{index}");
+        let config = mcp_server_config! {
+            name: name.clone(),
+            command: "python3".to_owned(),
+            args: vec![
+                script.to_string_lossy().into_owned(),
+                barrier_dir.to_string_lossy().into_owned(),
+                name.clone(),
+                SERVER_COUNT.to_string(),
+            ],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        };
+        tasks.push(tokio::spawn(async move {
+            let mut registry = ToolRegistry::new();
+            register_mcp_tools(&mut registry, &[config]).await?;
+            Result::<usize>::Ok(registry.specs().len())
+        }));
+    }
+
+    for task in tasks {
+        assert_eq!(task.await??, 1);
+    }
+    assert_eq!(fs::read_dir(barrier_dir)?.count(), SERVER_COUNT);
+    Ok(())
+}
+
 #[tokio::test]
 async fn mcp_resource_and_prompt_adapters_apply_tool_context_timeout() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -812,6 +888,99 @@ while True:
         "zero-surface registration must not orphan its process-group descendant"
     );
     Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn mcp_zero_surface_registration_reaps_windows_job_descendant() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let descendant_pid_file = temp.path().join("zero-surface-descendant.pid");
+    let script = temp.path().join("zero-surface.py");
+    let descendant_path = serde_json::to_string(&descendant_pid_file.to_string_lossy())?;
+    write_server(
+        &script,
+        &r#"#!/usr/bin/env python3
+import json, pathlib, subprocess, sys, time
+pid_path = __DESCENDANT_PID_FILE__
+child = subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)",
+    pid_path,
+])
+deadline = time.monotonic() + 2.0
+while not pathlib.Path(pid_path).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not pathlib.Path(pid_path).exists():
+    sys.exit(3)
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line.decode())
+def write_message(obj):
+    sys.stdout.buffer.write(json.dumps(obj).encode() + b"\n")
+    sys.stdout.buffer.flush()
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+"#
+        .replace("__DESCENDANT_PID_FILE__", &descendant_path),
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    let mut zero_surface = server_config("zero-surface", &script, 5);
+    zero_surface.required = false;
+    register_mcp_tools(&mut registry, &[zero_surface]).await?;
+    assert!(registry.specs().is_empty());
+
+    let descendant_pid = read_windows_pid(&descendant_pid_file).await?;
+    assert!(
+        !windows_process_is_alive(descendant_pid)?,
+        "zero-surface registration must not orphan its Windows Job Object descendant"
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn read_windows_pid(path: &std::path::Path) -> Result<u32> {
+    for _ in 0..800 {
+        if let Ok(contents) = tokio::fs::read_to_string(path).await
+            && let Ok(process_id) = contents.trim().parse()
+        {
+            return Ok(process_id);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!(
+        "timed out waiting for Windows descendant pid at {}",
+        path.display()
+    )
+}
+
+#[cfg(windows)]
+fn windows_process_is_alive(process_id: u32) -> Result<bool> {
+    let script = format!(
+        "if (Get-Process -Id {process_id} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+    );
+    Ok(std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .status()?
+        .success())
 }
 
 #[tokio::test]
