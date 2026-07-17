@@ -92,7 +92,10 @@ fn replace_and_sync(temp: &Path, path: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers that remain alive for the call.
+    // `std::fs::rename` cannot request `MOVEFILE_WRITE_THROUGH`, so retain one direct Win32 call
+    // to preserve the durable replacement contract.
+    // SAFETY: both vectors are non-null, NUL-terminated UTF-16 buffers. Their storage remains
+    // stable and readable for the full call, and Win32 does not retain either pointer afterward.
     let replaced = unsafe {
         MoveFileExW(
             source.as_ptr(),

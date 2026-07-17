@@ -6,11 +6,13 @@
 
 #[cfg(windows)]
 mod windows {
+    // Rust's standard library does not expose Windows Job Object lifecycle APIs. Keep the
+    // unavoidable unsafe surface limited to direct Win32 calls and raw-handle ownership transfer.
     use std::{
         collections::BTreeMap,
         ffi::c_void,
         io,
-        mem::{size_of, zeroed},
+        mem::size_of,
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
         ptr,
         sync::{Arc, Mutex, OnceLock},
@@ -34,20 +36,21 @@ mod windows {
 
     impl WindowsJob {
         fn create() -> Result<Self> {
-            // SAFETY: both optional pointers are null, and the returned handle is checked before
-            // it is transferred into `OwnedHandle`.
+            // SAFETY: Win32 permits null security-attribute and name pointers here. No Rust
+            // references cross the FFI boundary, and the returned handle is checked before use.
             let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
             if raw.is_null() {
                 return Err(io::Error::last_os_error())
                     .context("failed to create Windows Job Object");
             }
-            // SAFETY: `raw` is a fresh, non-null owned Job Object handle.
+            // SAFETY: `raw` is a fresh, non-null Job Object handle that is closed with
+            // `CloseHandle`; ownership is transferred exactly once to `OwnedHandle`.
             let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
-            // SAFETY: the Win32 structure is plain data and its documented zero state is valid.
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: the handle remains owned by `handle`; `limits` points to a correctly sized
-            // structure for `JobObjectExtendedLimitInformation` for the duration of the call.
+            // SAFETY: `handle` keeps the Job Object valid. `limits` is the matching repr(C) Win32
+            // structure, and its aligned pointer remains readable for the full call with the exact
+            // structure size supplied.
             let configured = unsafe {
                 SetInformationJobObject(
                     raw,
@@ -64,8 +67,8 @@ mod windows {
         }
 
         fn assign_process(&self, process_id: u32) -> Result<()> {
-            // SAFETY: `OpenProcess` receives a concrete child pid and only the rights required for
-            // Job Object assignment/termination. The result is checked before ownership transfer.
+            // SAFETY: the FFI call receives an integer pid, valid access flags, and a false handle
+            // inheritance flag. The returned handle is checked before any use or ownership transfer.
             let process = unsafe {
                 OpenProcess(
                     PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
@@ -77,9 +80,11 @@ mod windows {
                 return Err(io::Error::last_os_error())
                     .with_context(|| format!("failed to open Windows child process {process_id}"));
             }
-            // SAFETY: `process` is a fresh, non-null owned process handle.
+            // SAFETY: `process` is a fresh, non-null process handle that is closed with
+            // `CloseHandle`; ownership is transferred exactly once to `OwnedHandle`.
             let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
-            // SAFETY: both handles remain valid for the duration of the call.
+            // SAFETY: both `OwnedHandle` values keep their raw handles valid for the full call;
+            // `AssignProcessToJobObject` only borrows them and does not take ownership.
             let assigned = unsafe {
                 AssignProcessToJobObject(
                     self.handle.as_raw_handle().cast::<c_void>(),
@@ -95,7 +100,8 @@ mod windows {
         }
 
         fn terminate(&self) -> Result<()> {
-            // SAFETY: the Job Object handle is owned by `self` and stays valid through the call.
+            // SAFETY: `self.handle` keeps the Job Object handle valid for the full call;
+            // `TerminateJobObject` borrows the handle and does not take ownership.
             let terminated =
                 unsafe { TerminateJobObject(self.handle.as_raw_handle().cast::<c_void>(), 1) };
             if terminated == 0 {
