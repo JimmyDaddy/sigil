@@ -76,6 +76,7 @@ mod elicitation;
 mod framing;
 mod lifecycle;
 mod oauth;
+mod oauth_credential;
 mod schema;
 mod tools;
 mod transport;
@@ -94,6 +95,12 @@ pub use oauth::{
     McpOAuthPendingAuthorization, McpOAuthProtocolError, McpOAuthResource, McpOAuthTokenResponse,
     McpOAuthTransportError, discover_oauth_authorization_server, exchange_oauth_authorization_code,
     prepare_oauth_client,
+};
+pub use oauth_credential::{
+    McpOAuthCredentialError, McpOAuthCredentialRecord, McpOAuthCredentialScope,
+    McpOAuthCredentialSnapshot, McpOAuthCredentialStatus, McpOAuthCredentialStore,
+    McpOAuthRevocationOutcome, SystemMcpOAuthCredentialStore, refresh_oauth_credential,
+    revoke_oauth_credential,
 };
 pub use schema::CompiledMcpSchema;
 pub use tools::{McpCallToolResult, McpRemoteTool};

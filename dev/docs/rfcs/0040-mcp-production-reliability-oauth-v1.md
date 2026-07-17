@@ -1,6 +1,6 @@
 # RFC-0040 MCP Production Reliability and OAuth V1
 
-状态：active / R40.0-R40.2 complete; R40.3 next
+状态：active / R40.0-R40.3 complete; R40.4 next
 
 创建日期：2026-07-17
 
@@ -328,3 +328,14 @@ CI，但真实第三方 OAuth account 不进入必跑 gate。
   PKCE drift、scope escalation、secret/debug canary、redirect/retry absence；MCP full tests、runtime mapping、
   targeted strict Clippy、rustfmt 与 diff gate 通过。credential persistence/refresh 与产品交互仍保持关闭，
   由 R40.3-R40.4 接入。
+- R40.3 complete. 新增绑定 server/resource/issuer/client/normalized scopes 的 versioned credential
+  scope/record；production store 只访问 native system keyring，阻塞 API 经 `spawn_blocking` 隔离，
+  record 使用 Windows Credential Manager 的 2560-byte 最窄上限，unavailable/rejected/oversize 均
+  fail closed 且无 config/session/file fallback。secret carrier、serialized bytes、decoded wire values 与
+  Basic client-auth 中间材料均使用 zeroizing drop，公开 Debug/error/status 只投影非 secret 信息。
+  runtime credential manager 在 expiry skew 内按 scope single-flight refresh，成功后先写入完整 rotated
+  record 再返回新 snapshot；invalid_grant 持久禁用旧 access/refresh，transport ambiguity 与 post-401
+  路径都不原地 retry。refresh 绑定 issuer/client/resource/scopes，DCR secret expiry 与 form-encoded
+  confidential client auth 已覆盖；remote revoke 与 local clear 是可独立观察、独立调用的动作。
+  MCP 180/180、runtime 579/579（含 credential 5/5）、affected strict Clippy、rustfmt/diff、`cargo deny check` 与
+  `cargo audit`（既有两项显式 ignore）通过；真实 native keyring platform conformance 保留到 R40.5。

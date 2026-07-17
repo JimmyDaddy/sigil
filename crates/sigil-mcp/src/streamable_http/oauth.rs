@@ -17,6 +17,7 @@ use tokio::{
 };
 use url::Url;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::auth::parse_auth_parameters;
 
@@ -97,6 +98,8 @@ pub enum McpOAuthHttpPurpose {
     AuthorizationServerMetadata,
     DynamicClientRegistration,
     TokenExchange,
+    TokenRefresh,
+    TokenRevocation,
 }
 
 /// One redaction-safe OAuth HTTP request for execution by the runtime transport.
@@ -143,7 +146,7 @@ impl McpOAuthHttpRequest {
         }
     }
 
-    fn post(
+    pub(super) fn post(
         destination: &Url,
         purpose: McpOAuthHttpPurpose,
         content_type: &'static str,
@@ -195,7 +198,7 @@ impl McpOAuthHttpRequest {
 pub struct McpOAuthHttpResponse {
     pub status: u16,
     pub content_type: Option<String>,
-    body: SecretString,
+    pub(super) body: SecretString,
 }
 
 impl McpOAuthHttpResponse {
@@ -1106,10 +1109,10 @@ impl fmt::Debug for McpOAuthAuthorizationCode {
 
 /// Validated token response whose secret values remain in redacted carriers.
 pub struct McpOAuthTokenResponse {
-    access_token: SecretString,
-    refresh_token: Option<SecretString>,
-    expires_in_secs: Option<u64>,
-    scopes: Vec<String>,
+    pub(super) access_token: SecretString,
+    pub(super) refresh_token: Option<SecretString>,
+    pub(super) expires_in_secs: Option<u64>,
+    pub(super) scopes: Vec<String>,
 }
 
 impl fmt::Debug for McpOAuthTokenResponse {
@@ -1163,6 +1166,17 @@ pub async fn exchange_oauth_authorization_code(
     executor: &dyn McpOAuthHttpExecutor,
     authorization: McpOAuthAuthorizationCode,
 ) -> Result<McpOAuthTokenResponse, McpOAuthProtocolError> {
+    let request = build_authorization_code_request(&authorization)?;
+    let response = executor
+        .execute(request)
+        .await
+        .map_err(|_| McpOAuthProtocolError::Transport)?;
+    parse_bearer_token_response(response, &authorization.scopes, &authorization.scopes)
+}
+
+fn build_authorization_code_request(
+    authorization: &McpOAuthAuthorizationCode,
+) -> Result<McpOAuthHttpRequest, McpOAuthProtocolError> {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer.append_pair("grant_type", "authorization_code");
     serializer.append_pair("code", authorization.code.expose_secret());
@@ -1190,27 +1204,47 @@ pub async fn exchange_oauth_authorization_code(
                 .client_secret
                 .as_ref()
                 .ok_or(McpOAuthProtocolError::InvalidClient)?;
-            let encoded = general_purpose::STANDARD.encode(format!(
-                "{}:{}",
-                authorization.client.client_id(),
-                secret.expose_secret()
-            ));
             headers.push((
                 "authorization".to_owned(),
-                SecretString::new(format!("Basic {encoded}")),
+                basic_client_authorization(authorization.client.client_id(), secret),
             ));
         }
     };
-    let response = executor
-        .execute(McpOAuthHttpRequest::post(
-            &authorization.discovery.token_endpoint,
-            McpOAuthHttpPurpose::TokenExchange,
-            "application/x-www-form-urlencoded",
-            headers,
-            SecretString::new(serializer.finish()),
-        ))
-        .await
-        .map_err(|_| McpOAuthProtocolError::Transport)?;
+    Ok(McpOAuthHttpRequest::post(
+        &authorization.discovery.token_endpoint,
+        McpOAuthHttpPurpose::TokenExchange,
+        "application/x-www-form-urlencoded",
+        headers,
+        SecretString::new(serializer.finish()),
+    ))
+}
+
+pub(super) fn basic_client_authorization(
+    client_id: &str,
+    client_secret: &SecretString,
+) -> SecretString {
+    let encoded_id = form_encoded_component(client_id);
+    let encoded_secret = Zeroizing::new(form_encoded_component(client_secret.expose_secret()));
+    let material = Zeroizing::new(format!("{encoded_id}:{}", encoded_secret.as_str()));
+    let encoded = Zeroizing::new(general_purpose::STANDARD.encode(material.as_bytes()));
+    SecretString::new(format!("Basic {}", encoded.as_str()))
+}
+
+fn form_encoded_component(value: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("value", value);
+    serializer
+        .finish()
+        .strip_prefix("value=")
+        .unwrap_or_default()
+        .to_owned()
+}
+
+pub(super) fn parse_bearer_token_response(
+    response: McpOAuthHttpResponse,
+    fallback_scopes: &[String],
+    allowed_scopes: &[String],
+) -> Result<McpOAuthTokenResponse, McpOAuthProtocolError> {
     if response.status != 200
         || !is_json_content_type(response.content_type.as_deref())
         || response.body.expose_secret().len() > MAX_TOKEN_BODY_BYTES
@@ -1233,13 +1267,11 @@ pub async fn exchange_oauth_authorization_code(
         .map(|scope| validate_scopes(scope.split(' ').filter(|value| !value.is_empty())))
         .transpose()
         .map_err(|_| McpOAuthProtocolError::TokenRejected)?
-        .unwrap_or_else(|| authorization.scopes.clone());
-    if scopes.iter().any(|scope| {
-        !authorization
-            .scopes
-            .iter()
-            .any(|requested| requested == scope)
-    }) {
+        .unwrap_or_else(|| fallback_scopes.to_vec());
+    if scopes
+        .iter()
+        .any(|scope| !allowed_scopes.iter().any(|requested| requested == scope))
+    {
         return Err(McpOAuthProtocolError::TokenRejected);
     }
     if token

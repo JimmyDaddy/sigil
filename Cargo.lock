@@ -3004,6 +3004,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "hmac",
+ "keyring",
  "nix 0.28.0",
  "regex",
  "reqwest",
@@ -3018,6 +3019,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

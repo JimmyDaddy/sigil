@@ -70,6 +70,7 @@ mod hosted_web_search;
 pub mod image_attachment;
 pub mod machine_protocol;
 pub mod mcp_declaration;
+pub mod mcp_oauth;
 pub mod model_eval;
 pub mod paths;
 pub mod plugins;
@@ -132,6 +133,7 @@ pub use mcp_declaration::{
     PluginManifestAttestation, ResolvedMcpServerDeclaration, ResolvedMcpStdioLaunch,
     resolve_user_root_mcp_declarations,
 };
+pub use mcp_oauth::McpOAuthCredentialManager;
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_ATTACHMENTS_DIR, DEFAULT_CHANGESETS_DIR,
     DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR, DEFAULT_SESSION_EXPORTS_DIR,
