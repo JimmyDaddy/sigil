@@ -982,6 +982,58 @@ fn activate_lazy_mcp_reports_notice_when_no_lazy_servers_match() -> Result<()> {
 }
 
 #[test]
+fn activate_lazy_remote_mcp_uses_streamable_http_route_instead_of_false_ready() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-remote-lazy.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.web.enabled = true;
+    root_config.web.network_mode = sigil_kernel::NetworkPolicy::Allow;
+    root_config.mcp_servers.push(McpServerConfig {
+        name: "remote-lazy".to_owned(),
+        transport: sigil_kernel::McpServerTransportConfig::StreamableHttp(
+            sigil_kernel::McpStreamableHttpConfig {
+                url: "not a valid URL".to_owned(),
+                http_headers: Default::default(),
+                env_http_headers: Default::default(),
+                bearer_token_env_var: None,
+                client_capabilities: Default::default(),
+            },
+        ),
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    });
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::ActivateLazyMcp {
+        server_name: Some("remote-lazy".to_owned()),
+    })?;
+    let status = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::McpActivationStatus {
+                status: McpActivationStatus::Failed { .. },
+                ..
+            }
+        )
+    })?;
+    assert!(matches!(
+        status,
+        WorkerMessage::McpActivationStatus {
+            server_name: Some(ref server_name),
+            status: McpActivationStatus::Failed { ref error },
+        } if server_name == "remote-lazy" && error.contains("invalid remote MCP endpoint")
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn refresh_mcp_server_reports_deferred_for_unknown_server() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -1025,6 +1077,58 @@ fn refresh_mcp_server_reports_deferred_for_unknown_server() -> Result<()> {
         WorkerMessage::Notice(ref text) if text == "MCP refresh skipped for unknown server missing"
     ));
 
+    Ok(())
+}
+
+#[test]
+fn refresh_remote_mcp_uses_transactional_streamable_http_route() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-remote-refresh.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.web.enabled = true;
+    root_config.web.network_mode = sigil_kernel::NetworkPolicy::Allow;
+    root_config.mcp_servers.push(McpServerConfig {
+        name: "remote-refresh".to_owned(),
+        transport: sigil_kernel::McpServerTransportConfig::StreamableHttp(
+            sigil_kernel::McpStreamableHttpConfig {
+                url: "not a valid URL".to_owned(),
+                http_headers: Default::default(),
+                env_http_headers: Default::default(),
+                bearer_token_env_var: None,
+                client_capabilities: Default::default(),
+            },
+        ),
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    });
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::RefreshMcpServer {
+        server_name: "remote-refresh".to_owned(),
+    })?;
+    let status = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::McpActivationStatus {
+                status: McpActivationStatus::Failed { .. },
+                ..
+            }
+        )
+    })?;
+    assert!(matches!(
+        status,
+        WorkerMessage::McpActivationStatus {
+            server_name: Some(ref server_name),
+            status: McpActivationStatus::Failed { ref error },
+        } if server_name == "remote-refresh" && error.contains("invalid remote MCP endpoint")
+    ));
+
+    worker.shutdown()?;
     Ok(())
 }
 

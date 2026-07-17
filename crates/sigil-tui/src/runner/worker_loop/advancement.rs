@@ -125,6 +125,11 @@ where
                 .current
                 .as_ref()
                 .and_then(Session::mutation_event_recorder),
+            state
+                .session
+                .current
+                .as_ref()
+                .and_then(|session| session.egress_audit_recorder().ok()),
             &mut state.refresh.pending_mcp_servers,
         );
         state.refresh.next_mcp_retry_at = if shared_registry_blocked {

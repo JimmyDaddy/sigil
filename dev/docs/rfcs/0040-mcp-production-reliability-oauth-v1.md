@@ -1,6 +1,6 @@
 # RFC-0040 MCP Production Reliability and OAuth V1
 
-状态：active / R40.0 complete; R40.1A next
+状态：active / R40.0-R40.1A complete; R40.1B next
 
 创建日期：2026-07-17
 
@@ -303,3 +303,10 @@ CI，但真实第三方 OAuth account 不进入必跑 gate。
   与多 destination egress 三项 P1 已进入冻结契约，并将原 R40.1 拆为 activation correctness 与共享
   process ownership 两片。docs link/mirror/command metadata 与 diff gate 通过；本机 Ruby 2.6 缺少
   `Array#filter_map`，使用只作用于 gate 进程的兼容 polyfill 执行了相同脚本，未修改仓库脚本。
+- R40.1A complete. Product-surface activation/refresh 现在先按真实 transport 分流：lazy stdio 只进入
+  declaration process path，Streamable HTTP 通过 durable remote activator。remote replacement 在旧
+  generation 仍注册时完成 connect/initialize/pin/tools-list，失败保持旧 owner/tool；成功后才替换并
+  retire。TUI invalid-endpoint regression 证明 lazy/refresh 不再返回零工具假成功；runtime 回归证明
+  replacement preflight 失败后旧 generation identity 不变。runtime/TUI targeted tests、crate check、
+  per-crate `--no-deps` strict Clippy、rustfmt 与 diff 通过。全 dependency Clippy 被同期未提交的
+  `sigil-kernel/agent.rs` 三处 `needless_borrow` 阻塞，本切片未修改或吸收该并发工作。

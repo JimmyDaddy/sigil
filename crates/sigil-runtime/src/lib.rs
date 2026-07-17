@@ -181,7 +181,10 @@ pub use provider_status::{
     BalanceSnapshot, ProviderStatusTaskManager, ProviderStatusTaskResult,
     fetch_provider_balance_snapshot, fetch_remote_model_ids,
 };
-pub use remote_mcp::{activate_eager_remote_mcp_server, activate_remote_mcp_server};
+pub use remote_mcp::{
+    activate_eager_remote_mcp_server, activate_or_refresh_configured_remote_mcp_server,
+    activate_remote_mcp_server,
+};
 pub use session_control::{append_session_control_entries, current_unix_time_ms};
 pub use session_lifecycle::{
     DEFAULT_SESSION_CATALOG_MAX_ENTRIES, DEFAULT_SESSION_CATALOG_MAX_STREAM_BYTES,
@@ -240,16 +243,18 @@ pub use mcp_registry::{
     activate_lazy_mcp_tools_detailed_with_mcp_handlers,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder,
     activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder_and_network_admission,
-    attach_remote_mcp_activation_presenter, build_configured_execution_backend,
-    build_tool_registry, build_tool_registry_with_mcp_elicitation,
-    build_tool_registry_with_mcp_handlers, build_tool_registry_with_mutation_recorder,
+    activate_mcp_tools_from_product_surface, attach_remote_mcp_activation_presenter,
+    build_configured_execution_backend, build_tool_registry,
+    build_tool_registry_with_mcp_elicitation, build_tool_registry_with_mcp_handlers,
+    build_tool_registry_with_mutation_recorder,
     build_tool_registry_with_mutation_recorder_and_workspace_trust,
     build_tool_registry_with_mutation_recorder_and_workspace_trust_and_network_admission,
     build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust,
     build_tool_surface_with_mutation_recorder_and_workspace_trust_and_network_admission,
     build_tool_surface_without_eager_mcp_with_workspace_trust, mcp_process_receipts_summary,
-    mcp_stdio_boundary_summary, refresh_mcp_server_tools_with_mcp_handlers,
+    mcp_stdio_boundary_summary, refresh_mcp_server_tools_from_product_surface,
+    refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
     register_mcp_server_declarations,

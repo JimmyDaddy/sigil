@@ -750,6 +750,78 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_rec
     .await
 }
 
+/// Activates configured MCP servers from an explicit product-surface action while routing each
+/// transport through its real lifecycle implementation.
+///
+/// Stdio declarations retain their process admission contract. Streamable HTTP declarations use
+/// the durable remote transport path and therefore require both a session egress recorder and a
+/// concrete disclosure presenter.
+#[allow(clippy::too_many_arguments)]
+pub async fn activate_mcp_tools_from_product_surface(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+    network_admission: ExtensionProcessNetworkAdmission,
+    egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+) -> Result<LazyMcpActivationResult> {
+    let remote_servers = root_config
+        .mcp_servers
+        .iter()
+        .filter(|server| server.streamable_http().is_some())
+        .filter(|server| {
+            server_name.map_or(server.startup == McpServerStartup::Lazy, |name| {
+                server.name == name
+            })
+        })
+        .map(|server| server.name.clone())
+        .collect::<Vec<_>>();
+    let remote_egress_recorder = match (remote_servers.is_empty(), egress_recorder) {
+        (true, _) => None,
+        (false, Some(recorder)) => Some(recorder),
+        (false, None) => {
+            bail!("remote MCP activation requires a durable session recorder");
+        }
+    };
+    let mut result = activate_lazy_mcp_tools_detailed_inner(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root.clone(),
+        server_name,
+        Arc::clone(&elicitation_handler),
+        runtime_event_handler,
+        mutation_recorder,
+        None,
+        network_admission,
+    )
+    .await?;
+    for remote_server_name in remote_servers {
+        let recorder = remote_egress_recorder
+            .clone()
+            .ok_or_else(|| anyhow!("remote MCP activation requires a durable session recorder"))?;
+        let remote = crate::activate_or_refresh_configured_remote_mcp_server(
+            registry,
+            root_config,
+            &remote_server_name,
+            provider_capabilities.tool_name_max_chars,
+            workspace_root.clone(),
+            recorder,
+            Arc::clone(&presenter),
+            Arc::clone(&elicitation_handler),
+        )
+        .await?;
+        result.matched_servers += remote.matched_servers;
+        result.added_tools += remote.added_tools;
+    }
+    Ok(result)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn activate_lazy_mcp_tools_detailed_inner(
     registry: &mut ToolRegistry,
@@ -767,6 +839,7 @@ async fn activate_lazy_mcp_tools_detailed_inner(
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let selected_declarations = declarations
         .iter()
+        .filter(|declaration| declaration.config().stdio().is_some())
         .filter(|declaration| declaration.config().startup == McpServerStartup::Lazy)
         .filter(|declaration| server_name.is_none_or(|name| declaration.effective_name() == name))
         .cloned()
@@ -1218,6 +1291,55 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_an
     .await
 }
 
+/// Refreshes one configured MCP server from a product surface through the transport-specific
+/// transactional path.
+#[allow(clippy::too_many_arguments)]
+pub async fn refresh_mcp_server_tools_from_product_surface(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: &str,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+    network_admission: ExtensionProcessNetworkAdmission,
+    egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
+    presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
+) -> Result<McpRefreshResult> {
+    let server = root_config
+        .mcp_servers
+        .iter()
+        .find(|server| server.name == server_name);
+    if server.is_some_and(|server| server.streamable_http().is_some()) {
+        let egress_recorder = egress_recorder
+            .ok_or_else(|| anyhow!("remote MCP refresh requires a durable session recorder"))?;
+        return crate::activate_or_refresh_configured_remote_mcp_server(
+            registry,
+            root_config,
+            server_name,
+            provider_capabilities.tool_name_max_chars,
+            workspace_root,
+            egress_recorder,
+            presenter,
+            elicitation_handler,
+        )
+        .await;
+    }
+    refresh_mcp_server_tools_inner(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        runtime_event_handler,
+        mutation_recorder,
+        network_admission,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn refresh_mcp_server_tools_inner(
     registry: &mut ToolRegistry,
@@ -1301,7 +1423,7 @@ async fn refresh_mcp_server_tools_inner(
     })
 }
 
-pub(super) async fn shutdown_registered_tools(tools: &[Arc<dyn Tool>]) -> Result<()> {
+pub(crate) async fn shutdown_registered_tools(tools: &[Arc<dyn Tool>]) -> Result<()> {
     let mut attempted_owners = Vec::new();
     let mut failures = Vec::new();
     for tool in tools {

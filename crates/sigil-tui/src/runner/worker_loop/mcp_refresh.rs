@@ -19,6 +19,7 @@ pub(in crate::runner) fn refresh_pending_mcp_servers<P>(
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     mcp_event_handler: Arc<ChannelMcpRuntimeEventHandler>,
     mutation_recorder: Option<MutationEventRecorder>,
+    egress_recorder: Option<sigil_kernel::EgressAuditRecorder>,
     pending_mcp_refreshes: &mut BTreeSet<String>,
 ) -> bool
 where
@@ -43,8 +44,13 @@ where
             elicitation_handler.clone();
         let mcp_event_handler_trait: Arc<dyn sigil_runtime::McpRuntimeEventHandler> =
             mcp_event_handler.clone();
+        let disclosure_presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter> = Arc::new(
+            crate::runner::egress_disclosure_bridge::ChannelEgressDisclosurePresenter::new(
+                message_tx.clone(),
+            ),
+        );
         match runtime.block_on(
-            sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission(
+            sigil_runtime::refresh_mcp_server_tools_from_product_surface(
                 agent.tool_registry_mut(),
                 root_config,
                 provider_capabilities,
@@ -57,6 +63,8 @@ where
                     options.permission_context.network_policy,
                     false,
                 ),
+                egress_recorder.clone(),
+                disclosure_presenter,
             ),
         ) {
             Ok(result) if result.matched_servers == 0 => {

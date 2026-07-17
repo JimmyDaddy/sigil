@@ -34,9 +34,10 @@ use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV;
 use super::{
     ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher, SecretSource,
     activate_eager_remote_mcp_server, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
-    build_plan_prompt_tool_registry, build_provider, build_role_provider, build_role_run_options,
-    build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
-    build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
+    activate_or_refresh_configured_remote_mcp_server, build_plan_prompt_tool_registry,
+    build_provider, build_role_provider, build_role_run_options, build_role_skill_tool_registry,
+    build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
+    build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust,
     build_tool_surface_without_eager_mcp_with_workspace_trust, launch_planned_mcp_process,
     load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
@@ -3086,6 +3087,109 @@ async fn eager_remote_streamable_http_activates_real_transport_and_registers_too
     assert!(requests[0].contains("\"method\":\"initialize\""));
     assert!(requests[1].contains("\"method\":\"notifications/initialized\""));
     assert!(requests[2].contains("\"method\":\"tools/list\""));
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn configured_remote_refresh_failure_preserves_previous_generation() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_port = listener.local_addr()?.port();
+    let server = tokio::spawn(async move {
+        let responses = [
+            (
+                "200 OK",
+                Some("application/json"),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "runtime-refresh-fixture", "version": "1.0.0" }
+                    }
+                })
+                .to_string(),
+            ),
+            ("202 Accepted", None, String::new()),
+            (
+                "200 OK",
+                Some("application/json"),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "tools": [{
+                            "name": "echo",
+                            "description": "Echo fixture",
+                            "inputSchema": { "type": "object" }
+                        }]
+                    }
+                })
+                .to_string(),
+            ),
+        ];
+        for (status, content_type, body) in responses {
+            let (mut socket, _) = listener.accept().await?;
+            let _ = read_fixture_http_request(&mut socket).await?;
+            write_fixture_http_response(&mut socket, status, content_type, &body).await?;
+        }
+        Result::<()>::Ok(())
+    });
+
+    let temp = tempfile::tempdir()?;
+    let _environment_guard = crate::test_env::lock();
+    let proxy = format!("http://127.0.0.1:{proxy_port}");
+    let _environment = EnvScope::set_owned(&[
+        ("HTTP_PROXY", proxy.clone()),
+        ("http_proxy", proxy),
+        ("NO_PROXY", String::new()),
+        ("no_proxy", String::new()),
+    ]);
+    let mut config = eager_remote_config("fixture.invalid", 80, sigil_kernel::NetworkPolicy::Allow);
+    config.web.proxy_mode = sigil_kernel::WebProxyMode::Environment;
+    let mut registry = ToolRegistry::new();
+    let _ = activate_eager_remote_mcp_server(
+        &mut registry,
+        &config,
+        "remote-eager",
+        128,
+        temp.path().to_path_buf(),
+        eager_remote_recorder(&temp)?,
+        Arc::new(EagerRemoteReceiptPresenter),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+    )
+    .await?;
+    server.await??;
+    let previous_owners =
+        registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, "remote-eager");
+    assert_eq!(previous_owners.len(), 1);
+
+    let sigil_kernel::McpServerTransportConfig::StreamableHttp(remote) =
+        &mut config.mcp_servers[0].transport
+    else {
+        panic!("fixture transport is remote");
+    };
+    remote.url = "not a valid URL".to_owned();
+    let error = activate_or_refresh_configured_remote_mcp_server(
+        &mut registry,
+        &config,
+        "remote-eager",
+        128,
+        temp.path().to_path_buf(),
+        eager_remote_recorder(&temp)?,
+        Arc::new(EagerRemoteReceiptPresenter),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+    )
+    .await
+    .expect_err("invalid replacement endpoint must fail before registry mutation");
+
+    assert!(error.to_string().contains("invalid remote MCP endpoint"));
+    assert!(registry.spec_for("mcp__remote_eager__echo").is_some());
+    assert_eq!(
+        registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, "remote-eager"),
+        previous_owners
+    );
     Ok(())
 }
 

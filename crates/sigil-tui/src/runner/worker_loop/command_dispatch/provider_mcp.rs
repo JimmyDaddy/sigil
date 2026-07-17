@@ -75,22 +75,33 @@ where
                     .current
                     .as_ref()
                     .and_then(Session::mutation_event_recorder);
-                match runtime.block_on(
-                    sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder_and_network_admission(
-                        agent.tool_registry_mut(),
-                        root_config,
-                        provider_capabilities,
-                        options.workspace_root.clone(),
-                        server_name.as_deref(),
-                        elicitation_handler.clone(),
-                        mcp_event_handler.clone(),
-                        mutation_recorder,
-                        sigil_kernel::ExtensionProcessNetworkAdmission::new(
-                            options.permission_context.network_policy,
-                            false,
+                let egress_recorder = state
+                    .session
+                    .current
+                    .as_ref()
+                    .and_then(|session| session.egress_audit_recorder().ok());
+                let disclosure_presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter> =
+                    Arc::new(
+                        crate::runner::egress_disclosure_bridge::ChannelEgressDisclosurePresenter::new(
+                            message_tx.clone(),
                         ),
+                    );
+                match runtime.block_on(sigil_runtime::activate_mcp_tools_from_product_surface(
+                    agent.tool_registry_mut(),
+                    root_config,
+                    provider_capabilities,
+                    options.workspace_root.clone(),
+                    server_name.as_deref(),
+                    elicitation_handler.clone(),
+                    mcp_event_handler.clone(),
+                    mutation_recorder,
+                    sigil_kernel::ExtensionProcessNetworkAdmission::new(
+                        options.permission_context.network_policy,
+                        false,
                     ),
-                ) {
+                    egress_recorder,
+                    disclosure_presenter,
+                )) {
                     Ok(result) if result.matched_servers == 0 => {
                         let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                             server_name: server_name.clone(),

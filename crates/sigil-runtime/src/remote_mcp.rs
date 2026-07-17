@@ -83,6 +83,104 @@ pub async fn activate_eager_remote_mcp_server(
     .await
 }
 
+/// Activates or refreshes one configured Streamable HTTP server from an explicit product-surface
+/// action.
+///
+/// This V1 surface deliberately retains the same `web.network_mode = allow` requirement as eager
+/// startup. An `ask` policy needs a real permission decision, not merely a disclosure frame, and is
+/// therefore left to the dedicated authentication interaction slice.
+///
+/// Replacement is prepared while the old generation remains registered. A failed connection,
+/// initialization, pin check, or tool listing leaves the old generation byte-for-byte intact.
+#[allow(clippy::too_many_arguments)]
+pub async fn activate_or_refresh_configured_remote_mcp_server(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    server_name: &str,
+    provider_tool_name_max_chars: usize,
+    workspace_root: std::path::PathBuf,
+    recorder: sigil_kernel::EgressAuditRecorder,
+    presenter: Arc<dyn EgressDisclosurePresenter>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<crate::McpRefreshResult> {
+    let server = root_config
+        .mcp_servers
+        .iter()
+        .find(|server| server.name == server_name)
+        .ok_or_else(|| anyhow!("unknown remote MCP server {server_name}"))?;
+    if server.streamable_http().is_none() {
+        bail!("configured remote MCP activation requires streamable_http transport");
+    }
+    let budget = sigil_kernel::WebTaskTreeBudget::new(
+        format!("remote-mcp-user-action-{}", uuid::Uuid::new_v4()),
+        web_budget_limits(root_config),
+        None,
+    )?;
+    let context = ToolContext::for_eager_network_startup(
+        workspace_root,
+        root_config.web.timeout_secs,
+        root_config.web.network_mode,
+        recorder,
+        budget,
+    )?;
+
+    let retired_owners =
+        registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name);
+    let retired_tools = retired_owners
+        .iter()
+        .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+        .collect::<Vec<_>>();
+    let replaced_tool_names = retired_tools
+        .iter()
+        .map(|tool| tool.spec().name)
+        .collect::<BTreeSet<_>>();
+    for tool in &retired_tools {
+        registry.register(Arc::clone(tool));
+    }
+
+    let replacement = prepare_remote_mcp_generation(
+        registry,
+        root_config,
+        server,
+        provider_tool_name_max_chars,
+        &context,
+        presenter,
+        elicitation_handler,
+        &replaced_tool_names,
+    )
+    .await?;
+    let replacement_owner = replacement.lifecycle_owner.clone();
+    let added_tools = replacement.tools.len();
+    for tool in replacement.tools {
+        registry.register(tool);
+    }
+    for owner in &retired_owners {
+        let _ = registry.drain_by_lifecycle_owner(owner);
+    }
+
+    if let Err(retirement_error) =
+        crate::mcp_registry::shutdown_registered_tools(&retired_tools).await
+    {
+        let replacement_tools = registry.drain_by_lifecycle_owner(&replacement_owner);
+        let rollback_error = crate::mcp_registry::shutdown_registered_tools(&replacement_tools)
+            .await
+            .err();
+        return Err(anyhow!(
+            "failed to retire previous remote MCP server {server_name} generation: {retirement_error:#}{}",
+            rollback_error
+                .map(|error| format!("; replacement generation rollback was incomplete: {error:#}"))
+                .unwrap_or_default()
+        ));
+    }
+
+    Ok(crate::McpRefreshResult {
+        matched_servers: 1,
+        removed_tools: retired_tools.len(),
+        added_tools,
+        process_launch_receipts: Vec::new(),
+    })
+}
+
 /// Activates one user-root Streamable HTTP MCP server after the ordinary tool permission decision
 /// has admitted network egress. Every HTTP message still passes the durable authorization,
 /// presentation, destination-guard, and shared-budget barrier before DNS or socket activity.
@@ -95,6 +193,40 @@ pub async fn activate_remote_mcp_server(
     presenter: Arc<dyn EgressDisclosurePresenter>,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
 ) -> Result<usize> {
+    let prepared = prepare_remote_mcp_generation(
+        registry,
+        root_config,
+        server,
+        provider_tool_name_max_chars,
+        context,
+        presenter,
+        elicitation_handler,
+        &BTreeSet::new(),
+    )
+    .await?;
+    let added_tools = prepared.tools.len();
+    for tool in prepared.tools {
+        registry.register(tool);
+    }
+    Ok(added_tools)
+}
+
+struct PreparedRemoteMcpGeneration {
+    lifecycle_owner: ToolLifecycleOwner,
+    tools: Vec<Arc<dyn Tool>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_remote_mcp_generation(
+    registry: &ToolRegistry,
+    root_config: &RootConfig,
+    server: &McpServerConfig,
+    provider_tool_name_max_chars: usize,
+    context: &ToolContext,
+    presenter: Arc<dyn EgressDisclosurePresenter>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    replaced_tool_names: &BTreeSet<String>,
+) -> Result<PreparedRemoteMcpGeneration> {
     let remote = server
         .streamable_http()
         .ok_or_else(|| anyhow!("remote MCP activation requires streamable_http transport"))?;
@@ -233,8 +365,9 @@ pub async fn activate_remote_mcp_server(
         .specs()
         .into_iter()
         .map(|spec| spec.name)
+        .filter(|name| !replaced_tool_names.contains(name))
         .collect::<BTreeSet<_>>();
-    let before = used.len();
+    let mut prepared_tools: Vec<Arc<dyn Tool>> = Vec::with_capacity(tools.len());
     for remote_tool in tools {
         let name = McpToolName::new(
             &server.name,
@@ -242,7 +375,7 @@ pub async fn activate_remote_mcp_server(
             provider_tool_name_max_chars,
             &mut used,
         );
-        registry.register(Arc::new(RemoteMcpTool {
+        prepared_tools.push(Arc::new(RemoteMcpTool {
             client: Arc::clone(&client),
             remote_tool,
             provider_name: name.provider_name,
@@ -254,7 +387,10 @@ pub async fn activate_remote_mcp_server(
             execution_lock: Arc::clone(&execution_lock),
         }));
     }
-    Ok(used.len().saturating_sub(before))
+    Ok(PreparedRemoteMcpGeneration {
+        lifecycle_owner,
+        tools: prepared_tools,
+    })
 }
 
 struct RemoteFormHandlerAdapter {
