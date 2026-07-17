@@ -613,12 +613,13 @@ async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_c
     let temp = tempfile::tempdir()?;
     let subdir = temp.path().join("subdir");
     std::fs::create_dir(&subdir)?;
+    std::fs::write(subdir.join("cwd-marker.txt"), "cwd-ok")?;
     let manager = TerminalProcessManager::new(temp.path())?;
 
     #[cfg(windows)]
-    let command = "(Get-Location).Path";
+    let command = "Get-Content -Raw -LiteralPath 'cwd-marker.txt'";
     #[cfg(not(windows))]
-    let command = "pwd";
+    let command = "cat cwd-marker.txt";
 
     let entry = manager
         .start(TerminalStartRequest {
@@ -638,11 +639,7 @@ async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_c
         TerminalTaskStatus::Exited { exit_code: Some(0) }
     ));
     let read = manager.read(&entry.handle.task_id, 0, 1024).await?;
-    assert!(
-        read.content
-            .to_ascii_lowercase()
-            .contains(&subdir.display().to_string().to_ascii_lowercase())
-    );
+    assert!(read.content.contains("cwd-ok"), "{:?}", read.content);
     Ok(())
 }
 

@@ -6197,7 +6197,19 @@ async fn windows_job_object_reaps_terminal_process_and_pty_descendants() -> Resu
         } else {
             manager.start(request).await?
         };
-        let child_pid = read_windows_pid(&pid_file).await?;
+        let child_pid = match read_windows_pid(&pid_file).await {
+            Ok(process_id) => process_id,
+            Err(error) => {
+                let status = manager.status(&entry.handle.task_id).await?;
+                let output = manager.read(&entry.handle.task_id, 0, 4096).await?;
+                let _ = manager.cancel(&entry.handle.task_id).await;
+                anyhow::bail!(
+                    "{error}; terminal_status={:?}; terminal_output={:?}",
+                    status.status,
+                    output.content
+                );
+            }
+        };
         let cancelled = manager.cancel(&entry.handle.task_id).await?;
 
         assert_eq!(cancelled.status, TerminalTaskStatus::Cancelled);
@@ -6214,7 +6226,7 @@ async fn windows_job_object_reaps_terminal_process_and_pty_descendants() -> Resu
 fn windows_descendant_command(pid_file: &Path) -> String {
     let path = pid_file.to_string_lossy().replace(char::from(39), "''");
     format!(
-        "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -PassThru; Set-Content -NoNewline -LiteralPath '{path}' -Value $child.Id; Start-Sleep -Seconds 30"
+        "& powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'Set-Content -NoNewline -LiteralPath ''{path}'' -Value $PID; Start-Sleep -Seconds 30'"
     )
 }
 
