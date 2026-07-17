@@ -6053,6 +6053,10 @@ fn explicit_shells_resolve_to_their_native_dialects() -> Result<()> {
         ShellDialect::PowerShell
     );
     assert_eq!(
+        ResolvedShell::resolve_explicit("C:/Program Files/PowerShell/7/PWSH.EXE")?.dialect(),
+        ShellDialect::PowerShell
+    );
+    assert_eq!(
         ResolvedShell::resolve_explicit("cmd.exe")?.dialect(),
         ShellDialect::Cmd
     );

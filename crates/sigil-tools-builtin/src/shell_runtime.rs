@@ -54,11 +54,11 @@ impl ResolvedShell {
         let Some(file_name) = program.file_name().and_then(|name| name.to_str()) else {
             bail!("terminal shell must name a supported executable");
         };
-        let stem = file_name
+        let normalized_name = file_name.to_ascii_lowercase();
+        let stem = normalized_name
             .strip_suffix(".exe")
-            .unwrap_or(file_name)
-            .to_ascii_lowercase();
-        let dialect = match stem.as_str() {
+            .unwrap_or(&normalized_name);
+        let dialect = match stem {
             "sh" | "bash" | "zsh" | "fish" => ShellDialect::Posix,
             "pwsh" | "powershell" => ShellDialect::PowerShell,
             "cmd" => ShellDialect::Cmd,
