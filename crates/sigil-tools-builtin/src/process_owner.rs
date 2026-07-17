@@ -93,7 +93,8 @@ mod windows {
             let terminated =
                 unsafe { TerminateJobObject(self.handle.as_raw_handle().cast::<c_void>(), 1) };
             if terminated == 0 {
-                bail!(io::Error::last_os_error().context("failed to terminate Windows Job Object"));
+                return Err(io::Error::last_os_error())
+                    .context("failed to terminate Windows Job Object");
             }
             Ok(())
         }
@@ -104,12 +105,12 @@ mod windows {
         REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
     }
 
-    pub(super) struct ProcessTreeOwnerGuard {
+    pub(crate) struct ProcessTreeOwnerGuard {
         process_id: u32,
     }
 
     impl ProcessTreeOwnerGuard {
-        pub(super) fn assign(process_id: Option<u32>) -> Result<Self> {
+        pub(crate) fn assign(process_id: Option<u32>) -> Result<Self> {
             let process_id =
                 process_id.ok_or_else(|| anyhow!("Windows child process id unavailable"))?;
             let mut registry = registry()
@@ -133,7 +134,7 @@ mod windows {
         }
     }
 
-    pub(super) fn terminate_owned_process_tree(process_id: u32) -> Result<()> {
+    pub(crate) fn terminate_owned_process_tree(process_id: u32) -> Result<()> {
         let job = registry()
             .lock()
             .map_err(|_| anyhow!("Windows Job Object registry lock poisoned"))?
@@ -145,7 +146,7 @@ mod windows {
         job.terminate()
     }
 
-    pub(super) fn validate_process_tree_owner() -> Result<()> {
+    pub(crate) fn validate_process_tree_owner() -> Result<()> {
         drop(WindowsJob::create()?);
         Ok(())
     }

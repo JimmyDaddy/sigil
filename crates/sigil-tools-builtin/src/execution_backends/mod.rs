@@ -1384,7 +1384,7 @@ async fn run_cleanup_command(
     }
 }
 
-pub(crate) fn configure_execution_process_group(command: &mut Command) {
+pub(crate) fn configure_execution_process_group(_command: &mut Command) {
     #[cfg(unix)]
-    command.process_group(0);
+    _command.process_group(0);
 }

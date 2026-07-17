@@ -772,9 +772,9 @@ async fn kill_and_reap_child(child: &mut Child) -> McpProcessCleanupSummary {
     }
 }
 
-fn configure_mcp_process_group(command: &mut Command) {
+fn configure_mcp_process_group(_command: &mut Command) {
     #[cfg(unix)]
-    command.process_group(0);
+    _command.process_group(0);
 }
 
 #[cfg(any(windows, test))]

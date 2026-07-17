@@ -4,6 +4,12 @@ use anyhow::Result;
 
 use super::*;
 
+#[test]
+fn process_group_configuration_is_portable() {
+    let mut command = Command::new(if cfg!(windows) { "cmd.exe" } else { "sh" });
+    configure_mcp_process_group(&mut command);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn bounded_cleanup_command_status_enforces_timeout_and_kill_on_drop() -> Result<()> {

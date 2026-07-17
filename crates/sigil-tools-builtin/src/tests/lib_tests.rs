@@ -6083,6 +6083,10 @@ fn terminal_platform_capability_is_offline_and_truthful() -> Result<()> {
         capability.process_tree_owner,
         "unix_process_group" | "windows_job_object" | "direct_child_only"
     ));
+    #[cfg(windows)]
+    assert_eq!(capability.process_tree_owner, "windows_job_object");
+    #[cfg(unix)]
+    assert_eq!(capability.process_tree_owner, "unix_process_group");
     Ok(())
 }
 
