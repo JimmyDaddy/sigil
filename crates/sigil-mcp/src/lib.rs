@@ -123,14 +123,20 @@ pub use search_binding::{
 };
 pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 pub use streamable_http::{
-    CompiledMcpSchema, McpCallToolResult, McpRemoteClientCapabilities, McpRemoteFormField,
-    McpRemoteFormFieldKind, McpRemoteFormHandler, McpRemoteFormResponse, McpRemoteProtocolVersion,
-    McpRemoteRoot, McpRemoteServerIdentity, McpRemoteTool, McpRequestBodyObserver,
-    McpStreamableHttpAuthState, McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpClient,
-    McpStreamableHttpDestinationAuthorizer, McpStreamableHttpDestinationError,
-    McpStreamableHttpError, McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment,
-    McpStreamableHttpLifecycle, McpStreamableHttpLimits, McpStreamableHttpRoute,
-    McpStreamableHttpRouteEvidence, PreparedMcpStreamableHttpHeaders, ValidatedMcpFormRequest,
+    CompiledMcpSchema, McpCallToolResult, McpOAuthAuthorizationCode, McpOAuthChallenge,
+    McpOAuthClientIntent, McpOAuthClientRegistration, McpOAuthDiscovery, McpOAuthHttpExecutor,
+    McpOAuthHttpMethod, McpOAuthHttpPurpose, McpOAuthHttpRequest, McpOAuthHttpResponse,
+    McpOAuthLoopbackListener, McpOAuthPendingAuthorization, McpOAuthProtocolError,
+    McpOAuthResource, McpOAuthTokenResponse, McpOAuthTransportError, McpRemoteClientCapabilities,
+    McpRemoteFormField, McpRemoteFormFieldKind, McpRemoteFormHandler, McpRemoteFormResponse,
+    McpRemoteProtocolVersion, McpRemoteRoot, McpRemoteServerIdentity, McpRemoteTool,
+    McpRequestBodyObserver, McpStreamableHttpAuthState, McpStreamableHttpAuthorizedDialPlan,
+    McpStreamableHttpClient, McpStreamableHttpDestinationAuthorizer,
+    McpStreamableHttpDestinationError, McpStreamableHttpError, McpStreamableHttpHeaderConfig,
+    McpStreamableHttpHeaderEnvironment, McpStreamableHttpLifecycle, McpStreamableHttpLimits,
+    McpStreamableHttpRoute, McpStreamableHttpRouteEvidence, PreparedMcpStreamableHttpHeaders,
+    ValidatedMcpFormRequest, discover_oauth_authorization_server,
+    exchange_oauth_authorization_code, prepare_oauth_client,
 };
 pub use tools::{
     mcp_launch_static_fingerprint, mcp_launch_static_fingerprint_at,

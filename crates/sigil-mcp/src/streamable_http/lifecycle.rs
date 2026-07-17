@@ -1022,6 +1022,7 @@ impl McpStreamableHttpClient {
             headers,
             self.headers.has_static_credential,
             session_sent,
+            &self.endpoint,
         );
         if matches!(result, Err(McpStreamableHttpError::SessionExpired)) {
             self.expire_session().await;

@@ -13,6 +13,19 @@ use tempfile::tempdir;
 
 use super::*;
 
+#[test]
+fn oauth_challenge_remains_a_non_retrying_connector_failure_until_runtime_auth_is_wired() {
+    let challenge = sigil_mcp::McpOAuthChallenge::parse(
+        "Bearer",
+        SecretString::new("https://resource.example/mcp"),
+    )
+    .expect("valid challenge")
+    .expect("Bearer challenge");
+    let failure = mcp_failure(&McpStreamableHttpError::OAuthRequired(Box::new(challenge)));
+
+    assert_eq!(failure.class, WebSearchFailureClass::OAuthUnsupported);
+}
+
 struct ReceiptPresenter;
 
 #[async_trait]

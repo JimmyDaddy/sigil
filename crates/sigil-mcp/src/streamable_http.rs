@@ -75,6 +75,7 @@ mod auth;
 mod elicitation;
 mod framing;
 mod lifecycle;
+mod oauth;
 mod schema;
 mod tools;
 mod transport;
@@ -86,6 +87,14 @@ use framing::{
 };
 pub use lifecycle::McpStreamableHttpClient;
 pub(super) use lifecycle::RpcResponse;
+pub use oauth::{
+    McpOAuthAuthorizationCode, McpOAuthChallenge, McpOAuthClientIntent, McpOAuthClientRegistration,
+    McpOAuthDiscovery, McpOAuthHttpExecutor, McpOAuthHttpMethod, McpOAuthHttpPurpose,
+    McpOAuthHttpRequest, McpOAuthHttpResponse, McpOAuthLoopbackListener,
+    McpOAuthPendingAuthorization, McpOAuthProtocolError, McpOAuthResource, McpOAuthTokenResponse,
+    McpOAuthTransportError, discover_oauth_authorization_server, exchange_oauth_authorization_code,
+    prepare_oauth_client,
+};
 pub use schema::CompiledMcpSchema;
 pub use tools::{McpCallToolResult, McpRemoteTool};
 use transport::{build_client, safe_origin, validate_endpoint, validate_safe_destination};
@@ -566,6 +575,8 @@ pub enum McpStreamableHttpError {
     AuthenticationRequired,
     #[error("remote MCP static credential was rejected")]
     AuthenticationFailed,
+    #[error("remote MCP OAuth authentication is required")]
+    OAuthRequired(Box<McpOAuthChallenge>),
     #[error("remote MCP OAuth is unsupported")]
     OAuthUnsupported,
     #[error("remote MCP authentication challenge is invalid or exceeds limits")]

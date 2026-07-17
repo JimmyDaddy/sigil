@@ -244,13 +244,14 @@ fn streamable_http_headers_enforce_ownership_tls_and_live_hmac() {
 
 #[test]
 fn streamable_http_401_classification_distinguishes_plain_static_and_oauth() {
+    let resource = Url::parse("https://mcp.example/mcp").expect("resource");
     let plain = HeaderMap::new();
     assert!(matches!(
-        auth::classify_unauthorized(&plain, false),
+        auth::classify_unauthorized(&plain, false, &resource),
         Err(McpStreamableHttpError::AuthenticationRequired)
     ));
     assert!(matches!(
-        auth::classify_unauthorized(&plain, true),
+        auth::classify_unauthorized(&plain, true, &resource),
         Err(McpStreamableHttpError::AuthenticationFailed)
     ));
     let mut oauth = HeaderMap::new();
@@ -261,8 +262,13 @@ fn streamable_http_401_classification_distinguishes_plain_static_and_oauth() {
         ),
     );
     assert!(matches!(
-        auth::classify_unauthorized(&oauth, false),
-        Err(McpStreamableHttpError::OAuthUnsupported)
+        auth::classify_unauthorized(&oauth, false, &resource),
+        Err(McpStreamableHttpError::OAuthRequired(_))
+    ));
+    oauth.insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    assert!(matches!(
+        auth::classify_unauthorized(&oauth, false, &resource),
+        Err(McpStreamableHttpError::OAuthRequired(_))
     ));
     let mut invalid = HeaderMap::new();
     invalid.insert(
@@ -270,7 +276,7 @@ fn streamable_http_401_classification_distinguishes_plain_static_and_oauth() {
         HeaderValue::from_static("Bearer resource_metadata=\"http://127.0.0.1/meta\""),
     );
     assert!(matches!(
-        auth::classify_unauthorized(&invalid, false),
+        auth::classify_unauthorized(&invalid, false, &resource),
         Err(McpStreamableHttpError::InvalidAuthenticationChallenge)
     ));
 }
@@ -784,6 +790,7 @@ async fn streamable_http_initialize_sse_ping_uses_staged_session_without_early_r
 
 #[test]
 fn streamable_http_auth_parser_handles_realm_duplicates_and_oversize_without_fetch() {
+    let resource = Url::parse("https://mcp.example/mcp").expect("resource");
     let mut valid = HeaderMap::new();
     valid.insert(
         WWW_AUTHENTICATE,
@@ -792,8 +799,8 @@ fn streamable_http_auth_parser_handles_realm_duplicates_and_oversize_without_fet
         ),
     );
     assert!(matches!(
-        auth::classify_unauthorized(&valid, false),
-        Err(McpStreamableHttpError::OAuthUnsupported)
+        auth::classify_unauthorized(&valid, false, &resource),
+        Err(McpStreamableHttpError::OAuthRequired(_))
     ));
     let mut duplicate = HeaderMap::new();
     duplicate.append(
@@ -805,7 +812,7 @@ fn streamable_http_auth_parser_handles_realm_duplicates_and_oversize_without_fet
         HeaderValue::from_static("Bearer realm=\"two\""),
     );
     assert!(matches!(
-        auth::classify_unauthorized(&duplicate, false),
+        auth::classify_unauthorized(&duplicate, false, &resource),
         Err(McpStreamableHttpError::InvalidAuthenticationChallenge)
     ));
     let mut oversize = HeaderMap::new();
@@ -814,7 +821,7 @@ fn streamable_http_auth_parser_handles_realm_duplicates_and_oversize_without_fet
         HeaderValue::from_str(&format!("Bearer realm=\"{}\"", "x".repeat(5000))).expect("header"),
     );
     assert!(matches!(
-        auth::classify_unauthorized(&oversize, false),
+        auth::classify_unauthorized(&oversize, false, &resource),
         Err(McpStreamableHttpError::InvalidAuthenticationChallenge)
     ));
 }
@@ -1144,7 +1151,7 @@ async fn streamable_http_oauth_challenge_http_fixtures_never_fetch_metadata_or_r
         .await
         .expect_err(kind);
         match kind {
-            "oauth" => assert!(matches!(error, McpStreamableHttpError::OAuthUnsupported)),
+            "oauth" => assert!(matches!(error, McpStreamableHttpError::OAuthRequired(_))),
             _ => assert!(matches!(
                 error,
                 McpStreamableHttpError::InvalidAuthenticationChallenge

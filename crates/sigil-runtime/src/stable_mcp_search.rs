@@ -806,7 +806,9 @@ fn mcp_failure(error: &McpStreamableHttpError) -> WebSearchFailure {
         E::AuthenticationFailed => {
             WebSearchFailure::new(WebSearchFailureClass::AuthenticationFailed)
         }
-        E::OAuthUnsupported => WebSearchFailure::new(WebSearchFailureClass::OAuthUnsupported),
+        E::OAuthRequired(_) | E::OAuthUnsupported => {
+            WebSearchFailure::new(WebSearchFailureClass::OAuthUnsupported)
+        }
         E::AccessDenied => WebSearchFailure::new(WebSearchFailureClass::AccessDenied),
         E::RateLimited => WebSearchFailure::new(WebSearchFailureClass::RateLimited),
         E::SessionExpired => WebSearchFailure::new(WebSearchFailureClass::SessionExpired),

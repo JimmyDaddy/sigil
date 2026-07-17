@@ -1,6 +1,6 @@
 # RFC-0040 MCP Production Reliability and OAuth V1
 
-状态：active / R40.0-R40.1B complete; R40.2 next
+状态：active / R40.0-R40.2 complete; R40.3 next
 
 创建日期：2026-07-17
 
@@ -318,3 +318,13 @@ CI，但真实第三方 OAuth account 不进入必跑 gate。
   通过。macOS MCP 168/168、process 1/1、tools 193/193（1 ignored）、targeted strict Clippy、rustdoc、
   test-layout、fmt/diff 与 `sigil-process` Windows target check 通过；完整 MCP Windows cross-check 受本机
   缺少 MinGW C compiler 阻塞，真实 Windows 执行证据由 R40.5 hosted gate 收口。
+- R40.2 complete. `sigil-mcp` 现在把 401 Bearer challenge 投影为 bounded、redaction-safe 的 typed
+  OAuth trigger，但不会在 transport 内静默发起网络请求或 retry。协议层实现 RFC 9728 protected
+  resource metadata、RFC 8414/OIDC discovery 顺序、exact resource/issuer/HTTPS endpoint 校验、PKCE
+  S256/state/RFC 8707 resource binding、显式 public client 或 metadata-advertised DCR、loopback/manual
+  callback 与 authorization-code exchange。所有物理请求通过逐 destination 的 executor trait 交回
+  runtime；loopback 仅监听 `127.0.0.1` 随机端口，flow 五分钟过期且单次消费。mock/adversarial tests
+  覆盖 wrong state/origin、duplicate、authorization error、slowloris、timeout、oversize、issuer/resource/
+  PKCE drift、scope escalation、secret/debug canary、redirect/retry absence；MCP full tests、runtime mapping、
+  targeted strict Clippy、rustfmt 与 diff gate 通过。credential persistence/refresh 与产品交互仍保持关闭，
+  由 R40.3-R40.4 接入。

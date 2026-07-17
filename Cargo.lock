@@ -3001,6 +3001,7 @@ version = "0.0.1-alpha.4"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "futures",
  "hmac",
  "nix 0.28.0",

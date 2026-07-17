@@ -197,6 +197,7 @@ pub(super) fn normalize_status(
     headers: &HeaderMap,
     static_credential_sent: bool,
     session_sent: bool,
+    resource: &Url,
 ) -> Result<(), McpStreamableHttpError> {
     if status.is_redirection() {
         return Err(McpStreamableHttpError::UnexpectedHttpStatus {
@@ -204,7 +205,9 @@ pub(super) fn normalize_status(
         });
     }
     match status {
-        StatusCode::UNAUTHORIZED => classify_unauthorized(headers, static_credential_sent),
+        StatusCode::UNAUTHORIZED => {
+            classify_unauthorized(headers, static_credential_sent, resource)
+        }
         StatusCode::FORBIDDEN => Err(McpStreamableHttpError::AccessDenied),
         StatusCode::TOO_MANY_REQUESTS => Err(McpStreamableHttpError::RateLimited),
         StatusCode::NOT_FOUND if session_sent => Err(McpStreamableHttpError::SessionExpired),
@@ -216,6 +219,7 @@ pub(super) fn normalize_status(
 pub(super) fn classify_unauthorized(
     headers: &HeaderMap,
     static_credential_sent: bool,
+    resource: &Url,
 ) -> Result<(), McpStreamableHttpError> {
     let challenges = headers.get_all(WWW_AUTHENTICATE);
     if challenges.iter().count() > 1 {
@@ -228,35 +232,12 @@ pub(super) fn classify_unauthorized(
         if challenge.len() > MAX_AUTH_CHALLENGE_BYTES || challenge.chars().any(char::is_control) {
             return Err(McpStreamableHttpError::InvalidAuthenticationChallenge);
         }
-        if let Some((scheme, parameters)) = challenge.split_once(char::is_whitespace)
-            && scheme.eq_ignore_ascii_case("bearer")
+        if !static_credential_sent
+            && let Some(challenge) =
+                McpOAuthChallenge::parse(challenge, SecretString::new(resource.as_str()))
+                    .map_err(|_| McpStreamableHttpError::InvalidAuthenticationChallenge)?
         {
-            let parsed = parse_auth_parameters(parameters)?;
-            let oauth_keys = [
-                "resource_metadata",
-                "resource_metadata_url",
-                "authorization_uri",
-            ];
-            let oauth_values = oauth_keys
-                .iter()
-                .filter_map(|key| parsed.get(*key))
-                .collect::<Vec<_>>();
-            if oauth_values.len() > 1 {
-                return Err(McpStreamableHttpError::InvalidAuthenticationChallenge);
-            }
-            if let Some(value) = oauth_values.first() {
-                let metadata = Url::parse(value)
-                    .map_err(|_| McpStreamableHttpError::InvalidAuthenticationChallenge)?;
-                if metadata.scheme() != "https"
-                    || metadata.host_str().is_none()
-                    || !metadata.username().is_empty()
-                    || metadata.password().is_some()
-                    || metadata.fragment().is_some()
-                {
-                    return Err(McpStreamableHttpError::InvalidAuthenticationChallenge);
-                }
-                return Err(McpStreamableHttpError::OAuthUnsupported);
-            }
+            return Err(McpStreamableHttpError::OAuthRequired(Box::new(challenge)));
         }
     }
     Err(if static_credential_sent {
@@ -266,7 +247,9 @@ pub(super) fn classify_unauthorized(
     })
 }
 
-fn parse_auth_parameters(input: &str) -> Result<BTreeMap<String, String>, McpStreamableHttpError> {
+pub(super) fn parse_auth_parameters(
+    input: &str,
+) -> Result<BTreeMap<String, String>, McpStreamableHttpError> {
     let bytes = input.as_bytes();
     let mut index = 0usize;
     let mut parsed = BTreeMap::new();
