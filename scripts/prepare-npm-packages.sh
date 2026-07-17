@@ -134,7 +134,7 @@ for archive in "${archives[@]}"; do
     "type": "git",
     "url": "git+https://github.com/JimmyDaddy/sigil.git"
   },
-  "homepage": "https://jimmydaddy.github.io/sigil/",
+  "homepage": "https://sigil.corerobin.com/",
   "os": ["${os}"],
   "cpu": ["${cpu}"],
   "files": ["bin", "LICENSE"]
@@ -177,7 +177,7 @@ cat >"${root_package_dir}/package.json" <<JSON
     "type": "git",
     "url": "git+https://github.com/JimmyDaddy/sigil.git"
   },
-  "homepage": "https://jimmydaddy.github.io/sigil/",
+  "homepage": "https://sigil.corerobin.com/",
   "bin": {
     "sigil": "bin/sigil.js"
   },

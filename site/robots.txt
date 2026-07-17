@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://jimmydaddy.github.io/sigil/sitemap.xml
+Sitemap: https://sigil.corerobin.com/sitemap.xml

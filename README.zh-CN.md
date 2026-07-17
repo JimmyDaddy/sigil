@@ -11,7 +11,7 @@
 
 Sigil 是一个 TUI-first 的 Rust coding agent，用来在真实仓库里协助开发。它把对话、工具调用、审批、diff、诊断、计划任务和 session 恢复放进同一个终端界面里；CLI 只保留为轻量自动化入口。
 
-[网站](https://jimmydaddy.github.io/sigil/zh-CN/) · [文档站](https://jimmydaddy.github.io/sigil/zh-CN/docs/) · [快速上手](https://jimmydaddy.github.io/sigil/zh-CN/docs/quickstart/) · [视觉导览](https://jimmydaddy.github.io/sigil/zh-CN/docs/visual-tour/) · [支持状态](https://jimmydaddy.github.io/sigil/zh-CN/docs/status/)
+[网站](https://sigil.corerobin.com/zh-CN/) · [文档站](https://sigil.corerobin.com/zh-CN/docs/) · [快速上手](https://sigil.corerobin.com/zh-CN/docs/quickstart/) · [视觉导览](https://sigil.corerobin.com/zh-CN/docs/visual-tour/) · [支持状态](https://sigil.corerobin.com/zh-CN/docs/status/)
 
 Sigil 的 alpha release 已通过 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 发布。`v0.0.1-alpha.4` 是 early preview：核心 TUI 工作流已经可用，但配置、插件 API、高级 sandbox 覆盖和自动化入口仍可能调整。自更新仍属于后续 packaging 工作。
 

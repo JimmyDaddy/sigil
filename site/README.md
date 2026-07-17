@@ -21,7 +21,7 @@ or static metadata such as `robots.txt`.
 Expected project site URL after Pages is enabled:
 
 ```text
-https://jimmydaddy.github.io/sigil/
+https://sigil.corerobin.com/
 ```
 
 Repository setting required once:

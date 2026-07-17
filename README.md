@@ -11,7 +11,7 @@ English | [简体中文](README.zh-CN.md)
 
 Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, tool calls, approvals, diffs, diagnostics, planning, and session recovery inside one terminal interface, while keeping the CLI as a thin automation surface.
 
-[Website](https://jimmydaddy.github.io/sigil/) · [Docs site](https://jimmydaddy.github.io/sigil/docs/) · [Quickstart](https://jimmydaddy.github.io/sigil/docs/quickstart/) · [Visual tour](https://jimmydaddy.github.io/sigil/docs/visual-tour/) · [Status](https://jimmydaddy.github.io/sigil/docs/status/)
+[Website](https://sigil.corerobin.com/) · [Docs site](https://sigil.corerobin.com/docs/) · [Quickstart](https://sigil.corerobin.com/docs/quickstart/) · [Visual tour](https://sigil.corerobin.com/docs/visual-tour/) · [Status](https://sigil.corerobin.com/docs/status/)
 
 Sigil's alpha release is available through npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. `v0.0.1-alpha.4` is an early preview: core TUI workflows are usable, while configuration, plugin APIs, advanced sandbox coverage, and automation surfaces may still change. Self-update remains future packaging work.
 

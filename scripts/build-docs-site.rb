@@ -9,7 +9,7 @@ require "open3"
 
 REPO_ROOT = File.expand_path("..", __dir__)
 OUT_DIR = File.expand_path(ARGV.fetch(0), REPO_ROOT) if $PROGRAM_NAME == __FILE__
-SITE_URL = "https://jimmydaddy.github.io/sigil"
+SITE_URL = "https://sigil.corerobin.com"
 SOURCE_LAST_MODIFIED_CACHE = {}
 
 PAGES = [
