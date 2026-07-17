@@ -75,6 +75,37 @@ use worker::{
 const TERMINAL_CLEANUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const TERMINAL_CLEANUP_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
+pub(super) struct PtyIoControl {
+    pub(super) input_tx: StdMutex<Option<std_mpsc::SyncSender<Vec<u8>>>>,
+    pub(super) master: StdMutex<Option<Box<dyn MasterPty + Send>>>,
+}
+
+impl PtyIoControl {
+    fn new(input_tx: std_mpsc::SyncSender<Vec<u8>>, master: Box<dyn MasterPty + Send>) -> Self {
+        Self {
+            input_tx: StdMutex::new(Some(input_tx)),
+            master: StdMutex::new(Some(master)),
+        }
+    }
+
+    #[cfg(test)]
+    fn input_only(input_tx: std_mpsc::SyncSender<Vec<u8>>) -> Self {
+        Self {
+            input_tx: StdMutex::new(Some(input_tx)),
+            master: StdMutex::new(None),
+        }
+    }
+
+    pub(super) fn close(&self) {
+        if let Ok(mut input_tx) = self.input_tx.lock() {
+            input_tx.take();
+        }
+        if let Ok(mut master) = self.master.lock() {
+            master.take();
+        }
+    }
+}
+
 #[cfg(test)]
 use io::{capture_pty_reader, capture_stream, is_pty_eof_error};
 #[cfg(test)]

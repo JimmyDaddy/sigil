@@ -203,8 +203,7 @@ impl TerminalProcessManager {
         let managed = ManagedTerminalTask {
             summary: Arc::clone(&summary),
             control: TerminalTaskControl::Pty {
-                input_tx: pty_runtime.input_tx.clone(),
-                master: Arc::clone(&pty_runtime.master),
+                io_control: Arc::clone(&pty_runtime.io_control),
                 killer: Arc::clone(&pty_runtime.killer),
                 process_id: pty_runtime.process_id,
                 capture_ledger: Arc::clone(&pty_runtime.capture_ledger),
@@ -226,6 +225,7 @@ impl TerminalProcessManager {
             artifacts: plan.artifacts,
             wait_task: pty_runtime.wait_task,
             killer: pty_runtime.killer,
+            io_control: pty_runtime.io_control,
             process_id: pty_runtime.process_id,
             capture_ledger: pty_runtime.capture_ledger,
             cancel_requested: pty_runtime.cancel_requested,
@@ -285,7 +285,7 @@ impl TerminalProcessManager {
             bail!("terminal task is not running: {}", task_id.as_str());
         }
 
-        let TerminalTaskControl::Pty { input_tx, .. } = &task.control else {
+        let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
             bail!("terminal task backend does not support input: process");
         };
 
@@ -297,6 +297,13 @@ impl TerminalProcessManager {
             );
         }
         let input_bytes = input.len() as u64;
+        let input_tx = io_control
+            .input_tx
+            .lock()
+            .map_err(|_| anyhow!("terminal PTY input lock poisoned: {}", task_id.as_str()))?;
+        let input_tx = input_tx
+            .as_ref()
+            .ok_or_else(|| anyhow!("terminal task is no longer running: {}", task_id.as_str()))?;
         input_tx.try_send(input).map_err(|error| match error {
             std_mpsc::TrySendError::Full(_) => {
                 anyhow!("terminal pty input queue is full: {}", task_id.as_str())
@@ -329,17 +336,20 @@ impl TerminalProcessManager {
             bail!("terminal task is not running: {}", task_id.as_str());
         }
 
-        let TerminalTaskControl::Pty { master, .. } = &task.control else {
+        let TerminalTaskControl::Pty { io_control, .. } = &task.control else {
             bail!("terminal task backend does not support resize: process");
         };
 
         let task_id_for_error = task_id.as_str().to_owned();
-        let master = Arc::clone(master);
+        let io_control = Arc::clone(io_control);
         task::spawn_blocking(move || -> Result<()> {
-            let master = master
+            let master = io_control
+                .master
                 .lock()
                 .map_err(|_| anyhow!("terminal pty master lock poisoned: {task_id_for_error}"))?;
             master
+                .as_ref()
+                .ok_or_else(|| anyhow!("terminal task is no longer running: {task_id_for_error}"))?
                 .resize(size.to_portable())
                 .context("failed to resize terminal pty")
         })
@@ -391,6 +401,7 @@ impl TerminalProcessManager {
             }
             TerminalTaskControl::Pty {
                 killer,
+                io_control,
                 process_id,
                 capture_ledger,
                 cancel_requested,
@@ -402,6 +413,7 @@ impl TerminalProcessManager {
                 cancel_pty_task(
                     &task.summary,
                     Arc::clone(killer),
+                    Arc::clone(io_control),
                     *process_id,
                     Arc::clone(capture_ledger),
                     Arc::clone(cancel_requested),
@@ -651,8 +663,7 @@ pub(super) enum TerminalTaskControl {
         cancel_tx: mpsc::Sender<CancelCommand>,
     },
     Pty {
-        input_tx: std_mpsc::SyncSender<Vec<u8>>,
-        master: Arc<StdMutex<Box<dyn MasterPty + Send>>>,
+        io_control: Arc<PtyIoControl>,
         killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
         process_id: Option<u32>,
         capture_ledger: Arc<TerminalCaptureLedger>,

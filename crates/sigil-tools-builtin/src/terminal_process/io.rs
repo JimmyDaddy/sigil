@@ -211,20 +211,26 @@ const TERMINAL_QUERY_TAIL_BYTES: usize = PRIVATE_CURSOR_POSITION_QUERY.len() - 1
 
 #[derive(Default)]
 pub(super) struct TerminalQueryResponder {
-    input_tx: Option<std_mpsc::SyncSender<Vec<u8>>>,
+    io_control: Option<std::sync::Weak<PtyIoControl>>,
     tail: Vec<u8>,
 }
 
 impl TerminalQueryResponder {
-    pub(super) fn new(input_tx: Option<std_mpsc::SyncSender<Vec<u8>>>) -> Self {
+    pub(super) fn new(io_control: Option<std::sync::Weak<PtyIoControl>>) -> Self {
         Self {
-            input_tx,
+            io_control,
             tail: Vec::new(),
         }
     }
 
     pub(super) fn observe(&mut self, bytes: &[u8]) -> Result<()> {
-        let Some(input_tx) = self.input_tx.as_ref() else {
+        let Some(io_control) = self.io_control.as_ref().and_then(std::sync::Weak::upgrade) else {
+            return Ok(());
+        };
+        let input_tx = io_control.input_tx.lock().map_err(|_| {
+            anyhow!("terminal PTY input lock poisoned while responding to cursor query")
+        })?;
+        let Some(input_tx) = input_tx.as_ref() else {
             return Ok(());
         };
         let previous_tail_len = self.tail.len();
@@ -266,7 +272,7 @@ pub(super) fn spawn_pty_read_thread(
     stream_path: PathBuf,
     output_path: PathBuf,
     limits: TerminalArtifactLimits,
-    terminal_response_tx: Option<std_mpsc::SyncSender<Vec<u8>>>,
+    terminal_io_control: Option<std::sync::Weak<PtyIoControl>>,
     capture_ledger: Arc<TerminalCaptureLedger>,
     capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
 ) -> ThreadJoinHandle<Result<CaptureOutcome>> {
@@ -279,7 +285,7 @@ pub(super) fn spawn_pty_read_thread(
                 stream_path,
                 output_path,
                 limits,
-                terminal_response_tx,
+                terminal_io_control,
                 capture_ledger,
                 capture_failure_tx,
             )
@@ -328,12 +334,12 @@ pub(super) fn capture_pty_reader(
     stream_path: PathBuf,
     output_path: PathBuf,
     limits: TerminalArtifactLimits,
-    terminal_response_tx: Option<std_mpsc::SyncSender<Vec<u8>>>,
+    terminal_io_control: Option<std::sync::Weak<PtyIoControl>>,
     capture_ledger: Arc<TerminalCaptureLedger>,
     capture_failure_tx: mpsc::UnboundedSender<TerminalCaptureFailure>,
 ) -> Result<CaptureOutcome> {
     let stream = TerminalOutputStream::Stdout;
-    let mut terminal_query_responder = TerminalQueryResponder::new(terminal_response_tx);
+    let mut terminal_query_responder = TerminalQueryResponder::new(terminal_io_control);
     let mut stream_file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)

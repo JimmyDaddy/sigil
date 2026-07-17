@@ -1333,7 +1333,8 @@ async fn terminal_pty_reader_panic_is_reported_live_after_the_panic() -> Result<
 #[test]
 fn terminal_query_responder_handles_split_and_private_cursor_queries() -> Result<()> {
     let (input_tx, input_rx) = std::sync::mpsc::sync_channel(2);
-    let mut responder = super::io::TerminalQueryResponder::new(Some(input_tx));
+    let io_control = Arc::new(super::PtyIoControl::input_only(input_tx));
+    let mut responder = super::io::TerminalQueryResponder::new(Some(Arc::downgrade(&io_control)));
 
     responder.observe(b"before\x1b[")?;
     assert!(matches!(
@@ -1349,6 +1350,12 @@ fn terminal_query_responder_handles_split_and_private_cursor_queries() -> Result
     ));
     responder.observe(b"\x1b[?6n")?;
     assert_eq!(input_rx.try_recv()?, b"\x1b[1;1R");
+    io_control.close();
+    responder.observe(b"\x1b[6n")?;
+    assert!(matches!(
+        input_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
     Ok(())
 }
 
@@ -1532,6 +1539,9 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         Arc::new(StdMutex::new(
             Box::new(SuccessfulKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
         )),
+        Arc::new(super::PtyIoControl::input_only(
+            std::sync::mpsc::sync_channel(1).0,
+        )),
         None,
         Arc::new(super::TerminalCaptureLedger::default()),
         Arc::new(AtomicBool::new(false)),
@@ -1554,6 +1564,9 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         &pty_cancel_error_summary,
         Arc::new(StdMutex::new(
             Box::new(FailingKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
+        )),
+        Arc::new(super::PtyIoControl::input_only(
+            std::sync::mpsc::sync_channel(1).0,
         )),
         None,
         Arc::new(super::TerminalCaptureLedger::default()),
@@ -1634,6 +1647,9 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
         wait_task: aborted_wait_task,
         killer: Arc::new(StdMutex::new(
             Box::new(SuccessfulKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
+        )),
+        io_control: Arc::new(super::PtyIoControl::input_only(
+            std::sync::mpsc::sync_channel(1).0,
         )),
         process_id: None,
         capture_ledger: Arc::new(super::TerminalCaptureLedger::default()),

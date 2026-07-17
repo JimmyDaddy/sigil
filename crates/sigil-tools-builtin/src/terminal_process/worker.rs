@@ -7,8 +7,7 @@ use crate::process_owner::terminate_owned_process_tree;
 
 pub(super) struct PtyRuntime {
     pub(super) process_owner: ProcessTreeOwnerGuard,
-    pub(super) input_tx: std_mpsc::SyncSender<Vec<u8>>,
-    pub(super) master: Arc<StdMutex<Box<dyn MasterPty + Send>>>,
+    pub(super) io_control: Arc<PtyIoControl>,
     pub(super) killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
     pub(super) process_id: Option<u32>,
     pub(super) capture_ledger: Arc<TerminalCaptureLedger>,
@@ -66,6 +65,7 @@ pub(super) struct PtyWorker {
     pub(super) artifacts: TerminalTaskArtifacts,
     pub(super) wait_task: JoinHandle<PtyWaitOutcome>,
     pub(super) killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
+    pub(super) io_control: Arc<PtyIoControl>,
     pub(super) process_id: Option<u32>,
     pub(super) capture_ledger: Arc<TerminalCaptureLedger>,
     pub(super) cancel_requested: Arc<AtomicBool>,
@@ -152,13 +152,13 @@ pub(super) fn spawn_pty_runtime(
     let writer = master
         .take_writer()
         .context("failed to take terminal pty writer")?;
-    let master = Arc::new(StdMutex::new(master));
     let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_PTY_INPUT_QUEUE_BOUND);
     spawn_pty_input_thread(writer, input_rx);
+    let io_control = Arc::new(PtyIoControl::new(input_tx, master));
     #[cfg(windows)]
-    let terminal_response_tx = Some(input_tx.clone());
+    let terminal_io_control = Some(Arc::downgrade(&io_control));
     #[cfg(not(windows))]
-    let terminal_response_tx = None;
+    let terminal_io_control = None;
 
     let command_spec = plan
         .pty_command
@@ -196,7 +196,7 @@ pub(super) fn spawn_pty_runtime(
         plan.artifacts.absolute_stdout.clone(),
         plan.artifacts.absolute_output.clone(),
         artifact_limits,
-        terminal_response_tx,
+        terminal_io_control,
         Arc::clone(&capture_ledger),
         capture_failure_tx,
     );
@@ -213,8 +213,7 @@ pub(super) fn spawn_pty_runtime(
 
     Ok(PtyRuntime {
         process_owner,
-        input_tx,
-        master,
+        io_control,
         killer,
         process_id,
         capture_ledger,
@@ -449,6 +448,7 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
 
     match event {
         PtyWorkerEvent::WaitCompleted(outcome) => {
+            worker.io_control.close();
             let mut outcome = joined_pty_outcome(outcome);
             let cleanup = if worker.cancel_requested.load(Ordering::SeqCst) {
                 let cleanup = cleanup_process_group_after_direct_exit(worker.process_id).await;
@@ -477,6 +477,7 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
             .await;
         }
         PtyWorkerEvent::CaptureFailed(failure) => {
+            worker.io_control.close();
             let (outcome, cleanup) = terminate_pty_after_capture_failure(&mut worker).await;
             let _ = finalize_terminal_summary(
                 &worker.summary,
@@ -495,6 +496,7 @@ pub(super) async fn run_pty_worker(mut worker: PtyWorker) {
             .await;
         }
         PtyWorkerEvent::ChildExited(status) => {
+            worker.io_control.close();
             finalize_pty_after_child_exit(&mut worker, status).await;
         }
     }
@@ -1125,6 +1127,7 @@ async fn cancellation_status_after_process_tree_cleanup(
 pub(super) async fn cancel_pty_task(
     summary: &Arc<Mutex<TerminalTaskEntry>>,
     killer: Arc<StdMutex<Box<dyn ChildKiller + Send + Sync>>>,
+    io_control: Arc<PtyIoControl>,
     process_id: Option<u32>,
     capture_ledger: Arc<TerminalCaptureLedger>,
     cancel_requested: Arc<AtomicBool>,
@@ -1136,6 +1139,7 @@ pub(super) async fn cancel_pty_task(
     if let Some(process_id) = process_id {
         let _ = send_terminate_signal(process_id).await;
     }
+    io_control.close();
 
     if let Some(entry) = wait_for_terminal_summary(summary, cancel_grace).await {
         return Ok(entry);
