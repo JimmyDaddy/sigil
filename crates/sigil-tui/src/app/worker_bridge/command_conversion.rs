@@ -245,6 +245,13 @@ impl AppState {
             AppAction::RefreshMcpServer { server_name } => {
                 WorkerCommand::RefreshMcpServer { server_name }
             }
+            AppAction::McpOAuth {
+                server_name,
+                action,
+            } => WorkerCommand::McpOAuth {
+                server_name,
+                action,
+            },
             AppAction::StartNewSession { session_log_path } => {
                 WorkerCommand::StartNewSession { session_log_path }
             }
@@ -256,7 +263,9 @@ impl AppState {
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }
             | AppAction::CopyToClipboard { .. }
+            | AppAction::CopySecretToClipboard { .. }
             | AppAction::OpenExternalUrl { .. }
+            | AppAction::OpenSecretExternalUrl { .. }
             | AppAction::RevealFile { .. } => unreachable!(
                 "setup/config/runtime updates are handled before worker command conversion"
             ),

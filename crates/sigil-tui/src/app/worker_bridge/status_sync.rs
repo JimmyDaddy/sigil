@@ -74,7 +74,9 @@ impl AppState {
     ) {
         let finishes_disclosure_operation = matches!(
             &status,
-            McpActivationStatus::Ready { .. } | McpActivationStatus::Failed { .. }
+            McpActivationStatus::Ready { .. }
+                | McpActivationStatus::AuthenticationRequired
+                | McpActivationStatus::Failed { .. }
         );
         let Some(server_name) = server_name else {
             self.push_event("mcp", mcp_activation_event_detail(None, &status));
@@ -87,6 +89,9 @@ impl AppState {
             McpActivationStatus::Activating => McpServerRuntimeStatus::Activating,
             McpActivationStatus::Refreshing => McpServerRuntimeStatus::Refreshing,
             McpActivationStatus::Deferred => McpServerRuntimeStatus::Deferred,
+            McpActivationStatus::AuthenticationRequired => {
+                McpServerRuntimeStatus::AuthenticationRequired
+            }
             McpActivationStatus::Stale { capability } => McpServerRuntimeStatus::Stale {
                 capability: capability.clone(),
             },
@@ -240,6 +245,7 @@ pub(super) fn mcp_activation_event_detail(
         McpActivationStatus::Activating => "activating".to_owned(),
         McpActivationStatus::Refreshing => "refreshing".to_owned(),
         McpActivationStatus::Deferred => "deferred".to_owned(),
+        McpActivationStatus::AuthenticationRequired => "authentication required".to_owned(),
         McpActivationStatus::Stale { capability } => format!("stale {capability}"),
         McpActivationStatus::Ready {
             added_tools,

@@ -145,6 +145,42 @@ fn scope_and_record_round_trip_are_exact_bounded_and_redacted() {
 }
 
 #[test]
+fn configured_lookup_locates_only_an_exact_server_resource_and_public_client() {
+    let lookup = McpOAuthCredentialLookup::new(
+        "github",
+        "https://mcp.example/public/mcp",
+        Some("sigil-client".to_owned()),
+        vec!["files:write".to_owned(), "files:read".to_owned()],
+    )
+    .expect("lookup");
+    let reordered = McpOAuthCredentialLookup::new(
+        "github",
+        "https://mcp.example/public/mcp",
+        Some("sigil-client".to_owned()),
+        vec!["files:read".to_owned(), "files:write".to_owned()],
+    )
+    .expect("lookup");
+    assert_eq!(lookup, reordered);
+    assert!(lookup.accepts(&scope()));
+    let encoded = encode_locator(&scope()).expect("locator");
+    assert_eq!(decode_locator(&lookup, &encoded).expect("decode"), scope());
+
+    let other_client = McpOAuthCredentialLookup::new(
+        "github",
+        "https://mcp.example/public/mcp",
+        Some("other-client".to_owned()),
+        Vec::new(),
+    )
+    .expect("lookup");
+    assert!(!other_client.accepts(&scope()));
+    assert!(matches!(
+        decode_locator(&other_client, &encoded),
+        Err(McpOAuthCredentialError::InvalidRecord)
+    ));
+    assert!(!format!("{lookup:?}").contains("mcp.example"));
+}
+
+#[test]
 fn expiry_and_rotation_change_only_safe_status_and_fingerprint() {
     let original = record(1_000, Some(1_100), false);
     assert_eq!(original.status(1_000), McpOAuthCredentialStatus::Present);

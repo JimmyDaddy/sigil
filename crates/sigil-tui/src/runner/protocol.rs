@@ -113,6 +113,17 @@ pub enum QueueMoveDirection {
     Down,
 }
 
+#[derive(Debug, Clone)]
+pub enum McpOAuthUserAction {
+    Inspect,
+    SignIn,
+    ManualCallback(sigil_kernel::SecretString),
+    Cancel,
+    Refresh,
+    Revoke,
+    ClearLocal,
+}
+
 #[derive(Debug)]
 pub enum WorkerCommand {
     SubmitPrompt {
@@ -305,6 +316,10 @@ pub enum WorkerCommand {
     },
     RefreshMcpServer {
         server_name: String,
+    },
+    McpOAuth {
+        server_name: String,
+        action: McpOAuthUserAction,
     },
     StartNewSession {
         session_log_path: PathBuf,
@@ -506,6 +521,10 @@ pub enum WorkerMessage {
         server_name: Option<String>,
         status: McpActivationStatus,
     },
+    McpOAuthStatus {
+        status: sigil_runtime::McpOAuthAuthStatus,
+        revocation: Option<sigil_runtime::McpOAuthRevocationOutcome>,
+    },
     McpProgress {
         notification: McpProgressNotification,
     },
@@ -537,6 +556,7 @@ pub enum McpActivationStatus {
     Activating,
     Refreshing,
     Deferred,
+    AuthenticationRequired,
     Stale {
         capability: String,
     },
@@ -547,4 +567,16 @@ pub enum McpActivationStatus {
     Failed {
         error: String,
     },
+}
+
+impl McpActivationStatus {
+    pub(crate) fn from_error(error: String) -> Self {
+        if error.contains("remote MCP authentication is required")
+            || error.contains("remote MCP OAuth authentication is required")
+        {
+            Self::AuthenticationRequired
+        } else {
+            Self::Failed { error }
+        }
+    }
 }

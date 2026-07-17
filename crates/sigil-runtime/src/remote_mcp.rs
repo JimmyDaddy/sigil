@@ -15,14 +15,15 @@ use sigil_kernel::{
 use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest,
     McpRemoteClientCapabilities, McpRemoteFormHandler, McpRemoteFormResponse, McpRemoteRoot,
-    McpRemoteTool, McpStreamableHttpClient, McpStreamableHttpHeaderConfig,
-    McpStreamableHttpHeaderEnvironment, McpStreamableHttpLimits, McpToolName,
-    PreparedMcpStreamableHttpHeaders, ValidatedMcpFormRequest,
+    McpRemoteTool, McpStreamableHttpBearerProvider, McpStreamableHttpClient,
+    McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment, McpStreamableHttpLimits,
+    McpToolName, PreparedMcpStreamableHttpHeaders, ValidatedMcpFormRequest,
 };
 use url::Url;
 
 use crate::{
-    EgressOrderingCoordinator, IpCidr, ProxyEnvironment,
+    EgressOrderingCoordinator, IpCidr, McpOAuthCredentialManager, ProxyEnvironment,
+    RuntimeMcpOAuthBearerProvider, RuntimeMcpOAuthHttpExecutor,
     RuntimeMcpStreamableHttpDestinationAuthorizer, RuntimeMcpTransportAttemptFactory,
     SystemWebDestinationResolver, WebDestinationGuard, WebDestinationGuardPolicy,
     secret_redactor_for_root_config,
@@ -181,6 +182,23 @@ pub async fn activate_or_refresh_configured_remote_mcp_server(
     })
 }
 
+/// Retires every registered generation for one remote MCP server after local credentials are
+/// cleared. The registry is drained before shutdown so no new call can observe a stale bearer.
+pub async fn deactivate_configured_remote_mcp_server(
+    registry: &mut ToolRegistry,
+    server_name: &str,
+) -> Result<usize> {
+    let owners =
+        registry.lifecycle_owners_by_scope(sigil_mcp::MCP_TOOL_LIFECYCLE_NAMESPACE, server_name);
+    let retired = owners
+        .iter()
+        .flat_map(|owner| registry.drain_by_lifecycle_owner(owner))
+        .collect::<Vec<_>>();
+    let retired_count = retired.len();
+    crate::mcp_registry::shutdown_registered_tools(&retired).await?;
+    Ok(retired_count)
+}
+
 /// Activates one user-root Streamable HTTP MCP server after the ordinary tool permission decision
 /// has admitted network egress. Every HTTP message still passes the durable authorization,
 /// presentation, destination-guard, and shared-budget barrier before DNS or socket activity.
@@ -276,9 +294,44 @@ async fn prepare_remote_mcp_generation(
     let budget = context
         .web_task_tree_budget()
         .ok_or_else(|| anyhow!("remote MCP activation requires a root-owned task-tree budget"))?;
+    let oauth_executor = if remote.oauth.is_some() {
+        Some(Arc::new(RuntimeMcpOAuthHttpExecutor::new(
+            root_config,
+            recorder.clone(),
+            Arc::clone(&presenter),
+            Arc::clone(&budget),
+            {
+                let cancellation = context.cancellation_handle();
+                Arc::new(move || {
+                    cancellation
+                        .as_ref()
+                        .is_none_or(|cancellation| !cancellation.is_cancel_requested())
+                })
+            },
+        )?) as Arc<dyn sigil_mcp::McpOAuthHttpExecutor>)
+    } else {
+        None
+    };
+    let bearer_provider: Option<Arc<dyn McpStreamableHttpBearerProvider>> =
+        match (remote.oauth.as_ref(), oauth_executor) {
+            (Some(oauth), Some(executor)) => {
+                let lookup = sigil_mcp::McpOAuthCredentialLookup::new(
+                    server.name.clone(),
+                    remote.url.clone(),
+                    oauth.client_id.clone(),
+                    oauth.scopes.clone(),
+                )?;
+                Some(Arc::new(RuntimeMcpOAuthBearerProvider::new(
+                    Arc::new(McpOAuthCredentialManager::system()),
+                    lookup,
+                    executor,
+                )))
+            }
+            _ => None,
+        };
     let root_run_id = budget.root_run_id().to_owned();
     let attempts = Arc::new(RuntimeMcpTransportAttemptFactory::new(
-        budget,
+        Arc::clone(&budget),
         root_run_id,
         EgressBindingOrigin::UserConfigured,
         format!("remote-mcp-{}-transport-v1", server.name),
@@ -335,7 +388,7 @@ async fn prepare_remote_mcp_generation(
     } else {
         None
     };
-    let client = McpStreamableHttpClient::connect_with_inbound_prepared(
+    let client = McpStreamableHttpClient::connect_with_inbound_prepared_and_bearer_provider(
         authorizer,
         prepared,
         capabilities,
@@ -349,6 +402,7 @@ async fn prepare_remote_mcp_generation(
         },
         roots,
         form_handler,
+        bearer_provider,
     )
     .await?;
     validate_remote_pin(server, &transport_fingerprint, &client).await?;

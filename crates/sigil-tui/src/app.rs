@@ -20,6 +20,7 @@ mod image_attachment_flow;
 mod input_flow;
 mod input_history;
 mod key_router;
+mod mcp_oauth_flow;
 mod modal_flow;
 mod mouse_flow;
 mod pending_plan_flow;
@@ -54,7 +55,7 @@ use sigil_kernel::{
     ConversationInputTarget, ImageAttachment, InteractionMode, MemoryConfig,
     MutationArtifactCleanupTarget, MutationArtifactInventoryItem, MutationArtifactRetentionReport,
     PermissionMode, PlanApprovalPermission, PlanTaskStartMode, ReasoningEffort, RootConfig,
-    SecretRedactor, SessionConfig, SessionStats, StorageConfig, TaskStateProjection,
+    SecretRedactor, SecretString, SessionConfig, SessionStats, StorageConfig, TaskStateProjection,
     ToolPreviewSnapshot, resolve_workspace_root,
 };
 use sigil_runtime::{
@@ -102,6 +103,30 @@ pub(crate) use self::usage_sidebar_flow::context_window_source_label;
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 pub(crate) const SCRATCH_DIR_LABEL: &str = "cache/tmp";
+
+pub(super) fn compact_mcp_oauth_scopes(scopes: &[String]) -> String {
+    if scopes.is_empty() {
+        return "default".to_owned();
+    }
+    let mut shown = scopes
+        .iter()
+        .take(3)
+        .map(|scope| {
+            let mut characters = scope.chars();
+            let prefix = characters.by_ref().take(48).collect::<String>();
+            if characters.next().is_some() {
+                format!("{prefix}…")
+            } else {
+                prefix
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if scopes.len() > 3 {
+        shown.push_str(&format!(" +{}", scopes.len() - 3));
+    }
+    shown
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentView {
@@ -415,8 +440,14 @@ pub enum AppAction {
     CopyToClipboard {
         text: String,
     },
+    CopySecretToClipboard {
+        text: SecretString,
+    },
     OpenExternalUrl {
         url: String,
+    },
+    OpenSecretExternalUrl {
+        url: SecretString,
     },
     RevealFile {
         path: PathBuf,
@@ -491,6 +522,10 @@ pub enum AppAction {
     },
     RefreshMcpServer {
         server_name: String,
+    },
+    McpOAuth {
+        server_name: String,
+        action: crate::runner::McpOAuthUserAction,
     },
     StartNewSession {
         session_log_path: PathBuf,
@@ -952,6 +987,9 @@ impl AppState {
         }
         if self.checkpoint_restore_modal_open() {
             return Ok(self.handle_checkpoint_restore_modal_key_event(key));
+        }
+        if self.mcp_oauth_modal_open() {
+            return Ok(self.handle_mcp_oauth_modal_key_event(key));
         }
         if self.feedback_modal_open() {
             return Ok(self.handle_feedback_modal_key_event(key));

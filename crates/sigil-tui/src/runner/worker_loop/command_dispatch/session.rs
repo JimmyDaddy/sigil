@@ -277,6 +277,7 @@ where
                 }
             }
             SessionCommand::SwitchSession { session_log_path } => {
+                cancel_all_mcp_oauth_flows(state);
                 match transition_session(
                     SessionTransitionKind::Switch,
                     session_log_path,
@@ -301,6 +302,7 @@ where
                 }
             }
             SessionCommand::StartNewSession { session_log_path } => {
+                cancel_all_mcp_oauth_flows(state);
                 match transition_session(
                     SessionTransitionKind::StartNew,
                     session_log_path,

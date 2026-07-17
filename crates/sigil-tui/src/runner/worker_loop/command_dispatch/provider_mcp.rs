@@ -138,9 +138,7 @@ where
                         let error = format!("{error:#}");
                         let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                             server_name: server_name.clone(),
-                            status: McpActivationStatus::Failed {
-                                error: error.clone(),
-                            },
+                            status: McpActivationStatus::from_error(error.clone()),
                         });
                         let detail = server_name
                             .as_deref()
@@ -161,6 +159,26 @@ where
                 }
                 state.refresh.pending_mcp_servers.insert(server_name);
                 state.refresh.next_mcp_retry_at = Instant::now();
+            }
+            ProviderMcpCommand::McpOAuth {
+                server_name,
+                action,
+            } => {
+                if state.run.active.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot manage MCP authentication while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                dispatch_mcp_oauth_action(
+                    runtime,
+                    agent,
+                    root_config,
+                    message_tx,
+                    state,
+                    server_name,
+                    action,
+                );
             }
         }
     }

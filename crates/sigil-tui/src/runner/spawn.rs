@@ -264,9 +264,7 @@ fn spawn_eager_mcp_startup_tasks(
                     let error = format!("{error:#}");
                     let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                         server_name: Some(server_name.clone()),
-                        status: McpActivationStatus::Failed {
-                            error: error.clone(),
-                        },
+                        status: McpActivationStatus::from_error(error),
                     });
                 }
             }

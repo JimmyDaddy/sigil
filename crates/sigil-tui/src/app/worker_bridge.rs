@@ -701,6 +701,9 @@ impl AppState {
             } => {
                 self.apply_mcp_activation_status(server_name, status);
             }
+            WorkerMessage::McpOAuthStatus { status, revocation } => {
+                self.apply_mcp_oauth_status(status, revocation);
+            }
             WorkerMessage::McpProgress { notification } => {
                 self.apply_mcp_progress(notification);
             }

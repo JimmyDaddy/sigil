@@ -50,6 +50,22 @@ async fn connect_fixture(
 }
 
 #[tokio::test]
+async fn streamable_http_dynamic_authorization_binds_the_supplied_snapshot_fingerprint() {
+    let server = FixtureServer::start(Vec::new()).await;
+    let authorizer = PlanAuthorizer::direct(server.endpoint());
+    let fingerprints = authorizer.live_fingerprints();
+    let plan = authorizer
+        .authorize_destination_with_fingerprint("hmac-sha256:rotated-snapshot")
+        .await
+        .expect("dynamic plan");
+    assert_eq!(plan.live_header_fingerprint, "hmac-sha256:rotated-snapshot");
+    assert_eq!(
+        fingerprints.lock().expect("fingerprints").as_slice(),
+        ["hmac-sha256:rotated-snapshot"]
+    );
+}
+
+#[tokio::test]
 async fn streamable_http_initialization_stages_session_until_202_barrier() {
     let (client, server) = connect_fixture(
         vec![

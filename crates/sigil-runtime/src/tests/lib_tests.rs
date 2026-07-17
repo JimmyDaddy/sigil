@@ -39,8 +39,9 @@ use super::{
     build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
     build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust,
-    build_tool_surface_without_eager_mcp_with_workspace_trust, launch_planned_mcp_process,
-    load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
+    build_tool_surface_without_eager_mcp_with_workspace_trust,
+    deactivate_configured_remote_mcp_server, launch_planned_mcp_process, load_anthropic_config,
+    load_deepseek_config, load_gemini_config, load_openai_compat_config,
     load_openai_responses_config, provider_capabilities_for_name, provider_capability_view,
     refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
@@ -2450,6 +2451,21 @@ async fn generation_shutdown_attempts_every_distinct_owner_after_failure() {
 }
 
 #[tokio::test]
+async fn clearing_remote_credentials_retires_the_server_generation_before_shutdown() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExistingMcpTool));
+    assert!(registry.spec_for("mcp__lazy__echo").is_some());
+
+    assert_eq!(
+        deactivate_configured_remote_mcp_server(&mut registry, "lazy")
+            .await
+            .expect("deactivate generation"),
+        1
+    );
+    assert!(registry.spec_for("mcp__lazy__echo").is_none());
+}
+
+#[tokio::test]
 async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
@@ -3016,6 +3032,7 @@ fn eager_remote_config(
                 http_headers: BTreeMap::new(),
                 env_http_headers: BTreeMap::new(),
                 bearer_token_env_var: None,
+                oauth: None,
                 client_capabilities: Default::default(),
             },
         ),

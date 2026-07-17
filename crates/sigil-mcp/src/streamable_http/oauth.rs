@@ -1002,6 +1002,45 @@ pub struct McpOAuthLoopbackListener {
     redirect_uri: Url,
 }
 
+/// Opaque accepted callback that has not yet been validated against the pending flow.
+pub struct McpOAuthLoopbackCallback {
+    socket: tokio::net::TcpStream,
+    callback_url: SecretString,
+}
+
+impl fmt::Debug for McpOAuthLoopbackCallback {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpOAuthLoopbackCallback")
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpOAuthLoopbackCallback {
+    pub async fn complete(
+        mut self,
+        pending: &mut McpOAuthPendingAuthorization,
+    ) -> Result<McpOAuthAuthorizationCode, McpOAuthProtocolError> {
+        let result = pending.complete_callback(self.callback_url);
+        let (status, message) = if result.is_ok() {
+            ("200 OK", "Authorization received. You can return to Sigil.")
+        } else {
+            (
+                "400 Bad Request",
+                "Authorization could not be accepted. Return to Sigil.",
+            )
+        };
+        let body =
+            format!("<!doctype html><meta charset=utf-8><title>Sigil</title><p>{message}</p>");
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = self.socket.write_all(response.as_bytes()).await;
+        result
+    }
+}
+
 impl fmt::Debug for McpOAuthLoopbackListener {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1042,6 +1081,20 @@ impl McpOAuthLoopbackListener {
             return Err(McpOAuthProtocolError::InvalidAuthorizationResponse);
         }
         let timeout = pending.remaining()?;
+        let callback = self.receive_callback_with_timeout(timeout).await?;
+        callback.complete(pending).await
+    }
+
+    /// Accepts one bounded loopback callback while leaving state/issuer/code validation to the
+    /// opaque callback's `complete` step. Dropping this future closes the listener.
+    pub async fn receive_callback(self) -> Result<McpOAuthLoopbackCallback, McpOAuthProtocolError> {
+        self.receive_callback_with_timeout(OAUTH_FLOW_TTL).await
+    }
+
+    async fn receive_callback_with_timeout(
+        self,
+        timeout: Duration,
+    ) -> Result<McpOAuthLoopbackCallback, McpOAuthProtocolError> {
         let accepted = tokio::time::timeout(timeout, async {
             let (mut socket, _) = self
                 .listener
@@ -1052,39 +1105,20 @@ impl McpOAuthLoopbackListener {
             Ok::<_, McpOAuthProtocolError>((socket, target))
         })
         .await;
-        let (mut socket, target) = match accepted {
+        let (socket, target) = match accepted {
             Ok(Ok(connection)) => connection,
-            Ok(Err(error)) => {
-                pending.cancel();
-                return Err(error);
-            }
-            Err(_) => {
-                pending.cancel();
-                return Err(McpOAuthProtocolError::FlowExpired);
-            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(McpOAuthProtocolError::FlowExpired),
         };
         let callback = format!(
             "{}{}",
             self.redirect_uri.origin().ascii_serialization(),
             target
         );
-        let result = pending.complete_callback(SecretString::new(callback));
-        let (status, message) = if result.is_ok() {
-            ("200 OK", "Authorization received. You can return to Sigil.")
-        } else {
-            (
-                "400 Bad Request",
-                "Authorization could not be accepted. Return to Sigil.",
-            )
-        };
-        let body =
-            format!("<!doctype html><meta charset=utf-8><title>Sigil</title><p>{message}</p>");
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = socket.write_all(response.as_bytes()).await;
-        result
+        Ok(McpOAuthLoopbackCallback {
+            socket,
+            callback_url: SecretString::new(callback),
+        })
     }
 }
 

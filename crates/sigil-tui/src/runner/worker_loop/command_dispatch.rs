@@ -285,6 +285,10 @@ pub(in crate::runner) enum ProviderMcpCommand {
     RefreshMcpServer {
         server_name: String,
     },
+    McpOAuth {
+        server_name: String,
+        action: McpOAuthUserAction,
+    },
 }
 
 #[derive(Debug)]
@@ -630,6 +634,13 @@ pub(in crate::runner) fn classify_worker_command(
                 server_name,
             })
         }
+        WorkerCommand::McpOAuth {
+            server_name,
+            action,
+        } => ClassifiedWorkerCommand::ProviderMcp(ProviderMcpCommand::McpOAuth {
+            server_name,
+            action,
+        }),
         WorkerCommand::Shutdown => {
             ClassifiedWorkerCommand::Maintenance(MaintenanceCommand::Shutdown)
         }

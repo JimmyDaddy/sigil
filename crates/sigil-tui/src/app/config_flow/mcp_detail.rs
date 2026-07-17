@@ -82,6 +82,18 @@ pub(super) fn render_mcp_lifecycle_summary(
                 &remote_environment_summary(remote),
             ));
             rows.push(render_config_readonly_row(
+                "OAuth",
+                &remote
+                    .oauth
+                    .as_ref()
+                    .map(|oauth| {
+                        let client = oauth.client_id.as_deref().unwrap_or("dynamic registration");
+                        let scopes = crate::app::compact_mcp_oauth_scopes(&oauth.scopes);
+                        format!("{client} · scopes {scopes} · system credential store")
+                    })
+                    .unwrap_or_else(|| "off".to_owned()),
+            ));
+            rows.push(render_config_readonly_row(
                 "Static fingerprint",
                 &sigil_runtime::mcp_transport_static_fingerprint(&config)
                     .unwrap_or_else(|_| "invalid".to_owned()),

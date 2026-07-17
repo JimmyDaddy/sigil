@@ -50,6 +50,7 @@ pub struct McpStreamableHttpClient {
     authorizer: Arc<dyn McpStreamableHttpDestinationAuthorizer>,
     pending_plan: Mutex<Option<McpStreamableHttpAuthorizedDialPlan>>,
     headers: ResolvedHeaders,
+    bearer_provider: Option<Arc<dyn McpStreamableHttpBearerProvider>>,
     capabilities: McpRemoteClientCapabilities,
     roots: Vec<McpRemoteRoot>,
     form_handler: Option<Arc<dyn McpRemoteFormHandler>>,
@@ -134,6 +135,27 @@ impl McpStreamableHttpClient {
         roots: Vec<McpRemoteRoot>,
         form_handler: Option<Arc<dyn McpRemoteFormHandler>>,
     ) -> Result<Arc<Self>, McpStreamableHttpError> {
+        Self::connect_with_inbound_prepared_and_bearer_provider(
+            authorizer,
+            prepared,
+            capabilities,
+            limits,
+            roots,
+            form_handler,
+            None,
+        )
+        .await
+    }
+
+    pub async fn connect_with_inbound_prepared_and_bearer_provider(
+        authorizer: Arc<dyn McpStreamableHttpDestinationAuthorizer>,
+        prepared: PreparedMcpStreamableHttpHeaders,
+        capabilities: McpRemoteClientCapabilities,
+        limits: McpStreamableHttpLimits,
+        roots: Vec<McpRemoteRoot>,
+        form_handler: Option<Arc<dyn McpRemoteFormHandler>>,
+        bearer_provider: Option<Arc<dyn McpStreamableHttpBearerProvider>>,
+    ) -> Result<Arc<Self>, McpStreamableHttpError> {
         let limits = limits.validate()?;
         if roots.len() > 32
             || (!capabilities.roots && !roots.is_empty())
@@ -146,17 +168,37 @@ impl McpStreamableHttpClient {
             endpoint,
             headers,
         } = prepared;
+        if headers.has_static_credential && bearer_provider.is_some() {
+            return Err(McpStreamableHttpError::ConfigurationInvalid);
+        }
+        if bearer_provider.is_some() && endpoint.scheme() != "https" {
+            return Err(McpStreamableHttpError::ConfigurationInvalid);
+        }
         if authorizer.endpoint().expose_secret() != endpoint_secret.expose_secret() {
             return Err(McpStreamableHttpError::ConfigurationInvalid);
         }
         let expected_profile_fingerprint = authorizer.profile_config_proxy_fingerprint();
-        let expected_live_header_fingerprint = authorizer.live_header_fingerprint();
         validate_fingerprint(&expected_profile_fingerprint)?;
-        validate_fingerprint(&expected_live_header_fingerprint)?;
-        if headers.live_fingerprint != expected_live_header_fingerprint {
-            return Err(McpStreamableHttpError::ConfigurationInvalid);
+        if bearer_provider.is_none() {
+            let configured_live_fingerprint = authorizer.live_header_fingerprint();
+            validate_fingerprint(&configured_live_fingerprint)?;
+            if headers.live_fingerprint != configured_live_fingerprint {
+                return Err(McpStreamableHttpError::ConfigurationInvalid);
+            }
         }
-        let plan = authorizer.authorize_destination().await?;
+        let initial_bearer = match bearer_provider.as_ref() {
+            Some(provider) => Some(provider.bearer_snapshot(&headers.live_fingerprint).await?),
+            None => None,
+        };
+        let expected_live_header_fingerprint = initial_bearer
+            .as_ref()
+            .map_or(headers.live_fingerprint.as_str(), |snapshot| {
+                snapshot.live_fingerprint()
+            });
+        validate_fingerprint(expected_live_header_fingerprint)?;
+        let plan = authorizer
+            .authorize_destination_with_fingerprint(expected_live_header_fingerprint)
+            .await?;
         if plan.endpoint.expose_secret() != endpoint_secret.expose_secret() {
             return Err(McpStreamableHttpError::InvalidDialPlan);
         }
@@ -170,6 +212,7 @@ impl McpStreamableHttpClient {
             authorizer,
             pending_plan: Mutex::new(Some(plan)),
             headers,
+            bearer_provider,
             capabilities,
             roots,
             form_handler,
@@ -189,7 +232,9 @@ impl McpStreamableHttpClient {
 
     #[must_use]
     pub fn auth_state(&self) -> McpStreamableHttpAuthState {
-        if self.headers.has_static_credential {
+        if self.bearer_provider.is_some() {
+            McpStreamableHttpAuthState::OAuthCredential
+        } else if self.headers.has_static_credential {
             McpStreamableHttpAuthState::StaticCredential
         } else {
             McpStreamableHttpAuthState::Anonymous
@@ -888,14 +933,37 @@ impl McpStreamableHttpClient {
         request_started: Option<Arc<AtomicBool>>,
         body_observer: Option<Arc<dyn McpRequestBodyObserver>>,
     ) -> Result<McpHttpResponse, McpStreamableHttpError> {
+        let bearer_snapshot = match self.bearer_provider.as_ref() {
+            Some(provider) => Some(
+                provider
+                    .bearer_snapshot(&self.headers.live_fingerprint)
+                    .await?,
+            ),
+            None => None,
+        };
+        let effective_live_fingerprint = bearer_snapshot
+            .as_ref()
+            .map_or(self.headers.live_fingerprint.as_str(), |snapshot| {
+                snapshot.live_fingerprint()
+            });
         let mut plan = self
             .pending_plan
             .lock()
             .await
             .take()
             .map_or_else(|| None, Some);
+        if plan
+            .as_ref()
+            .is_some_and(|plan| plan.live_header_fingerprint != effective_live_fingerprint)
+        {
+            plan = None;
+        }
         if plan.is_none() {
-            plan = Some(self.authorizer.authorize_destination().await?);
+            plan = Some(
+                self.authorizer
+                    .authorize_destination_with_fingerprint(effective_live_fingerprint)
+                    .await?,
+            );
         }
         let mut plan = plan.ok_or(McpStreamableHttpError::InvalidDialPlan)?;
         if Url::parse(plan.endpoint.expose_secret())
@@ -906,8 +974,7 @@ impl McpStreamableHttpClient {
         }
         if plan.profile_config_proxy_fingerprint
             != self.authorizer.profile_config_proxy_fingerprint()
-            || plan.live_header_fingerprint != self.headers.live_fingerprint
-            || plan.live_header_fingerprint != self.authorizer.live_header_fingerprint()
+            || plan.live_header_fingerprint != effective_live_fingerprint
         {
             return Err(McpStreamableHttpError::InvalidDialPlan);
         }
@@ -926,6 +993,11 @@ impl McpStreamableHttpClient {
             let value = HeaderValue::from_str(value.expose_secret())
                 .map_err(|_| McpStreamableHttpError::ConfigurationInvalid)?;
             request = request.header(name, value);
+        }
+        if let Some(snapshot) = bearer_snapshot.as_ref() {
+            let value = HeaderValue::from_str(snapshot.authorization().expose_secret())
+                .map_err(|_| McpStreamableHttpError::ConfigurationInvalid)?;
+            request = request.header(AUTHORIZATION, value);
         }
         if let Some(session) = session {
             request = request.header(MCP_VERSION_HEADER, session.version.as_str());
@@ -1020,12 +1092,17 @@ impl McpStreamableHttpClient {
         let result = normalize_status(
             status,
             headers,
-            self.headers.has_static_credential,
+            self.headers.has_static_credential || self.bearer_provider.is_some(),
             session_sent,
             &self.endpoint,
         );
         if matches!(result, Err(McpStreamableHttpError::SessionExpired)) {
             self.expire_session().await;
+        }
+        if matches!(result, Err(McpStreamableHttpError::AuthenticationRequired))
+            && let Some(provider) = self.bearer_provider.as_ref()
+        {
+            provider.mark_unauthorized().await?;
         }
         result
     }

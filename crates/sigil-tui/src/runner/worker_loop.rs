@@ -55,8 +55,8 @@ use super::{
     event_bridge::ChannelEventHandler,
     mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
     protocol::{
-        McpActivationStatus, QueueMoveDirection, V2CompactionApplySource, WorkerApprovalCommand,
-        WorkerCommand, WorkerMessage,
+        McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, V2CompactionApplySource,
+        WorkerApprovalCommand, WorkerCommand, WorkerMessage,
     },
     session_flow::{
         CapturedSessionRuntimeAttachments, load_session,
@@ -71,6 +71,7 @@ mod checkpoint_runtime;
 mod command_dispatch;
 mod compaction_runtime;
 mod compaction_tasks;
+mod mcp_oauth_runtime;
 mod mcp_refresh;
 mod provider_status;
 mod queue_driver;
@@ -113,6 +114,10 @@ pub(in crate::runner) use compaction_runtime::{
 pub(in crate::runner) use compaction_tasks::{
     CompactionPreparationTaskManager, CompactionPreparationTaskResult, IdleV2CompactionPreparation,
     ManualV2CompactionPreparation, OverflowV2CompactionPreparation, PreTurnV2CompactionPreparation,
+};
+pub(in crate::runner) use mcp_oauth_runtime::{
+    ActiveMcpOAuthFlow, McpOAuthTaskResult, advance_mcp_oauth_results, cancel_all_mcp_oauth_flows,
+    dispatch_mcp_oauth_action,
 };
 pub(in crate::runner) use mcp_refresh::WorkerLoopMcpHandlers;
 pub(in crate::runner) use mcp_refresh::refresh_pending_mcp_servers;

@@ -40,6 +40,7 @@ where
             }
             state.refresh.provider_status_tasks.abort_all();
             state.compaction.preparation_tasks.abort_all();
+            cancel_all_mcp_oauth_flows(state);
             WorkerCommandDispatchControl::Break
         }
     }

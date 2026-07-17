@@ -17,6 +17,7 @@ use super::oauth::{
 };
 
 const CREDENTIAL_RECORD_VERSION: u8 = 1;
+const CREDENTIAL_LOCATOR_VERSION: u8 = 1;
 const CREDENTIAL_SERVICE: &str = "io.github.sigil.mcp-oauth.v1";
 // Windows Credential Manager is the narrowest supported native store.
 const MAX_CREDENTIAL_RECORD_BYTES: usize = 2_560;
@@ -72,6 +73,86 @@ pub struct McpOAuthCredentialScope {
     client_id: String,
     scopes: Vec<String>,
     binding_id: String,
+}
+
+/// Stable, secret-free lookup binding derived from the configured OAuth intent.
+///
+/// The exact issuer/client/scope credential binding remains inside the located keyring record.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpOAuthCredentialLookup {
+    server_name: String,
+    resource: String,
+    configured_client_id: Option<String>,
+    configured_scopes: Vec<String>,
+    binding_id: String,
+}
+
+impl fmt::Debug for McpOAuthCredentialLookup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpOAuthCredentialLookup")
+            .field("binding_id", &self.binding_id)
+            .field("scope_count", &self.configured_scopes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpOAuthCredentialLookup {
+    pub fn new(
+        server_name: impl Into<String>,
+        resource: impl Into<String>,
+        configured_client_id: Option<String>,
+        configured_scopes: Vec<String>,
+    ) -> Result<Self, McpOAuthCredentialError> {
+        let server_name = server_name.into();
+        let resource = resource.into();
+        if !valid_text(&server_name, MAX_SERVER_NAME_BYTES)
+            || !valid_https_binding(&resource)
+            || configured_client_id.as_deref().is_some_and(|client_id| {
+                !valid_text(client_id, MAX_BINDING_TEXT_BYTES)
+                    || client_id.chars().any(char::is_whitespace)
+            })
+        {
+            return Err(McpOAuthCredentialError::InvalidScope);
+        }
+        let configured_scopes = normalize_scopes(configured_scopes)?;
+        let mut digest = Sha256::new();
+        update_digest(&mut digest, "server", server_name.as_bytes());
+        update_digest(&mut digest, "resource", resource.as_bytes());
+        update_digest(
+            &mut digest,
+            "configured_client",
+            configured_client_id.as_deref().unwrap_or("").as_bytes(),
+        );
+        for scope in &configured_scopes {
+            update_digest(&mut digest, "configured_scope", scope.as_bytes());
+        }
+        Ok(Self {
+            server_name,
+            resource,
+            configured_client_id,
+            configured_scopes,
+            binding_id: format!("sha256:{:x}", digest.finalize()),
+        })
+    }
+
+    #[must_use]
+    pub fn binding_id(&self) -> &str {
+        &self.binding_id
+    }
+
+    fn keyring_account(&self) -> String {
+        format!("lookup-{}", self.binding_id)
+    }
+
+    fn accepts(&self, scope: &McpOAuthCredentialScope) -> bool {
+        scope.server_name() == self.server_name
+            && scope.resource() == self.resource
+            && self
+                .configured_client_id
+                .as_deref()
+                .is_none_or(|client_id| scope.client_id() == client_id)
+    }
 }
 
 impl fmt::Debug for McpOAuthCredentialScope {
@@ -462,6 +543,26 @@ pub trait McpOAuthCredentialStore: Send + Sync {
     ) -> Result<bool, McpOAuthCredentialError>;
 }
 
+/// Keyring-only lookup index from public configuration intent to an exact credential scope.
+#[async_trait]
+pub trait McpOAuthCredentialLocatorStore: Send + Sync {
+    async fn load_located(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+    ) -> Result<Option<McpOAuthCredentialRecord>, McpOAuthCredentialError>;
+
+    async fn store_locator(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+        scope: &McpOAuthCredentialScope,
+    ) -> Result<(), McpOAuthCredentialError>;
+
+    async fn delete_locator(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+    ) -> Result<bool, McpOAuthCredentialError>;
+}
+
 /// Native system credential-store implementation with no plaintext fallback.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemMcpOAuthCredentialStore;
@@ -530,6 +631,78 @@ impl McpOAuthCredentialStore for SystemMcpOAuthCredentialStore {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux"
+))]
+#[async_trait]
+impl McpOAuthCredentialLocatorStore for SystemMcpOAuthCredentialStore {
+    async fn load_located(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+    ) -> Result<Option<McpOAuthCredentialRecord>, McpOAuthCredentialError> {
+        let account = lookup.keyring_account();
+        let bytes = tokio::task::spawn_blocking(move || {
+            let entry = keyring::Entry::new(CREDENTIAL_SERVICE, &account)
+                .map_err(|_| McpOAuthCredentialError::StoreUnavailable)?;
+            match entry.get_secret() {
+                Ok(value) => Ok(Some(Zeroizing::new(value))),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(_) => Err(McpOAuthCredentialError::StoreUnavailable),
+            }
+        })
+        .await
+        .map_err(|_| McpOAuthCredentialError::StoreUnavailable)??;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let scope = decode_locator(lookup, &bytes)?;
+        self.load(&scope).await
+    }
+
+    async fn store_locator(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+        scope: &McpOAuthCredentialScope,
+    ) -> Result<(), McpOAuthCredentialError> {
+        if !lookup.accepts(scope) {
+            return Err(McpOAuthCredentialError::InvalidScope);
+        }
+        let account = lookup.keyring_account();
+        let bytes = encode_locator(scope)?;
+        tokio::task::spawn_blocking(move || {
+            let entry = keyring::Entry::new(CREDENTIAL_SERVICE, &account)
+                .map_err(|_| McpOAuthCredentialError::StoreUnavailable)?;
+            entry
+                .set_secret(&bytes)
+                .map_err(|_| McpOAuthCredentialError::StoreRejected)
+        })
+        .await
+        .map_err(|_| McpOAuthCredentialError::StoreUnavailable)??;
+        Ok(())
+    }
+
+    async fn delete_locator(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+    ) -> Result<bool, McpOAuthCredentialError> {
+        let account = lookup.keyring_account();
+        tokio::task::spawn_blocking(move || {
+            let entry = keyring::Entry::new(CREDENTIAL_SERVICE, &account)
+                .map_err(|_| McpOAuthCredentialError::StoreUnavailable)?;
+            match entry.delete_credential() {
+                Ok(()) => Ok(true),
+                Err(keyring::Error::NoEntry) => Ok(false),
+                Err(_) => Err(McpOAuthCredentialError::StoreRejected),
+            }
+        })
+        .await
+        .map_err(|_| McpOAuthCredentialError::StoreUnavailable)?
+    }
+}
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
@@ -555,6 +728,37 @@ impl McpOAuthCredentialStore for SystemMcpOAuthCredentialStore {
     async fn delete(
         &self,
         _scope: &McpOAuthCredentialScope,
+    ) -> Result<bool, McpOAuthCredentialError> {
+        Err(McpOAuthCredentialError::StoreUnavailable)
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_os = "linux"
+)))]
+#[async_trait]
+impl McpOAuthCredentialLocatorStore for SystemMcpOAuthCredentialStore {
+    async fn load_located(
+        &self,
+        _lookup: &McpOAuthCredentialLookup,
+    ) -> Result<Option<McpOAuthCredentialRecord>, McpOAuthCredentialError> {
+        Err(McpOAuthCredentialError::StoreUnavailable)
+    }
+
+    async fn store_locator(
+        &self,
+        _lookup: &McpOAuthCredentialLookup,
+        _scope: &McpOAuthCredentialScope,
+    ) -> Result<(), McpOAuthCredentialError> {
+        Err(McpOAuthCredentialError::StoreUnavailable)
+    }
+
+    async fn delete_locator(
+        &self,
+        _lookup: &McpOAuthCredentialLookup,
     ) -> Result<bool, McpOAuthCredentialError> {
         Err(McpOAuthCredentialError::StoreUnavailable)
     }
@@ -760,6 +964,26 @@ struct LoadedCredential {
     rotation_id: String,
 }
 
+#[derive(Serialize)]
+struct StoredCredentialLocatorRef<'a> {
+    version: u8,
+    server_name: &'a str,
+    resource: &'a str,
+    issuer: &'a str,
+    client_id: &'a str,
+    scopes: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct LoadedCredentialLocator {
+    version: u8,
+    server_name: String,
+    resource: String,
+    issuer: String,
+    client_id: String,
+    scopes: Vec<String>,
+}
+
 impl Drop for LoadedCredential {
     fn drop(&mut self) {
         if let Some(value) = self.access_token.as_mut() {
@@ -821,6 +1045,51 @@ fn encode_record(
         return Err(McpOAuthCredentialError::InvalidRecord);
     }
     Ok(encoded)
+}
+
+fn encode_locator(
+    scope: &McpOAuthCredentialScope,
+) -> Result<Zeroizing<Vec<u8>>, McpOAuthCredentialError> {
+    let encoded = Zeroizing::new(
+        serde_json::to_vec(&StoredCredentialLocatorRef {
+            version: CREDENTIAL_LOCATOR_VERSION,
+            server_name: scope.server_name(),
+            resource: scope.resource(),
+            issuer: scope.issuer(),
+            client_id: scope.client_id(),
+            scopes: scope.scopes(),
+        })
+        .map_err(|_| McpOAuthCredentialError::InvalidRecord)?,
+    );
+    if encoded.is_empty() || encoded.len() > MAX_CREDENTIAL_RECORD_BYTES {
+        return Err(McpOAuthCredentialError::InvalidRecord);
+    }
+    Ok(encoded)
+}
+
+fn decode_locator(
+    lookup: &McpOAuthCredentialLookup,
+    bytes: &[u8],
+) -> Result<McpOAuthCredentialScope, McpOAuthCredentialError> {
+    if bytes.is_empty() || bytes.len() > MAX_CREDENTIAL_RECORD_BYTES {
+        return Err(McpOAuthCredentialError::InvalidRecord);
+    }
+    let loaded: LoadedCredentialLocator =
+        serde_json::from_slice(bytes).map_err(|_| McpOAuthCredentialError::InvalidRecord)?;
+    if loaded.version != CREDENTIAL_LOCATOR_VERSION {
+        return Err(McpOAuthCredentialError::InvalidRecord);
+    }
+    let scope = McpOAuthCredentialScope::new(
+        loaded.server_name,
+        loaded.resource,
+        loaded.issuer,
+        loaded.client_id,
+        loaded.scopes,
+    )?;
+    if !lookup.accepts(&scope) {
+        return Err(McpOAuthCredentialError::InvalidRecord);
+    }
+    Ok(scope)
 }
 
 fn decode_record(

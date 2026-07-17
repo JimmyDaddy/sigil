@@ -203,6 +203,7 @@ pub struct PlanAuthorizer {
     live_header_fingerprint: String,
     budget: Arc<WebTaskTreeBudget>,
     calls: Arc<AtomicUsize>,
+    live_fingerprints: Arc<Mutex<Vec<String>>>,
 }
 
 impl PlanAuthorizer {
@@ -243,31 +244,26 @@ impl PlanAuthorizer {
             )
             .expect("budget"),
             calls: Arc::new(AtomicUsize::new(0)),
+            live_fingerprints: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub fn call_count(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.calls)
     }
-}
 
-#[async_trait]
-impl McpStreamableHttpDestinationAuthorizer for PlanAuthorizer {
-    fn endpoint(&self) -> SecretString {
-        SecretString::new(self.endpoint.clone())
+    pub fn live_fingerprints(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.live_fingerprints)
     }
 
-    fn profile_config_proxy_fingerprint(&self) -> String {
-        self.profile_fingerprint.clone()
-    }
-
-    fn live_header_fingerprint(&self) -> String {
-        self.live_header_fingerprint.clone()
-    }
-
-    async fn authorize_destination(
+    async fn authorize_with_fingerprint(
         &self,
+        live_header_fingerprint: &str,
     ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError> {
+        self.live_fingerprints
+            .lock()
+            .expect("fingerprints lock")
+            .push(live_header_fingerprint.to_owned());
         let ordinal = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let attempt_id = format!("fixture-attempt-{ordinal}");
         let mut reservation = self
@@ -292,10 +288,40 @@ impl McpStreamableHttpDestinationAuthorizer for PlanAuthorizer {
             format!("http://fixture.test:{port}"),
             vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)],
             self.profile_fingerprint.clone(),
-            self.live_header_fingerprint.clone(),
+            live_header_fingerprint,
             reservation,
         )
         .map_err(|_| McpStreamableHttpDestinationError::DestinationRejected)
+    }
+}
+
+#[async_trait]
+impl McpStreamableHttpDestinationAuthorizer for PlanAuthorizer {
+    fn endpoint(&self) -> SecretString {
+        SecretString::new(self.endpoint.clone())
+    }
+
+    fn profile_config_proxy_fingerprint(&self) -> String {
+        self.profile_fingerprint.clone()
+    }
+
+    fn live_header_fingerprint(&self) -> String {
+        self.live_header_fingerprint.clone()
+    }
+
+    async fn authorize_destination(
+        &self,
+    ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError> {
+        self.authorize_with_fingerprint(&self.live_header_fingerprint)
+            .await
+    }
+
+    async fn authorize_destination_with_fingerprint(
+        &self,
+        live_header_fingerprint: &str,
+    ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError> {
+        self.authorize_with_fingerprint(live_header_fingerprint)
+            .await
     }
 }
 

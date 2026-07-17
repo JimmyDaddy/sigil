@@ -6,6 +6,7 @@ pub(in crate::runner) struct WorkerLoopState {
     pub(in crate::runner) compaction: CompactionWorkerState,
     pub(in crate::runner) refresh: RefreshWorkerState,
     pub(in crate::runner) agent: AgentWorkerState,
+    pub(in crate::runner) mcp_oauth: McpOAuthWorkerState,
     pub(in crate::runner) processed_worker_command_ids: BTreeSet<String>,
 }
 
@@ -21,6 +22,7 @@ impl WorkerLoopState {
         let (task_result_tx, task_result_rx) = mpsc::channel();
         let (provider_status_tx, provider_status_rx) = mpsc::channel();
         let (compaction_preparation_tx, compaction_preparation_rx) = mpsc::channel();
+        let (mcp_oauth_result_tx, mcp_oauth_result_rx) = mpsc::channel();
         Self {
             session: SessionWorkerState {
                 log_path: session_log_path,
@@ -58,9 +60,20 @@ impl WorkerLoopState {
                 supervisor: agent_supervisor,
                 background_runs: background_agent_runs,
             },
+            mcp_oauth: McpOAuthWorkerState {
+                result_tx: mcp_oauth_result_tx,
+                result_rx: mcp_oauth_result_rx,
+                active: BTreeMap::new(),
+            },
             processed_worker_command_ids: BTreeSet::new(),
         }
     }
+}
+
+pub(in crate::runner) struct McpOAuthWorkerState {
+    pub(in crate::runner) result_tx: mpsc::Sender<McpOAuthTaskResult>,
+    pub(in crate::runner) result_rx: mpsc::Receiver<McpOAuthTaskResult>,
+    pub(in crate::runner) active: BTreeMap<String, ActiveMcpOAuthFlow>,
 }
 
 pub(in crate::runner) struct SessionWorkerState {

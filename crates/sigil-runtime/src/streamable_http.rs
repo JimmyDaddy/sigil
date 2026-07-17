@@ -43,6 +43,22 @@ impl RuntimeMcpStreamableHttpAttempt {
             attempt_id: attempt_id.into(),
         }
     }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        McpTransportAuthorization,
+        PreEgressDisclosure,
+        WebBudgetReservation,
+        String,
+    ) {
+        (
+            self.authorization,
+            self.disclosure,
+            self.reservation,
+            self.attempt_id,
+        )
+    }
 }
 
 /// Produces a fresh durable authorization/disclosure/budget tuple for every HTTP message.
@@ -301,6 +317,27 @@ where
     async fn authorize_destination(
         &self,
     ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError> {
+        self.authorize_with_live_fingerprint(&self.live_header_fingerprint)
+            .await
+    }
+
+    async fn authorize_destination_with_fingerprint(
+        &self,
+        live_header_fingerprint: &str,
+    ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError> {
+        self.authorize_with_live_fingerprint(live_header_fingerprint)
+            .await
+    }
+}
+
+impl<R> RuntimeMcpStreamableHttpDestinationAuthorizer<R>
+where
+    R: WebDestinationResolver + Send + Sync,
+{
+    async fn authorize_with_live_fingerprint(
+        &self,
+        live_header_fingerprint: &str,
+    ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError> {
         let endpoint = Url::parse(self.endpoint.expose_secret())
             .map_err(|_| McpStreamableHttpDestinationError::DestinationRejected)?;
         // preview performs URL/logical/proxy policy checks only; direct DNS remains after barrier.
@@ -348,7 +385,7 @@ where
                 plan.safe_logical_destination(),
                 plan.direct_addresses().to_vec(),
                 self.profile_config_proxy_fingerprint.clone(),
-                self.live_header_fingerprint.clone(),
+                live_header_fingerprint,
                 budget,
             )
             .map_err(|_| McpStreamableHttpDestinationError::DestinationRejected),
@@ -363,7 +400,7 @@ where
                     plan.safe_transport_destination(),
                     proxy_url,
                     self.profile_config_proxy_fingerprint.clone(),
-                    self.live_header_fingerprint.clone(),
+                    live_header_fingerprint,
                     budget,
                 )
                 .map_err(|_| McpStreamableHttpDestinationError::DestinationRejected)

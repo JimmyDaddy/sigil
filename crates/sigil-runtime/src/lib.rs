@@ -17,10 +17,10 @@ use sigil_kernel::{
 pub use sigil_mcp::{
     McpDeclarationLaunchMetadata, McpElicitationAction, McpElicitationHandler,
     McpElicitationRequest, McpElicitationResponse, McpListChangedKind, McpListChangedNotification,
-    McpProcessCoverage, McpProcessLaunch, McpProcessLaunchReceipt, McpProcessLaunchRequest,
-    McpProcessLauncher, McpProgressNotification, McpRuntimeEventHandler, McpToolRegistrationReport,
-    mcp_transport_static_fingerprint, unsupported_mcp_elicitation_handler,
-    unsupported_mcp_runtime_event_handler,
+    McpOAuthRevocationOutcome, McpProcessCoverage, McpProcessLaunch, McpProcessLaunchReceipt,
+    McpProcessLaunchRequest, McpProcessLauncher, McpProgressNotification, McpRuntimeEventHandler,
+    McpToolRegistrationReport, mcp_transport_static_fingerprint,
+    unsupported_mcp_elicitation_handler, unsupported_mcp_runtime_event_handler,
 };
 use sigil_provider_anthropic::{
     AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV, anthropic_capabilities,
@@ -71,6 +71,8 @@ pub mod image_attachment;
 pub mod machine_protocol;
 pub mod mcp_declaration;
 pub mod mcp_oauth;
+pub mod mcp_oauth_flow;
+pub mod mcp_oauth_http;
 pub mod model_eval;
 pub mod paths;
 pub mod plugins;
@@ -133,7 +135,12 @@ pub use mcp_declaration::{
     PluginManifestAttestation, ResolvedMcpServerDeclaration, ResolvedMcpStdioLaunch,
     resolve_user_root_mcp_declarations,
 };
-pub use mcp_oauth::McpOAuthCredentialManager;
+pub use mcp_oauth::{McpOAuthCredentialManager, RuntimeMcpOAuthBearerProvider};
+pub use mcp_oauth_flow::{
+    McpOAuthAuthErrorCode, McpOAuthAuthPhase, McpOAuthAuthStatus, McpOAuthFlowControl,
+    McpOAuthFlowError, McpOAuthPreparedFlow, McpOAuthRuntimeService,
+};
+pub use mcp_oauth_http::{RuntimeMcpOAuthHttpExecutor, runtime_mcp_oauth_executor_for_user_action};
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_ATTACHMENTS_DIR, DEFAULT_CHANGESETS_DIR,
     DEFAULT_PROJECT_ASSETS_DIR, DEFAULT_SCRATCH_DIR, DEFAULT_SESSION_EXPORTS_DIR,
@@ -185,7 +192,7 @@ pub use provider_status::{
 };
 pub use remote_mcp::{
     activate_eager_remote_mcp_server, activate_or_refresh_configured_remote_mcp_server,
-    activate_remote_mcp_server,
+    activate_remote_mcp_server, deactivate_configured_remote_mcp_server,
 };
 pub use session_control::{
     append_session_control_entries, append_session_control_entries_and_track_detached,

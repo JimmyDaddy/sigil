@@ -621,6 +621,63 @@ fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
 }
 
 #[test]
+fn config_mcp_oauth_activation_opens_exclusive_authentication_modal() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(McpServerConfig {
+        name: "remote-oauth".to_owned(),
+        transport: sigil_kernel::McpServerTransportConfig::StreamableHttp(
+            sigil_kernel::McpStreamableHttpConfig {
+                url: "https://mcp.example/public/mcp".to_owned(),
+                http_headers: Default::default(),
+                env_http_headers: Default::default(),
+                bearer_token_env_var: None,
+                oauth: Some(sigil_kernel::config::McpOAuthConfig {
+                    client_id: Some("sigil-client".to_owned()),
+                    scopes: vec!["files:read".to_owned(), "files:write".to_owned()],
+                }),
+                client_capabilities: Default::default(),
+            },
+        ),
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Mcp);
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .focus_footer(ConfigFooterAction::ActivateMcp);
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("sigil-client · scopes files:read files:write"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::McpOAuth {
+            ref server_name,
+            action: McpOAuthUserAction::Inspect,
+        }) if server_name == "remote-oauth"
+    ));
+    assert!(app.mcp_oauth_modal_open());
+    assert!(
+        app.modal_lines()
+            .join("\n")
+            .contains("checking system store")
+    );
+
+    let secret_action = AppAction::OpenSecretExternalUrl {
+        url: SecretString::new("https://auth.example/authorize?code=secret-canary"),
+    };
+    assert!(!format!("{secret_action:?}").contains("secret-canary"));
+    Ok(())
+}
+
+#[test]
 fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
     let mut config = test_config();
     config.mcp_servers.push(mcp_server_config! {

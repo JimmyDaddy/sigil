@@ -2845,6 +2845,7 @@ fn remote_transport_fingerprint_binds_source_metadata_without_resolving_secrets(
                     "SIGIL_TEST_MISSING_REMOTE_MCP_SECRET".to_owned(),
                 )]),
                 bearer_token_env_var: None,
+                oauth: None,
                 client_capabilities: BTreeSet::from([
                     sigil_kernel::McpRemoteClientCapability::Roots,
                 ]),

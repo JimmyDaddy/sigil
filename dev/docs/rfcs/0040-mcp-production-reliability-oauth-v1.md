@@ -1,6 +1,6 @@
 # RFC-0040 MCP Production Reliability and OAuth V1
 
-状态：active / R40.0-R40.3 complete; R40.4 next
+状态：active / R40.0-R40.4 complete; R40.5 next
 
 创建日期：2026-07-17
 
@@ -339,3 +339,14 @@ CI，但真实第三方 OAuth account 不进入必跑 gate。
   confidential client auth 已覆盖；remote revoke 与 local clear 是可独立观察、独立调用的动作。
   MCP 180/180、runtime 579/579（含 credential 5/5）、affected strict Clippy、rustfmt/diff、`cargo deny check` 与
   `cargo audit`（既有两项显式 ignore）通过；真实 native keyring platform conformance 保留到 R40.5。
+- R40.4 complete. 用户根 `streamable_http` 配置新增与静态 bearer/Authorization 互斥、仅 HTTPS 的
+  public OAuth intent；错误同时提供英文与中文修复信息。runtime 为 resource discovery、issuer discovery、
+  DCR、token exchange、refresh 和 revoke 的每个 destination 单独执行 durable authorization、disclosure、
+  shared destination guard 与 wire/decoded budget 计费，禁用 redirect、retry、cookie、referrer 与 response
+  decompression。每个 MCP request 在物理发送前从 system keyring 解析最新 exact credential snapshot，并把
+  live HMAC 绑定到新的 dial plan；401 不原地 retry。TUI worker 提供 typed inspect/sign-in/manual callback/
+  cancel/refresh/revoke/clear actions 与独占 auth modal，授权 URL 和 callback 在 action/debug 路径保持 secret，
+  清除本机 credential 会先摘除已注册 generation。eager/headless activation 不打开浏览器。kernel/MCP/runtime/
+  TUI 定向与完整回归、strict Clippy、rustfmt 通过；编译后的 production TUI 也通过 trust gate 到
+  `/config` MCP detail、独占 Authentication modal 和 typed credential-store status 的 real-PTY smoke。
+  完整 OAuth callback binary、platform keyring、hosted matrix 与公开文档收口进入 R40.5。

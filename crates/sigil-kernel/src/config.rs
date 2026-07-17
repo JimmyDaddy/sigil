@@ -1751,7 +1751,21 @@ pub struct McpStreamableHttpConfig {
     pub http_headers: BTreeMap<String, String>,
     pub env_http_headers: BTreeMap<String, String>,
     pub bearer_token_env_var: Option<String>,
+    pub oauth: Option<McpOAuthConfig>,
     pub client_capabilities: BTreeSet<McpRemoteClientCapability>,
+}
+
+/// Public OAuth client intent for one user-root Streamable HTTP MCP server.
+///
+/// Secrets, discovered registration metadata and tokens are deliberately excluded. They are
+/// runtime-owned and may only be persisted in the native system credential store.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct McpOAuthConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 /// Public, bounded MCP client capabilities supported for remote root servers.
@@ -1797,6 +1811,8 @@ enum McpServerConfigWire {
         #[serde(default)]
         bearer_token_env_var: Option<String>,
         #[serde(default)]
+        oauth: Option<McpOAuthConfig>,
+        #[serde(default)]
         client_capabilities: Vec<McpRemoteClientCapability>,
         #[serde(default = "default_startup_timeout_secs")]
         startup_timeout_secs: u64,
@@ -1837,6 +1853,7 @@ impl Serialize for McpServerConfig {
                     http_headers: config.http_headers.clone(),
                     env_http_headers: config.env_http_headers.clone(),
                     bearer_token_env_var: config.bearer_token_env_var.clone(),
+                    oauth: config.oauth.clone(),
                     client_capabilities: config.client_capabilities.iter().copied().collect(),
                     startup_timeout_secs: self.startup_timeout_secs,
                     required: self.required,
@@ -1886,6 +1903,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
                 http_headers,
                 env_http_headers,
                 bearer_token_env_var,
+                oauth,
                 client_capabilities,
                 startup_timeout_secs,
                 required,
@@ -1905,6 +1923,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
                         http_headers,
                         env_http_headers,
                         bearer_token_env_var,
+                        oauth,
                         client_capabilities: capabilities,
                     }),
                     startup_timeout_secs,
@@ -2040,6 +2059,21 @@ fn validate_remote_mcp_config(config: &McpStreamableHttpConfig) -> Result<()> {
             .saturating_add("authorization".len())
             .saturating_add(environment_name.len());
     }
+    if let Some(oauth) = config.oauth.as_ref() {
+        anyhow::ensure!(
+            endpoint.scheme() == "https",
+            "streamable_http MCP OAuth requires https / MCP OAuth 必须使用 https"
+        );
+        anyhow::ensure!(
+            config.bearer_token_env_var.is_none()
+                && !config
+                    .env_http_headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("authorization")),
+            "streamable_http MCP OAuth cannot be combined with a static Authorization or bearer credential / MCP OAuth 不能与静态 Authorization 或 bearer 凭据同时配置"
+        );
+        validate_remote_mcp_oauth_config(oauth)?;
+    }
     anyhow::ensure!(
         total_bytes <= 32 * 1024,
         "streamable_http MCP custom header metadata exceeds 32 KiB"
@@ -2050,6 +2084,44 @@ fn validate_remote_mcp_config(config: &McpStreamableHttpConfig) -> Result<()> {
             "streamable_http MCP credentials require https"
         );
     }
+    Ok(())
+}
+
+fn validate_remote_mcp_oauth_config(config: &McpOAuthConfig) -> Result<()> {
+    if let Some(client_id) = config.client_id.as_deref() {
+        anyhow::ensure!(
+            !client_id.is_empty()
+                && client_id.len() <= 1024
+                && !client_id.chars().any(char::is_control)
+                && !client_id.chars().any(char::is_whitespace),
+            "streamable_http MCP OAuth client_id must contain 1..=1024 non-whitespace bytes / MCP OAuth client_id 必须为 1..=1024 字节且不含空白字符"
+        );
+    }
+    anyhow::ensure!(
+        config.scopes.len() <= 32,
+        "streamable_http MCP OAuth scopes exceed the limit of 32 / MCP OAuth scopes 不能超过 32 项"
+    );
+    let mut unique = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    for scope in &config.scopes {
+        total_bytes = total_bytes.saturating_add(scope.len());
+        anyhow::ensure!(
+            !scope.is_empty()
+                && scope.len() <= 256
+                && scope.bytes().all(|byte| {
+                    byte == 0x21 || (0x23..=0x5b).contains(&byte) || (0x5d..=0x7e).contains(&byte)
+                }),
+            "streamable_http MCP OAuth scope is empty, invalid, or exceeds 256 bytes / MCP OAuth scope 不能为空、格式无效或超过 256 字节"
+        );
+        anyhow::ensure!(
+            unique.insert(scope),
+            "streamable_http MCP OAuth scopes contain a duplicate value / MCP OAuth scopes 包含重复项"
+        );
+    }
+    anyhow::ensure!(
+        total_bytes <= 4 * 1024,
+        "streamable_http MCP OAuth scope metadata exceeds 4 KiB / MCP OAuth scope 元数据超过 4 KiB"
+    );
     Ok(())
 }
 

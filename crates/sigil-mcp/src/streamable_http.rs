@@ -91,16 +91,16 @@ pub(super) use lifecycle::RpcResponse;
 pub use oauth::{
     McpOAuthAuthorizationCode, McpOAuthChallenge, McpOAuthClientIntent, McpOAuthClientRegistration,
     McpOAuthDiscovery, McpOAuthHttpExecutor, McpOAuthHttpMethod, McpOAuthHttpPurpose,
-    McpOAuthHttpRequest, McpOAuthHttpResponse, McpOAuthLoopbackListener,
+    McpOAuthHttpRequest, McpOAuthHttpResponse, McpOAuthLoopbackCallback, McpOAuthLoopbackListener,
     McpOAuthPendingAuthorization, McpOAuthProtocolError, McpOAuthResource, McpOAuthTokenResponse,
     McpOAuthTransportError, discover_oauth_authorization_server, exchange_oauth_authorization_code,
     prepare_oauth_client,
 };
 pub use oauth_credential::{
-    McpOAuthCredentialError, McpOAuthCredentialRecord, McpOAuthCredentialScope,
-    McpOAuthCredentialSnapshot, McpOAuthCredentialStatus, McpOAuthCredentialStore,
-    McpOAuthRevocationOutcome, SystemMcpOAuthCredentialStore, refresh_oauth_credential,
-    revoke_oauth_credential,
+    McpOAuthCredentialError, McpOAuthCredentialLocatorStore, McpOAuthCredentialLookup,
+    McpOAuthCredentialRecord, McpOAuthCredentialScope, McpOAuthCredentialSnapshot,
+    McpOAuthCredentialStatus, McpOAuthCredentialStore, McpOAuthRevocationOutcome,
+    SystemMcpOAuthCredentialStore, refresh_oauth_credential, revoke_oauth_credential,
 };
 pub use schema::CompiledMcpSchema;
 pub use tools::{McpCallToolResult, McpRemoteTool};
@@ -330,6 +330,19 @@ pub trait McpStreamableHttpDestinationAuthorizer: Send + Sync {
     async fn authorize_destination(
         &self,
     ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError>;
+
+    /// Authorizes one request using the exact per-request credential/header snapshot binding.
+    /// Static authorizers accept only their configured fingerprint; dynamic runtime authorizers
+    /// override this method so credential rotation always produces a fresh dial plan.
+    async fn authorize_destination_with_fingerprint(
+        &self,
+        live_header_fingerprint: &str,
+    ) -> Result<McpStreamableHttpAuthorizedDialPlan, McpStreamableHttpDestinationError> {
+        if live_header_fingerprint != self.live_header_fingerprint() {
+            return Err(McpStreamableHttpDestinationError::DestinationRejected);
+        }
+        self.authorize_destination().await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,6 +468,18 @@ pub trait McpStreamableHttpHeaderEnvironment: Send + Sync {
     fn resolve(&self, name: &str) -> Option<SecretString>;
 }
 
+/// Runtime-owned per-request OAuth bearer source.
+#[async_trait]
+pub trait McpStreamableHttpBearerProvider: Send + Sync {
+    async fn bearer_snapshot(
+        &self,
+        static_header_fingerprint: &str,
+    ) -> Result<McpOAuthCredentialSnapshot, McpStreamableHttpError>;
+
+    /// Invalidates the observed access snapshot after a 401 without refreshing or retrying.
+    async fn mark_unauthorized(&self) -> Result<(), McpStreamableHttpError>;
+}
+
 #[derive(Clone)]
 struct ResolvedHeaders {
     values: Vec<(HeaderName, SecretString)>,
@@ -522,6 +547,7 @@ impl fmt::Debug for ResolvedHeaders {
 pub enum McpStreamableHttpAuthState {
     Anonymous,
     StaticCredential,
+    OAuthCredential,
 }
 
 #[derive(Debug, Error)]

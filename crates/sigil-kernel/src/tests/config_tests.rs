@@ -1318,6 +1318,10 @@ env_http_headers = { X-Api-Key = "MCP_API_KEY" }
 client_capabilities = ["roots", "elicitation"]
 startup = "lazy"
 required = false
+
+[mcp_servers.oauth]
+client_id = "sigil-public-client"
+scopes = ["mcp:tools", "mcp:resources"]
 "#;
 
     let config: RootConfig = toml::from_str(raw).expect("flat MCP variants should parse");
@@ -1328,6 +1332,9 @@ required = false
     assert_eq!(remote.url, "https://mcp.example.test/mcp");
     assert_eq!(remote.http_headers["X-Client"], "sigil-alpha");
     assert_eq!(remote.env_http_headers["X-Api-Key"], "MCP_API_KEY");
+    let oauth = remote.oauth.as_ref().expect("OAuth intent should parse");
+    assert_eq!(oauth.client_id.as_deref(), Some("sigil-public-client"));
+    assert_eq!(oauth.scopes, ["mcp:tools", "mcp:resources"]);
     assert!(
         remote
             .client_capabilities
@@ -1435,6 +1442,51 @@ server_version = "1.0.0"
     let error =
         toml::from_str::<RootConfig>(legacy_pin).expect_err("legacy command_fingerprint must fail");
     assert!(error.to_string().contains("transport_fingerprint"));
+}
+
+#[test]
+fn root_remote_mcp_oauth_is_bounded_https_only_and_authorization_exclusive() {
+    for (url, body, expected) in [
+        (
+            "http://mcp.example.test/mcp",
+            "oauth = { client_id = \"sigil-public\" }",
+            "OAuth requires https",
+        ),
+        (
+            "https://mcp.example.test/mcp",
+            "bearer_token_env_var = \"MCP_TOKEN\"\noauth = { client_id = \"sigil-public\" }",
+            "cannot be combined",
+        ),
+        (
+            "https://mcp.example.test/mcp",
+            "env_http_headers = { Authorization = \"MCP_TOKEN\" }\noauth = { scopes = [\"mcp:tools\"] }",
+            "cannot be combined",
+        ),
+        (
+            "https://mcp.example.test/mcp",
+            "oauth = { client_id = \"bad client\" }",
+            "client_id",
+        ),
+        (
+            "https://mcp.example.test/mcp",
+            "oauth = { scopes = [\"mcp:tools\", \"mcp:tools\"] }",
+            "duplicate",
+        ),
+        (
+            "https://mcp.example.test/mcp",
+            "oauth = { scopes = [\"bad scope\"] }",
+            "scope is empty, invalid",
+        ),
+    ] {
+        let raw = format!(
+            "[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\nname = \"remote\"\ntransport = \"streamable_http\"\nurl = \"{url}\"\n{body}\n"
+        );
+        let error = toml::from_str::<RootConfig>(&raw).expect_err("invalid OAuth config");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
 }
 
 #[test]

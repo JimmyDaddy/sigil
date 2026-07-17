@@ -10,7 +10,8 @@ use std::{
 use async_trait::async_trait;
 use sigil_kernel::SecretString;
 use sigil_mcp::{
-    McpOAuthChallenge, McpOAuthClientIntent, McpOAuthCredentialError, McpOAuthCredentialRecord,
+    McpOAuthChallenge, McpOAuthClientIntent, McpOAuthCredentialError,
+    McpOAuthCredentialLocatorStore, McpOAuthCredentialLookup, McpOAuthCredentialRecord,
     McpOAuthCredentialScope, McpOAuthCredentialStatus, McpOAuthCredentialStore,
     McpOAuthHttpExecutor, McpOAuthHttpPurpose, McpOAuthHttpRequest, McpOAuthHttpResponse,
     McpOAuthPendingAuthorization, McpOAuthRevocationOutcome, McpOAuthTransportError,
@@ -23,7 +24,9 @@ use super::*;
 #[derive(Default)]
 struct MemoryStore {
     record: StdMutex<Option<McpOAuthCredentialRecord>>,
+    locator: StdMutex<Option<McpOAuthCredentialScope>>,
     unavailable: AtomicBool,
+    reject_locator: AtomicBool,
     stores: AtomicUsize,
     deletes: AtomicUsize,
 }
@@ -74,6 +77,50 @@ impl McpOAuthCredentialStore for MemoryStore {
         }
         self.deletes.fetch_add(1, Ordering::SeqCst);
         Ok(self.record.lock().expect("record lock").take().is_some())
+    }
+}
+
+#[async_trait]
+impl McpOAuthCredentialLocatorStore for MemoryStore {
+    async fn load_located(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+    ) -> Result<Option<McpOAuthCredentialRecord>, McpOAuthCredentialError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(McpOAuthCredentialError::StoreUnavailable);
+        }
+        let scope = self.locator.lock().expect("locator lock").clone();
+        let Some(scope) = scope else {
+            return Ok(None);
+        };
+        let _ = lookup;
+        self.load(&scope).await
+    }
+
+    async fn store_locator(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+        scope: &McpOAuthCredentialScope,
+    ) -> Result<(), McpOAuthCredentialError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(McpOAuthCredentialError::StoreUnavailable);
+        }
+        if self.reject_locator.load(Ordering::SeqCst) {
+            return Err(McpOAuthCredentialError::StoreRejected);
+        }
+        let _ = lookup;
+        *self.locator.lock().expect("locator lock") = Some(scope.clone());
+        Ok(())
+    }
+
+    async fn delete_locator(
+        &self,
+        _lookup: &McpOAuthCredentialLookup,
+    ) -> Result<bool, McpOAuthCredentialError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(McpOAuthCredentialError::StoreUnavailable);
+        }
+        Ok(self.locator.lock().expect("locator lock").take().is_some())
     }
 }
 
@@ -399,4 +446,51 @@ async fn revoke_failure_keeps_local_record_until_separate_clear() {
         manager.status(&scope, 1_001).await,
         McpOAuthCredentialStatus::Missing
     );
+}
+
+#[tokio::test]
+async fn lookup_persistence_is_exact_clearable_and_rolls_back_on_locator_failure() {
+    let (_scope, original) = authorized_record(1_000, 3_600).await;
+    let lookup = McpOAuthCredentialLookup::new(
+        "github",
+        "https://mcp.example/public/mcp",
+        Some("sigil-client".to_owned()),
+        vec!["files:read".to_owned()],
+    )
+    .expect("lookup");
+    let store = Arc::new(MemoryStore::default());
+    let manager = McpOAuthCredentialManager::new_with_locator(store.clone(), store.clone());
+    manager
+        .persist_for_lookup(&lookup, &original)
+        .await
+        .expect("persist exact lookup");
+    assert_eq!(
+        manager
+            .load_for_lookup(&lookup)
+            .await
+            .expect("load lookup")
+            .expect("record")
+            .generation_id(),
+        original.generation_id()
+    );
+
+    let (_, replacement) = authorized_record(1_010, 3_600).await;
+    store.reject_locator.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        manager.persist_for_lookup(&lookup, &replacement).await,
+        Err(McpOAuthCredentialError::StoreRejected)
+    ));
+    assert_eq!(
+        store.loaded().expect("rolled back").generation_id(),
+        original.generation_id()
+    );
+    store.reject_locator.store(false, Ordering::SeqCst);
+    assert!(
+        manager
+            .clear_local_for_lookup(&lookup)
+            .await
+            .expect("clear lookup")
+    );
+    assert!(store.loaded().is_none());
+    assert!(store.locator.lock().expect("locator lock").is_none());
 }

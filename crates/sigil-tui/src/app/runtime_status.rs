@@ -123,6 +123,7 @@ pub(crate) fn count_label(count: usize, singular: &str, plural: &str) -> String 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum McpServerRuntimeStatus {
     Deferred,
+    AuthenticationRequired,
     Activating,
     Refreshing,
     Stale {
@@ -141,6 +142,7 @@ impl McpServerRuntimeStatus {
     pub(super) fn label_for_server(&self, server_name: Option<&str>) -> String {
         match self {
             Self::Deferred => "deferred".to_owned(),
+            Self::AuthenticationRequired => "authentication required".to_owned(),
             Self::Activating => "activating".to_owned(),
             Self::Refreshing => "refreshing".to_owned(),
             Self::Stale { capability } => format!("stale {capability}"),

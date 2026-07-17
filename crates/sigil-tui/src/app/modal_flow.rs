@@ -186,6 +186,7 @@ pub(super) enum ModalState {
     SecretInput(SecretInputState),
     TextInput(TextInputState),
     McpElicitation(McpElicitationModalState),
+    McpOAuth(super::mcp_oauth_flow::McpOAuthModalState),
     CheckpointRestore(super::checkpoint_flow::CheckpointRestoreModalState),
     V2CompactionPreview(Box<super::compaction_flow::V2CompactionPreviewModalState>),
     SessionActions(Box<super::session_lifecycle_flow::SessionActionsModalState>),
@@ -225,6 +226,7 @@ impl AppState {
             ModalState::SecretInput(state) => Some(state.target.title()),
             ModalState::TextInput(state) => Some(state.target.title()),
             ModalState::McpElicitation(_) => Some("MCP Elicitation"),
+            ModalState::McpOAuth(_) => Some("MCP Authentication"),
             ModalState::CheckpointRestore(_) => Some("Restore Checkpoint"),
             ModalState::V2CompactionPreview(_) => Some("Context Compaction"),
             ModalState::SessionActions(_) => Some("Session Actions"),
@@ -297,6 +299,7 @@ impl AppState {
                 }
                 lines
             }
+            Some(ModalState::McpOAuth(state)) => super::mcp_oauth_flow::modal_lines(state),
             Some(ModalState::CheckpointRestore(_)) => Vec::new(),
             Some(ModalState::V2CompactionPreview(state)) => state.lines(),
             Some(ModalState::SessionActions(state)) => state.lines(),
@@ -356,6 +359,15 @@ impl AppState {
                     5 + state.selected,
                 ))
             }
+            ModalState::McpOAuth(state) => state.manual_callback.as_ref().map(|buffer| {
+                (
+                    "callback URL".to_owned(),
+                    buffer.chars().count(),
+                    super::mcp_oauth_flow::modal_lines(state)
+                        .len()
+                        .saturating_sub(2),
+                )
+            }),
             ModalState::ModelPicker(_) => None,
             ModalState::CheckpointRestore(_) => None,
             ModalState::V2CompactionPreview(_) => None,
@@ -684,6 +696,7 @@ impl AppState {
                 _ => ModalOutcome::None,
             },
             ModalState::McpElicitation(_) => ModalOutcome::None,
+            ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => match key.code {
                 KeyCode::Esc => {
@@ -749,6 +762,17 @@ impl AppState {
                 }
                 ModalOutcome::None
             }
+            ModalState::McpOAuth(state) => {
+                if let Some(buffer) = state.manual_callback.as_mut() {
+                    for character in text.chars().filter(|character| !character.is_control()) {
+                        if buffer.len() >= 8 * 1024 {
+                            break;
+                        }
+                        buffer.push(character);
+                    }
+                }
+                ModalOutcome::None
+            }
             ModalState::ModelPicker(_)
             | ModalState::McpElicitation(_)
             | ModalState::CheckpointRestore(_)
@@ -790,6 +814,7 @@ impl AppState {
                 ModalOutcome::TextSubmitted { target, value }
             }
             ModalState::McpElicitation(_) => self.accept_mcp_elicitation(),
+            ModalState::McpOAuth(_) => ModalOutcome::None,
             ModalState::CheckpointRestore(_) => ModalOutcome::None,
             ModalState::V2CompactionPreview(state) => {
                 if state.is_admitted() {

@@ -679,11 +679,27 @@ where
                 app.record_clipboard_copy_unavailable("OSC52 disabled");
             }
         }
+        AppAction::CopySecretToClipboard { text } => {
+            if app.terminal_osc52_clipboard_enabled() {
+                copy_text_to_terminal_clipboard(text.expose_secret())?;
+                app.record_clipboard_copy_success(text.expose_secret());
+            } else {
+                app.record_clipboard_copy_unavailable("OSC52 disabled");
+            }
+        }
         AppAction::OpenExternalUrl { url } => {
             match launch_external_target(ExternalLaunchTarget::Url(&url)) {
                 Ok(()) => app.record_feedback_external_action_success("opening bug report form"),
                 Err(error) => {
                     app.record_feedback_external_action_failure("open bug report form", &error);
+                }
+            }
+        }
+        AppAction::OpenSecretExternalUrl { url } => {
+            match launch_external_target(ExternalLaunchTarget::Url(url.expose_secret())) {
+                Ok(()) => app.record_feedback_external_action_success("opening authorization page"),
+                Err(error) => {
+                    app.record_feedback_external_action_failure("open authorization page", &error);
                 }
             }
         }

@@ -95,9 +95,7 @@ where
                 let error = format!("{error:#}");
                 let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                     server_name: Some(server_name.clone()),
-                    status: McpActivationStatus::Failed {
-                        error: error.clone(),
-                    },
+                    status: McpActivationStatus::from_error(error.clone()),
                 });
                 let _ = message_tx.send(WorkerMessage::Notice(format!(
                     "MCP refresh failed for {server_name}: {error}"

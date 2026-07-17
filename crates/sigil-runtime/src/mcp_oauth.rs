@@ -5,16 +5,116 @@ use std::{
 };
 
 use sigil_mcp::{
-    McpOAuthCredentialError, McpOAuthCredentialRecord, McpOAuthCredentialScope,
-    McpOAuthCredentialSnapshot, McpOAuthCredentialStatus, McpOAuthCredentialStore,
-    McpOAuthHttpExecutor, McpOAuthRevocationOutcome, SystemMcpOAuthCredentialStore,
-    refresh_oauth_credential, revoke_oauth_credential,
+    McpOAuthCredentialError, McpOAuthCredentialLocatorStore, McpOAuthCredentialLookup,
+    McpOAuthCredentialRecord, McpOAuthCredentialScope, McpOAuthCredentialSnapshot,
+    McpOAuthCredentialStatus, McpOAuthCredentialStore, McpOAuthHttpExecutor,
+    McpOAuthRevocationOutcome, McpStreamableHttpBearerProvider, McpStreamableHttpError,
+    SystemMcpOAuthCredentialStore, refresh_oauth_credential, revoke_oauth_credential,
 };
 use tokio::sync::Mutex;
+
+/// Per-request bridge from a public OAuth lookup to exact keyring credentials and durable refresh.
+pub struct RuntimeMcpOAuthBearerProvider {
+    manager: Arc<McpOAuthCredentialManager>,
+    lookup: McpOAuthCredentialLookup,
+    executor: Arc<dyn McpOAuthHttpExecutor>,
+}
+
+impl std::fmt::Debug for RuntimeMcpOAuthBearerProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeMcpOAuthBearerProvider")
+            .field("lookup", &self.lookup)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeMcpOAuthBearerProvider {
+    #[must_use]
+    pub fn new(
+        manager: Arc<McpOAuthCredentialManager>,
+        lookup: McpOAuthCredentialLookup,
+        executor: Arc<dyn McpOAuthHttpExecutor>,
+    ) -> Self {
+        Self {
+            manager,
+            lookup,
+            executor,
+        }
+    }
+
+    #[must_use]
+    pub fn lookup(&self) -> &McpOAuthCredentialLookup {
+        &self.lookup
+    }
+}
+
+#[async_trait::async_trait]
+impl McpStreamableHttpBearerProvider for RuntimeMcpOAuthBearerProvider {
+    async fn bearer_snapshot(
+        &self,
+        static_header_fingerprint: &str,
+    ) -> Result<McpOAuthCredentialSnapshot, McpStreamableHttpError> {
+        let record = self
+            .manager
+            .load_for_lookup(&self.lookup)
+            .await
+            .map_err(map_credential_error)?
+            .ok_or(McpStreamableHttpError::AuthenticationRequired)?;
+        self.manager
+            .bearer_snapshot(
+                record.scope(),
+                static_header_fingerprint,
+                current_epoch_secs(),
+                self.executor.as_ref(),
+            )
+            .await
+            .map_err(map_credential_error)
+    }
+
+    async fn mark_unauthorized(&self) -> Result<(), McpStreamableHttpError> {
+        let Some(record) = self
+            .manager
+            .load_for_lookup(&self.lookup)
+            .await
+            .map_err(map_credential_error)?
+        else {
+            return Ok(());
+        };
+        self.manager
+            .mark_unauthorized(record.scope(), current_epoch_secs())
+            .await
+            .map_err(map_credential_error)
+    }
+}
+
+fn current_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn map_credential_error(error: McpOAuthCredentialError) -> McpStreamableHttpError {
+    match error {
+        McpOAuthCredentialError::AuthenticationRequired
+        | McpOAuthCredentialError::InvalidRefresh => McpStreamableHttpError::AuthenticationRequired,
+        McpOAuthCredentialError::Transport => McpStreamableHttpError::Transport,
+        McpOAuthCredentialError::InvalidScope
+        | McpOAuthCredentialError::InvalidRecord
+        | McpOAuthCredentialError::StoreUnavailable
+        | McpOAuthCredentialError::StoreRejected
+        | McpOAuthCredentialError::RefreshRejected
+        | McpOAuthCredentialError::RevocationRejected => {
+            McpStreamableHttpError::AuthenticationFailed
+        }
+    }
+}
 
 /// Runtime owner for keyring persistence and per-scope single-flight OAuth refresh.
 pub struct McpOAuthCredentialManager {
     store: Arc<dyn McpOAuthCredentialStore>,
+    locator_store: Option<Arc<dyn McpOAuthCredentialLocatorStore>>,
     refresh_locks: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
 }
 
@@ -36,7 +136,12 @@ impl McpOAuthCredentialManager {
     /// Uses the native system credential store. There is deliberately no file fallback.
     #[must_use]
     pub fn system() -> Self {
-        Self::new(Arc::new(SystemMcpOAuthCredentialStore))
+        let store = Arc::new(SystemMcpOAuthCredentialStore);
+        Self {
+            store: store.clone(),
+            locator_store: Some(store),
+            refresh_locks: Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// Builds a manager around a credential store implementation, primarily for conformance tests.
@@ -44,6 +149,20 @@ impl McpOAuthCredentialManager {
     pub fn new(store: Arc<dyn McpOAuthCredentialStore>) -> Self {
         Self {
             store,
+            locator_store: None,
+            refresh_locks: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Builds a manager with a keyring lookup index, primarily for end-to-end flow tests.
+    #[must_use]
+    pub fn new_with_locator(
+        store: Arc<dyn McpOAuthCredentialStore>,
+        locator_store: Arc<dyn McpOAuthCredentialLocatorStore>,
+    ) -> Self {
+        Self {
+            store,
+            locator_store: Some(locator_store),
             refresh_locks: Mutex::new(BTreeMap::new()),
         }
     }
@@ -54,6 +173,57 @@ impl McpOAuthCredentialManager {
         record: &McpOAuthCredentialRecord,
     ) -> Result<(), McpOAuthCredentialError> {
         self.store.store(record).await
+    }
+
+    /// Persists the exact credential first, then commits the public-intent locator.
+    pub async fn persist_for_lookup(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+        record: &McpOAuthCredentialRecord,
+    ) -> Result<(), McpOAuthCredentialError> {
+        let locator = self
+            .locator_store
+            .as_ref()
+            .ok_or(McpOAuthCredentialError::StoreUnavailable)?;
+        let previous = self.store.load(record.scope()).await?;
+        self.store.store(record).await?;
+        if let Err(error) = locator.store_locator(lookup, record.scope()).await {
+            match previous {
+                Some(previous) => {
+                    let _ = self.store.store(&previous).await;
+                }
+                None => {
+                    let _ = self.store.delete(record.scope()).await;
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Resolves the exact secret-bearing record through the keyring-only intent locator.
+    pub async fn load_for_lookup(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+    ) -> Result<Option<McpOAuthCredentialRecord>, McpOAuthCredentialError> {
+        self.locator_store
+            .as_ref()
+            .ok_or(McpOAuthCredentialError::StoreUnavailable)?
+            .load_located(lookup)
+            .await
+    }
+
+    /// Returns the located exact scope and its secret-free status.
+    pub async fn status_for_lookup(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+        now_epoch_secs: u64,
+    ) -> Result<Option<(McpOAuthCredentialScope, McpOAuthCredentialStatus)>, McpOAuthCredentialError>
+    {
+        Ok(self
+            .load_for_lookup(lookup)
+            .await?
+            .map(|record| (record.scope().clone(), record.status(now_epoch_secs))))
     }
 
     /// Returns a secret-free status projection; unavailable stores never become `Missing`.
@@ -154,6 +324,24 @@ impl McpOAuthCredentialManager {
         scope: &McpOAuthCredentialScope,
     ) -> Result<bool, McpOAuthCredentialError> {
         self.store.delete(scope).await
+    }
+
+    /// Clears both the exact credential and its public-intent locator.
+    pub async fn clear_local_for_lookup(
+        &self,
+        lookup: &McpOAuthCredentialLookup,
+    ) -> Result<bool, McpOAuthCredentialError> {
+        let locator = self
+            .locator_store
+            .as_ref()
+            .ok_or(McpOAuthCredentialError::StoreUnavailable)?;
+        let record = locator.load_located(lookup).await?;
+        let mut deleted = false;
+        if let Some(record) = record {
+            deleted = self.store.delete(record.scope()).await?;
+        }
+        let locator_deleted = locator.delete_locator(lookup).await?;
+        Ok(deleted || locator_deleted)
     }
 
     async fn refresh_and_snapshot(

@@ -1704,17 +1704,24 @@ impl AppState {
         let Some(server) = root_config
             .mcp_servers
             .get(config_state.selected_mcp_server_index)
+            .cloned()
         else {
             self.last_notice = Some("no MCP server selected".to_owned());
             return Ok(None);
         };
+        if server
+            .streamable_http()
+            .is_some_and(|remote| remote.oauth.is_some())
+        {
+            return Ok(self.open_mcp_oauth_modal(&server));
+        }
         let server_name = server.name.clone();
         let current_status = self
             .runtime
             .mcp_server_statuses
             .get(&server_name)
             .cloned()
-            .unwrap_or_else(|| initial_mcp_server_status(server));
+            .unwrap_or_else(|| initial_mcp_server_status(&server));
         match current_status {
             McpServerRuntimeStatus::Deferred if server.startup == McpServerStartup::Lazy => {
                 self.runtime
@@ -1735,6 +1742,7 @@ impl AppState {
                 return Ok(None);
             }
             McpServerRuntimeStatus::Deferred
+            | McpServerRuntimeStatus::AuthenticationRequired
             | McpServerRuntimeStatus::Stale { .. }
             | McpServerRuntimeStatus::Ready { .. }
             | McpServerRuntimeStatus::Failed { .. } => {}

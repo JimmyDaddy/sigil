@@ -47,28 +47,38 @@ pub(in crate::runner) fn advance_worker_loop<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
-    if matches!(
+    let refresh_advanced = matches!(
         advance_refreshes(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
-    ) || matches!(
-        advance_compaction_results(context.reborrow()),
-        WorkerAdvancementControl::SkipCommandPoll
-    ) || matches!(
-        advance_run_results(context.reborrow()),
-        WorkerAdvancementControl::SkipCommandPoll
-    ) || matches!(
-        advance_idle_compaction(context.reborrow()),
-        WorkerAdvancementControl::SkipCommandPoll
-    ) || matches!(
-        advance_background_agents(context.reborrow()),
-        WorkerAdvancementControl::SkipCommandPoll
-    ) || matches!(
-        advance_pending_agent_continuations(context.reborrow()),
-        WorkerAdvancementControl::SkipCommandPoll
-    ) || matches!(
-        advance_conversation_queue(context.reborrow()),
-        WorkerAdvancementControl::SkipCommandPoll
-    ) {
+    );
+    let oauth_advanced = advance_mcp_oauth_results(context.message_tx, context.state);
+    if refresh_advanced
+        || oauth_advanced
+        || matches!(
+            advance_compaction_results(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+        || matches!(
+            advance_run_results(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+        || matches!(
+            advance_idle_compaction(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+        || matches!(
+            advance_background_agents(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+        || matches!(
+            advance_pending_agent_continuations(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+        || matches!(
+            advance_conversation_queue(context.reborrow()),
+            WorkerAdvancementControl::SkipCommandPoll
+        )
+    {
         WorkerAdvancementControl::SkipCommandPoll
     } else {
         WorkerAdvancementControl::PollCommand
