@@ -30,6 +30,7 @@ where
                     root_config,
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     message_tx,
                     elicitation_handler,
                     &state.agent.supervisor,

@@ -465,26 +465,19 @@ where
         state,
         ..
     } = context;
-    while let Ok(task_result) = state.run.result_rx.try_recv() {
+    while let Ok(mut task_result) = state.run.result_rx.try_recv() {
         if state.run.discarded_ids.remove(&task_result.run_id) {
             continue;
         }
         elicitation_handler.set_audit_buffer(None);
         state.run.active = None;
-        state.session.current = match load_session_with_runtime_attachments(
-            task_result.session.provider_name(),
-            task_result.session.model_name(),
-            &state.session.log_path,
-            Some(&task_result.session),
-        ) {
-            Ok(session) => Some(session),
-            Err(error) => {
-                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                    "session reload skipped after run: {error:#}"
-                )));
-                Some(task_result.session)
-            }
-        };
+        // The completed run returns the authoritative in-memory session for its own appends. Queue
+        // controls accepted while that session was detached were already persisted through the
+        // same linear writer, so merge only that tracked delta instead of rereading the JSONL.
+        task_result
+            .session
+            .record_durably_appended_controls(state.session.detached_durable_controls.drain(..));
+        state.session.current = Some(task_result.session);
         match task_result.payload {
             RunTaskPayload::Chat {
                 result: Ok(run_result),
@@ -605,6 +598,7 @@ where
                             append_queue_failure_and_pause_and_notify(
                                 &state.session.log_path,
                                 &mut state.session.current,
+                                &mut state.session.detached_durable_controls,
                                 message_tx,
                                 queue_id.clone(),
                                 format!("{reason}: {error}"),

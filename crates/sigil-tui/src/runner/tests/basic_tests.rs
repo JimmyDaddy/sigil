@@ -1,4 +1,4 @@
-use std::{fs, time::Duration};
+use std::{fs, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use sigil_kernel::{
@@ -1439,6 +1439,83 @@ fn queue_conversation_input_persists_while_agent_is_active() -> Result<()> {
         entry,
         SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
             if queued.prompt == "queued while running"
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn queued_follow_up_survives_active_run_completion_and_dispatches() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-queue-after-completion.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (provider, first_stream_started) = PlannedProvider::new_with_stream_start_signal(vec![
+        StreamPlan::GatedChunks {
+            gate: Arc::clone(&gate),
+            chunks: vec![
+                ProviderChunk::TextDelta("first done".to_owned()),
+                ProviderChunk::Done,
+            ],
+        },
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("second done".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "first".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    first_stream_started.recv_timeout(Duration::from_secs(3))?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "second".to_owned(),
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let _ = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. }
+            if items.len() == 1 && items[0].queued.prompt == "second")
+    })?;
+
+    gate.notify_one();
+    let first_finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::RunFinished { result, .. }
+            if result.final_text == "first done")
+    })?;
+    assert!(matches!(
+        first_finished,
+        WorkerMessage::RunFinished { ref entries, .. }
+            if entries.iter().any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
+                    if queued.prompt == "second"
+            ))
+    ));
+
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+            if prompt == "second")
+    })?;
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::RunFinished { result, .. }
+            if result.final_text == "second done")
+    })?;
+
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+            if status.queue_id.as_str() == "queue_1"
+                && status.status == ConversationInputStatus::Delivered
     )));
 
     worker.shutdown()?;

@@ -12,6 +12,7 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fs2::FileExt;
 use futures::{Stream, stream};
 use serde_json::json;
 use sigil_kernel::{
@@ -2581,6 +2582,7 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
     let options = run_options(temp.path().to_path_buf());
     let outcome = AgentRunOutcome {
         changed_files: vec!["crates/sigil-tui/src/app/key_router.rs".to_owned()],
+        tool_call_ids: vec!["call-check".to_owned(), "call-check-touched".to_owned()],
         ..AgentRunOutcome::default()
     };
     let context = runtime
@@ -2705,7 +2707,10 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
 
     let temp = tempfile::tempdir()?;
     let options = run_options(temp.path().to_path_buf());
-    let outcome = AgentRunOutcome::default();
+    let outcome = AgentRunOutcome {
+        tool_call_ids: vec!["call-read".to_owned(), "call-glob".to_owned()],
+        ..AgentRunOutcome::default()
+    };
 
     assert!(
         runtime
@@ -2717,7 +2722,51 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
 }
 
 #[test]
-fn final_answer_context_includes_network_policy_allow_facets() -> Result<()> {
+fn final_answer_context_ignores_material_facts_from_an_earlier_run() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let mut session = Session::new("parent", "model");
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-previous-check".to_owned(),
+        tool_name: "bash".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(10),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta {
+            exit_code: Some(0),
+            details: json!({
+                "shell": {
+                    "command": "cargo check",
+                    "command_family": "cargo_check",
+                    "verdict": "passed"
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+        error: None,
+        model_content_hash: None,
+    })))?;
+
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome {
+        tool_call_ids: vec!["call-current-read".to_owned()],
+        ..AgentRunOutcome::default()
+    };
+
+    assert!(
+        runtime
+            .final_answer_context(&session, &options, &outcome)?
+            .is_none(),
+        "a command recorded by an earlier run must not alter the current run's final-answer request"
+    );
+    Ok(())
+}
+
+#[test]
+fn final_answer_context_ignores_network_read_policy_allow() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
@@ -2751,16 +2800,69 @@ fn final_answer_context_includes_network_policy_allow_facets() -> Result<()> {
 
     let temp = tempfile::tempdir()?;
     let options = run_options(temp.path().to_path_buf());
-    let context = runtime
-        .final_answer_context(&session, &options, &AgentRunOutcome::default())?
-        .expect("network effect records should remain visible to final-answer facts");
-    let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
-    let approvals = &payload["session_facts"]["approvals"];
-    assert_eq!(approvals["policy_allow"], 1);
-    assert_eq!(approvals["facets"]["network_effect"]["read"], 1);
-    assert_eq!(approvals["facets"]["network_policy"]["allow"], 1);
-    assert_eq!(approvals["facets"]["local_policy"]["allow"], 1);
-    assert_eq!(approvals["facets"]["source_policy"]["allow"], 1);
+    let outcome = AgentRunOutcome {
+        tool_call_ids: vec!["call-network-read".to_owned()],
+        ..AgentRunOutcome::default()
+    };
+    assert!(
+        runtime
+            .final_answer_context(&session, &options, &outcome)?
+            .is_none(),
+        "an allowed network read is ordinary tool provenance, not a reason to regenerate a completed reply"
+    );
+    Ok(())
+}
+
+#[test]
+fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() -> Result<()> {
+    let config = root_config();
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, ToolRegistry::new());
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("parent.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("parent", "model").with_store(store);
+    session.append_control(ControlEntry::ToolApproval(
+        sigil_kernel::ToolApprovalEntry {
+            action: ToolApprovalAuditAction::PolicyEvaluated,
+            call_id: "call-network-read-locked".to_owned(),
+            tool_name: "websearch".to_owned(),
+            access: ToolAccess::Read,
+            network_effect: Some(sigil_kernel::NetworkEffect::Read),
+            local_policy_decision: ApprovalMode::Allow,
+            network_policy_decision: ApprovalMode::Allow,
+            source_policy_decision: ApprovalMode::Allow,
+            operation: Some(ToolOperation::NetworkRequest),
+            risk: Some(PermissionRisk::High),
+            subjects: Vec::new(),
+            subject_zones: Vec::new(),
+            policy_decision: ApprovalMode::Allow,
+            external_directory_required: false,
+            confirmation: None,
+            snapshot_required: false,
+            command_permission_matches: Vec::new(),
+            allow_source: None,
+            grant_call_id: None,
+            user_decision: None,
+            reason: None,
+            preview_hash: None,
+        },
+    ))?;
+    let locked_file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+    locked_file.try_lock_exclusive()?;
+
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome {
+        tool_call_ids: vec!["call-network-read-locked".to_owned()],
+        ..AgentRunOutcome::default()
+    };
+    let context = runtime.final_answer_context(&session, &options, &outcome);
+
+    locked_file.unlock()?;
+    assert!(
+        context?.is_none(),
+        "an allowed network read must short-circuit before durable readiness projection"
+    );
     Ok(())
 }
 
@@ -2893,7 +2995,14 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
 
     let temp = tempfile::tempdir()?;
     let options = run_options(temp.path().to_path_buf());
-    let outcome = AgentRunOutcome::default();
+    let outcome = AgentRunOutcome {
+        tool_call_ids: vec![
+            "call-policy".to_owned(),
+            "call-user".to_owned(),
+            "call-user-reuse".to_owned(),
+        ],
+        ..AgentRunOutcome::default()
+    };
     let context = runtime
         .final_answer_context(&session, &options, &outcome)?
         .expect("approval facts should produce final-answer context");

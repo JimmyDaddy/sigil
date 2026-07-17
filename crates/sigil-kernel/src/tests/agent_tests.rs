@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fs::OpenOptions,
     path::PathBuf,
     pin::Pin,
     sync::{
@@ -11,33 +12,36 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fs2::FileExt;
 use futures::{Stream, stream};
 use serde_json::{Value, json};
 
 use crate::{
     ApprovalHandler, ApprovalMode, AssistantMessageKind, AutoApproveHandler, BackgroundTaskHandle,
     BackgroundTaskStatus, CompactionConfig, CompletionRequest, ControlEntry, DurableEventType,
-    EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, FrozenProviderRequestMaterial,
-    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage,
-    MutationEventRecorder, PermissionConfig, PermissionDecision, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PlanId,
-    PlanPermissionGrantedEntry, PreparedToolExecution, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
+    EventHandler, ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel,
+    ExternalSourceRecord, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
+    MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
+    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
+    PlanApprovedEntry, PlanId, PlanPermissionGrantedEntry, PreparedToolExecution, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ProviderPhysicalAttemptOutcome,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
-    ResponseHandle, RunEvent, Session, SessionLogEntry, SessionStreamRecord,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext, TaskRunEntry,
-    TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus, ToolPreparation,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
-    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
-    VisibleCompletionState, WorkspaceMutationDetected, plan_text_hash,
+    ResponseHandle, RunEvent, SecretString, Session, SessionLogEntry, SessionStreamRecord,
+    SourceCacheStatus, SourceFreshness, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskRunEntry, TaskRunStatus, TerminalTaskStatus, Tool, ToolAccess,
+    ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision,
+    ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId,
+    ToolExecutionStatus, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
+    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
+    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    plan_text_hash,
 };
 
 use super::{
-    Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunTerminalReason,
+    Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
+    AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext, emit_tool_result,
 };
 
 struct MockProvider;
@@ -312,6 +316,7 @@ impl Provider for CapturingTextProvider {
 struct ToolSideEffectProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
+struct ToolRunFactsDelegate;
 struct ForegroundTerminalProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
     tool_completed: Arc<AtomicBool>,
@@ -363,6 +368,34 @@ impl Provider for ToolSideEffectProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
+    }
+}
+
+#[async_trait]
+impl AgentToolDelegate for ToolRunFactsDelegate {
+    async fn handle_agent_tool_call(
+        &mut self,
+        _session: &mut Session,
+        _call: &ToolCall,
+        _options: &AgentRunOptions,
+        _handler: &mut (dyn EventHandler + Send),
+        _approval_handler: &mut (dyn ApprovalHandler + Send),
+    ) -> Result<Option<ToolResult>> {
+        Ok(None)
+    }
+
+    fn final_answer_context(
+        &mut self,
+        _session: &Session,
+        _options: &AgentRunOptions,
+        outcome: &AgentRunOutcome,
+    ) -> Result<Option<FinalAnswerContext>> {
+        Ok(
+            (!outcome.tool_call_ids.is_empty()).then(|| FinalAnswerContext {
+                key: "tool-run-facts-v1".to_owned(),
+                prompt: "recorded current-run facts".to_owned(),
+            }),
+        )
     }
 }
 
@@ -1446,6 +1479,32 @@ impl EventHandler for RecordingEventHandler {
     }
 }
 
+struct SessionReadLockingEventHandler {
+    session_path: PathBuf,
+    shared_lock: Option<std::fs::File>,
+    events: Vec<RunEvent>,
+}
+
+impl EventHandler for SessionReadLockingEventHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if self.shared_lock.is_none()
+            && matches!(
+                &event,
+                RunEvent::Control(ControlEntry::WebUrlCapabilityDescriptor(_))
+            )
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.session_path)?;
+            FileExt::lock_shared(&file)?;
+            self.shared_lock = Some(file);
+        }
+        self.events.push(event);
+        Ok(())
+    }
+}
+
 struct StateTrackingProvider;
 
 #[async_trait]
@@ -2231,6 +2290,63 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn final_answer_context_is_injected_before_the_post_tool_provider_request() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SideEffectTool));
+    let agent = Agent::new(
+        ToolSideEffectProvider {
+            captured: Arc::clone(&captured),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-side-effect", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    let mut delegate = ToolRunFactsDelegate;
+
+    let output = agent
+        .run_with_approval_input_and_agent_delegate(
+            &mut session,
+            AgentRunInput::user("load facts"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+            &mut delegate,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    let captured = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(
+        captured.len(),
+        2,
+        "one tool request and one final-answer request should be sufficient"
+    );
+    assert!(captured[1].messages.iter().any(|message| {
+        message.role == MessageRole::User
+            && message.content.as_deref() == Some("recorded current-run facts")
+    }));
+    assert!(!handler.events.iter().any(|event| {
+        matches!(event, RunEvent::Notice(message) if message.contains("recorded run facts added before final answer"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_forwards_tool_progress_without_persisting_progress_as_tool_messages() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ProgressEchoTool));
@@ -2693,6 +2809,58 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
         serde_json::to_value(&projected_entries)?,
         serde_json::to_value(session.entries())?
     );
+    Ok(())
+}
+
+#[test]
+fn completed_run_terminal_records_share_one_durable_sync() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("mock", "mock-model").with_store(store.clone());
+    let before_syncs = store.writer_data_sync_count()?;
+    let readiness = crate::ReadinessEvaluatedEntry {
+        scope: crate::EvidenceScope::Run("message-final".to_owned()),
+        evaluation: crate::ReadinessEvaluation {
+            run_status: crate::RunStatus::Completed,
+            verification_verdict: VerificationVerdict::NotApplicable,
+            visible_state: VisibleCompletionState::Completed,
+            reasons: Vec::new(),
+            required_actions: Vec::new(),
+        },
+        policy_hash: None,
+        workspace_snapshot_id: None,
+    };
+
+    super::run_lifecycle::append_completed_run_lifecycle_events(
+        &mut session,
+        AgentRunTerminalReason::FinalAnswer,
+        "message-final",
+        1,
+        readiness,
+    )?;
+
+    assert_eq!(store.writer_data_sync_count()? - before_syncs, 1);
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records[0].stored_event().event_type,
+        DurableEventType::RunStatusChanged.as_str()
+    );
+    assert_eq!(
+        records[1].stored_event().event_type,
+        DurableEventType::RunFinalized.as_str()
+    );
+    assert_eq!(
+        records[2].stored_event().event_type,
+        DurableEventType::ReadinessEvaluated.as_str()
+    );
+    assert!(matches!(
+        session.entries().last(),
+        Some(SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+            _
+        )))
+    ));
     Ok(())
 }
 
@@ -3889,6 +4057,104 @@ async fn safe_persistence_uses_session_url_registrar_across_distinct_turns_and_o
             .count(),
         2
     );
+    Ok(())
+}
+
+#[test]
+fn tool_result_bundle_is_durable_before_control_handlers_can_lock_the_session_file() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session-websearch-bundle.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let probe = Arc::new(SessionUrlRegistrarProbe::default());
+    let registrar: Arc<dyn UserUrlCapabilityRegistrar> = probe.clone();
+    let mut session = Session::new("mock", "mock-model").with_store(store);
+    session.try_attach_user_url_capability_registrar(registrar)?;
+
+    let urls = ["https://example.com/a", "https://example.com/b"];
+    let sources = urls
+        .iter()
+        .enumerate()
+        .map(|(index, url)| {
+            ExternalSourceRecord::from_remote_candidate(
+                session.session_scope_id(),
+                None,
+                ExternalEvidenceLevel::SearchSnippet,
+                *url,
+                "exa_mcp",
+                Some(format!("Result {}", index + 1)),
+                None,
+                "2026-07-17T00:00:00Z",
+                None,
+                Some(index + 1),
+                SourceFreshness::Unknown,
+                SourceCacheStatus::NotApplicable,
+                ToolRestartPolicy::Replayable,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let registrations = sources
+        .iter()
+        .zip(urls)
+        .map(|(source, url)| UserUrlCapabilityRegistration {
+            source_id: source.source_id.clone(),
+            durable_entry_id: String::new(),
+            raw_canonical_url: SecretString::new(url),
+            safe_display_url: url.to_owned(),
+            restart_policy: ToolRestartPolicy::Replayable,
+            replayable_canonical_url: Some(url.to_owned()),
+            originating_call_id: Some("call-websearch".to_owned()),
+            provenance: WebUrlProvenanceKind::WebSearchResult,
+            issued_at_ms: 1,
+            expires_at_ms: 3_600_001,
+        })
+        .collect::<Vec<_>>();
+    let result = ToolResult::ok(
+        "call-websearch",
+        "websearch",
+        "two results",
+        ToolResultMeta::default(),
+    )
+    .with_url_capability_registrations(registrations)
+    .with_external_sources(sources);
+    let mut handler = SessionReadLockingEventHandler {
+        session_path: session_path.clone(),
+        shared_lock: None,
+        events: Vec::new(),
+    };
+
+    emit_tool_result(&mut session, &mut handler, result)?;
+
+    assert_eq!(probe.staged.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.committed.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.rolled_back.load(Ordering::SeqCst), 0);
+    assert_eq!(handler.events.len(), 4);
+    assert!(matches!(
+        handler.events.last(),
+        Some(RunEvent::ToolResult(_))
+    ));
+    let locked_file = handler
+        .shared_lock
+        .take()
+        .expect("the first URL descriptor should acquire a shared session lock");
+    FileExt::unlock(&locked_file)?;
+    drop(locked_file);
+
+    let entries = JsonlSessionStore::read_entries(&session_path)?;
+    assert_eq!(entries.len(), 4);
+    assert!(matches!(entries[0], SessionLogEntry::ToolResult(_)));
+    assert!(matches!(
+        entries[1],
+        SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(_))
+    ));
+    assert!(matches!(
+        entries[2],
+        SessionLogEntry::Control(ControlEntry::WebUrlCapabilityDescriptor(_))
+    ));
+    assert!(matches!(
+        &entries[3],
+        SessionLogEntry::Control(ControlEntry::ExternalProvenance(provenance))
+            if provenance.sources.len() == 2
+    ));
     Ok(())
 }
 

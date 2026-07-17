@@ -26,6 +26,95 @@ fn session_review_projects_v2_stream_entries() {
 }
 
 #[test]
+fn session_review_snapshot_reuses_one_checkpoint_readiness_reduction() -> Result<()> {
+    let temp = tempdir()?;
+    let path = temp.path().join("session-review-single-reducer.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let scope = sigil_kernel::EvidenceScope::Run("run-before-restore".to_owned());
+    store.append(&SessionLogEntry::User(ModelMessage::user("restore note")))?;
+    store.append(&SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+        sigil_kernel::ReadinessEvaluatedEntry {
+            scope: scope.clone(),
+            evaluation: sigil_kernel::ReadinessEvaluation {
+                run_status: sigil_kernel::RunStatus::Completed,
+                verification_verdict: sigil_kernel::VerificationVerdict::Passed,
+                visible_state: sigil_kernel::VisibleCompletionState::Verified,
+                reasons: Vec::new(),
+                required_actions: Vec::new(),
+            },
+            policy_hash: None,
+            workspace_snapshot_id: Some("snapshot-before-restore".to_owned()),
+        },
+    )))?;
+    store.append_event(
+        DurableEventType::CheckpointRestored,
+        EventClass::Critical,
+        serde_json::to_value(sigil_kernel::CheckpointRestored {
+            operation_id: "op-review-restore".to_owned(),
+            batch_id: None,
+            tool_call_id: Some("call-review-restore".to_owned()),
+            restored_subject: sigil_kernel::MutationSubject::File {
+                path: PathBuf::from("note.txt"),
+                file_type: sigil_kernel::FileType::File,
+            },
+            restored_from: sigil_kernel::SnapshotCoverage::Captured(
+                "artifact-review-before".to_owned(),
+            ),
+            mutation_committed_event_id: "event-review-restore".to_owned(),
+            workspace_revision: 2,
+            workspace_snapshot_id: "snapshot-after-restore".to_owned(),
+        })?,
+    )?;
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let snapshot = super::super::session_review::session_review_snapshot(&path, &[]);
+    let direct_lines =
+        super::super::session_review::session_review_sidebar_lines_from_records(&records, &[]);
+
+    assert_eq!(snapshot.lines, direct_lines);
+    assert!(snapshot.latest_checkpoint_restore_sequence.is_some());
+    assert!(snapshot.readiness_sequences_by_scope.contains_key(&scope));
+    assert!(
+        snapshot
+            .lines
+            .iter()
+            .any(|line| line == "verification: stale after checkpoint restore")
+    );
+    Ok(())
+}
+
+#[test]
+fn live_control_updates_preserve_review_without_rereading_the_session_file() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
+    let session_path = temp.path().join("session-live-control.jsonl");
+    app.session_log_path = session_path.clone();
+    app.sync_current_session_state(vec![SessionLogEntry::User(ModelMessage::user(
+        "Search recent model news",
+    ))]);
+    let review_before = app.session_review_sidebar_lines();
+    assert!(review_before.join("\n").contains("review: turn 1/1"));
+
+    std::fs::create_dir(&session_path)?;
+    app.append_current_session_control(ControlEntry::UsageSnapshot(UsageStats::default()));
+
+    let review_after = app.session_review_sidebar_lines();
+    assert_eq!(review_after, review_before);
+    assert!(
+        !review_after
+            .join("\n")
+            .contains("durable stream unavailable")
+    );
+    Ok(())
+}
+
+#[test]
 fn session_review_reads_v2_mutation_and_readiness_evidence() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
@@ -110,6 +199,14 @@ fn session_review_reads_v2_mutation_and_readiness_evidence() -> Result<()> {
     app.session_log_path = session_path.clone();
     app.sync_current_session_state(JsonlSessionStore::read_entries(&session_path)?);
 
+    assert_eq!(app.review.latest_checkpoint_restore_sequence, None);
+    assert!(
+        app.review
+            .readiness_sequences_by_scope
+            .get(&sigil_kernel::EvidenceScope::Run("run-review".to_owned()))
+            .is_some_and(|sequence| *sequence > 0),
+        "the same durable review snapshot should update readiness ordering"
+    );
     let review = app.session_review_sidebar_lines().join("\n");
     assert!(review.contains("review: turn 1/1"));
     assert!(review.contains("Fix typo in note.txt"));

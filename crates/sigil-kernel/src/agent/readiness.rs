@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::{
     CheckpointRestored, ExecutionMutationProfile, MutationCommitted, MutationReconciled,
     MutationResolution, WorkspaceMutationDetected,
-    event::{DurableEventType, EventHandler, RunEvent},
+    event::DurableEventType,
     session::{
         ControlEntry, JsonlSessionStore, Session, SessionLogEntry, SessionStreamRecord,
         ToolExecutionStatus,
@@ -22,19 +22,6 @@ use super::{
     AgentRunOptions, AgentRunOutcome,
     tool_audit::{execution_mutation_profile_from_details, terminal_task_id_from_tool_metadata},
 };
-
-pub(super) fn append_agent_run_readiness(
-    session: &mut Session,
-    handler: &mut impl EventHandler,
-    options: &AgentRunOptions,
-    final_message_id: &str,
-    outcome: &AgentRunOutcome,
-) -> Result<()> {
-    let entry = projected_agent_run_readiness(session, options, final_message_id, outcome)?;
-    let control = ControlEntry::ReadinessEvaluated(entry);
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
-}
 
 /// Computes the readiness verdict that would be recorded for a final run answer.
 ///

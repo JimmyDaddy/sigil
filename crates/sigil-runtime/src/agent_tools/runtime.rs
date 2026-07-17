@@ -453,6 +453,13 @@ fn collect_session_facts(
     session: &Session,
     run_context: Option<(&AgentRunOptions, &AgentRunOutcome)>,
 ) -> Result<SessionFactsSummary> {
+    let call_belongs_to_current_run = |call_id: &str| match run_context {
+        Some((_, outcome)) => outcome
+            .tool_call_ids
+            .iter()
+            .any(|current_call_id| current_call_id == call_id),
+        None => true,
+    };
     let mut approvals_policy_allow = 0_u64;
     let mut approvals_policy_deny = 0_u64;
     let mut approvals_requested = 0_u64;
@@ -462,7 +469,6 @@ fn collect_session_facts(
     let mut approvals_user_deny = 0_u64;
     let mut approval_session_grants = 0_u64;
     let mut approval_session_grant_reuses = 0_u64;
-    let mut approval_network_effect_records = 0_u64;
     let mut local_policy_facets = approval_mode_counts();
     let mut network_policy_facets = approval_mode_counts();
     let mut source_policy_facets = approval_mode_counts();
@@ -484,6 +490,9 @@ fn collect_session_facts(
         };
         match control {
             ControlEntry::ToolApproval(approval) => {
+                if !call_belongs_to_current_run(&approval.call_id) {
+                    continue;
+                }
                 record_approval_mode(&mut local_policy_facets, approval.local_policy_decision);
                 record_approval_mode(&mut network_policy_facets, approval.network_policy_decision);
                 record_approval_mode(&mut source_policy_facets, approval.source_policy_decision);
@@ -491,9 +500,6 @@ fn collect_session_facts(
                     .network_effect
                     .map(NetworkEffect::as_str)
                     .unwrap_or("none");
-                if approval.network_effect.is_some() {
-                    approval_network_effect_records += 1;
-                }
                 *network_effects.entry(effect.to_owned()).or_default() += 1;
                 match approval.action {
                     ToolApprovalAuditAction::PolicyEvaluated => {
@@ -552,10 +558,15 @@ fn collect_session_facts(
                     ToolApprovalAuditAction::PreviewFailed => {}
                 }
             }
-            ControlEntry::ToolApprovalSessionGrant(_) => {
+            ControlEntry::ToolApprovalSessionGrant(grant)
+                if call_belongs_to_current_run(&grant.call_id) =>
+            {
                 approval_session_grants += 1;
             }
             ControlEntry::ToolExecution(execution) => {
+                if !call_belongs_to_current_run(&execution.call_id) {
+                    continue;
+                }
                 if execution.status != ToolExecutionStatus::Started {
                     for file in &execution.changed_files {
                         changed_files.insert(file.clone());
@@ -646,7 +657,15 @@ fn collect_session_facts(
         }));
     }
 
-    let readiness = if let Some((options, outcome)) = run_context {
+    let has_recorded_facts = approvals_policy_deny > 0
+        || approvals_requested > 0
+        || approvals_resolved > 0
+        || approval_session_grants > 0
+        || approval_session_grant_reuses > 0
+        || !commands.is_empty()
+        || subagents_total > 0
+        || !changed_files.is_empty();
+    let readiness = if has_recorded_facts && let Some((options, outcome)) = run_context {
         let entry = sigil_kernel::projected_agent_run_readiness(
             session,
             options,
@@ -666,16 +685,6 @@ fn collect_session_facts(
     } else {
         None
     };
-
-    let has_recorded_facts = approvals_policy_deny > 0
-        || approvals_requested > 0
-        || approvals_resolved > 0
-        || approval_session_grants > 0
-        || approval_session_grant_reuses > 0
-        || approval_network_effect_records > 0
-        || !commands.is_empty()
-        || subagents_total > 0
-        || !changed_files.is_empty();
     Ok(SessionFactsSummary {
         has_recorded_facts,
         value: json!({

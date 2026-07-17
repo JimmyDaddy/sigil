@@ -283,16 +283,17 @@ impl AppState {
     }
 
     pub(super) fn sync_current_session_state(&mut self, entries: Vec<SessionLogEntry>) {
-        (
-            self.review.latest_checkpoint_restore_sequence,
-            self.review.readiness_sequences_by_scope,
-        ) = super::session_review::checkpoint_verification_order(&self.session_log_path);
         let entries =
             preserve_local_ui_control_entries(&self.session_browser.current_entries, entries);
+        let review_snapshot =
+            super::session_review::session_review_snapshot(&self.session_log_path, &entries);
+        self.review.latest_checkpoint_restore_sequence =
+            review_snapshot.latest_checkpoint_restore_sequence;
+        self.review.readiness_sequences_by_scope = review_snapshot.readiness_sequences_by_scope;
         self.runtime.stats = session_stats_from_entries(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.session_browser.current_entries = entries;
-        self.mark_current_session_entries_changed();
+        self.mark_current_session_entries_changed_with_review_lines(review_snapshot.lines);
         self.reconcile_optimistic_conversation_queue_items();
         self.refresh_active_agent_view_after_parent_sync();
         self.refresh_conversation_queue_selection();
@@ -303,14 +304,10 @@ impl AppState {
         self.session_browser
             .current_entries
             .push(SessionLogEntry::Control(control));
-        (
-            self.review.latest_checkpoint_restore_sequence,
-            self.review.readiness_sequences_by_scope,
-        ) = super::session_review::checkpoint_verification_order(&self.session_log_path);
         self.runtime.stats = session_stats_from_entries(&self.session_browser.current_entries);
         self.tool_preview_snapshots =
             restored_tool_preview_snapshot_index(&self.session_browser.current_entries);
-        self.mark_current_session_entries_changed();
+        self.mark_current_session_entries_changed_live();
         self.reconcile_optimistic_conversation_queue_items();
         self.refresh_active_agent_view_after_parent_sync();
         self.refresh_conversation_queue_selection();

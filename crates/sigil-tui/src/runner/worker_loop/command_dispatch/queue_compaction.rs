@@ -34,9 +34,10 @@ where
             } => {
                 state.compaction.preparation_tasks.abort_all();
                 state.session.pending_queued_pre_turn_preparation = None;
-                match queue_conversation_input(
+                match queue_conversation_input_and_track_detached(
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     &mut state.session.exact_prompts,
                     prompt,
                     kind,
@@ -57,6 +58,7 @@ where
                 match cancel_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     &mut state.session.exact_prompts,
                     queue_id,
                 ) {
@@ -76,6 +78,7 @@ where
                 match edit_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     &mut state.session.exact_prompts,
                     queue_id,
                     prompt,
@@ -96,6 +99,7 @@ where
                 match move_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     queue_id,
                     direction,
                 ) {
@@ -111,6 +115,7 @@ where
                 match promote_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     queue_id,
                 ) {
                     Ok(entries) => send_conversation_queue_update(message_tx, &entries),
@@ -125,6 +130,7 @@ where
                 match promote_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     queue_id,
                 ) {
                     Ok(entries) => {
@@ -136,6 +142,7 @@ where
                                 root_config,
                                 &state.session.log_path,
                                 &mut state.session.current,
+                                &mut state.session.detached_durable_controls,
                                 message_tx,
                                 elicitation_handler,
                                 &state.agent.supervisor,
@@ -153,6 +160,7 @@ where
                 match set_conversation_queue_paused(
                     &state.session.log_path,
                     &mut state.session.current,
+                    &mut state.session.detached_durable_controls,
                     paused,
                 ) {
                     Ok(entries) => send_conversation_queue_update(message_tx, &entries),

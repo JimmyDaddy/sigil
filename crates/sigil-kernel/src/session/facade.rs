@@ -150,6 +150,43 @@ impl Session {
         self.append(SessionLogEntry::ToolResult(message))
     }
 
+    /// Persists one tool result and its URL provenance controls as a single ordered writer batch.
+    pub(crate) fn append_tool_result_bundle(
+        &mut self,
+        message: ModelMessage,
+        controls: Vec<ControlEntry>,
+    ) -> Result<()> {
+        for control in &controls {
+            match control {
+                ControlEntry::WebUrlCapabilityDescriptor(descriptor) => {
+                    if descriptor.session_scope_id != self.session_scope_id {
+                        bail!("web URL capability descriptor belongs to a different session scope");
+                    }
+                    if descriptor.durable_entry_id != message.id {
+                        bail!("web URL capability descriptor belongs to a different tool result");
+                    }
+                    descriptor.validate()?;
+                }
+                ControlEntry::ExternalProvenance(provenance) => {
+                    if provenance.session_scope_id != self.session_scope_id {
+                        bail!("external provenance belongs to a different session scope");
+                    }
+                    provenance.validate_against_message(&message)?;
+                }
+                _ => bail!("tool result bundle contains an unsupported control entry"),
+            }
+        }
+
+        let mut entries = Vec::with_capacity(controls.len() + 1);
+        entries.push(SessionLogEntry::ToolResult(message));
+        entries.extend(controls.into_iter().map(SessionLogEntry::Control));
+        if let Some(store) = &self.store {
+            store.append_session_entry_events(&entries)?;
+        }
+        self.entries.extend(entries);
+        Ok(())
+    }
+
     pub fn append_control(&mut self, control: ControlEntry) -> Result<()> {
         self.append(SessionLogEntry::Control(control))
     }
@@ -179,6 +216,19 @@ impl Session {
     /// The blocking append must have completed successfully before this method is called.
     pub(crate) fn record_durably_appended_control(&mut self, control: ControlEntry) {
         self.entries.push(SessionLogEntry::Control(control));
+    }
+
+    /// Merges controls that an adapter has already appended to this session's durable store.
+    ///
+    /// This method only updates the in-memory projection and never writes the controls again. It is
+    /// intended for a run boundary where the live [`Session`] was temporarily detached while the
+    /// adapter accepted append-only controls through the same durable session stream.
+    pub fn record_durably_appended_controls(
+        &mut self,
+        controls: impl IntoIterator<Item = ControlEntry>,
+    ) {
+        self.entries
+            .extend(controls.into_iter().map(SessionLogEntry::Control));
     }
 
     /// Returns the live session scope used to bind URL capabilities and external provenance.
@@ -286,6 +336,23 @@ impl Session {
             .as_ref()
             .map(|store| store.append_event(event_type, event_class, payload))
             .transpose()
+    }
+
+    pub(crate) fn append_durable_events_with_controls(
+        &mut self,
+        durable_events: Vec<(DurableEventType, EventClass, serde_json::Value)>,
+        controls: Vec<ControlEntry>,
+    ) -> Result<()> {
+        let entries = controls
+            .iter()
+            .cloned()
+            .map(SessionLogEntry::Control)
+            .collect::<Vec<_>>();
+        if let Some(store) = self.store.as_ref() {
+            store.append_events_and_session_entries(durable_events, &entries)?;
+        }
+        self.entries.extend(entries);
+        Ok(())
     }
 
     /// Returns the strict store-backed writer used by pre-effect durable audit ordering.
@@ -1048,9 +1115,21 @@ impl Session {
                 .image_attachment_resolver
                 .as_deref(),
         )?;
-        self.append_control(ControlEntry::PrefixSnapshotCaptured(
-            assembled.prefix_snapshot,
-        ))?;
+        let prefix_changed = self.latest_prefix_snapshot().is_none_or(|latest| {
+            latest.sha256 != assembled.prefix_snapshot.sha256
+                || latest.provider_name != assembled.prefix_snapshot.provider_name
+                || latest.model_name != assembled.prefix_snapshot.model_name
+                || latest.memory_fingerprint != assembled.prefix_snapshot.memory_fingerprint
+                || latest.tool_schema_fingerprint
+                    != assembled.prefix_snapshot.tool_schema_fingerprint
+                || latest.skill_index_fingerprint
+                    != assembled.prefix_snapshot.skill_index_fingerprint
+        });
+        if prefix_changed {
+            self.append_control(ControlEntry::PrefixSnapshotCaptured(
+                assembled.prefix_snapshot,
+            ))?;
+        }
         Ok(assembled.request)
     }
 

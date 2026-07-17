@@ -1319,6 +1319,25 @@ fn read_event_records_fails_when_session_file_is_exclusively_locked() -> Result<
 }
 
 #[test]
+fn merging_durably_appended_controls_updates_memory_without_duplicate_persistence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session-detached-control.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    let control = ControlEntry::Note {
+        kind: "detached_control".to_owned(),
+        data: serde_json::json!({"value": 1}),
+    };
+
+    store.append(&SessionLogEntry::Control(control.clone()))?;
+    session.record_durably_appended_controls([control]);
+
+    assert_eq!(session.entries().len(), 1);
+    assert_eq!(JsonlSessionStore::read_entries(&path)?.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn writer_mode_loader_fails_when_session_file_is_locked() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
@@ -3968,6 +3987,59 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::MemorySnapshotCaptured(_))
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn build_request_reuses_an_identical_durable_prefix_snapshot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    session.append_user_message(ModelMessage::user("hello"))?;
+
+    let first = session.build_request(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+    let second = session.build_request(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+
+    assert_eq!(
+        serde_json::to_value(&first.messages)?,
+        serde_json::to_value(&second.messages)?
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(_))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        JsonlSessionStore::read_entries(store.path())?
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(_))
+            ))
+            .count(),
+        1
+    );
     Ok(())
 }
 

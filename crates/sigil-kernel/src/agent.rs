@@ -56,9 +56,11 @@ use preview::{
     resolved_interactive_approval_identity,
 };
 use provider_stream::collect_provider_turn;
-use readiness::append_agent_run_readiness;
 pub use readiness::projected_agent_run_readiness;
-use run_lifecycle::{append_failed_run_lifecycle_events, append_run_lifecycle_events};
+use run_lifecycle::{
+    append_completed_run_lifecycle_events, append_failed_run_lifecycle_events,
+    append_run_lifecycle_events,
+};
 use task_plan::{
     append_tool_ignored_after_task_plan_acceptance, handle_task_plan_update_call,
     task_plan_update_call_is_accepted,
@@ -1068,6 +1070,17 @@ where
                     },
                     outcome,
                 });
+            }
+            if initial_frozen_provider_request.is_none()
+                && let Some(context) = agent_delegate
+                    .as_deref_mut()
+                    .map(|delegate| delegate.final_answer_context(session, &options, &outcome))
+                    .transpose()?
+                    .flatten()
+                && final_answer_context_key.as_deref() != Some(context.key.as_str())
+            {
+                final_answer_context_key = Some(context.key);
+                transient_context.push(ModelMessage::user(context.prompt));
             }
             model_turns = model_turns.saturating_add(1);
 
@@ -2229,20 +2242,6 @@ where
                 transient_context.push(ModelMessage::user(blocker_prompt));
                 continue;
             }
-            if let Some(context) = agent_delegate
-                .as_deref_mut()
-                .map(|delegate| delegate.final_answer_context(session, &options, &outcome))
-                .transpose()?
-                .flatten()
-                && final_answer_context_key.as_deref() != Some(context.key.as_str())
-            {
-                final_answer_context_key = Some(context.key);
-                handler.handle(RunEvent::Notice(
-                    "recorded run facts added before final answer; continuing".to_owned(),
-                ))?;
-                transient_context.push(ModelMessage::user(context.prompt));
-                continue;
-            }
 
             claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
             let mut hosted_finalized = hosted_finalized;
@@ -2281,14 +2280,18 @@ where
             }
 
             outcome.tool_calls = total_tool_calls;
-            append_run_lifecycle_events(
+            let readiness =
+                projected_agent_run_readiness(session, &options, &final_message_id, &outcome)?;
+            append_completed_run_lifecycle_events(
                 session,
-                "completed",
                 outcome.terminal_reason,
-                Some(&final_message_id),
+                &final_message_id,
                 total_tool_calls,
+                readiness.clone(),
             )?;
-            append_agent_run_readiness(session, handler, &options, &final_message_id, &outcome)?;
+            handler.handle(RunEvent::Control(ControlEntry::ReadinessEvaluated(
+                readiness,
+            )))?;
             return Ok(AgentRunOutput {
                 result: AgentRunResult {
                     final_text: assistant_text,

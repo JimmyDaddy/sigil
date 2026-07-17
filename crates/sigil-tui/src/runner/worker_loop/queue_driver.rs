@@ -531,9 +531,32 @@ where
     )))
 }
 
+#[cfg(test)]
 pub(in crate::runner) fn queue_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    exact_prompts: &mut ExactConversationPromptStore,
+    prompt: String,
+    kind: ConversationInputKind,
+    target: ConversationInputTarget,
+    reasoning_effort: ReasoningEffort,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    queue_conversation_input_and_track_detached(
+        session_log_path,
+        current_session,
+        &mut Vec::new(),
+        exact_prompts,
+        prompt,
+        kind,
+        target,
+        reasoning_effort,
+    )
+}
+
+pub(in crate::runner) fn queue_conversation_input_and_track_detached(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     exact_prompts: &mut ExactConversationPromptStore,
     prompt: String,
     kind: ConversationInputKind,
@@ -565,28 +588,24 @@ pub(in crate::runner) fn queue_conversation_input(
         reasoning_effort: Some(reasoning_effort),
         created_at_ms: Some(current_unix_time_ms()),
     };
-    let control = ControlEntry::ConversationInputQueued(entry);
-    if let Some(session) = current_session.as_mut() {
-        session
-            .append_control(control)
-            .map_err(|error| format!("failed to append follow-up: {error:#}"))?;
+    let detached_control_count = detached_durable_controls.len();
+    let append_result = append_session_control_entries_and_track_detached(
+        session_log_path,
+        current_session,
+        [ControlEntry::ConversationInputQueued(entry)],
+        detached_durable_controls,
+        "follow-up",
+    );
+    if append_result.is_ok() || detached_durable_controls.len() > detached_control_count {
         exact_prompts.insert(queue_id, SecretString::new(prompt));
-        Ok(session.entries().to_vec())
-    } else {
-        let store = JsonlSessionStore::new(session_log_path.to_path_buf())
-            .map_err(|error| format!("failed to open session store for follow-up: {error:#}"))?;
-        store
-            .append(&SessionLogEntry::Control(control))
-            .map_err(|error| format!("failed to persist follow-up: {error:#}"))?;
-        exact_prompts.insert(queue_id, SecretString::new(prompt));
-        JsonlSessionStore::read_entries(session_log_path)
-            .map_err(|error| format!("failed to reload follow-up: {error:#}"))
     }
+    append_result.map_err(|error| format!("{error:#}"))
 }
 
 pub(in crate::runner) fn cancel_queued_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     exact_prompts: &mut ExactConversationPromptStore,
     queue_id: ConversationInputQueueId,
 ) -> std::result::Result<Vec<SessionLogEntry>, String> {
@@ -594,6 +613,7 @@ pub(in crate::runner) fn cancel_queued_conversation_input(
     let entries = append_conversation_queue_control_entries(
         session_log_path,
         current_session,
+        detached_durable_controls,
         vec![ControlEntry::ConversationInputStatusChanged(
             ConversationInputStatusEntry {
                 queue_id: queue_id.clone(),
@@ -610,6 +630,7 @@ pub(in crate::runner) fn cancel_queued_conversation_input(
 pub(in crate::runner) fn edit_queued_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     exact_prompts: &mut ExactConversationPromptStore,
     queue_id: ConversationInputQueueId,
     prompt: String,
@@ -624,6 +645,7 @@ pub(in crate::runner) fn edit_queued_conversation_input(
     let entries = append_conversation_queue_control_entries(
         session_log_path,
         current_session,
+        detached_durable_controls,
         vec![ControlEntry::ConversationInputEdited(
             ConversationInputEditedEntry {
                 queue_id: queue_id.clone(),
@@ -641,6 +663,7 @@ pub(in crate::runner) fn edit_queued_conversation_input(
 pub(in crate::runner) fn move_queued_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     queue_id: ConversationInputQueueId,
     direction: QueueMoveDirection,
 ) -> std::result::Result<Vec<SessionLogEntry>, String> {
@@ -664,6 +687,7 @@ pub(in crate::runner) fn move_queued_conversation_input(
     append_conversation_queue_control_entries(
         session_log_path,
         current_session,
+        detached_durable_controls,
         vec![ControlEntry::ConversationInputReordered(
             ConversationInputReorderedEntry {
                 queue_id,
@@ -677,6 +701,7 @@ pub(in crate::runner) fn move_queued_conversation_input(
 pub(in crate::runner) fn promote_queued_conversation_input(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     queue_id: ConversationInputQueueId,
 ) -> std::result::Result<Vec<SessionLogEntry>, String> {
     let entries = read_conversation_queue_entries(session_log_path, current_session)?;
@@ -699,17 +724,24 @@ pub(in crate::runner) fn promote_queued_conversation_input(
             updated_at_ms: Some(current_unix_time_ms()),
         },
     ));
-    append_conversation_queue_control_entries(session_log_path, current_session, controls)
+    append_conversation_queue_control_entries(
+        session_log_path,
+        current_session,
+        detached_durable_controls,
+        controls,
+    )
 }
 
 pub(in crate::runner) fn set_conversation_queue_paused(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     paused: bool,
 ) -> std::result::Result<Vec<SessionLogEntry>, String> {
     append_conversation_queue_control_entries(
         session_log_path,
         current_session,
+        detached_durable_controls,
         vec![ControlEntry::ConversationInputQueueControl(
             ConversationInputQueueControlEntry {
                 action: if paused {
@@ -758,12 +790,14 @@ pub(in crate::runner) fn ensure_projection_item_is_mutable(
 pub(in crate::runner) fn append_conversation_queue_control_entries(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     controls: Vec<ControlEntry>,
 ) -> std::result::Result<Vec<SessionLogEntry>, String> {
-    append_session_control_entries(
+    append_session_control_entries_and_track_detached(
         session_log_path,
         current_session,
         controls,
+        detached_durable_controls,
         "conversation queue",
     )
     .map_err(|error| format!("{error:#}"))
@@ -1083,6 +1117,7 @@ pub(in crate::runner) fn append_queue_status_and_notify(
 pub(in crate::runner) fn append_queue_failure_and_pause_and_notify(
     session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     message_tx: &mpsc::Sender<WorkerMessage>,
     queue_id: ConversationInputQueueId,
     reason: String,
@@ -1100,7 +1135,12 @@ pub(in crate::runner) fn append_queue_failure_and_pause_and_notify(
             updated_at_ms: Some(current_unix_time_ms()),
         }),
     ];
-    match append_conversation_queue_control_entries(session_log_path, current_session, controls) {
+    match append_conversation_queue_control_entries(
+        session_log_path,
+        current_session,
+        detached_durable_controls,
+        controls,
+    ) {
         Ok(entries) => send_conversation_queue_update(message_tx, &entries),
         Err(error) => {
             let _ = message_tx.send(WorkerMessage::Notice(format!(

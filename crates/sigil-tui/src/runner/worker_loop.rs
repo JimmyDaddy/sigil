@@ -44,7 +44,8 @@ use sigil_kernel::{
 
 use sigil_runtime::{
     ProviderStatusTaskManager, ProviderStatusTaskResult, append_session_control_entries,
-    current_unix_time_ms, effective_compaction_config,
+    append_session_control_entries_and_track_detached, current_unix_time_ms,
+    effective_compaction_config,
 };
 
 use super::{
@@ -126,14 +127,14 @@ pub(in crate::runner) use queue_driver::{
     edit_queued_conversation_input, mark_stale_dispatching_conversation_queue_items,
     move_queued_conversation_input,
     prepare_next_queued_conversation_pressure_admission_with_resolver,
-    promote_queued_conversation_input, queue_conversation_input, send_conversation_queue_update,
-    set_conversation_queue_paused,
+    promote_queued_conversation_input, queue_conversation_input_and_track_detached,
+    send_conversation_queue_update, set_conversation_queue_paused,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(in crate::runner) use queue_driver::{
     QueuedConversationCandidatePreparation, prepare_next_queued_conversation_candidate,
-    prepare_next_queued_conversation_pressure_admission,
+    prepare_next_queued_conversation_pressure_admission, queue_conversation_input,
 };
 pub(in crate::runner) use scheduler::{finish_idle_auto_compaction, run_worker_loop};
 pub(in crate::runner) use session_lifecycle_runtime::{

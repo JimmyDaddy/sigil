@@ -45,9 +45,10 @@ where
                     } else {
                         ConversationInputKind::Chat
                     };
-                    match queue_conversation_input(
+                    match queue_conversation_input_and_track_detached(
                         &state.session.log_path,
                         &mut state.session.current,
+                        &mut state.session.detached_durable_controls,
                         &mut state.session.exact_prompts,
                         prompt,
                         kind,
@@ -435,6 +436,7 @@ where
                         root_config,
                         &state.session.log_path,
                         &mut state.session.current,
+                        &mut state.session.detached_durable_controls,
                         message_tx,
                         elicitation_handler,
                         &state.agent.supervisor,

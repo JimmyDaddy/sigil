@@ -138,6 +138,7 @@ where
     state.session.pending_queued_pre_turn_preparation = None;
     state.session.last_queued_pre_turn_block = None;
     state.session.pending_agent_result_continuations = pending_agent_result_continuations;
+    state.session.detached_durable_controls.clear();
     if !same_logical_session {
         state.session.exact_prompts.clear();
     }

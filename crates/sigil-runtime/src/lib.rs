@@ -187,7 +187,10 @@ pub use remote_mcp::{
     activate_eager_remote_mcp_server, activate_or_refresh_configured_remote_mcp_server,
     activate_remote_mcp_server,
 };
-pub use session_control::{append_session_control_entries, current_unix_time_ms};
+pub use session_control::{
+    append_session_control_entries, append_session_control_entries_and_track_detached,
+    current_unix_time_ms,
+};
 pub use session_lifecycle::{
     DEFAULT_SESSION_CATALOG_MAX_ENTRIES, DEFAULT_SESSION_CATALOG_MAX_STREAM_BYTES,
     DEFAULT_SESSION_CATALOG_MAX_TOTAL_VALIDATION_BYTES, DEFAULT_SESSION_EXPORT_MAX_BYTES,

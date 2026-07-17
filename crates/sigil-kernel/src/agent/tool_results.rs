@@ -55,27 +55,11 @@ where
             }
         }
     }
-    if let Err(error) = session.append_tool_message(message.clone()) {
-        if !registrations.is_empty()
-            && let Some(registrar) = registrar.as_ref()
-        {
-            let _ = registrar.rollback_message(&message.id);
-        }
-        return Err(error);
-    }
+    let mut controls =
+        Vec::with_capacity(registrations.len() + usize::from(!external_sources.is_empty()));
     for registration in registrations.iter() {
         let descriptor = registration.durable_descriptor(session.session_scope_id());
-        descriptor.validate()?;
-        let control = ControlEntry::WebUrlCapabilityDescriptor(descriptor);
-        if let Err(error) = session.append_control(control.clone()) {
-            if !registrations.is_empty()
-                && let Some(registrar) = registrar.as_ref()
-            {
-                let _ = registrar.rollback_message(&message.id);
-            }
-            return Err(error);
-        }
-        handler.handle(RunEvent::Control(control))?;
+        controls.push(ControlEntry::WebUrlCapabilityDescriptor(descriptor));
     }
     if !external_sources.is_empty() {
         let provenance = ExternalProvenanceEntry {
@@ -85,17 +69,15 @@ where
             sources: *external_sources,
             citations: Vec::new(),
         };
-        provenance.validate_against_message(&message)?;
-        let control = ControlEntry::ExternalProvenance(provenance);
-        if let Err(error) = session.append_control(control.clone()) {
-            if !registrations.is_empty()
-                && let Some(registrar) = registrar.as_ref()
-            {
-                let _ = registrar.rollback_message(&message.id);
-            }
-            return Err(error);
+        controls.push(ControlEntry::ExternalProvenance(provenance));
+    }
+    if let Err(error) = session.append_tool_result_bundle(message.clone(), controls.clone()) {
+        if !registrations.is_empty()
+            && let Some(registrar) = registrar.as_ref()
+        {
+            let _ = registrar.rollback_message(&message.id);
         }
-        handler.handle(RunEvent::Control(control))?;
+        return Err(error);
     }
     if !registrations.is_empty()
         && let Some(registrar) = registrar.as_ref()
@@ -108,6 +90,9 @@ where
             ),
             None => "failed to commit tool-result URL capabilities".to_owned(),
         }));
+    }
+    for control in controls {
+        handler.handle(RunEvent::Control(control))?;
     }
     handler.handle(RunEvent::ToolResult(result))
 }

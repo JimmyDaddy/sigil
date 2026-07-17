@@ -805,6 +805,8 @@ pub(super) struct LinearSessionWriter {
     #[cfg(test)]
     parent_sync_count: u64,
     #[cfg(test)]
+    data_sync_count: u64,
+    #[cfg(test)]
     next_fault: Option<SessionWriterFault>,
 }
 
@@ -950,6 +952,8 @@ impl LinearSessionWriter {
             full_scan_count: 0,
             #[cfg(test)]
             parent_sync_count: 0,
+            #[cfg(test)]
+            data_sync_count: 0,
             #[cfg(test)]
             next_fault: None,
         }
@@ -1171,6 +1175,10 @@ impl LinearSessionWriter {
         if let Err(error) = write_result {
             self.requires_reload = true;
             return Err(error);
+        }
+        #[cfg(test)]
+        if any_recovery_critical {
+            self.data_sync_count = self.data_sync_count.saturating_add(1);
         }
 
         let last = events
@@ -1456,6 +1464,11 @@ impl LinearSessionWriter {
     #[cfg(test)]
     pub(super) fn parent_sync_count(&self) -> u64 {
         self.parent_sync_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn data_sync_count(&self) -> u64 {
+        self.data_sync_count
     }
 
     #[cfg(test)]

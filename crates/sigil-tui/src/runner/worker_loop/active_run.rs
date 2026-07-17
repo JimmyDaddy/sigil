@@ -42,6 +42,7 @@ pub(in crate::runner) fn cancel_active_run(
     root_config: &RootConfig,
     current_session_log_path: &Path,
     current_session: &mut Option<Session>,
+    detached_durable_controls: &mut Vec<ControlEntry>,
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: &Arc<ChannelMcpElicitationHandler>,
     agent_supervisor: &sigil_runtime::AgentSupervisor,
@@ -149,6 +150,7 @@ pub(in crate::runner) fn cancel_active_run(
             image_attachment_resolver.clone(),
         ) {
             *current_session = Some(session);
+            detached_durable_controls.clear();
         }
         let _ = message_tx.send(WorkerMessage::RunFailed(
             "run was interrupted, but its cancellation request could not be persisted".to_owned(),
@@ -183,6 +185,10 @@ pub(in crate::runner) fn cancel_active_run(
     ) {
         Ok(session) => {
             let mut session = session;
+            // A successful reload already contains every control persisted while the run owned
+            // the detached session. Clear the delta before later cancellation-audit work so an
+            // error in that work cannot carry already-projected controls into the next run.
+            detached_durable_controls.clear();
             if let Err(error) =
                 append_mcp_elicitation_audits(&mut session, &active_run.elicitation_audit_buffer)
             {

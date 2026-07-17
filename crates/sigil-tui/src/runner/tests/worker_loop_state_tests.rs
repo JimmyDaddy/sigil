@@ -175,6 +175,13 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     state.session.last_queued_pre_turn_block = Some((queue_id, "blocked".to_owned()));
     state
         .session
+        .detached_durable_controls
+        .push(ControlEntry::Note {
+            kind: "detached-before-switch".to_owned(),
+            data: serde_json::Value::Null,
+        });
+    state
+        .session
         .pending_agent_result_continuations
         .push(sigil_kernel::AgentThreadId::new("agent_pending")?);
     state
@@ -198,6 +205,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
     assert_eq!(message.session_log_path, target_path);
     assert_eq!(state.session.log_path, target_path);
     assert!(state.session.exact_prompts.is_empty());
+    assert!(state.session.detached_durable_controls.is_empty());
     assert!(state.session.last_queued_pre_turn_block.is_none());
     assert!(state.session.pending_agent_result_continuations.is_empty());
     assert!(!state.compaction.idle_auto.is_requested());
@@ -287,6 +295,13 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
     state.session.last_queued_pre_turn_block = Some((queue_id, "blocked".to_owned()));
     state
         .session
+        .detached_durable_controls
+        .push(ControlEntry::Note {
+            kind: "detached-before-fork".to_owned(),
+            data: serde_json::Value::Null,
+        });
+    state
+        .session
         .pending_agent_result_continuations
         .push(sigil_kernel::AgentThreadId::new("fork_pending")?);
     state
@@ -309,6 +324,7 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
 
     assert_eq!(state.session.log_path, target_path);
     assert!(state.session.exact_prompts.is_empty());
+    assert!(state.session.detached_durable_controls.is_empty());
     assert!(state.session.last_queued_pre_turn_block.is_none());
     assert!(state.session.pending_agent_result_continuations.is_empty());
     assert!(!state.compaction.idle_auto.is_requested());

@@ -25,6 +25,7 @@ impl WorkerLoopState {
             session: SessionWorkerState {
                 log_path: session_log_path,
                 current: session,
+                detached_durable_controls: Vec::new(),
                 exact_prompts: ExactConversationPromptStore::new(),
                 pending_agent_result_continuations,
                 last_queued_pre_turn_block: None,
@@ -65,6 +66,7 @@ impl WorkerLoopState {
 pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) log_path: PathBuf,
     pub(in crate::runner) current: Option<Session>,
+    pub(in crate::runner) detached_durable_controls: Vec<ControlEntry>,
     pub(in crate::runner) exact_prompts: ExactConversationPromptStore,
     pub(in crate::runner) pending_agent_result_continuations: Vec<AgentThreadId>,
     pub(in crate::runner) last_queued_pre_turn_block: Option<(ConversationInputQueueId, String)>,

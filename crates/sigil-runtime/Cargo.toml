@@ -34,6 +34,7 @@ url.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
+fs2.workspace = true
 tokio.workspace = true
 
 [lints]

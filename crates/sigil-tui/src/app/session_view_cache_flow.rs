@@ -142,12 +142,45 @@ impl AppState {
         self.refresh_session_view_cache();
     }
 
+    pub(in crate::app) fn mark_current_session_entries_changed_live(&mut self) {
+        let session_review_lines = self
+            .session_browser
+            .view_cache
+            .borrow()
+            .session_review_lines
+            .clone();
+        self.mark_current_session_entries_changed_with_review_lines(session_review_lines);
+    }
+
+    pub(in crate::app) fn mark_current_session_entries_changed_with_review_lines(
+        &mut self,
+        session_review_lines: Vec<String>,
+    ) {
+        self.session_browser.current_entries_revision = self
+            .session_browser
+            .current_entries_revision
+            .saturating_add(1);
+        let cache = self.build_session_view_cache_with_review_lines(session_review_lines);
+        *self.session_browser.view_cache.borrow_mut() = cache;
+    }
+
     pub(in crate::app) fn refresh_session_view_cache(&mut self) {
         let cache = self.build_session_view_cache();
         *self.session_browser.view_cache.borrow_mut() = cache;
     }
 
     fn build_session_view_cache(&self) -> SessionViewCache {
+        let session_review_lines = session_review::session_review_sidebar_lines(
+            &self.session_log_path,
+            &self.session_browser.current_entries,
+        );
+        self.build_session_view_cache_with_review_lines(session_review_lines)
+    }
+
+    fn build_session_view_cache_with_review_lines(
+        &self,
+        session_review_lines: Vec<String>,
+    ) -> SessionViewCache {
         let entries = &self.session_browser.current_entries;
         let task_projection = TaskStateProjection::from_entries(entries);
         let agent_projection = AgentThreadStateProjection::from_entries(entries);
@@ -170,10 +203,7 @@ impl AppState {
             agent_child_items,
             agent_graph_summary_line,
             compaction_preview_line: self.compaction_preview_sidebar_line(entries),
-            session_review_lines: session_review::session_review_sidebar_lines(
-                &self.session_log_path,
-                entries,
-            ),
+            session_review_lines,
         }
     }
 

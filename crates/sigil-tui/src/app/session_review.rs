@@ -14,6 +14,12 @@ use super::formatting::truncate_session_view_text;
 
 const REVIEW_FILE_LIMIT: usize = 3;
 
+pub(super) struct SessionReviewSnapshot {
+    pub(super) latest_checkpoint_restore_sequence: Option<u64>,
+    pub(super) readiness_sequences_by_scope: BTreeMap<sigil_kernel::EvidenceScope, u64>,
+    pub(super) lines: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 struct ReviewTurnSummary {
     index: usize,
@@ -51,34 +57,56 @@ pub(super) fn session_review_sidebar_lines(
     session_log_path: &Path,
     entries: &[SessionLogEntry],
 ) -> Vec<String> {
+    session_review_snapshot(session_log_path, entries).lines
+}
+
+pub(super) fn session_review_snapshot(
+    session_log_path: &Path,
+    entries: &[SessionLogEntry],
+) -> SessionReviewSnapshot {
     if entries.is_empty() && !session_log_path.exists() {
-        return Vec::new();
+        return SessionReviewSnapshot {
+            latest_checkpoint_restore_sequence: None,
+            readiness_sequences_by_scope: BTreeMap::new(),
+            lines: Vec::new(),
+        };
     }
 
     let records = match JsonlSessionStore::read_event_records(session_log_path) {
         Ok(records) => records,
         Err(error) => {
-            return vec![format!(
-                "review: durable stream unavailable ({})",
-                truncate_session_view_text(&error.to_string(), 48)
-            )];
+            return SessionReviewSnapshot {
+                latest_checkpoint_restore_sequence: None,
+                readiness_sequences_by_scope: BTreeMap::new(),
+                lines: vec![format!(
+                    "review: durable stream unavailable ({})",
+                    truncate_session_view_text(&error.to_string(), 48)
+                )],
+            };
         }
     };
 
-    session_review_sidebar_lines_from_records(&records, entries)
+    let (latest_checkpoint_restore_sequence, readiness_sequences_by_scope) =
+        checkpoint_verification_order_from_records(&records);
+    let verification_stale_after_checkpoint = verification_stale_after_checkpoint(
+        latest_checkpoint_restore_sequence,
+        &readiness_sequences_by_scope,
+    );
+    SessionReviewSnapshot {
+        latest_checkpoint_restore_sequence,
+        readiness_sequences_by_scope,
+        lines: render_session_review_sidebar_lines_from_records(
+            &records,
+            entries,
+            verification_stale_after_checkpoint,
+        ),
+    }
 }
 
-pub(super) fn checkpoint_verification_order(
-    session_log_path: &Path,
-) -> (Option<u64>, BTreeMap<sigil_kernel::EvidenceScope, u64>) {
-    let Ok(records) = JsonlSessionStore::read_event_records(session_log_path) else {
-        return (None, BTreeMap::new());
-    };
-    checkpoint_verification_order_from_records(&records)
-}
-
-fn verification_stale_after_checkpoint_from_records(records: &[SessionStreamRecord]) -> bool {
-    let (latest_restore, readiness_by_scope) = checkpoint_verification_order_from_records(records);
+fn verification_stale_after_checkpoint(
+    latest_restore: Option<u64>,
+    readiness_by_scope: &BTreeMap<sigil_kernel::EvidenceScope, u64>,
+) -> bool {
     let latest_readiness = readiness_by_scope.values().max().copied();
     latest_restore.is_some_and(|restore| restore > latest_readiness.unwrap_or(0))
 }
@@ -107,9 +135,23 @@ fn checkpoint_verification_order_from_records(
     (latest_restore, readiness_by_scope)
 }
 
+#[cfg(test)]
 pub(super) fn session_review_sidebar_lines_from_records(
     records: &[SessionStreamRecord],
     fallback_entries: &[SessionLogEntry],
+) -> Vec<String> {
+    let (latest_restore, readiness_by_scope) = checkpoint_verification_order_from_records(records);
+    render_session_review_sidebar_lines_from_records(
+        records,
+        fallback_entries,
+        verification_stale_after_checkpoint(latest_restore, &readiness_by_scope),
+    )
+}
+
+fn render_session_review_sidebar_lines_from_records(
+    records: &[SessionStreamRecord],
+    fallback_entries: &[SessionLogEntry],
+    verification_stale_after_checkpoint: bool,
 ) -> Vec<String> {
     let mut turns_seen = 0usize;
     let mut current = ReviewTurnSummary::default();
@@ -142,7 +184,7 @@ pub(super) fn session_review_sidebar_lines_from_records(
     render_review_lines(
         turns_seen,
         &latest_completed,
-        verification_stale_after_checkpoint_from_records(records),
+        verification_stale_after_checkpoint,
     )
 }
 

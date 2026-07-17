@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use sigil_kernel::{
     Agent, AgentConfig, CompactionConfig, McpServerConfig, MemoryConfig, PermissionConfig,
     Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, RootConfig,
@@ -229,6 +229,10 @@ where
 #[derive(Clone)]
 pub(super) enum StreamPlan {
     Chunks(Vec<ProviderChunk>),
+    GatedChunks {
+        gate: Arc<tokio::sync::Notify>,
+        chunks: Vec<ProviderChunk>,
+    },
     Pending,
     Fail(&'static str),
 }
@@ -331,6 +335,13 @@ impl Provider for PlannedProvider {
             StreamPlan::Chunks(chunks) => {
                 Box::pin(stream::iter(chunks.into_iter().map(Ok::<_, anyhow::Error>)))
             }
+            StreamPlan::GatedChunks { gate, chunks } => Box::pin(
+                stream::once(async move {
+                    gate.notified().await;
+                    chunks
+                })
+                .flat_map(|chunks| stream::iter(chunks.into_iter().map(Ok::<_, anyhow::Error>))),
+            ),
             StreamPlan::Pending => Box::pin(stream::pending()),
             StreamPlan::Fail(error) => return Err(anyhow!(error.to_owned())),
         };

@@ -171,6 +171,52 @@ impl JsonlSessionStore {
             .context("session writer returned no event for a single append")
     }
 
+    pub(super) fn append_events_and_session_entries(
+        &self,
+        durable_events: Vec<(DurableEventType, EventClass, serde_json::Value)>,
+        entries: &[SessionLogEntry],
+    ) -> Result<Vec<StoredEvent>> {
+        if durable_events.is_empty() && entries.is_empty() {
+            bail!("durable event append batch must not be empty");
+        }
+        if entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
+            )
+        }) {
+            bail!("conversation input promotion must use the critical direct promotion append API");
+        }
+        let mut pending = durable_events
+            .into_iter()
+            .map(|(event_type, event_class, payload)| PendingStoredEvent {
+                event_type,
+                event_class,
+                payload,
+                event_id: None,
+                correlation_id: None,
+                causation_id: None,
+            })
+            .collect::<Vec<_>>();
+        pending.extend(entries.iter().map(|entry| {
+            let event_type = session_entry_event_type(entry);
+            PendingStoredEvent {
+                event_type,
+                event_class: session_entry_event_class(event_type),
+                payload: serde_json::json!({ "session_log_entry": entry }),
+                event_id: None,
+                correlation_id: None,
+                causation_id: None,
+            }
+        }));
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let (events, _) = writer.append_events(pending, false)?;
+        Ok(events)
+    }
+
     pub(crate) fn append_event_if<F>(
         &self,
         event_type: DurableEventType,
@@ -282,6 +328,45 @@ impl JsonlSessionStore {
         let event_class = session_entry_event_class(event_type);
         let payload = serde_json::json!({ "session_log_entry": entry });
         self.append_event(event_type, event_class, payload)
+    }
+
+    /// Appends one ordered group of provider-visible or control session entries while holding the
+    /// session writer and data-file lock for the whole group.
+    pub(super) fn append_session_entry_events(
+        &self,
+        entries: &[SessionLogEntry],
+    ) -> Result<Vec<StoredEvent>> {
+        if entries.is_empty() {
+            bail!("session entry append batch must not be empty");
+        }
+        if entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
+            )
+        }) {
+            bail!("conversation input promotion must use the critical direct promotion append API");
+        }
+        let pending = entries
+            .iter()
+            .map(|entry| {
+                let event_type = session_entry_event_type(entry);
+                PendingStoredEvent {
+                    event_type,
+                    event_class: session_entry_event_class(event_type),
+                    payload: serde_json::json!({ "session_log_entry": entry }),
+                    event_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                }
+            })
+            .collect();
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        let (events, _) = writer.append_events(pending, false)?;
+        Ok(events)
     }
 
     pub fn path(&self) -> &Path {
@@ -518,6 +603,15 @@ impl JsonlSessionStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
         Ok(writer.parent_sync_count())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn writer_data_sync_count(&self) -> Result<u64> {
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))?;
+        Ok(writer.data_sync_count())
     }
 }
 

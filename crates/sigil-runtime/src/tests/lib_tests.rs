@@ -224,6 +224,34 @@ fn append_session_control_entries_persists_without_in_memory_session() -> Result
     Ok(())
 }
 
+#[test]
+fn detached_session_control_tracking_records_only_successful_durable_appends() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session-detached.jsonl");
+    let mut current_session = None;
+    let mut detached_controls = Vec::new();
+
+    let entries = super::append_session_control_entries_and_track_detached(
+        &path,
+        &mut current_session,
+        [ControlEntry::Note {
+            kind: "runtime_detached_test".to_owned(),
+            data: json!({"value": 2}),
+        }],
+        &mut detached_controls,
+        "detached test note",
+    )?;
+
+    assert_eq!(detached_controls.len(), 1);
+    assert!(matches!(
+        detached_controls.first(),
+        Some(ControlEntry::Note { kind, .. }) if kind == "runtime_detached_test"
+    ));
+    assert_eq!(entries.len(), 1);
+    assert!(current_session.is_none());
+    Ok(())
+}
+
 struct ExistingMcpTool;
 
 #[async_trait]

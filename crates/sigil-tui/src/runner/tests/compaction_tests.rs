@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use sigil_kernel::{
     Agent, COMPACTION_TOKEN_PROOF_SCHEMA_VERSION, CompletionRequest, ControlEntry,
     ConversationInputKind, ConversationInputTarget, DurableEventType, EffectiveTokenBudget,
@@ -280,6 +280,13 @@ impl Provider for OverflowRecoveryProvider {
             StreamPlan::Chunks(chunks) => Ok(Box::pin(stream::iter(
                 chunks.into_iter().map(Ok::<_, anyhow::Error>),
             ))),
+            StreamPlan::GatedChunks { gate, chunks } => Ok(Box::pin(
+                stream::once(async move {
+                    gate.notified().await;
+                    chunks
+                })
+                .flat_map(|chunks| stream::iter(chunks.into_iter().map(Ok::<_, anyhow::Error>))),
+            )),
             StreamPlan::Pending => Ok(Box::pin(stream::pending())),
             StreamPlan::Fail(error) => Err(anyhow!(error)),
         }
