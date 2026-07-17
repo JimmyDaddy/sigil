@@ -27,7 +27,7 @@ use crate::{
     task::{TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanUpdateContext, task_plan_update_tool_spec},
     tool::{
         PreparedToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolProgressEvent,
-        ToolProgressSink, ToolRegistry, ToolResult,
+        ToolProgressSink, ToolRegistry, ToolResult, ToolSpec, ToolSubject,
     },
 };
 
@@ -1241,10 +1241,9 @@ where
                         .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
                 });
                 let mut accepted_task_plan = false;
-                for mut call in completed_calls {
+                for call in completed_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
-                    let mut explicit_network_approval = false;
                     if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
                         append_tool_ignored_after_task_plan_acceptance(
                             session,
@@ -1284,889 +1283,22 @@ where
                         accepted_task_plan = accepted_task_plan || accepted;
                         continue;
                     }
-                    let _tool_effect =
-                        begin_run_effect(cancellation.as_ref(), RunEffectKind::Tool)?;
-                    let mut execution_subjects = Vec::new();
-                    let mut prepared_tool_call = None;
-                    let mut tool_registered = false;
-                    let mut tool_is_agent_category = false;
-                    let execution_spec = tools.spec_for(&call.name);
-                    if let Some(spec) = execution_spec.as_ref() {
-                        tool_registered = true;
-                        tool_is_agent_category = spec.category == ToolCategory::Agent;
-                        let preparation_draft =
-                            match tools.prepare(tool_ctx.clone(), call.clone()).await {
-                                Ok(preparation) => preparation,
-                                Err(error) => {
-                                    append_invalid_tool_input_result(
-                                        session,
-                                        handler,
-                                        &mut outcome,
-                                        &call,
-                                        &[],
-                                        error,
-                                    )?;
-                                    continue;
-                                }
-                            };
-                        let subjects = if let Some(draft) = preparation_draft.as_ref() {
-                            draft.subjects().to_vec()
-                        } else {
-                            match tools.permission_subjects(&tool_ctx, &call) {
-                                Ok(subjects) => subjects,
-                                Err(error) => {
-                                    append_invalid_tool_input_result(
-                                        session,
-                                        handler,
-                                        &mut outcome,
-                                        &call,
-                                        &[],
-                                        error,
-                                    )?;
-                                    continue;
-                                }
-                            }
-                        };
-                        let access = match tools.permission_access(&tool_ctx, &call) {
-                            Ok(access) => access,
-                            Err(error) => {
-                                append_invalid_tool_input_result(
-                                    session,
-                                    handler,
-                                    &mut outcome,
-                                    &call,
-                                    &subjects,
-                                    error,
-                                )?;
-                                continue;
-                            }
-                        };
-                        let network_effect = match tools.permission_network_effect(&tool_ctx, &call)
-                        {
-                            Ok(network_effect) => network_effect,
-                            Err(error) => {
-                                append_invalid_tool_input_result(
-                                    session,
-                                    handler,
-                                    &mut outcome,
-                                    &call,
-                                    &subjects,
-                                    error,
-                                )?;
-                                continue;
-                            }
-                        };
-                        let operation = match tools.permission_operation(&tool_ctx, &call) {
-                            Ok(operation) => operation,
-                            Err(error) => {
-                                append_invalid_tool_input_result(
-                                    session,
-                                    handler,
-                                    &mut outcome,
-                                    &call,
-                                    &subjects,
-                                    error,
-                                )?;
-                                continue;
-                            }
-                        };
-                        let tool_default_mode =
-                            match tools.permission_default_mode(&tool_ctx, &call) {
-                                Ok(mode) => mode,
-                                Err(error) => {
-                                    append_invalid_tool_input_result(
-                                        session,
-                                        handler,
-                                        &mut outcome,
-                                        &call,
-                                        &subjects,
-                                        error,
-                                    )?;
-                                    continue;
-                                }
-                            };
-                        let decision = permission_policy
-                            .decide_with_operation_network_effect_and_default(
-                                spec,
-                                &call.name,
-                                access,
-                                operation,
-                                network_effect,
-                                subjects.clone(),
-                                tool_default_mode,
-                            )?;
-                        let pre_plan_decision =
-                            interactive_external_directory_approval_override(&options, decision);
-                        let plan_authority =
-                            active_plan_approval_authority(session, spec, &pre_plan_decision);
-                        let binding_decision =
-                            plan_approval_decision_override(session, spec, pre_plan_decision);
-                        let (decision, session_grant_source) = tool_session_grant_decision_override(
-                            session,
-                            &call.name,
-                            binding_decision.clone(),
-                        );
-                        prepared_tool_call = match preparation_draft {
-                            Some(draft) => {
-                                let policy_fingerprint =
-                                    preparation_policy_fingerprint(&binding_decision)?;
-                                let approval_identity =
-                                    if let Some(grant) = session_grant_source.as_ref() {
-                                        preparation_session_grant_identity(grant)?
-                                    } else if let Some(authority) = plan_authority.as_ref() {
-                                        preparation_plan_approval_identity(authority)?
-                                    } else if binding_decision.mode == ApprovalMode::Ask {
-                                        pending_interactive_approval_identity(&call.id)
-                                    } else {
-                                        preparation_policy_approval_identity(&policy_fingerprint)
-                                    };
-                                Some(draft.bind_with_approval_identity(
-                                    policy_fingerprint,
-                                    approval_identity,
-                                )?)
-                            }
-                            None => None,
-                        };
-                        let subject_label = if decision.subjects.is_empty() {
-                            "-".to_owned()
-                        } else {
-                            decision
-                                .subjects
-                                .iter()
-                                .map(|subject| subject.normalized.as_str())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        };
-                        handler.handle(RunEvent::Notice(format!(
-                            "permission {} subject={} mode={}",
-                            call.name,
-                            subject_label,
-                            decision.mode.as_str()
-                        )))?;
-                        append_tool_approval_policy_audit(
-                            session,
-                            &call,
-                            &decision,
-                            session_grant_source.as_ref(),
-                            prepared_tool_call
-                                .as_ref()
-                                .map(|prepared| prepared.prepared_digest().to_owned()),
-                        )?;
-                        let preview_capture = capture_tool_preview_for_decision(
-                            session,
-                            handler,
-                            tools,
-                            tool_ctx.clone(),
-                            &call,
-                            spec,
-                            &decision,
-                            prepared_tool_call.take(),
-                        )
-                        .await?;
-                        prepared_tool_call = preview_capture.prepared;
-                        execution_subjects = decision.subjects.clone();
-
-                        match decision.mode {
-                            ApprovalMode::Allow => {}
-                            ApprovalMode::Ask
-                                if options.interaction_mode == InteractionMode::Headless =>
-                            {
-                                let reason = format!(
-                                    "tool {} requires approval in headless mode",
-                                    call.name
-                                );
-                                append_tool_approval_audit(
-                                    session,
-                                    &call,
-                                    &decision,
-                                    ToolApprovalAuditAction::Resolved,
-                                    Some(ToolApprovalUserDecision::Denied),
-                                    Some(reason.clone()),
-                                    None,
-                                )?;
-                                let mut result = ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::ApprovalRequired,
-                                    reason,
-                                );
-                                attach_tool_call_context(&mut result, &call, &decision.subjects);
-                                record_and_emit_tool_result(
-                                    session,
-                                    handler,
-                                    &mut outcome,
-                                    result,
-                                )?;
-                                continue;
-                            }
-                            ApprovalMode::Ask => {
-                                let preview = preview_capture.preview.clone();
-                                let preview_hash = preview_capture.preview_hash.clone();
-                                append_tool_approval_audit(
-                                    session,
-                                    &call,
-                                    &decision,
-                                    ToolApprovalAuditAction::Requested,
-                                    None,
-                                    None,
-                                    preview_hash.clone(),
-                                )?;
-                                handler.handle(RunEvent::ToolApprovalRequested {
-                                    call: safe_call.clone(),
-                                    spec: spec.clone(),
-                                    subjects: decision.subjects.clone(),
-                                    network_effect: decision.network_effect,
-                                    local_policy_decision: decision.local_policy_decision,
-                                    network_policy_decision: decision.network_policy_decision,
-                                    source_policy_decision: decision.source_policy_decision,
-                                    operation: decision.operation,
-                                    risk: decision.risk,
-                                    subject_zones: decision.subject_zones.clone(),
-                                    confirmation: decision.confirmation.clone(),
-                                    snapshot_required: decision.snapshot_required,
-                                    command_permission_matches: decision
-                                        .command_permission_matches
-                                        .clone(),
-                                    preview,
-                                })?;
-                                let approval =
-                                    approval_handler.approve_tool_call(&safe_call, spec)?;
-                                let approval_is_explicit_user_action =
-                                    approval_handler.approval_is_explicit_user_action();
-                                let approval_would_allow = matches!(
-                                    &approval,
-                                    ToolApproval::Approve
-                                        | ToolApproval::ApproveForSession
-                                        | ToolApproval::ApproveWithArgs { .. }
-                                );
-                                if approval_would_allow
-                                    && decision.network_policy_decision == ApprovalMode::Ask
-                                    && !approval_is_explicit_user_action
-                                {
-                                    let reason =
-                                        "network approval requires an explicit user action"
-                                            .to_owned();
-                                    append_tool_approval_audit(
-                                        session,
-                                        &call,
-                                        &decision,
-                                        ToolApprovalAuditAction::Resolved,
-                                        None,
-                                        Some(reason.clone()),
-                                        preview_hash,
-                                    )?;
-                                    handler.handle(RunEvent::ToolApprovalResolved {
-                                        call_id: call.id.clone(),
-                                        approved: false,
-                                        reason: Some(reason.clone()),
-                                    })?;
-                                    let mut result = ToolResult::error(
-                                        call.id.clone(),
-                                        call.name.clone(),
-                                        ToolErrorKind::ApprovalDenied,
-                                        reason,
-                                    );
-                                    attach_tool_call_context(
-                                        &mut result,
-                                        &call,
-                                        &decision.subjects,
-                                    );
-                                    record_and_emit_tool_result(
-                                        session,
-                                        handler,
-                                        &mut outcome,
-                                        result,
-                                    )?;
-                                    continue;
-                                }
-                                let approval_is_explicit_network_user_action =
-                                    approval_is_explicit_user_action
-                                        && decision.network_effect.is_some()
-                                        && decision.network_policy_decision == ApprovalMode::Ask;
-                                match approval {
-                                    ToolApproval::Approve => {
-                                        explicit_network_approval =
-                                            approval_is_explicit_network_user_action;
-                                        append_tool_approval_audit(
-                                            session,
-                                            &call,
-                                            &decision,
-                                            ToolApprovalAuditAction::Resolved,
-                                            Some(ToolApprovalUserDecision::Approved),
-                                            None,
-                                            preview_hash,
-                                        )?;
-                                        authorize_prepared_tool_from_resolved_approval(
-                                            session,
-                                            &call,
-                                            &mut prepared_tool_call,
-                                        )?;
-                                        handler.handle(RunEvent::ToolApprovalResolved {
-                                            call_id: call.id.clone(),
-                                            approved: true,
-                                            reason: None,
-                                        })?;
-                                    }
-                                    ToolApproval::ApproveForSession => {
-                                        if !tool_approval_session_grant_available(&decision) {
-                                            let reason =
-                                                "session approval grant is not available for this tool call"
-                                                    .to_owned();
-                                            append_tool_approval_audit(
-                                                session,
-                                                &call,
-                                                &decision,
-                                                ToolApprovalAuditAction::Resolved,
-                                                Some(ToolApprovalUserDecision::Denied),
-                                                Some(reason.clone()),
-                                                preview_hash,
-                                            )?;
-                                            handler.handle(RunEvent::ToolApprovalResolved {
-                                                call_id: call.id.clone(),
-                                                approved: false,
-                                                reason: Some(reason.clone()),
-                                            })?;
-                                            let mut result = ToolResult::error(
-                                                call.id.clone(),
-                                                call.name.clone(),
-                                                ToolErrorKind::ApprovalDenied,
-                                                format!("tool execution denied by user: {reason}"),
-                                            );
-                                            attach_tool_call_context(
-                                                &mut result,
-                                                &call,
-                                                &decision.subjects,
-                                            );
-                                            record_and_emit_tool_result(
-                                                session,
-                                                handler,
-                                                &mut outcome,
-                                                result,
-                                            )?;
-                                            continue;
-                                        }
-                                        explicit_network_approval =
-                                            approval_is_explicit_network_user_action;
-                                        append_tool_approval_audit(
-                                            session,
-                                            &call,
-                                            &decision,
-                                            ToolApprovalAuditAction::Resolved,
-                                            Some(ToolApprovalUserDecision::ApprovedForSession),
-                                            None,
-                                            preview_hash,
-                                        )?;
-                                        authorize_prepared_tool_from_resolved_approval(
-                                            session,
-                                            &call,
-                                            &mut prepared_tool_call,
-                                        )?;
-                                        append_tool_approval_session_grant(
-                                            session, handler, &call, &decision,
-                                        )?;
-                                        handler.handle(RunEvent::ToolApprovalResolved {
-                                            call_id: call.id.clone(),
-                                            approved: true,
-                                            reason: Some("allowed for this session".to_owned()),
-                                        })?;
-                                    }
-                                    ToolApproval::ApproveWithArgs { args_json } => {
-                                        if prepared_tool_call.is_some() {
-                                            let reason = "prepared mutations do not allow approval-time argument changes; preview and approval must be repeated"
-                                                .to_owned();
-                                            append_tool_approval_audit(
-                                                session,
-                                                &call,
-                                                &decision,
-                                                ToolApprovalAuditAction::Resolved,
-                                                Some(ToolApprovalUserDecision::Denied),
-                                                Some(reason.clone()),
-                                                preview_hash,
-                                            )?;
-                                            handler.handle(RunEvent::ToolApprovalResolved {
-                                                call_id: call.id.clone(),
-                                                approved: false,
-                                                reason: Some(reason.clone()),
-                                            })?;
-                                            let mut result = ToolResult::error(
-                                                call.id.clone(),
-                                                call.name.clone(),
-                                                ToolErrorKind::StalePreparedMutation,
-                                                reason,
-                                            );
-                                            attach_tool_call_context(
-                                                &mut result,
-                                                &call,
-                                                &decision.subjects,
-                                            );
-                                            record_and_emit_tool_result(
-                                                session,
-                                                handler,
-                                                &mut outcome,
-                                                result,
-                                            )?;
-                                            continue;
-                                        }
-                                        let mut approved_call = call.clone();
-                                        approved_call.args_json = args_json;
-                                        let reevaluate_approved_call = || -> Result<_> {
-                                            let approved_subjects = tools
-                                                .permission_subjects(&tool_ctx, &approved_call)?;
-                                            let approved_access = tools
-                                                .permission_access(&tool_ctx, &approved_call)?;
-                                            let approved_network_effect = tools
-                                                .permission_network_effect(
-                                                    &tool_ctx,
-                                                    &approved_call,
-                                                )?;
-                                            let approved_operation = tools
-                                                .permission_operation(&tool_ctx, &approved_call)?;
-                                            let approved_default_mode = tools
-                                                .permission_default_mode(
-                                                    &tool_ctx,
-                                                    &approved_call,
-                                                )?;
-                                            let approved_decision = permission_policy
-                                                .decide_with_operation_network_effect_and_default(
-                                                    spec,
-                                                    &approved_call.name,
-                                                    approved_access,
-                                                    approved_operation,
-                                                    approved_network_effect,
-                                                    approved_subjects,
-                                                    approved_default_mode,
-                                                )?;
-                                            let approved_decision =
-                                                interactive_external_directory_approval_override(
-                                                    &options,
-                                                    approved_decision,
-                                                );
-                                            let approved_decision = plan_approval_decision_override(
-                                                session,
-                                                spec,
-                                                approved_decision,
-                                            );
-                                            Ok(tool_session_grant_decision_override(
-                                                session,
-                                                &approved_call.name,
-                                                approved_decision,
-                                            )
-                                            .0)
-                                        };
-                                        let approved_decision = reevaluate_approved_call();
-                                        let approved_decision = match approved_decision {
-                                            Ok(decision) => decision,
-                                            Err(error) => {
-                                                let reason = format!(
-                                                    "approval-time argument changes could not be re-evaluated: {error}"
-                                                );
-                                                append_tool_approval_audit(
-                                                    session,
-                                                    &approved_call,
-                                                    &decision,
-                                                    ToolApprovalAuditAction::Resolved,
-                                                    Some(ToolApprovalUserDecision::Denied),
-                                                    Some(reason.clone()),
-                                                    preview_hash,
-                                                )?;
-                                                handler.handle(RunEvent::ToolApprovalResolved {
-                                                    call_id: approved_call.id.clone(),
-                                                    approved: false,
-                                                    reason: Some(reason),
-                                                })?;
-                                                append_invalid_tool_input_result(
-                                                    session,
-                                                    handler,
-                                                    &mut outcome,
-                                                    &approved_call,
-                                                    &decision.subjects,
-                                                    error,
-                                                )?;
-                                                continue;
-                                            }
-                                        };
-                                        if approved_decision != decision {
-                                            let reason = "approval-time argument changes altered the permission scope; preview and approval must be repeated"
-                                                .to_owned();
-                                            append_tool_approval_audit(
-                                                session,
-                                                &approved_call,
-                                                &approved_decision,
-                                                ToolApprovalAuditAction::Resolved,
-                                                Some(ToolApprovalUserDecision::Denied),
-                                                Some(reason.clone()),
-                                                preview_hash,
-                                            )?;
-                                            handler.handle(RunEvent::ToolApprovalResolved {
-                                                call_id: approved_call.id.clone(),
-                                                approved: false,
-                                                reason: Some(reason.clone()),
-                                            })?;
-                                            let mut result = ToolResult::error(
-                                                approved_call.id.clone(),
-                                                approved_call.name.clone(),
-                                                ToolErrorKind::ApprovalDenied,
-                                                reason,
-                                            );
-                                            attach_tool_call_context(
-                                                &mut result,
-                                                &approved_call,
-                                                &approved_decision.subjects,
-                                            );
-                                            record_and_emit_tool_result(
-                                                session,
-                                                handler,
-                                                &mut outcome,
-                                                result,
-                                            )?;
-                                            continue;
-                                        }
-                                        call = approved_call;
-                                        execution_subjects = approved_decision.subjects.clone();
-                                        explicit_network_approval = approval_is_explicit_user_action
-                                            && approved_decision.network_effect.is_some()
-                                            && approved_decision.network_policy_decision
-                                                == ApprovalMode::Ask;
-                                        append_tool_approval_audit(
-                                            session,
-                                            &call,
-                                            &decision,
-                                            ToolApprovalAuditAction::Resolved,
-                                            Some(ToolApprovalUserDecision::Approved),
-                                            None,
-                                            preview_hash,
-                                        )?;
-                                        handler.handle(RunEvent::ToolApprovalResolved {
-                                            call_id: call.id.clone(),
-                                            approved: true,
-                                            reason: None,
-                                        })?;
-                                    }
-                                    ToolApproval::Deny { reason } => {
-                                        append_tool_approval_audit(
-                                            session,
-                                            &call,
-                                            &decision,
-                                            ToolApprovalAuditAction::Resolved,
-                                            Some(ToolApprovalUserDecision::Denied),
-                                            Some(reason.clone()),
-                                            preview_hash,
-                                        )?;
-                                        handler.handle(RunEvent::ToolApprovalResolved {
-                                            call_id: call.id.clone(),
-                                            approved: false,
-                                            reason: Some(reason.clone()),
-                                        })?;
-                                        let mut result = ToolResult::error(
-                                            call.id.clone(),
-                                            call.name.clone(),
-                                            ToolErrorKind::ApprovalDenied,
-                                            format!("tool execution denied by user: {reason}"),
-                                        );
-                                        attach_tool_call_context(
-                                            &mut result,
-                                            &call,
-                                            &decision.subjects,
-                                        );
-                                        record_and_emit_tool_result(
-                                            session,
-                                            handler,
-                                            &mut outcome,
-                                            result,
-                                        )?;
-                                        continue;
-                                    }
-                                }
-                            }
-                            ApprovalMode::Deny => {
-                                let (error_kind, reason) = if decision.external_directory_required {
-                                    (
-                                        ToolErrorKind::ExternalDirectoryRequired,
-                                        format!(
-                                            "external directory access requires permission.external_directory.enabled for {}. For scratch files, use $SIGIL_SCRATCH_DIR from bash or terminal_start.",
-                                            if subject_label == "-" {
-                                                call.name.as_str()
-                                            } else {
-                                                subject_label.as_str()
-                                            }
-                                        ),
-                                    )
-                                } else {
-                                    (
-                                        ToolErrorKind::PermissionDenied,
-                                        format!(
-                                            "denied by permission policy for {}",
-                                            if subject_label == "-" {
-                                                call.name.as_str()
-                                            } else {
-                                                subject_label.as_str()
-                                            }
-                                        ),
-                                    )
-                                };
-                                append_tool_approval_audit(
-                                    session,
-                                    &call,
-                                    &decision,
-                                    ToolApprovalAuditAction::Resolved,
-                                    Some(ToolApprovalUserDecision::Denied),
-                                    Some(reason.clone()),
-                                    None,
-                                )?;
-                                handler.handle(RunEvent::ToolApprovalResolved {
-                                    call_id: call.id.clone(),
-                                    approved: false,
-                                    reason: Some(reason.clone()),
-                                })?;
-                                let mut result = ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    error_kind,
-                                    reason,
-                                );
-                                attach_tool_call_context(&mut result, &call, &decision.subjects);
-                                record_and_emit_tool_result(
-                                    session,
-                                    handler,
-                                    &mut outcome,
-                                    result,
-                                )?;
-                                continue;
-                            }
-                        }
-                        let egress_audit = match tools.egress_audit(&tool_ctx, &call) {
-                            Ok(audit) => audit,
-                            Err(error) => {
-                                append_invalid_tool_input_result(
-                                    session,
-                                    handler,
-                                    &mut outcome,
-                                    &call,
-                                    &decision.subjects,
-                                    error,
-                                )?;
-                                continue;
-                            }
-                        };
-                        if let Some(egress_audit) = egress_audit {
-                            let control =
-                                tool_egress_control_entry(&call, &decision.subjects, egress_audit);
-                            session.append_control(control.clone())?;
-                            handler.handle(RunEvent::Control(control))?;
-                        }
-                    }
-
-                    let execution_mutation_profile = execution_spec
-                        .as_ref()
-                        .map(|_| tools.execution_mutation_profile(&tool_ctx, &call))
-                        .transpose()?
-                        .flatten();
-                    let prepared_current_authority = if let Some(prepared) =
-                        prepared_tool_call.as_ref()
-                    {
-                        let spec = execution_spec
-                            .as_ref()
-                            .expect("prepared tools must retain their execution spec");
-                        let access = tools.permission_access(&tool_ctx, &call)?;
-                        let network_effect = tools.permission_network_effect(&tool_ctx, &call)?;
-                        let operation = tools.permission_operation(&tool_ctx, &call)?;
-                        let tool_default_mode = tools.permission_default_mode(&tool_ctx, &call)?;
-                        let current_decision = permission_policy
-                            .decide_with_operation_network_effect_and_default(
-                                spec,
-                                &call.name,
-                                access,
-                                operation,
-                                network_effect,
-                                execution_subjects.clone(),
-                                tool_default_mode,
-                            )?;
-                        let current_pre_plan_decision =
-                            interactive_external_directory_approval_override(
-                                &options,
-                                current_decision,
-                            );
-                        let current_plan_authority = active_plan_approval_authority(
-                            session,
-                            spec,
-                            &current_pre_plan_decision,
-                        );
-                        let current_decision = plan_approval_decision_override(
-                            session,
-                            spec,
-                            current_pre_plan_decision,
-                        );
-                        let current_policy_fingerprint =
-                            preparation_policy_fingerprint(&current_decision)?;
-                        let bound_identity = &prepared.binding().approval_identity;
-                        let current_approval_identity = if bound_identity
-                            .starts_with("session-grant:")
-                        {
-                            let (_, current_grant) = tool_session_grant_decision_override(
-                                session,
-                                &call.name,
-                                current_decision.clone(),
-                            );
-                            match current_grant.as_ref() {
-                                Some(grant) => preparation_session_grant_identity(grant)?,
-                                None => "session-grant:missing".to_owned(),
-                            }
-                        } else if bound_identity.starts_with("plan:") {
-                            match current_plan_authority.as_ref() {
-                                Some(authority) => preparation_plan_approval_identity(authority)?,
-                                None => "plan:missing".to_owned(),
-                            }
-                        } else if bound_identity.starts_with("interactive:") {
-                            resolved_interactive_approval_identity(
-                                session,
-                                &call.id,
-                                prepared.prepared_digest(),
-                            )?
-                            .unwrap_or_else(|| "interactive:missing".to_owned())
-                        } else {
-                            preparation_policy_approval_identity(&current_policy_fingerprint)
-                        };
-                        Some((current_policy_fingerprint, current_approval_identity))
-                    } else {
-                        None
-                    };
-                    let prepared_audit_binding = prepared_tool_call
-                        .as_ref()
-                        .map(|prepared| prepared.audit_binding());
-                    append_tool_execution_started_audit(
+                    let tool_call_context = ToolCallProcessingContext {
                         session,
-                        &call,
-                        &execution_subjects,
-                        execution_mutation_profile.as_ref(),
-                        prepared_audit_binding.as_ref(),
-                    )?;
-                    let execution_started = Instant::now();
-                    let execution_tool_ctx = tool_ctx
-                        .clone()
-                        .with_network_authorization(
-                            options.permission_context.network_policy,
-                            explicit_network_approval,
-                        )
-                        .with_approved_subjects(execution_subjects.clone());
-                    let mut result = if let Some(prepared) = prepared_tool_call {
-                        let (current_policy_fingerprint, current_approval_identity) =
-                            prepared_current_authority
-                                .as_ref()
-                                .expect("prepared tools must retain their approval authority");
-                        match tools
-                            .execute_prepared_after_started_audit(
-                                execution_tool_ctx,
-                                call.clone(),
-                                prepared,
-                                current_policy_fingerprint,
-                                current_approval_identity,
-                            )
-                            .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Internal,
-                                error.to_string(),
-                            ),
-                        }
-                    } else {
-                        match agent_delegate
-                            .as_deref_mut()
-                            .filter(|_| tool_registered && tool_is_agent_category)
-                        {
-                            Some(delegate) => {
-                                delegate.set_run_cancellation(cancellation.clone());
-                                delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
-                                match delegate
-                                    .handle_agent_tool_call(
-                                        session,
-                                        &call,
-                                        &options,
-                                        handler,
-                                        approval_handler,
-                                    )
-                                    .await
-                                {
-                                    Ok(Some(result)) => result,
-                                    Ok(None) => match execute_after_started_audit_with_progress(
-                                        tools,
-                                        execution_tool_ctx.clone(),
-                                        call.clone(),
-                                        handler,
-                                    )
-                                    .await
-                                    {
-                                        Ok(result) => result,
-                                        Err(error) => ToolResult::error(
-                                            call.id.clone(),
-                                            call.name.clone(),
-                                            ToolErrorKind::Internal,
-                                            error.to_string(),
-                                        ),
-                                    },
-                                    Err(error) => ToolResult::error(
-                                        call.id.clone(),
-                                        call.name.clone(),
-                                        ToolErrorKind::Internal,
-                                        error.to_string(),
-                                    ),
-                                }
-                            }
-                            None => match execute_after_started_audit_with_progress(
-                                tools,
-                                execution_tool_ctx,
-                                call.clone(),
-                                handler,
-                            )
-                            .await
-                            {
-                                Ok(result) => result,
-                                Err(error) => ToolResult::error(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    ToolErrorKind::Internal,
-                                    error.to_string(),
-                                ),
-                            },
-                        }
+                        handler,
+                        tools,
+                        options: &options,
+                        permission_policy: &permission_policy,
+                        tool_ctx: tool_ctx.clone(),
+                        cancellation: cancellation.clone(),
+                        agent_delegate: &mut agent_delegate,
+                        approval_handler,
+                        outcome: &mut outcome,
+                        satisfied_agent_tool_calls: &mut satisfied_agent_tool_calls,
+                        transient_context: &mut transient_context,
+                        web_task_tree_budget: web_task_tree_budget.clone(),
                     };
-                    if let Some(binding) = prepared_audit_binding.as_ref() {
-                        attach_prepared_tool_audit_binding(&mut result, binding)?;
-                    }
-                    attach_tool_call_context(&mut result, &call, &execution_subjects);
-                    let duration_ms = Some(duration_ms(execution_started));
-                    let status = if result.is_error() {
-                        ToolExecutionStatus::Failed
-                    } else {
-                        ToolExecutionStatus::Completed
-                    };
-                    append_tool_execution_audit(
-                        session,
-                        &call,
-                        &execution_subjects,
-                        status,
-                        duration_ms,
-                        Some(&result),
-                    )?;
-                    append_tool_control_entries_from_result(session, handler, &mut result)?;
-                    if let Some(entry) =
-                        append_terminal_task_control_from_result(session, handler, &result)?
-                    {
-                        reconcile_terminal_task_mutation_from_start(
-                            session,
-                            &options.workspace_root,
-                            &entry,
-                        )?;
-                    }
-                    record_tool_run_outcome(&mut outcome, &result);
-                    if tool_is_agent_category && agent_tool_result_satisfies_delegation(&result) {
-                        satisfied_agent_tool_calls = satisfied_agent_tool_calls.saturating_add(1);
-                    }
-                    let tool_transient_context = std::mem::take(&mut result.transient_context);
-                    emit_tool_result(session, handler, result)?;
-                    transient_context.extend(tool_transient_context);
+                    process_tool_call(tool_call_context, call, safe_call).await?;
                 }
                 if accepted_task_plan {
                     outcome.tool_calls = total_tool_calls;
@@ -2242,7 +1374,6 @@ where
                 transient_context.push(ModelMessage::user(blocker_prompt));
                 continue;
             }
-
             claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
             let mut hosted_finalized = hosted_finalized;
             let url_capability_registrations = hosted_finalized
@@ -2302,6 +1433,833 @@ where
             });
         }
     }
+}
+
+struct AuthorizedToolCall {
+    call: ToolCall,
+    execution_spec: Option<ToolSpec>,
+    execution_subjects: Vec<ToolSubject>,
+    prepared_tool_call: Option<PreparedToolCall>,
+    explicit_network_approval: bool,
+}
+
+struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
+    session: &'run mut Session,
+    handler: &'run mut H,
+    tools: &'run ToolRegistry,
+    options: &'run AgentRunOptions,
+    permission_policy: &'run PermissionPolicy<'policy>,
+    tool_ctx: ToolContext,
+    cancellation: Option<RunCancellationHandle>,
+    agent_delegate: &'run mut Option<&'delegate mut (dyn AgentToolDelegate + Send)>,
+    approval_handler: &'run mut A,
+    outcome: &'run mut AgentRunOutcome,
+    satisfied_agent_tool_calls: &'run mut usize,
+    transient_context: &'run mut Vec<ModelMessage>,
+    web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
+}
+
+async fn process_tool_call<H, A>(
+    context: ToolCallProcessingContext<'_, '_, '_, H, A>,
+    mut call: ToolCall,
+    safe_call: ToolCall,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let ToolCallProcessingContext {
+        session,
+        handler,
+        tools,
+        options,
+        permission_policy,
+        tool_ctx,
+        cancellation,
+        agent_delegate,
+        approval_handler,
+        outcome,
+        satisfied_agent_tool_calls,
+        transient_context,
+        web_task_tree_budget,
+    } = context;
+    let mut explicit_network_approval = false;
+    let _tool_effect = begin_run_effect(cancellation.as_ref(), RunEffectKind::Tool)?;
+    let mut execution_subjects = Vec::new();
+    let mut prepared_tool_call = None;
+    let execution_spec = tools.spec_for(&call.name);
+    if let Some(spec) = execution_spec.as_ref() {
+        let preparation_draft = match tools.prepare(tool_ctx.clone(), call.clone()).await {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                append_invalid_tool_input_result(session, handler, outcome, &call, &[], error)?;
+                return Ok(());
+            }
+        };
+        let subjects = if let Some(draft) = preparation_draft.as_ref() {
+            draft.subjects().to_vec()
+        } else {
+            match tools.permission_subjects(&tool_ctx, &call) {
+                Ok(subjects) => subjects,
+                Err(error) => {
+                    append_invalid_tool_input_result(session, handler, outcome, &call, &[], error)?;
+                    return Ok(());
+                }
+            }
+        };
+        let access = match tools.permission_access(&tool_ctx, &call) {
+            Ok(access) => access,
+            Err(error) => {
+                append_invalid_tool_input_result(
+                    session, handler, outcome, &call, &subjects, error,
+                )?;
+                return Ok(());
+            }
+        };
+        let network_effect = match tools.permission_network_effect(&tool_ctx, &call) {
+            Ok(network_effect) => network_effect,
+            Err(error) => {
+                append_invalid_tool_input_result(
+                    session, handler, outcome, &call, &subjects, error,
+                )?;
+                return Ok(());
+            }
+        };
+        let operation = match tools.permission_operation(&tool_ctx, &call) {
+            Ok(operation) => operation,
+            Err(error) => {
+                append_invalid_tool_input_result(
+                    session, handler, outcome, &call, &subjects, error,
+                )?;
+                return Ok(());
+            }
+        };
+        let tool_default_mode = match tools.permission_default_mode(&tool_ctx, &call) {
+            Ok(mode) => mode,
+            Err(error) => {
+                append_invalid_tool_input_result(
+                    session, handler, outcome, &call, &subjects, error,
+                )?;
+                return Ok(());
+            }
+        };
+        let decision = permission_policy.decide_with_operation_network_effect_and_default(
+            spec,
+            &call.name,
+            access,
+            operation,
+            network_effect,
+            subjects.clone(),
+            tool_default_mode,
+        )?;
+        let pre_plan_decision = interactive_external_directory_approval_override(options, decision);
+        let plan_authority = active_plan_approval_authority(session, spec, &pre_plan_decision);
+        let binding_decision = plan_approval_decision_override(session, spec, pre_plan_decision);
+        let (decision, session_grant_source) =
+            tool_session_grant_decision_override(session, &call.name, binding_decision.clone());
+        prepared_tool_call = match preparation_draft {
+            Some(draft) => {
+                let policy_fingerprint = preparation_policy_fingerprint(&binding_decision)?;
+                let approval_identity = if let Some(grant) = session_grant_source.as_ref() {
+                    preparation_session_grant_identity(grant)?
+                } else if let Some(authority) = plan_authority.as_ref() {
+                    preparation_plan_approval_identity(authority)?
+                } else if binding_decision.mode == ApprovalMode::Ask {
+                    pending_interactive_approval_identity(&call.id)
+                } else {
+                    preparation_policy_approval_identity(&policy_fingerprint)
+                };
+                Some(draft.bind_with_approval_identity(policy_fingerprint, approval_identity)?)
+            }
+            None => None,
+        };
+        let subject_label = if decision.subjects.is_empty() {
+            "-".to_owned()
+        } else {
+            decision
+                .subjects
+                .iter()
+                .map(|subject| subject.normalized.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        handler.handle(RunEvent::Notice(format!(
+            "permission {} subject={} mode={}",
+            call.name,
+            subject_label,
+            decision.mode.as_str()
+        )))?;
+        append_tool_approval_policy_audit(
+            session,
+            &call,
+            &decision,
+            session_grant_source.as_ref(),
+            prepared_tool_call
+                .as_ref()
+                .map(|prepared| prepared.prepared_digest().to_owned()),
+        )?;
+        let preview_capture = capture_tool_preview_for_decision(
+            session,
+            handler,
+            tools,
+            tool_ctx.clone(),
+            &call,
+            spec,
+            &decision,
+            prepared_tool_call.take(),
+        )
+        .await?;
+        prepared_tool_call = preview_capture.prepared;
+        execution_subjects = decision.subjects.clone();
+
+        match decision.mode {
+            ApprovalMode::Allow => {}
+            ApprovalMode::Ask if options.interaction_mode == InteractionMode::Headless => {
+                let reason = format!("tool {} requires approval in headless mode", call.name);
+                append_tool_approval_audit(
+                    session,
+                    &call,
+                    &decision,
+                    ToolApprovalAuditAction::Resolved,
+                    Some(ToolApprovalUserDecision::Denied),
+                    Some(reason.clone()),
+                    None,
+                )?;
+                let mut result = ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::ApprovalRequired,
+                    reason,
+                );
+                attach_tool_call_context(&mut result, &call, &decision.subjects);
+                record_and_emit_tool_result(session, handler, outcome, result)?;
+                return Ok(());
+            }
+            ApprovalMode::Ask => {
+                let preview = preview_capture.preview.clone();
+                let preview_hash = preview_capture.preview_hash.clone();
+                append_tool_approval_audit(
+                    session,
+                    &call,
+                    &decision,
+                    ToolApprovalAuditAction::Requested,
+                    None,
+                    None,
+                    preview_hash.clone(),
+                )?;
+                handler.handle(RunEvent::ToolApprovalRequested {
+                    call: safe_call.clone(),
+                    spec: spec.clone(),
+                    subjects: decision.subjects.clone(),
+                    network_effect: decision.network_effect,
+                    local_policy_decision: decision.local_policy_decision,
+                    network_policy_decision: decision.network_policy_decision,
+                    source_policy_decision: decision.source_policy_decision,
+                    operation: decision.operation,
+                    risk: decision.risk,
+                    subject_zones: decision.subject_zones.clone(),
+                    confirmation: decision.confirmation.clone(),
+                    snapshot_required: decision.snapshot_required,
+                    command_permission_matches: decision.command_permission_matches.clone(),
+                    preview,
+                })?;
+                let approval = approval_handler.approve_tool_call(&safe_call, spec)?;
+                let approval_is_explicit_user_action =
+                    approval_handler.approval_is_explicit_user_action();
+                let approval_would_allow = matches!(
+                    &approval,
+                    ToolApproval::Approve
+                        | ToolApproval::ApproveForSession
+                        | ToolApproval::ApproveWithArgs { .. }
+                );
+                if approval_would_allow
+                    && decision.network_policy_decision == ApprovalMode::Ask
+                    && !approval_is_explicit_user_action
+                {
+                    let reason = "network approval requires an explicit user action".to_owned();
+                    append_tool_approval_audit(
+                        session,
+                        &call,
+                        &decision,
+                        ToolApprovalAuditAction::Resolved,
+                        None,
+                        Some(reason.clone()),
+                        preview_hash,
+                    )?;
+                    handler.handle(RunEvent::ToolApprovalResolved {
+                        call_id: call.id.clone(),
+                        approved: false,
+                        reason: Some(reason.clone()),
+                    })?;
+                    let mut result = ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::ApprovalDenied,
+                        reason,
+                    );
+                    attach_tool_call_context(&mut result, &call, &decision.subjects);
+                    record_and_emit_tool_result(session, handler, outcome, result)?;
+                    return Ok(());
+                }
+                let approval_is_explicit_network_user_action = approval_is_explicit_user_action
+                    && decision.network_effect.is_some()
+                    && decision.network_policy_decision == ApprovalMode::Ask;
+                match approval {
+                    ToolApproval::Approve => {
+                        explicit_network_approval = approval_is_explicit_network_user_action;
+                        append_tool_approval_audit(
+                            session,
+                            &call,
+                            &decision,
+                            ToolApprovalAuditAction::Resolved,
+                            Some(ToolApprovalUserDecision::Approved),
+                            None,
+                            preview_hash,
+                        )?;
+                        authorize_prepared_tool_from_resolved_approval(
+                            session,
+                            &call,
+                            &mut prepared_tool_call,
+                        )?;
+                        handler.handle(RunEvent::ToolApprovalResolved {
+                            call_id: call.id.clone(),
+                            approved: true,
+                            reason: None,
+                        })?;
+                    }
+                    ToolApproval::ApproveForSession => {
+                        if !tool_approval_session_grant_available(&decision) {
+                            let reason =
+                                "session approval grant is not available for this tool call"
+                                    .to_owned();
+                            append_tool_approval_audit(
+                                session,
+                                &call,
+                                &decision,
+                                ToolApprovalAuditAction::Resolved,
+                                Some(ToolApprovalUserDecision::Denied),
+                                Some(reason.clone()),
+                                preview_hash,
+                            )?;
+                            handler.handle(RunEvent::ToolApprovalResolved {
+                                call_id: call.id.clone(),
+                                approved: false,
+                                reason: Some(reason.clone()),
+                            })?;
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::ApprovalDenied,
+                                format!("tool execution denied by user: {reason}"),
+                            );
+                            attach_tool_call_context(&mut result, &call, &decision.subjects);
+                            record_and_emit_tool_result(session, handler, outcome, result)?;
+                            return Ok(());
+                        }
+                        explicit_network_approval = approval_is_explicit_network_user_action;
+                        append_tool_approval_audit(
+                            session,
+                            &call,
+                            &decision,
+                            ToolApprovalAuditAction::Resolved,
+                            Some(ToolApprovalUserDecision::ApprovedForSession),
+                            None,
+                            preview_hash,
+                        )?;
+                        authorize_prepared_tool_from_resolved_approval(
+                            session,
+                            &call,
+                            &mut prepared_tool_call,
+                        )?;
+                        append_tool_approval_session_grant(session, handler, &call, &decision)?;
+                        handler.handle(RunEvent::ToolApprovalResolved {
+                            call_id: call.id.clone(),
+                            approved: true,
+                            reason: Some("allowed for this session".to_owned()),
+                        })?;
+                    }
+                    ToolApproval::ApproveWithArgs { args_json } => {
+                        if prepared_tool_call.is_some() {
+                            let reason = "prepared mutations do not allow approval-time argument changes; preview and approval must be repeated"
+                                .to_owned();
+                            append_tool_approval_audit(
+                                session,
+                                &call,
+                                &decision,
+                                ToolApprovalAuditAction::Resolved,
+                                Some(ToolApprovalUserDecision::Denied),
+                                Some(reason.clone()),
+                                preview_hash,
+                            )?;
+                            handler.handle(RunEvent::ToolApprovalResolved {
+                                call_id: call.id.clone(),
+                                approved: false,
+                                reason: Some(reason.clone()),
+                            })?;
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::StalePreparedMutation,
+                                reason,
+                            );
+                            attach_tool_call_context(&mut result, &call, &decision.subjects);
+                            record_and_emit_tool_result(session, handler, outcome, result)?;
+                            return Ok(());
+                        }
+                        let mut approved_call = call.clone();
+                        approved_call.args_json = args_json;
+                        let reevaluate_approved_call = || -> Result<_> {
+                            let approved_subjects =
+                                tools.permission_subjects(&tool_ctx, &approved_call)?;
+                            let approved_access =
+                                tools.permission_access(&tool_ctx, &approved_call)?;
+                            let approved_network_effect =
+                                tools.permission_network_effect(&tool_ctx, &approved_call)?;
+                            let approved_operation =
+                                tools.permission_operation(&tool_ctx, &approved_call)?;
+                            let approved_default_mode =
+                                tools.permission_default_mode(&tool_ctx, &approved_call)?;
+                            let approved_decision = permission_policy
+                                .decide_with_operation_network_effect_and_default(
+                                    spec,
+                                    &approved_call.name,
+                                    approved_access,
+                                    approved_operation,
+                                    approved_network_effect,
+                                    approved_subjects,
+                                    approved_default_mode,
+                                )?;
+                            let approved_decision =
+                                interactive_external_directory_approval_override(
+                                    options,
+                                    approved_decision,
+                                );
+                            let approved_decision =
+                                plan_approval_decision_override(session, spec, approved_decision);
+                            Ok(tool_session_grant_decision_override(
+                                session,
+                                &approved_call.name,
+                                approved_decision,
+                            )
+                            .0)
+                        };
+                        let approved_decision = reevaluate_approved_call();
+                        let approved_decision = match approved_decision {
+                            Ok(decision) => decision,
+                            Err(error) => {
+                                let reason = format!(
+                                    "approval-time argument changes could not be re-evaluated: {error}"
+                                );
+                                append_tool_approval_audit(
+                                    session,
+                                    &approved_call,
+                                    &decision,
+                                    ToolApprovalAuditAction::Resolved,
+                                    Some(ToolApprovalUserDecision::Denied),
+                                    Some(reason.clone()),
+                                    preview_hash,
+                                )?;
+                                handler.handle(RunEvent::ToolApprovalResolved {
+                                    call_id: approved_call.id.clone(),
+                                    approved: false,
+                                    reason: Some(reason),
+                                })?;
+                                append_invalid_tool_input_result(
+                                    session,
+                                    handler,
+                                    outcome,
+                                    &approved_call,
+                                    &decision.subjects,
+                                    error,
+                                )?;
+                                return Ok(());
+                            }
+                        };
+                        if approved_decision != decision {
+                            let reason = "approval-time argument changes altered the permission scope; preview and approval must be repeated"
+                                .to_owned();
+                            append_tool_approval_audit(
+                                session,
+                                &approved_call,
+                                &approved_decision,
+                                ToolApprovalAuditAction::Resolved,
+                                Some(ToolApprovalUserDecision::Denied),
+                                Some(reason.clone()),
+                                preview_hash,
+                            )?;
+                            handler.handle(RunEvent::ToolApprovalResolved {
+                                call_id: approved_call.id.clone(),
+                                approved: false,
+                                reason: Some(reason.clone()),
+                            })?;
+                            let mut result = ToolResult::error(
+                                approved_call.id.clone(),
+                                approved_call.name.clone(),
+                                ToolErrorKind::ApprovalDenied,
+                                reason,
+                            );
+                            attach_tool_call_context(
+                                &mut result,
+                                &approved_call,
+                                &approved_decision.subjects,
+                            );
+                            record_and_emit_tool_result(session, handler, outcome, result)?;
+                            return Ok(());
+                        }
+                        call = approved_call;
+                        execution_subjects = approved_decision.subjects.clone();
+                        explicit_network_approval = approval_is_explicit_user_action
+                            && approved_decision.network_effect.is_some()
+                            && approved_decision.network_policy_decision == ApprovalMode::Ask;
+                        append_tool_approval_audit(
+                            session,
+                            &call,
+                            &decision,
+                            ToolApprovalAuditAction::Resolved,
+                            Some(ToolApprovalUserDecision::Approved),
+                            None,
+                            preview_hash,
+                        )?;
+                        handler.handle(RunEvent::ToolApprovalResolved {
+                            call_id: call.id.clone(),
+                            approved: true,
+                            reason: None,
+                        })?;
+                    }
+                    ToolApproval::Deny { reason } => {
+                        append_tool_approval_audit(
+                            session,
+                            &call,
+                            &decision,
+                            ToolApprovalAuditAction::Resolved,
+                            Some(ToolApprovalUserDecision::Denied),
+                            Some(reason.clone()),
+                            preview_hash,
+                        )?;
+                        handler.handle(RunEvent::ToolApprovalResolved {
+                            call_id: call.id.clone(),
+                            approved: false,
+                            reason: Some(reason.clone()),
+                        })?;
+                        let mut result = ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::ApprovalDenied,
+                            format!("tool execution denied by user: {reason}"),
+                        );
+                        attach_tool_call_context(&mut result, &call, &decision.subjects);
+                        record_and_emit_tool_result(session, handler, outcome, result)?;
+                        return Ok(());
+                    }
+                }
+            }
+            ApprovalMode::Deny => {
+                let (error_kind, reason) = if decision.external_directory_required {
+                    (
+                        ToolErrorKind::ExternalDirectoryRequired,
+                        format!(
+                            "external directory access requires permission.external_directory.enabled for {}. For scratch files, use $SIGIL_SCRATCH_DIR from bash or terminal_start.",
+                            if subject_label == "-" {
+                                call.name.as_str()
+                            } else {
+                                subject_label.as_str()
+                            }
+                        ),
+                    )
+                } else {
+                    (
+                        ToolErrorKind::PermissionDenied,
+                        format!(
+                            "denied by permission policy for {}",
+                            if subject_label == "-" {
+                                call.name.as_str()
+                            } else {
+                                subject_label.as_str()
+                            }
+                        ),
+                    )
+                };
+                append_tool_approval_audit(
+                    session,
+                    &call,
+                    &decision,
+                    ToolApprovalAuditAction::Resolved,
+                    Some(ToolApprovalUserDecision::Denied),
+                    Some(reason.clone()),
+                    None,
+                )?;
+                handler.handle(RunEvent::ToolApprovalResolved {
+                    call_id: call.id.clone(),
+                    approved: false,
+                    reason: Some(reason.clone()),
+                })?;
+                let mut result =
+                    ToolResult::error(call.id.clone(), call.name.clone(), error_kind, reason);
+                attach_tool_call_context(&mut result, &call, &decision.subjects);
+                record_and_emit_tool_result(session, handler, outcome, result)?;
+                return Ok(());
+            }
+        }
+        let egress_audit = match tools.egress_audit(&tool_ctx, &call) {
+            Ok(audit) => audit,
+            Err(error) => {
+                append_invalid_tool_input_result(
+                    session,
+                    handler,
+                    outcome,
+                    &call,
+                    &decision.subjects,
+                    error,
+                )?;
+                return Ok(());
+            }
+        };
+        if let Some(egress_audit) = egress_audit {
+            let control = tool_egress_control_entry(&call, &decision.subjects, egress_audit);
+            session.append_control(control.clone())?;
+            handler.handle(RunEvent::Control(control))?;
+        }
+    }
+
+    let authorized = AuthorizedToolCall {
+        call,
+        execution_spec,
+        execution_subjects,
+        prepared_tool_call,
+        explicit_network_approval,
+    };
+    execute_authorized_tool_call(
+        ToolCallProcessingContext {
+            session,
+            handler,
+            tools,
+            options,
+            permission_policy,
+            tool_ctx,
+            cancellation,
+            agent_delegate,
+            approval_handler,
+            outcome,
+            satisfied_agent_tool_calls,
+            transient_context,
+            web_task_tree_budget,
+        },
+        authorized,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn execute_authorized_tool_call<H, A>(
+    context: ToolCallProcessingContext<'_, '_, '_, H, A>,
+    authorized: AuthorizedToolCall,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let ToolCallProcessingContext {
+        session,
+        handler,
+        tools,
+        options,
+        permission_policy,
+        tool_ctx,
+        cancellation,
+        agent_delegate,
+        approval_handler,
+        outcome,
+        satisfied_agent_tool_calls,
+        transient_context,
+        web_task_tree_budget,
+    } = context;
+    let AuthorizedToolCall {
+        call,
+        execution_spec,
+        execution_subjects,
+        prepared_tool_call,
+        explicit_network_approval,
+    } = authorized;
+    let tool_is_agent_category = execution_spec
+        .as_ref()
+        .is_some_and(|spec| spec.category == ToolCategory::Agent);
+    let execution_mutation_profile = execution_spec
+        .as_ref()
+        .map(|_| tools.execution_mutation_profile(&tool_ctx, &call))
+        .transpose()?
+        .flatten();
+    let prepared_current_authority = if let Some(prepared) = prepared_tool_call.as_ref() {
+        let spec = execution_spec
+            .as_ref()
+            .expect("prepared tools must retain their execution spec");
+        let access = tools.permission_access(&tool_ctx, &call)?;
+        let network_effect = tools.permission_network_effect(&tool_ctx, &call)?;
+        let operation = tools.permission_operation(&tool_ctx, &call)?;
+        let tool_default_mode = tools.permission_default_mode(&tool_ctx, &call)?;
+        let current_decision = permission_policy.decide_with_operation_network_effect_and_default(
+            spec,
+            &call.name,
+            access,
+            operation,
+            network_effect,
+            execution_subjects.clone(),
+            tool_default_mode,
+        )?;
+        let current_pre_plan_decision =
+            interactive_external_directory_approval_override(options, current_decision);
+        let current_plan_authority =
+            active_plan_approval_authority(session, spec, &current_pre_plan_decision);
+        let current_decision =
+            plan_approval_decision_override(session, spec, current_pre_plan_decision);
+        let current_policy_fingerprint = preparation_policy_fingerprint(&current_decision)?;
+        let bound_identity = &prepared.binding().approval_identity;
+        let current_approval_identity = if bound_identity.starts_with("session-grant:") {
+            let (_, current_grant) =
+                tool_session_grant_decision_override(session, &call.name, current_decision.clone());
+            match current_grant.as_ref() {
+                Some(grant) => preparation_session_grant_identity(grant)?,
+                None => "session-grant:missing".to_owned(),
+            }
+        } else if bound_identity.starts_with("plan:") {
+            match current_plan_authority.as_ref() {
+                Some(authority) => preparation_plan_approval_identity(authority)?,
+                None => "plan:missing".to_owned(),
+            }
+        } else if bound_identity.starts_with("interactive:") {
+            resolved_interactive_approval_identity(session, &call.id, prepared.prepared_digest())?
+                .unwrap_or_else(|| "interactive:missing".to_owned())
+        } else {
+            preparation_policy_approval_identity(&current_policy_fingerprint)
+        };
+        Some((current_policy_fingerprint, current_approval_identity))
+    } else {
+        None
+    };
+    let prepared_audit_binding = prepared_tool_call
+        .as_ref()
+        .map(|prepared| prepared.audit_binding());
+    append_tool_execution_started_audit(
+        session,
+        &call,
+        &execution_subjects,
+        execution_mutation_profile.as_ref(),
+        prepared_audit_binding.as_ref(),
+    )?;
+    let execution_started = Instant::now();
+    let execution_tool_ctx = tool_ctx
+        .clone()
+        .with_network_authorization(
+            options.permission_context.network_policy,
+            explicit_network_approval,
+        )
+        .with_approved_subjects(execution_subjects.clone());
+    let mut result = if let Some(prepared) = prepared_tool_call {
+        let (current_policy_fingerprint, current_approval_identity) = prepared_current_authority
+            .as_ref()
+            .expect("prepared tools must retain their approval authority");
+        match tools
+            .execute_prepared_after_started_audit(
+                execution_tool_ctx,
+                call.clone(),
+                prepared,
+                current_policy_fingerprint,
+                current_approval_identity,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            ),
+        }
+    } else {
+        match agent_delegate
+            .as_deref_mut()
+            .filter(|_| execution_spec.is_some() && tool_is_agent_category)
+        {
+            Some(delegate) => {
+                delegate.set_run_cancellation(cancellation.clone());
+                delegate.set_web_task_tree_budget(web_task_tree_budget.clone());
+                match delegate
+                    .handle_agent_tool_call(session, &call, options, handler, approval_handler)
+                    .await
+                {
+                    Ok(Some(result)) => result,
+                    Ok(None) => match execute_after_started_audit_with_progress(
+                        tools,
+                        execution_tool_ctx.clone(),
+                        call.clone(),
+                        handler,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::Internal,
+                            error.to_string(),
+                        ),
+                    },
+                    Err(error) => ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        error.to_string(),
+                    ),
+                }
+            }
+            None => match execute_after_started_audit_with_progress(
+                tools,
+                execution_tool_ctx,
+                call.clone(),
+                handler,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                ),
+            },
+        }
+    };
+    if let Some(binding) = prepared_audit_binding.as_ref() {
+        attach_prepared_tool_audit_binding(&mut result, binding)?;
+    }
+    attach_tool_call_context(&mut result, &call, &execution_subjects);
+    let duration_ms = Some(duration_ms(execution_started));
+    let status = if result.is_error() {
+        ToolExecutionStatus::Failed
+    } else {
+        ToolExecutionStatus::Completed
+    };
+    append_tool_execution_audit(
+        session,
+        &call,
+        &execution_subjects,
+        status,
+        duration_ms,
+        Some(&result),
+    )?;
+    append_tool_control_entries_from_result(session, handler, &mut result)?;
+    if let Some(entry) = append_terminal_task_control_from_result(session, handler, &result)? {
+        reconcile_terminal_task_mutation_from_start(session, &options.workspace_root, &entry)?;
+    }
+    record_tool_run_outcome(outcome, &result);
+    if tool_is_agent_category && agent_tool_result_satisfies_delegation(&result) {
+        *satisfied_agent_tool_calls = (*satisfied_agent_tool_calls).saturating_add(1);
+    }
+    let tool_transient_context = std::mem::take(&mut result.transient_context);
+    emit_tool_result(session, handler, result)?;
+    transient_context.extend(tool_transient_context);
+    Ok(())
 }
 
 fn authorize_prepared_tool_from_resolved_approval(
