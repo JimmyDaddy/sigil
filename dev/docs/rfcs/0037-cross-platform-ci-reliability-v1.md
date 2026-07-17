@@ -49,8 +49,9 @@ The main CI workflow adds one `platform-check` matrix after the Linux workspace 
 - both runners execute `cargo check --locked --workspace --all-targets`;
 - macOS runs `sigil-kernel`, `sigil-tools-builtin`, `sigil-code-intel` and `sigil-runtime` library
   tests, covering the macOS execution backend and shared runtime contracts;
-- Windows runs `sigil-kernel`, `sigil-mcp` and `sigil-runtime` library tests plus
-  `sigil-http --all-targets`, preserving durable replace/reopen coverage;
+- Windows runs `sigil-kernel`, `sigil-tools-builtin`, `sigil-mcp` and `sigil-runtime` library tests
+  plus `sigil-http --all-targets`, preserving terminal/process conformance and durable
+  replace/reopen coverage;
 - `fail-fast` is disabled so one platform failure does not erase evidence from the other;
 - no environment skips, `continue-on-error` or release-only trigger hides failures.
 
